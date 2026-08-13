@@ -1,10 +1,10 @@
 package attest
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"regexp"
@@ -63,6 +63,47 @@ var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 // hexSHA256Pattern is the bare form zg-config-update carries.
 var hexSHA256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
+// VerifiedQuote is the part of an attestation a caller must already have established, and the
+// reason this package no longer looks at raw quote bytes.
+//
+// Every field here comes from one dstack-verifier /verify response for one GetQuote triple.
+// Constructing this type is the caller asserting that the response said is_valid, that
+// quote_verified and event_log_verified were both true, and that it checked the things only it
+// can decide — tcb_status, advisory_ids, os_image_is_dev, os_image_hash and which key provider
+// released this CVM's keys. This package cannot check any of those and does not pretend to.
+//
+// Taking verified inputs rather than a quote is deliberate. The alternative was a second
+// implementation of dstack's own verification — the digest format, the register offsets, the
+// mr_config_id layout — kept correct in parallel with theirs, and narrower than theirs, since
+// none of it says anything about the OS image or the TCB. What is left below is the part nobody
+// else implements, because it is ours: the zg-* records, the §4.2 report_data layout, and the
+// binding between them.
+type VerifiedQuote struct {
+	// ComposeHash is app_info.compose_hash from the verify response, hex. It comes out of the
+	// signed report body, so it is what makes tcb_info's app_compose believable once that
+	// hashes to it.
+	ComposeHash string
+	// ReportData is the quote's 64 bytes, verbatim. The verifier returns them; it does not
+	// interpret them, because the layout inside is ours (0g-pc SPEC §4.2).
+	ReportData []byte
+	// EventLogJSON is the log the verifier reported event_log_verified for. Any other log is
+	// unanchored, and passing one here is a lie this package cannot detect.
+	EventLogJSON []byte
+}
+
+func (v VerifiedQuote) check() error {
+	if !hexSHA256Pattern.MatchString(v.ComposeHash) {
+		return fmt.Errorf("compose hash %q is not a hex sha256; it must be app_info.compose_hash from a verify response", v.ComposeHash)
+	}
+	if len(v.ReportData) != reportDataLen {
+		return fmt.Errorf("report_data is %d bytes, want %d", len(v.ReportData), reportDataLen)
+	}
+	if len(v.EventLogJSON) == 0 {
+		return errors.New("no event log; pass the one dstack-verifier reported event_log_verified for")
+	}
+	return nil
+}
+
 // RunningState is what a CVM is running right now, derived from its quote alone.
 type RunningState struct {
 	// ComposeHash identifies the deployment's static configuration — every
@@ -110,29 +151,27 @@ type RunningState struct {
 // meaning pass unread. Everything else is skipped, because dstack and other
 // components legitimately write into the same register. The cost is a release order
 // — readers before writers.
-func ResolveRunningState(quote, eventLogJSON, tcbInfoJSON []byte, brokerService string) (*RunningState, error) {
-	events, err := RuntimeEvents(eventLogJSON)
+func ResolveRunningState(v VerifiedQuote, tcbInfoJSON []byte, brokerService string) (*RunningState, error) {
+	if err := v.check(); err != nil {
+		return nil, err
+	}
+	composeHash := v.ComposeHash
+
+	events, err := RuntimeEvents(v.EventLogJSON)
 	if err != nil {
 		return nil, err
 	}
 
-	rtmr3, err := RTMR(quote, 3)
-	if err != nil {
-		return nil, err
-	}
-	if replayed := ReplayRTMR3(events); !bytes.Equal(replayed[:], rtmr3) {
-		return nil, fmt.Errorf("event log replays to rtmr3 %x, quote says %x", replayed, rtmr3)
-	}
-
-	mrConfigID, err := MRConfigID(quote)
-	if err != nil {
-		return nil, err
-	}
-	composeHash, err := ComposeHashFromMRConfigID(mrConfigID)
-	if err != nil {
-		return nil, err
-	}
-
+	// No replay here: dstack-verifier already required this log to reproduce the quote's
+	// registers, which is what its event_log_verified means. Doing it again would be a second
+	// implementation of dstack's digest format to keep correct, and a narrower one — the
+	// verifier also checks the OS image hash, the ACPI tables and the TCB status, none of which
+	// a replay says anything about.
+	//
+	// What is NOT delegated is the line below. The verifier never sees app_compose — its
+	// request carries quote, event_log and vm_config — so nothing has tied tcb_info to this
+	// quote yet, and the compose file is only trustworthy once it hashes to the compose hash
+	// the verifier reported out of the signed report body.
 	appCompose, err := appComposeOf(tcbInfoJSON)
 	if err != nil {
 		return nil, err

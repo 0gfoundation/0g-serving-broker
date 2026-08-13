@@ -1,67 +1,68 @@
-// Package attest reads what a dstack CVM reports it is running out of its
-// attestation report, and is explicit about which parts of that report are binding.
+// Package attest reads the records this project writes into a dstack CVM's RTMR3, and binds
+// them to the keys the CVM published.
 //
-// A signed TDX quote carries measurements of what booted. It does not carry what
-// changed afterwards — an image upgrade performed inside the TEE leaves the boot
-// measurements untouched. What it does carry is RTMR3, which the controller extends
-// with one event per change before making it (see controller/internal/ctrl). RTMR3 is
-// append-only, so those events cannot be edited or dropped, and the quote's signature
-// covers the resulting value.
+// It is the second half of a verification, not the whole of one. The first half —
+// the DCAP signature, the measurement registers, the RTMR3 replay, the OS image hash, the
+// ACPI tables, the TCB status — belongs to dstack-verifier, whose /verify endpoint runs the
+// same process the dstack KMS runs before it releases a CVM's keys. Which is exactly the bar
+// worth meeting: a check weaker than that accepts CVMs the KMS itself would refuse a key to.
 //
-// # What this does not establish, and who must establish it
+// # What the caller must have done first
 //
-// RTMR3 says what was written, not who wrote it. dstack serves EmitEvent on
-// /var/run/dstack.sock from the same unauthenticated handler as GetQuote, binds that
-// socket 0777, and restricts neither the event name nor the payload. Any container that
-// can reach it can append any record — and deployments today mount it into the broker,
-// because that is how the broker gets GetQuote and DeriveKey.
+// Constructing a VerifiedQuote is the caller asserting all of it. POST the GetQuote triple to
+// a dstack-verifier you run yourself, and require:
 //
-// So a provider running a modified broker image can append its own zg-image-update naming
-// any digest and take a quote over it. That quote is genuine: the replay matches, the
-// compose hash matches, the signature verifies. No signature on the record could help,
-// since GetKey derives by path and any container may ask for any path, so there is no key
-// the broker cannot also derive. A challenge nonce does not help either — it defeats
-// replay of an old quote, not forgery of a new one.
+//	is_valid                          the whole verdict
+//	details.quote_verified            the DCAP chain
+//	details.event_log_verified        the log replays into the quote's registers
+//	details.tcb_status == "UpToDate"  and details.advisory_ids empty
+//	details.os_image_is_dev == false  and os_image_hash_verified
+//	details.key_provider.id           equals the KMS root key you trust
 //
-// **A DigestSourceEvent answer is therefore only as good as the deployment's confinement
-// of RTMR3 writers, and this package cannot check that.** It is a property of the compose
-// file, and the caller already holds the means to settle it: RunningState.ComposeHash is
-// the hash of the compose the CVM actually booted, bound to the quote by hardware. Compare
-// it against the hash of a compose you published and reviewed, and you know — by reading a
-// document you control — whether anything upgradeable can write the ledger. That is the
-// same discipline as the expected-digest set: the answer comes from software the user
-// installed, never from the party being checked.
+// Run your own instance rather than someone else's: calling a verifier you do not control
+// moves the trust root onto it, which is the one thing every rule below exists to avoid.
 //
-// Do not expect this package to derive it from app_compose instead. That was tried and
-// reverted: the mount shapes that reach a socket are an open set (a whole-directory bind,
-// a named volume with a bind driver_opt, a YAML alias, extends:, an interpolation that
-// splits the path — app_compose stores the compose text uninterpolated), and the fields
-// that would identify the broker are the wrong ones (the controller locates containers by
-// container_name, and in this project the controller shares the broker's image string and
-// differs only by command:). A parser that answers "probably not" here is worse than no
-// parser, because it reads as a guarantee.
+// This package cannot check any of that and does not pretend to. Nor does it compare anything
+// against an expected value — "is this the digest we published" needs a list that must come
+// from software the user installed, never from the party being checked.
 //
-// Until a deployment keeps that socket away from the broker — routing its quotes through
-// the controller, whose image compose_hash pins and which cannot upgrade itself — treat an
-// event-sourced digest as an audit record of what the controller did, not as proof of what
-// is running. doc/controller-design.md §5.1a carries the current state.
+// # What is left, and why it is here
 //
-// # Scope
+// Two formats dstack knows nothing about, so nobody else will ever read them:
 //
-// This package holds the authoritative implementation of the replay, because the
-// events are produced in this repository: the format and the reader have to
-// evolve together or one silently stops explaining the other.
+//   - the zg-image-update and zg-config-update records, which the controller appends before
+//     making a change (see controller/internal/ctrl). dstack-verifier confirms the log
+//     replays; it returns dstack's own boot facts and not these.
+//   - report_data's 64 bytes, packed by this project as enc_pub ‖ signer_addr ‖ version
+//     (0g-pc SPEC §4.2). The verifier hands the bytes back untouched.
 //
-// It deliberately does not verify the quote's DCAP signature, and does not compare
-// anything against an expected value. Those are the caller's: the signature needs
-// Intel's collateral, and "is this the digest we published" needs a list of
-// digests that must come from software the *user* installed, never from the party
-// being checked.
+// And one anchor the verifier cannot supply: its request carries quote, event_log and
+// vm_config — never app_compose — so nothing has tied tcb_info to the quote. This package
+// requires app_compose to hash to the compose hash the verifier reported out of the signed
+// report body, and refuses otherwise.
+//
+// # What an answer from here does and does not mean
+//
+// RTMR3 says what was written, not who wrote it. dstack serves EmitEvent from the same
+// unauthenticated handler as GetQuote and binds that socket 0777, so in a deployment that
+// mounts it into the broker, a modified broker image can append any record and take a genuine
+// quote over it — the replay matches, the compose hash matches, the signature verifies.
+//
+// A deployment that keeps the socket with the controller alone does not have that problem, and
+// there the record carries a signature of a kind: the addresses of the signing and encryption
+// keys derived from the image it names, which ResolveRunningState requires report_data to
+// match. That works only because the broker cannot derive keys itself, so it is the
+// confinement that makes the binding meaningful and not the other way round.
+//
+// Which of the two a caller is holding is decided by the compose file behind
+// RunningState.ComposeHash, and by nothing this package can see. Do not expect it to derive
+// that from app_compose either: it was tried and reverted, because the mount shapes that reach
+// a socket are an open set and the fields that would identify the broker are the wrong ones. A
+// parser answering "probably not" there is worse than none, because it reads as a guarantee.
+// doc/attestation-trust-chain.md lists what that review must cover.
 package attest
 
 import (
-	"crypto/sha512"
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -84,51 +85,6 @@ type TdxEvent struct {
 type RuntimeEvent struct {
 	Event   string
 	Payload []byte
-}
-
-// Digest is the measurement of one event:
-//
-//	SHA384( LE32(RuntimeEventType) ‖ ":" ‖ Event ‖ ":" ‖ Payload )
-//
-// The length prefix is explicitly little-endian. dstack writes it with Rust's
-// to_ne_bytes() — native order, which on the x86_64 hosts this runs on is little.
-// A reader that assumed big-endian would compute a digest that never matches, and
-// nothing in the format would say why.
-func (e RuntimeEvent) Digest() [48]byte {
-	var tag [4]byte
-	binary.LittleEndian.PutUint32(tag[:], RuntimeEventType)
-
-	h := sha512.New384()
-	h.Write(tag[:])
-	h.Write([]byte(":"))
-	h.Write([]byte(e.Event))
-	h.Write([]byte(":"))
-	h.Write(e.Payload)
-
-	var digest [48]byte
-	copy(digest[:], h.Sum(nil))
-	return digest
-}
-
-// ReplayRTMR3 folds events into RTMR3 the way the hardware does, starting from
-// the 48 zero bytes RTMR3 holds at reset:
-//
-//	mr = SHA384( mr ‖ event.Digest() )
-//
-// The result equalling the RTMR3 in a signed quote is what turns an event log —
-// which arrives over plain HTTP from the party being checked — into something
-// worth reading. Any event added, removed, reordered or altered changes it.
-func ReplayRTMR3(events []RuntimeEvent) [48]byte {
-	var mr [48]byte
-	for _, event := range events {
-		digest := event.Digest()
-
-		h := sha512.New384()
-		h.Write(mr[:])
-		h.Write(digest[:])
-		copy(mr[:], h.Sum(nil))
-	}
-	return mr
 }
 
 // RuntimeEvents pulls the runtime events out of a GetQuote event_log, in the

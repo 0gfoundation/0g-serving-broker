@@ -2,104 +2,90 @@ package attest
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"regexp"
+	"strings"
 )
 
-// Byte offsets of the measurements inside a raw TDX v4 quote, into the TD report
-// body that follows the quote header.
+// report_data, and only report_data.
 //
-// Read off a real production quote and checked field by field against the same
-// report's tcb_info, rather than derived from the structure definitions — see the
-// golden test. They are fixed by the v4 quote format; a v5 quote would need its
-// own offsets, and would fail the tcb_info comparison rather than mis-read
-// quietly, since nothing else lands on these boundaries.
+// Everything else a verifier needs out of a quote — the DCAP signature, the measurement
+// registers, mr_config_id's compose hash, the RTMR3 replay, the OS image hash, the TCB status —
+// comes from dstack-verifier, whose /verify endpoint runs the same process the dstack KMS runs
+// before it releases a CVM's keys. Reimplementing any of it here would mean keeping a second,
+// narrower copy correct in parallel with theirs.
+//
+// report_data is the exception because its 64 bytes carry a layout dstack knows nothing about:
+// the enclave encryption key and the response signer, packed by this project (0g-pc SPEC §4.2).
+// The verifier hands the bytes back untouched, and reading them is ours.
+
+// reportDataLen is the fixed size of report_data. A hardware limit, not a buffer.
+const reportDataLen = 64
+
+// report_data field offsets in the §4.2 layout:
+//
+//	0   32  enc_pub      X25519 recipient key
+//	32  20  signer_addr  secp256k1 Ethereum address, raw bytes
+//	52   4  version      uint32 big-endian, 1
+//	56   8  reserved     zero
 const (
-	offsetMRTD        = 184
-	offsetMRConfigID  = 232
-	offsetRTMR0       = 376
-	measurementLen    = 48 // SHA-384, the digest size TDX measurement registers hold
-	rtmrStride        = 48 // rtmr0..rtmr3 are adjacent
-	rtmrCount         = 4
-	composeHashLen    = 32 // SHA-256, what mr_config_id carries in a 48-byte field
-	mrConfigVersionV1 = 1
-	mrConfigVersionV2 = 2
+	reportDataSignerOffset  = 32
+	reportDataVersionOffset = 52
+	reportDataLayoutVersion = 1
 )
 
-// measurement copies measurementLen bytes out of a quote.
+// addressPattern is a lowercase 20-byte hex address.
+var addressPattern = regexp.MustCompile(`^0x[0-9a-f]{40}$`)
+
+// EncPubFromReportData returns the enclave encryption public key the quote binds, hex.
 //
-// A copy, not a subslice: these are handed to callers who compare and print them,
-// and aliasing the quote would let one of them corrupt the buffer every other
-// reading comes from.
-func measurement(quote []byte, offset int, name string) ([]byte, error) {
-	if len(quote) < offset+measurementLen {
-		return nil, fmt.Errorf("quote is %d bytes, too short to hold %s at offset %d", len(quote), name, offset)
+// Only the §4.2 layout carries one; the older layout is the ASCII signer address and nothing
+// else, so it answers "". A caller that intends to SEAL a request must have a non-empty value
+// here and must have checked it against the ledger — sealing to a key the ledger does not
+// vouch for hands the plaintext to whatever chose report_data, and no later signature check
+// can undo that.
+func EncPubFromReportData(reportData []byte) (string, error) {
+	if len(reportData) != reportDataLen {
+		return "", fmt.Errorf("report_data is %d bytes, want %d", len(reportData), reportDataLen)
 	}
-	return bytes.Clone(quote[offset : offset+measurementLen]), nil
-}
-
-// MRTD returns the measurement of the virtual firmware.
-func MRTD(quote []byte) ([]byte, error) {
-	return measurement(quote, offsetMRTD, "mrtd")
-}
-
-// MRConfigID returns the 48-byte configuration identity the host supplied when
-// the TD was built. For dstack this is where the compose hash lives; see
-// ComposeHashFromMRConfigID.
-func MRConfigID(quote []byte) ([]byte, error) {
-	return measurement(quote, offsetMRConfigID, "mr_config_id")
-}
-
-// RTMR returns runtime measurement register i, for i in [0, 3].
-//
-// RTMR0-2 hold what the firmware and kernel measured at boot. RTMR3 is the one an
-// application extends: see ReplayRTMR3.
-func RTMR(quote []byte, i int) ([]byte, error) {
-	if i < 0 || i >= rtmrCount {
-		return nil, fmt.Errorf("rtmr index %d out of range [0, %d]", i, rtmrCount-1)
+	if binary.BigEndian.Uint32(reportData[reportDataVersionOffset:reportDataVersionOffset+4]) != reportDataLayoutVersion {
+		return "", nil
 	}
-	return measurement(quote, offsetRTMR0+i*rtmrStride, fmt.Sprintf("rtmr%d", i))
+	pub := reportData[:reportDataSignerOffset]
+	if bytes.Equal(pub, make([]byte, len(pub))) {
+		return "", fmt.Errorf("report_data names an all-zero enc_pub")
+	}
+	return hex.EncodeToString(pub), nil
 }
 
-// ComposeHashFromMRConfigID returns the hex compose hash a dstack mr_config_id
-// carries.
+// SignerFromReportData returns the signer address the quote binds, lowercase "0x…".
 //
-// This is the reason compose_hash can be trusted without reading the event log:
-// mr_config_id is part of the TD report the quote signs, so the hash comes out of
-// hardware-bound, signed bytes. dstack also writes a compose-hash event into
-// RTMR3, but an application can emit an event by that name too — the register is
-// the statement that cannot be forged.
+// The hardware signed over it — but the enclave chose what to put there, so on its own it says
+// only "this TD asked for this address", not "this address belongs to the code that is
+// running". Binding it to an image is what ResolveRunningState does with it.
 //
-// The layout is a version byte, the hash, then zero padding. V2 replaces the hash
-// with keccak256(compose_hash ‖ app_id ‖ key_provider_kind ‖ key_provider_id),
-// which cannot be inverted: recognising a V2 report needs those three values from
-// the caller, so it is refused rather than guessed at. Production is V1 today.
-func ComposeHashFromMRConfigID(mrConfigID []byte) (string, error) {
-	if len(mrConfigID) != measurementLen {
-		return "", fmt.Errorf("mr_config_id is %d bytes, want %d", len(mrConfigID), measurementLen)
+// Two layouts exist because the broker publishes two quotes. The §4.2 layout is recognised by
+// its version field; anything else is read as the older form, where report_data is the ASCII
+// address zero-padded to 64 bytes.
+func SignerFromReportData(reportData []byte) (string, error) {
+	if len(reportData) != reportDataLen {
+		return "", fmt.Errorf("report_data is %d bytes, want %d", len(reportData), reportDataLen)
 	}
 
-	switch version := mrConfigID[0]; version {
-	case mrConfigVersionV1:
-		// The padding is checked because a nonzero tail means the field is not
-		// laid out the way this assumes, and the 32 bytes read as a compose hash
-		// would then be part of something else entirely.
-		if padding := mrConfigID[1+composeHashLen:]; !allZero(padding) {
-			return "", fmt.Errorf("mr_config_id v1 has %x after the compose hash, want zero padding", padding)
+	if binary.BigEndian.Uint32(reportData[reportDataVersionOffset:reportDataVersionOffset+4]) == reportDataLayoutVersion {
+		addr := reportData[reportDataSignerOffset : reportDataSignerOffset+20]
+		if bytes.Equal(addr, make([]byte, 20)) {
+			return "", fmt.Errorf("report_data names the zero address")
 		}
-		return hex.EncodeToString(mrConfigID[1 : 1+composeHashLen]), nil
-	case mrConfigVersionV2:
-		return "", fmt.Errorf("mr_config_id is v%d, which commits to the compose hash through keccak256(compose_hash‖app_id‖kp_kind‖kp_id); the compose hash cannot be recovered from the quote alone", version)
-	default:
-		return "", fmt.Errorf("mr_config_id version %d is not recognised", version)
+		return "0x" + hex.EncodeToString(addr), nil
 	}
-}
 
-func allZero(b []byte) bool {
-	for _, c := range b {
-		if c != 0 {
-			return false
-		}
+	// Legacy: the ASCII hex address, which the hardware zero-pads.
+	ascii := strings.ToLower(string(bytes.TrimRight(reportData, "\x00")))
+	if !addressPattern.MatchString(ascii) {
+		return "", fmt.Errorf("report_data %q is neither the §4.2 layout nor an ASCII address", ascii)
 	}
-	return true
+	return ascii, nil
 }

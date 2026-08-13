@@ -2,6 +2,7 @@ package attest
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"strings"
@@ -48,25 +49,65 @@ func pinnedCompose(t *testing.T) string {
 		"  "+brokerService+":\n    image: ghcr.io/0gfoundation/0g-serving-broker@"+bootDigest+"\n")
 }
 
-// syntheticQuote builds a quote whose measurement fields hold what the given
-// compose file and event log imply, so ResolveRunningState's anchoring checks pass
-// on a fixture the golden report cannot provide.
+// syntheticVerified builds the VerifiedQuote a caller would hold after dstack-verifier accepted
+// a GetQuote triple: the compose hash out of app_info, report_data verbatim, and the event log
+// the verifier reported event_log_verified for.
 //
-// It is not a valid signed quote and does not need to be: this package verifies no
-// signature, and the offsets it reads are pinned against a real quote elsewhere.
-func syntheticQuote(t *testing.T, appCompose string, events []RuntimeEvent) []byte {
+// No quote bytes are involved. That is the shape of this package now: the registers, the replay
+// and the DCAP chain are the verifier's, and what remains is the zg-* records and the §4.2
+// report_data layout, neither of which dstack knows anything about.
+func syntheticVerified(t *testing.T, appCompose string, events []RuntimeEvent) VerifiedQuote {
+	t.Helper()
+	return syntheticVerifiedSigning(t, appCompose, events, testSigner)
+}
+
+// testSigner is the address the fixtures' records bind and their report_data names, so the two
+// agree unless a test sets out to make them disagree.
+//
+// Deliberately carries hex letters, so a test that spells it in EIP-55 mixed case exercises the
+// case normalisation instead of comparing a string to itself.
+const testSigner = "0xabcdef1111111111111111111111111111111111"
+
+// testEncPub is the enclave encryption public key the fixtures' records bind and their
+// report_data names — 32 bytes in hex, like a real X25519 public key.
+const testEncPub = "beef000000000000000000000000000000000000000000000000000000000123"
+
+// imageRecordPayload is what the controller writes: the reference, then BOTH keys derived from
+// that image — the response signer and the enclave encryption public key.
+func imageRecordPayload(ref string) []byte {
+	return []byte(ref + " " + testSigner + " " + testEncPub)
+}
+
+// syntheticVerifiedSigning is syntheticVerified with control over the address report_data names,
+// so a test can make the quote and the ledger disagree about who holds the signing key.
+func syntheticVerifiedSigning(t *testing.T, appCompose string, events []RuntimeEvent, signer string) VerifiedQuote {
 	t.Helper()
 
-	quote := make([]byte, offsetRTMR0+rtmrCount*rtmrStride)
-
 	sum := sha256.Sum256([]byte(appCompose))
-	quote[offsetMRConfigID] = mrConfigVersionV1
-	copy(quote[offsetMRConfigID+1:], sum[:])
 
-	rtmr3 := ReplayRTMR3(events)
-	copy(quote[offsetRTMR0+3*rtmrStride:], rtmr3[:])
+	rd := make([]byte, reportDataLen)
+	raw, err := hex.DecodeString(strings.TrimPrefix(signer, "0x"))
+	if err != nil {
+		t.Fatalf("decoding the test signer: %v", err)
+	}
+	copy(rd[reportDataSignerOffset:], raw)
+	encRaw, err := hex.DecodeString(testEncPub)
+	if err != nil {
+		t.Fatalf("decoding the test enc_pub: %v", err)
+	}
+	copy(rd, encRaw)
+	binary.BigEndian.PutUint32(rd[reportDataVersionOffset:], reportDataLayoutVersion)
 
-	return quote
+	log, err := json.Marshal(tdxEventsOf(events))
+	if err != nil {
+		t.Fatalf("building the event log: %v", err)
+	}
+
+	return VerifiedQuote{
+		ComposeHash:  hex.EncodeToString(sum[:]),
+		ReportData:   rd,
+		EventLogJSON: log,
+	}
 }
 
 // bootEvents is dstack's own sequence, ending at the boundary past which a
@@ -84,26 +125,22 @@ func bootEvents() []RuntimeEvent {
 
 func resolve(t *testing.T, appCompose string, events []RuntimeEvent) (*RunningState, error) {
 	t.Helper()
-	log, err := json.Marshal(tdxEventsOf(events))
-	if err != nil {
-		t.Fatalf("building the event log: %v", err)
-	}
-	return ResolveRunningState(syntheticQuote(t, appCompose, events), log, tcbInfoFor(t, appCompose), brokerService)
+	return ResolveRunningState(syntheticVerified(t, appCompose, events), tcbInfoFor(t, appCompose), brokerService)
 }
 
-// tdxEventsOf renders events as the log a GetQuote response carries. The declared
-// digest is filled in because a real log carries one; nothing reads it.
+// tdxEventsOf renders events as the log a GetQuote response carries.
+//
+// The digest field is left empty: nothing in this package reads it now that the replay is
+// dstack-verifier's, and filling it in would only assert this code agrees with itself.
 func tdxEventsOf(events []RuntimeEvent) []TdxEvent {
 	entries := make([]TdxEvent, 0, len(events)+1)
-	// One firmware entry, to keep the filter honest: it must be skipped rather
-	// than folded, or every replay in production is wrong.
+	// One firmware entry on another register, to keep the filter honest: it must be skipped,
+	// or an entry belonging to another register's replay would be read as an application's.
 	entries = append(entries, TdxEvent{IMR: 0, EventType: 0x80000009, EventPayload: "0954"})
 	for _, event := range events {
-		digest := event.Digest()
 		entries = append(entries, TdxEvent{
 			IMR:          3,
 			EventType:    RuntimeEventType,
-			Digest:       hex.EncodeToString(digest[:]),
 			Event:        event.Event,
 			EventPayload: hex.EncodeToString(event.Payload),
 		})
@@ -132,7 +169,7 @@ func TestResolveFallsBackToTheComposePin(t *testing.T) {
 	if state.ConfigSHA256 != "" {
 		t.Errorf("ConfigSHA256 = %q, want empty when no config change was recorded", state.ConfigSHA256)
 	}
-	if got := hex.EncodeToString(hashOf(compose)); state.ComposeHash != got {
+	if got := func() string { sum := sha256.Sum256([]byte(compose)); return hex.EncodeToString(sum[:]) }(); state.ComposeHash != got {
 		t.Errorf("ComposeHash = %q, want %q", state.ComposeHash, got)
 	}
 }
@@ -167,56 +204,33 @@ func TestResolveTakesTheLastRecordedUpgrade(t *testing.T) {
 	}
 }
 
-// Every input but the quote arrives over plain HTTP from the party being described,
-// so each rejection here is a way a provider could otherwise describe itself.
+// tcb_info is the one input this package still anchors itself, and each rejection here is a way
+// a provider could otherwise describe itself.
+//
+// What is NOT here any more: an event log that does not replay to the quote's registers, and an
+// event dropped from the log. Both used to be caught in this function and are now
+// dstack-verifier's — its event_log_verified is exactly that check, over all four registers
+// rather than only rtmr3, and it comes with the OS image hash and the TCB status that a replay
+// says nothing about. Passing a log the verifier did not vouch for is a lie this package cannot
+// detect, which is why VerifiedQuote's doc says constructing it is an assertion.
 func TestResolveRejectsUnanchoredInputs(t *testing.T) {
 	compose := pinnedCompose(t)
 	goodEvents := append(bootEvents(),
-		RuntimeEvent{Event: EventImageUpdate, Payload: []byte("ghcr.io/x@" + upgradeDigest)})
-	goodLog, err := json.Marshal(tdxEventsOf(goodEvents))
-	if err != nil {
-		t.Fatalf("building the event log: %v", err)
-	}
-	quote := syntheticQuote(t, compose, goodEvents)
+		RuntimeEvent{Event: EventImageUpdate, Payload: imageRecordPayload("ghcr.io/x@" + upgradeDigest)})
+	v := syntheticVerified(t, compose, goodEvents)
 
-	t.Run("an event log that does not replay to the quote's rtmr3", func(t *testing.T) {
-		// The upgrade event edited to claim a different image, which is the whole
-		// attack: say you are running something you are not.
-		lied := append(bootEvents(),
-			RuntimeEvent{Event: EventImageUpdate, Payload: []byte("ghcr.io/x@sha256:" + strings.Repeat("f", 64))})
-		lie, err := json.Marshal(tdxEventsOf(lied))
-		if err != nil {
-			t.Fatalf("building the event log: %v", err)
-		}
-
-		if _, err := ResolveRunningState(quote, lie, tcbInfoFor(t, compose), brokerService); err == nil {
-			t.Error("ResolveRunningState() = nil, want the replay mismatch to be fatal")
-		}
-	})
-
-	t.Run("an event dropped from the log", func(t *testing.T) {
-		// Hiding an upgrade would leave the compose pin as the answer. It cannot
-		// be hidden: the fold covers every event.
-		short, err := json.Marshal(tdxEventsOf(bootEvents()))
-		if err != nil {
-			t.Fatalf("building the event log: %v", err)
-		}
-		if _, err := ResolveRunningState(quote, short, tcbInfoFor(t, compose), brokerService); err == nil {
-			t.Error("ResolveRunningState() = nil, want a dropped event to be fatal")
-		}
-	})
-
-	t.Run("an app_compose that does not hash to the quote's compose hash", func(t *testing.T) {
-		// Substituting a compose file would let a provider claim its deployment
-		// pins digests it does not.
+	t.Run("an app_compose that does not hash to the verified compose hash", func(t *testing.T) {
+		// Substituting a compose file would let a provider claim its deployment pins digests it
+		// does not. The verifier reports the compose hash out of the signed report body but
+		// never sees app_compose, so this is ours and only ours.
 		other := composeManifest(t, "services:\n  "+brokerService+":\n    image: evil@"+upgradeDigest+"\n")
-		if _, err := ResolveRunningState(quote, goodLog, tcbInfoFor(t, other), brokerService); err == nil {
+		if _, err := ResolveRunningState(v, tcbInfoFor(t, other), brokerService); err == nil {
 			t.Error("ResolveRunningState() = nil, want the compose hash mismatch to be fatal")
 		}
 	})
 
 	t.Run("a tcb_info with no app_compose", func(t *testing.T) {
-		if _, err := ResolveRunningState(quote, goodLog, []byte(`{}`), brokerService); err == nil {
+		if _, err := ResolveRunningState(v, []byte(`{}`), brokerService); err == nil {
 			t.Error("ResolveRunningState() = nil, want a missing app_compose to be fatal")
 		}
 	})
@@ -385,13 +399,13 @@ func TestResolveNeedsTheBrokerServiceToExist(t *testing.T) {
 // digest-pinned quote is not something a test can mint. The failure being this one
 // and not an earlier one is what says the anchoring steps all passed.
 func TestResolveOnTheGoldenReport(t *testing.T) {
-	quote, eventLogJSON, tcb := goldenReport(t)
+	r, tcb := goldenReport(t)
 	tcbInfoJSON, err := json.Marshal(map[string]any{"app_compose": tcb.AppCompose})
 	if err != nil {
 		t.Fatalf("rebuilding tcb_info: %v", err)
 	}
 
-	_, err = ResolveRunningState(quote, []byte(eventLogJSON), tcbInfoJSON, brokerService)
+	_, err = ResolveRunningState(goldenVerified(t, r, tcb), tcbInfoJSON, brokerService)
 	if err == nil {
 		t.Fatal("ResolveRunningState() = nil; the golden report's compose names the broker by tag")
 	}
@@ -402,7 +416,7 @@ func TestResolveOnTheGoldenReport(t *testing.T) {
 
 // The compose file the golden report carries, parsed as a real one.
 func TestPinnedImagesOnTheGoldenReport(t *testing.T) {
-	_, _, tcb := goldenReport(t)
+	_, tcb := goldenReport(t)
 	tcbInfoJSON, err := json.Marshal(map[string]any{"app_compose": tcb.AppCompose})
 	if err != nil {
 		t.Fatalf("rebuilding tcb_info: %v", err)
