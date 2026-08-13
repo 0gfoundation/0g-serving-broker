@@ -34,6 +34,7 @@ func phalaData(useController bool) TemplateData {
 func dataFor(node TeeNode, useController bool) TemplateData {
 	repo, digest := splitPinnedImage(brokerImage)
 	return TemplateData{
+		BrokerImage:      brokerImage,
 		TeeNode:          node,
 		UseController:    useController,
 		ConfigPath:       "./config.yml",
@@ -276,6 +277,103 @@ func TestNonPhalaNodesGetNoHalfHardenedDeployment(t *testing.T) {
 		for _, name := range []string{"TEE_SOCKET", "ATTEST_PROXY_SOCKET", "IMAGE_REPO", "zg-tee"} {
 			if strings.Contains(rendered, name) {
 				t.Errorf("%s with a controller carries %q, but has no proxy to serve it", node, name)
+			}
+		}
+	}
+}
+
+// Only the controller may write the config file, and that is what makes zg-config-update a
+// complete account of it rather than an audit trail of one route among several.
+//
+// The file lives inside the CVM, so the provider's host cannot reach it — but a read-write
+// mount lets the container holding it rewrite its own pricing, targetUrl or verifiability with
+// no record at all, which would leave "no config record" meaning nothing. Nothing in the
+// broker or the event service writes it: the only writer in the tree is ApplyCoreConfig.
+func TestOnlyTheControllerCanWriteTheConfig(t *testing.T) {
+	for _, node := range []TeeNode{"phala", "hardhat", "alicloud"} {
+		for _, controller := range []bool{false, true} {
+			compose := renderCompose(t, dataFor(node, controller))
+
+			for _, service := range []string{"0g-serving-provider-broker", "0g-serving-provider-event"} {
+				block := serviceBlock(t, compose, service)
+				if !strings.Contains(block, "/etc/config.yaml:ro") {
+					t.Errorf("%s (%s, controller=%v) mounts the config writable, so it could rewrite its own pricing with no record", service, node, controller)
+				}
+			}
+
+			if !controller {
+				continue
+			}
+			// The controller's own mount must stay writable — it is the writer.
+			ctl := serviceBlock(t, compose, "0g-controller")
+			if !strings.Contains(ctl, "/etc/config.yaml") || strings.Contains(ctl, "/etc/config.yaml:ro") {
+				t.Errorf("the controller cannot write the config, so ApplyCoreConfig would fail:\n%s", ctl)
+			}
+		}
+	}
+}
+
+// Every service the controller acts on must pin its container name.
+//
+// The controller finds containers by exact name and refuses anything else, because its lookup
+// otherwise falls back to a shortest-substring match — which after a failed recreate resolves
+// "0g-serving-provider-broker" to "0g-serving-provider-broker-db", this project's own database.
+// Without container_name, compose names the container <project>-<service>-1 and EVERY upgrade
+// is refused. A test rather than a comment, so adding a service the controller manages cannot
+// silently reintroduce it.
+func TestTheControllersContainersPinTheirNames(t *testing.T) {
+	compose := renderCompose(t, phalaData(true))
+
+	for _, service := range []string{"0g-serving-provider-broker", "0g-serving-provider-event", "0g-controller"} {
+		block := serviceBlock(t, compose, service)
+		if !strings.Contains(block, "container_name: "+service) {
+			t.Errorf("%s does not pin container_name, so the controller would refuse to act on it:\n%s", service, block)
+		}
+	}
+
+	// And NOT without one. A pinned name is global to the docker daemon, while the wizard
+	// supports several deployments per host through COMPOSE_PROJECT_NAME and a per-project
+	// network — so pinning unconditionally would make the second one fail on a name conflict,
+	// trading an isolation property every deployment has for a guard only a controller needs.
+	plain := renderCompose(t, phalaData(false))
+	if strings.Contains(plain, "container_name: 0g-serving-provider-broker") {
+		t.Error("a controller-less deployment pins container names, which breaks running two deployments on one host")
+	}
+}
+
+// Anything a service waits on for health must actually define a healthcheck, or compose refuses
+// the whole file at startup rather than at parse — which no YAML check catches.
+func TestEveryHealthDependencyHasAHealthcheck(t *testing.T) {
+	for _, node := range []TeeNode{"phala", "hardhat", "alicloud"} {
+		for _, controller := range []bool{false, true} {
+			data := dataFor(node, controller)
+			data.DeployLLM = true
+			data.UseNginx = true
+			data.UseMonitoring = true
+
+			var parsed struct {
+				Services map[string]struct {
+					Healthcheck any                       `yaml:"healthcheck"`
+					DependsOn   map[string]map[string]any `yaml:"depends_on"`
+				} `yaml:"services"`
+			}
+			if err := yaml.Unmarshal([]byte(renderCompose(t, data)), &parsed); err != nil {
+				t.Fatalf("%s: %v", node, err)
+			}
+			for name, svc := range parsed.Services {
+				for dep, cond := range svc.DependsOn {
+					if cond["condition"] != "service_healthy" {
+						continue
+					}
+					target, ok := parsed.Services[dep]
+					if !ok {
+						t.Errorf("%s: %s waits on %s, which this render does not define", node, name, dep)
+						continue
+					}
+					if target.Healthcheck == nil {
+						t.Errorf("%s: %s waits for %s to be healthy, but %s defines no healthcheck — compose refuses to start", node, name, dep, dep)
+					}
+				}
 			}
 		}
 	}
