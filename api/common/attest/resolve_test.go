@@ -219,6 +219,24 @@ func TestResolveRejectsUnanchoredInputs(t *testing.T) {
 		RuntimeEvent{Event: EventImageUpdate, Payload: imageRecordPayload("ghcr.io/x@" + upgradeDigest)})
 	v := syntheticVerified(t, compose, goodEvents)
 
+	// The one that actually pins the anchor: no record, so the answer comes from app_compose,
+	// and the substituted compose DOES pin a digest. Remove the hash check and this resolves
+	// successfully to the impostor's digest instead of refusing — which is the whole attack,
+	// and which an assertion on "did it error" cannot see, because a compose naming a tag
+	// errors either way for an unrelated reason.
+	t.Run("a substituted compose that would otherwise resolve", func(t *testing.T) {
+		boot := syntheticVerified(t, compose, bootEvents())
+		impostor := composeManifest(t, "services:\n  "+brokerService+":\n    image: evil@"+upgradeDigest+"\n")
+
+		state, err := ResolveRunningState(boot, tcbInfoFor(t, impostor), brokerService)
+		if err == nil {
+			t.Fatalf("resolved to %+v from a compose file this quote's compose hash does not cover", state)
+		}
+		if !strings.Contains(err.Error(), "app_compose") {
+			t.Errorf("error %q does not say the compose file is not this quote's", err)
+		}
+	})
+
 	t.Run("an app_compose that does not hash to the verified compose hash", func(t *testing.T) {
 		// Substituting a compose file would let a provider claim its deployment pins digests it
 		// does not. The verifier reports the compose hash out of the signed report body but

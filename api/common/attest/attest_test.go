@@ -171,8 +171,14 @@ func TestAppComposeIsAnchoredToTheVerifiedComposeHash(t *testing.T) {
 	// vouched for the hash itself: the mismatch means this tcb_info belongs to another quote.
 	other := v
 	other.ComposeHash = strings.Repeat("ab", 32)
-	if _, err := ResolveRunningState(other, []byte(r.TcbInfo), "0g-serving-provider-broker"); err == nil {
-		t.Error("resolved with a compose hash the manifest does not hash to")
+	_, err := ResolveRunningState(other, []byte(r.TcbInfo), "0g-serving-provider-broker")
+	if err == nil {
+		t.Fatal("resolved with a compose hash the manifest does not hash to")
+	}
+	// The reason matters: this report's compose names a tag, so it refuses either way, and an
+	// assertion on "did it error" would pass with the anchor removed.
+	if !strings.Contains(err.Error(), "app_compose") {
+		t.Errorf("refused with %q, want the compose-hash mismatch — a bare error here would also fire with the anchor gone", err)
 	}
 }
 

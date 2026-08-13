@@ -225,9 +225,17 @@ func ResolveRunningState(v VerifiedQuote, tcbInfoJSON []byte, brokerService stri
 		return nil, configErr
 	}
 
-	// Not the compose fallback: an image record exists, it just did not resolve, and
-	// falling back would answer with the digest the deployment booted on while the
-	// ledger says it was changed to something the writer could not name.
+	// A record wins over the compose pin, and the two are mutually exclusive.
+	//
+	// Redundant today, deliberately: digestOfImageRef cannot answer with an empty digest and no
+	// error, so reaching here with DigestSourceEvent means a valid digest is already set and the
+	// fallback's own guard would skip it. A mutation removing this line fails no test.
+	//
+	// Kept because it puts the precedence in the control flow instead of leaving it implied by
+	// the conjunction of two earlier conditions — and it becomes load-bearing the moment either
+	// moves, which is the kind of change that happens. An earlier version of this comment
+	// claimed it was preventing a fallback after an unreadable record; that case returns an
+	// error twenty lines above.
 	if state.DigestSource == DigestSourceEvent {
 		return state, nil
 	}
