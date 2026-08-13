@@ -27,7 +27,13 @@ type ContainerStatus struct {
 	State     string `json:"state"`  // running, exited, paused, etc.
 	Health    string `json:"health"` // healthy, unhealthy, starting, none
 	StartedAt string `json:"startedAt"`
-	Image     string `json:"image"`
+	// Image is the reference the container was CREATED with, which for a compose file
+	// naming a tag is a tag. It answers "what was asked for", not "what is running".
+	Image string `json:"image"`
+	// ImageID is the image the container is actually running. The two differ whenever a
+	// tag has moved since the container started, so anything that must describe the
+	// running code has to use this one.
+	ImageID string `json:"imageId"`
 }
 
 // Client wraps the Docker client
@@ -119,6 +125,7 @@ func (c *Client) inspectContainerStatus(ctx context.Context, containerID, contai
 		Health:    health,
 		StartedAt: inspect.State.StartedAt,
 		Image:     inspect.Config.Image,
+		ImageID:   inspect.Image,
 	}, nil
 }
 

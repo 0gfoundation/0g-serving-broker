@@ -30,11 +30,17 @@ const bindEncPubEnvVar = "TEE_REPORT_DATA_BIND_ENC_PUB"
 // dstack's socket into this container. dstack serves EmitEvent from the same handler as
 // GetQuote, so a container holding that socket can append to RTMR3 — including a record
 // about the image it is itself running, which is exactly what makes such a record unable to
-// describe it. The proxy forwards GetQuote, Info and GetKey and nothing else.
+// describe it. The proxy forwards GetQuote and Info, and nothing else.
 //
-// Only the missing mount provides that property; this variable just tells an honest broker
-// where else to ask. The client type stays Phala either way, because the wire protocol is
-// identical.
+// Setting it also switches signing to the controller, because the proxy deliberately does
+// NOT forward GetKey: a key the broker can derive is a key it can keep across an upgrade,
+// which would leave a pre-upgrade attestation verifying forever. One variable drives both
+// halves so they cannot be configured into disagreeing — pointed at anything that is not the
+// controller's proxy, signing fails closed rather than quietly deriving a second key.
+//
+// Only the missing mount provides the RTMR3 property; this variable just tells an honest
+// broker where to ask. The client type stays Phala either way, because the quote wire
+// protocol is identical.
 const teeSocketEnvVar = "TEE_SOCKET"
 
 type ClientType int
@@ -60,8 +66,16 @@ type TeeService struct {
 	clientType ClientType
 	logger     log.Logger
 
+	// ProviderSigner is the signing key, and is nil whenever the controller holds it
+	// instead (see remote). Sign, SignEIP712 and SignHash are the way to use it; reaching
+	// for the field directly is what a remote deployment cannot support.
 	ProviderSigner *ecdsa.PrivateKey
 	Address        common.Address
+
+	// remote is non-nil when signing goes to the controller's attestation proxy, which is
+	// exactly when TEE_SOCKET is set. Then ProviderSigner stays nil and this process never
+	// holds the key at all — the property that makes deriving it per image worth anything.
+	remote *remoteSigner
 
 	// Quote is the legacy-layout quote whose report_data is the ASCII signer
 	// address; existing clients that predate the §4.2 layout parse this.
@@ -90,11 +104,23 @@ func NewTeeService(clientType ClientType, logger log.Logger) (*TeeService, error
 // SyncQuote synchronizes the quote and provider signer.
 func (s *TeeService) SyncQuote(ctx context.Context, nvQuote bool) error {
 	var client TappdClient
+	// Recomputed on every call rather than remembered, so a re-sync can never keep signing
+	// through a socket the current environment no longer names. Closing the old one's idle
+	// connections is what keeps that cheap: a dropped Transport keeps its read and write
+	// loops reachable forever.
+	if s.remote != nil {
+		s.remote.client.CloseIdleConnections()
+	}
+	s.remote = nil
 	switch s.clientType {
 	case Mock:
 		client = &MockTappdClient{}
 	case Phala:
-		client = NewPhalaTappdClient(os.Getenv(teeSocketEnvVar))
+		socket := os.Getenv(teeSocketEnvVar)
+		client = NewPhalaTappdClient(socket)
+		if socket != "" {
+			s.remote = newRemoteSigner(socket)
+		}
 	case GCP:
 		client = &GcpTappdClient{}
 	case AliCloud:
@@ -103,12 +129,25 @@ func (s *TeeService) SyncQuote(ctx context.Context, nvQuote bool) error {
 		return errors.New("unsupported client type")
 	}
 
-	signer, err := s.getSigningKey(ctx, client)
-	if err != nil {
-		return err
+	if s.remote != nil {
+		// The controller holds the key, so the address is read, not computed. ProviderSigner
+		// stays nil: there is nothing to put in it, and leaving it nil is what makes any
+		// caller that still reaches past the signing methods fail loudly here rather than
+		// sign with a key that no attestation names.
+		addr, err := s.remote.SignerAddress(ctx)
+		if err != nil {
+			return errors.Wrap(err, "reading the signer address from the controller")
+		}
+		s.ProviderSigner = nil
+		s.Address = addr
+	} else {
+		signer, err := s.getSigningKey(ctx, client)
+		if err != nil {
+			return err
+		}
+		s.ProviderSigner = signer
+		s.Address = crypto.PubkeyToAddress(signer.PublicKey)
 	}
-	s.ProviderSigner = signer
-	s.Address = crypto.PubkeyToAddress(signer.PublicKey)
 	s.logger.Debugf("teeAddress: %s", s.Address)
 
 	// Derive the X25519 enc key (§4.1) inside the TEE from a distinct path, so a
@@ -188,10 +227,21 @@ func bindEncPubEnabled() bool {
 // deterministic in the underlying material, so the key is measurement-tied and
 // stable across restarts on a real backend, and rotates with the measurement.
 func (s *TeeService) getEncKey(ctx context.Context, client TappdClient) (pccrypto.PrivateKey, pccrypto.PublicKey, error) {
-	material, err := client.DeriveKey(ctx, encKeyDerivePath)
+	var material string
+	var err error
+	if s.remote != nil {
+		// Per running image on this path, so an upgraded image cannot unseal what clients
+		// sealed to its predecessor. The controller derives it on the same suffix this
+		// package uses (EncKeyDerivePathSuffix), and returns the material verbatim.
+		material, err = s.remote.EncKeyMaterial(ctx)
+	} else {
+		material, err = client.DeriveKey(ctx, encKeyDerivePath)
+	}
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "deriving enc key material")
 	}
+	// []byte of the string, not a hex decode — both paths must condition the same bytes or
+	// the two derive different keys from the same material.
 	return deriveEncKey([]byte(material))
 }
 
@@ -236,18 +286,39 @@ func (s *TeeService) getSigningKey(ctx context.Context, client TappdClient) (*ec
 	return privateKey, nil
 }
 
-// Sign signs the given message hash with the TEE provider signer
-// This matches the signature format expected by Ethereum contracts
-func (s *TeeService) Sign(messageHash []byte) ([]byte, error) {
+// SignHash produces the raw 65-byte secp256k1 signature over a 32-byte hash.
+//
+// This is the single seam between holding the key and asking for a signature. Locally it is
+// crypto.Sign; with TEE_SOCKET set it is one call to the controller, which derives the key
+// from the digest of the image this process is running and never returns it. Both return the
+// same bytes for the same key and hash — the recovery-id fixup stays with each caller so the
+// two paths cannot drift apart on it.
+//
+// It takes no context deliberately. Every caller signs a response that is already complete
+// and will be fetched later out of the signature cache, so tying the signature to the request
+// context would drop the proof exactly when a client hangs up early — precisely the case
+// where the proof is what is left to serve. The remote call is bounded by
+// remoteSignerTimeout instead.
+func (s *TeeService) SignHash(hash []byte) ([]byte, error) {
+	if s.remote != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), remoteSignerTimeout)
+		defer cancel()
+		return s.remote.SignHash(ctx, hash)
+	}
 	if s.ProviderSigner == nil {
 		return nil, errors.New("provider signer not initialized")
 	}
+	return crypto.Sign(hash, s.ProviderSigner)
+}
 
+// Sign signs the given message hash with the TEE provider signer
+// This matches the signature format expected by Ethereum contracts
+func (s *TeeService) Sign(messageHash []byte) ([]byte, error) {
 	// Add Ethereum Signed Message prefix (matching the contract expectation)
 	ethPrefix := []byte("\x19Ethereum Signed Message:\n32")
 	prefixedHash := crypto.Keccak256(ethPrefix, messageHash)
 
-	signature, err := crypto.Sign(prefixedHash, s.ProviderSigner)
+	signature, err := s.SignHash(prefixedHash)
 	if err != nil {
 		return nil, errors.Wrap(err, "signing message")
 	}
@@ -265,14 +336,10 @@ func (s *TeeService) Sign(messageHash []byte) ([]byte, error) {
 // Keccak256(\x19\x01 || domainSeparator || structHash)
 // This is used for EIP-712 typed data signatures (e.g., TEE settlements)
 func (s *TeeService) SignEIP712(digest []byte) ([]byte, error) {
-	if s.ProviderSigner == nil {
-		return nil, errors.New("provider signer not initialized")
-	}
-
 	// The digest is already the final 32-byte hash from EIP-712
 	// Sign it directly without adding any additional prefixes
 	// (unlike Sign() which adds "\x19Ethereum Signed Message:\n32" for personal_sign)
-	signature, err := crypto.Sign(digest, s.ProviderSigner)
+	signature, err := s.SignHash(digest)
 	if err != nil {
 		return nil, errors.Wrap(err, "signing EIP-712 digest")
 	}
