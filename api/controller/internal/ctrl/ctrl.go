@@ -2,15 +2,19 @@ package ctrl
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/Dstack-TEE/dstack/sdk/go/dstack"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"gopkg.in/yaml.v3"
@@ -20,6 +24,68 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	"github.com/0glabs/0g-serving-broker/inference/contract"
 )
+
+// EventEmitter extends RTMR3 with one runtime event.
+//
+// RTMR3 is append-only hardware state: an event folded into it cannot be edited
+// or removed, and it is covered by the signature over any quote taken afterwards.
+// That is the whole reason the controller records a change here before making it
+// — the record outlives the process that wrote it and does not depend on the
+// process being honest later.
+//
+// The property the two change paths owe a reader is therefore not "a record exists"
+// but: **the last image record names the image the broker will be running when it
+// next serves a quote, and the last config record names the file it will read.**
+// Recording first is how a change cannot happen unrecorded; appending the truth on
+// abort (abortImageChange, abortConfigChange) is how a record cannot outlive the
+// change it describes. Both halves are needed — the ledger is append-only, so the
+// second cannot be done by rewinding.
+//
+// An interface only so the ordering below can be tested; production is the dstack
+// client over /var/run/dstack.sock.
+type EventEmitter interface {
+	EmitEvent(ctx context.Context, event string, payload []byte) error
+}
+
+// The two events the controller records, and their payloads.
+//
+// This is a wire contract with every verifier that reads RTMR3, and the payload
+// bytes go into the event's digest — so a change to a name or an encoding is a
+// change to the measurement, and old readers stop being able to explain new logs.
+// Payloads are bare bytes rather than JSON for that reason: a verifier has to
+// reproduce them exactly, and JSON leaves key order, spacing and escaping free.
+//
+// The zg- prefix is a namespace. dstack already writes app-id, compose-hash and
+// system-ready into RTMR3, and other components may add their own.
+const (
+	// Payload: "<repo>@sha256:<64hex>", the reference the upgrade runs on.
+	eventImageUpdate = "zg-image-update"
+	// Payload: hex(sha256(config file content)). Records behaviour, not just
+	// code: pricing, verifiability and targetUrl all live in that file, and an
+	// image digest alone would leave them changeable without a trace.
+	eventConfigUpdate = "zg-config-update"
+)
+
+// Ceilings on how long a recorded change may hold the controller.
+//
+// Not tuning knobs: they exist so the lock cannot be held forever. Both paths hold a
+// lock that also gates start/stop/restart, and an upgrade's pull has no timeout of its
+// own, so without these a registry that never answers would leave an operator unable
+// to restart the broker to recover. Generous enough for a multi-gigabyte pull plus the
+// two-minute health wait.
+const (
+	upgradeTimeout      = 30 * time.Minute
+	configChangeTimeout = 5 * time.Minute
+
+	// restoreTimeout bounds putting the ledger back. Deliberately separate: a restore
+	// runs *because* something failed, often the deadline above, and must not inherit
+	// the context that expired.
+	restoreTimeout = 30 * time.Second
+)
+
+// ErrChangeInProgress is returned when a change is refused because another one
+// holds the controller.
+var ErrChangeInProgress = errors.New("another image or config change is in progress")
 
 // Names of the containers the controller manages.
 //
@@ -87,6 +153,16 @@ type Ctrl struct {
 	config       config.ControllerConfig
 	fullConfig   *config.Config // Full config for accessing Service configuration
 	dockerClient *docker.Client
+	emitter      EventEmitter
+
+	// Serializes the two paths that record into RTMR3 and then act.
+	//
+	// RTMR3 is a ledger, and two upgrades interleaving would write one whose
+	// events do not describe the order things happened in: the last
+	// zg-image-update is what a reader believes is running, and with concurrent
+	// callers the last event and the last container created can come from
+	// different requests. Held for the whole operation, not just the emit.
+	changing sync.Mutex
 
 	// Contract for syncing services
 	servingContract *contract.ServingContract
@@ -130,9 +206,15 @@ func NewCtrl(fullConfig *config.Config, logger log.Logger) (*Ctrl, error) {
 	}
 
 	ctrl := &Ctrl{
-		config:         cfg,
-		fullConfig:     fullConfig,
-		dockerClient:   dockerClient,
+		config:       cfg,
+		fullConfig:   fullConfig,
+		dockerClient: dockerClient,
+		// Talks to /var/run/dstack.sock, which the controller's compose entry has
+		// to mount. Not dialled here: the client is lazy, and a controller that
+		// refused to start without it would take the read-only endpoints down too.
+		// An upgrade attempted without the socket fails at the emit, before
+		// anything is touched, which is the outcome that matters.
+		emitter:        dstack.NewDstackClient(),
 		adminAddresses: adminAddresses,
 		allowedIPs:     allowedIPs,
 		logger:         logger,
@@ -274,6 +356,16 @@ func (c *Ctrl) StartContainer(ctx context.Context, alias string) error {
 		return &InvalidContainerError{Alias: alias}
 	}
 
+	// Under the same lock as the recorded changes, even though this records
+	// nothing itself. Starting the broker is what seals a quote around whatever
+	// the ledger says at that moment, so a start let through the middle of an
+	// upgrade would hand a reader a quote describing an image the upgrade had
+	// announced but not yet installed.
+	if !c.changing.TryLock() {
+		return ErrChangeInProgress
+	}
+	defer c.changing.Unlock()
+
 	return c.dockerClient.StartContainer(ctx, containerName)
 }
 
@@ -284,6 +376,16 @@ func (c *Ctrl) StopContainer(ctx context.Context, alias string) error {
 		return &InvalidContainerError{Alias: alias}
 	}
 
+	// Under the same lock as the recorded changes, even though this records
+	// nothing itself. Starting the broker is what seals a quote around whatever
+	// the ledger says at that moment, so a start let through the middle of an
+	// upgrade would hand a reader a quote describing an image the upgrade had
+	// announced but not yet installed.
+	if !c.changing.TryLock() {
+		return ErrChangeInProgress
+	}
+	defer c.changing.Unlock()
+
 	return c.dockerClient.StopContainer(ctx, containerName)
 }
 
@@ -293,6 +395,16 @@ func (c *Ctrl) RestartContainer(ctx context.Context, alias string) error {
 	if containerName == "" {
 		return &InvalidContainerError{Alias: alias}
 	}
+
+	// Under the same lock as the recorded changes, even though this records
+	// nothing itself. Starting the broker is what seals a quote around whatever
+	// the ledger says at that moment, so a start let through the middle of an
+	// upgrade would hand a reader a quote describing an image the upgrade had
+	// announced but not yet installed.
+	if !c.changing.TryLock() {
+		return ErrChangeInProgress
+	}
+	defer c.changing.Unlock()
 
 	return c.dockerClient.RestartContainer(ctx, containerName)
 }
@@ -308,8 +420,19 @@ func (c *Ctrl) GetCoreConfig() (string, error) {
 	return string(data), nil
 }
 
-// ApplyCoreConfig updates the shared config file and restarts both broker and event containers
-// configContent is raw YAML string to avoid parsing issues with hex addresses
+// ApplyCoreConfig updates the shared config file and restarts both broker and
+// event containers.
+//
+// configContent is a raw YAML string, to avoid parsing issues with hex addresses.
+// It is hashed and recorded in RTMR3 before the file is written, so a reader can
+// tell whether the running configuration is still the one the compose_hash
+// pinned — and if not, which content replaced it. A failure to record aborts
+// before the write: an unrecorded change is a change nobody can see. A write that
+// then fails restores the record, for the reasons in abortConfigChange.
+//
+// The restarts are not only how the new config takes effect, they are also what
+// publishes the record — the broker serves a quote it took at startup, so an event
+// emitted while it runs reaches no reader until it restarts.
 func (c *Ctrl) ApplyCoreConfig(ctx context.Context, configContent string) error {
 	// Validate YAML format (but don't use parsed result to preserve original content)
 	var tmp interface{}
@@ -317,19 +440,171 @@ func (c *Ctrl) ApplyCoreConfig(ctx context.Context, configContent string) error 
 		return &InvalidConfigError{Err: err}
 	}
 
-	if err := os.WriteFile(c.config.ConfigFile, []byte(configContent), 0644); err != nil {
-		return err
+	if !c.changing.TryLock() {
+		return ErrChangeInProgress
+	}
+	defer c.changing.Unlock()
+
+	// Detached and bounded for the same reasons as UpdateImages.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), configChangeTimeout)
+	defer cancel()
+
+	sum := sha256.Sum256([]byte(configContent))
+	if err := c.emitter.EmitEvent(ctx, eventConfigUpdate, []byte(hex.EncodeToString(sum[:]))); err != nil {
+		return fmt.Errorf("recording the config change in RTMR3: %w", err)
 	}
 
-	// Restart both broker and event since they share the config
-	if err := c.RestartContainer(ctx, "broker"); err != nil {
+	if err := os.WriteFile(c.config.ConfigFile, []byte(configContent), 0644); err != nil {
+		return c.abortConfigChange(ctx, err)
+	}
+
+	// Restart both broker and event since they share the config.
+	//
+	// Straight to the docker client, not through the Ctrl methods: those take
+	// `changing`, which this call already holds.
+	if err := c.dockerClient.RestartContainer(ctx, containerBroker); err != nil {
 		return fmt.Errorf("failed to restart broker: %w", err)
 	}
-	if err := c.RestartContainer(ctx, "event"); err != nil {
+	if err := c.dockerClient.RestartContainer(ctx, containerEvent); err != nil {
 		return fmt.Errorf("failed to restart event: %w", err)
 	}
 
 	return nil
+}
+
+// AmbiguousContainerError is returned when a container the upgrade must act on cannot
+// be found under its exact name.
+type AmbiguousContainerError struct {
+	Want string
+	Got  string // the name resolution settled on, or "" if nothing matched
+}
+
+func (e *AmbiguousContainerError) Error() string {
+	if e.Got == "" {
+		return fmt.Sprintf("no container named %q; set container_name: %s in the compose file", e.Want, e.Want)
+	}
+	return fmt.Sprintf("no container named %q — %q matched instead, and acting on it would recreate the wrong service; set container_name: %s in the compose file", e.Want, e.Got, e.Want)
+}
+
+// verifyExactContainer refuses to proceed unless name resolves to a container of
+// exactly that name.
+func (c *Ctrl) verifyExactContainer(ctx context.Context, name string) error {
+	status, err := c.dockerClient.GetContainerStatus(ctx, name)
+	if err != nil {
+		return fmt.Errorf("looking up container %s: %w", name, err)
+	}
+	if status == nil {
+		return &AmbiguousContainerError{Want: name}
+	}
+	if status.Name != name {
+		return &AmbiguousContainerError{Want: name, Got: status.Name}
+	}
+	return nil
+}
+
+// abortImageChange restores the image record and returns the error to report.
+//
+// One caller: the recreate. Everything before it — the pull, the two stops, the
+// record itself — runs before the record exists or leaves nothing to correct;
+// everything after it has the broker on the new image, so the record is already right
+// and restoring would replace a true record with a false one.
+func (c *Ctrl) abortImageChange(ctx context.Context, cause error) error {
+	// Its own context, not the upgrade's. The upgrade's deadline may be exactly what
+	// aborted it, and a restore that inherits an expired one cannot run at all —
+	// which leaves the ledger overstating on precisely the path that exists to stop
+	// that. Two local calls, so the budget is small.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), restoreTimeout)
+	defer cancel()
+
+	if err := c.restoreImageRecord(ctx); err != nil {
+		c.logger.Errorf("[UpdateImages] RTMR3 names an image the broker is not running and the record could not be restored: %v", err)
+		return errors.Join(cause, fmt.Errorf("RTMR3 still names the image this upgrade did not reach, and restoring it failed: %w", err))
+	}
+	c.logger.Info("[UpdateImages] Upgrade aborted; RTMR3 record restored to the image the broker is running")
+	return cause
+}
+
+// restoreImageRecord appends a record naming the image the broker is actually on.
+//
+// RTMR3 cannot be edited or rewound, so a record that turned out not to describe
+// reality is corrected the only way an append-only ledger allows: by appending the
+// truth after it. A reader takes the last image record as what is running, which is
+// what this restores.
+//
+// Leaving the overstatement instead is not the conservative direction, which is what
+// makes this load-bearing rather than tidy. The stale record names the digest the
+// caller asked for — for an attacker, the digest a verifier is looking for — while
+// the broker keeps running whatever it ran before. "A reader would reject it" only
+// holds when the stale record names something the reader was not looking for.
+//
+// It follows that this must fail CLOSED. Every outcome emits something, and when the
+// truth cannot be established the payload deliberately names no digest, which
+// attest.ResolveRunningState refuses. An earlier version returned an error instead
+// for those cases, on the reasoning that a broker whose reference carries no digest
+// belongs to a deployment attest cannot verify anyway — which is wrong: the
+// compose-pinned fallback is only consulted when there is no image record at all, so
+// the stale one would have made an unverifiable deployment verifiably wrong.
+//
+// The broker's reference is re-read rather than captured beforehand, because the
+// abort paths differ in how far they got: one leaves it stopped on the old image,
+// another created-but-not-started on the new one, another with no container at all.
+func (c *Ctrl) restoreImageRecord(ctx context.Context) error {
+	// Names no digest, so a reader refuses rather than believing the record this is
+	// replacing. Used whenever the broker's own reference cannot be established.
+	unknown := c.config.ImageRepo
+
+	payload := unknown
+	switch status, err := c.dockerClient.GetContainerStatus(ctx, containerBroker); {
+	case err != nil:
+		c.logger.Warnf("[UpdateImages] Could not read the broker's image to restore the RTMR3 record, recording it as unknown: %v", err)
+	case status == nil:
+		// The abort removed the container and did not get one back.
+		c.logger.Warnf("[UpdateImages] No %s container to read an image from, recording the running image as unknown", containerBroker)
+	case status.Name != containerBroker:
+		// GetContainerStatus falls back to a shortest-substring match, so a
+		// deployment that does not pin container_name can resolve this to a
+		// neighbour — "0g-serving-provider-broker-db" contains the broker's whole
+		// name. Fine for a status endpoint, not for something a reader treats as
+		// the attested image.
+		c.logger.Warnf("[UpdateImages] %q resolved to container %q, recording the running image as unknown", containerBroker, status.Name)
+	default:
+		payload = status.Image
+	}
+
+	return c.emitter.EmitEvent(ctx, eventImageUpdate, []byte(payload))
+}
+
+// abortConfigChange restores the config record and returns the error to report.
+//
+// Same reasoning as restoreImageRecord, including the fail-closed part: the recorded
+// hash would otherwise name content that was never applied, and the caller picks
+// which content that is. When the file cannot be read the payload deliberately names
+// no hash, which attest.ResolveRunningState refuses.
+//
+// The file is re-read rather than assumed unchanged, because os.WriteFile truncates
+// before it writes — a failure part-way through leaves content that is neither the
+// old nor the new, and that is what the record has to name.
+func (c *Ctrl) abortConfigChange(ctx context.Context, cause error) error {
+	// Its own context, for the reason given in abortImageChange.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), restoreTimeout)
+	defer cancel()
+
+	// Not a hex sha256, so a reader refuses rather than believing the record this
+	// is replacing.
+	payload := "unknown"
+	if content, err := os.ReadFile(c.config.ConfigFile); err != nil {
+		c.logger.Warnf("[ApplyCoreConfig] Could not re-read the config file to restore the RTMR3 record, recording it as unknown: %v", err)
+	} else {
+		sum := sha256.Sum256(content)
+		payload = hex.EncodeToString(sum[:])
+	}
+
+	if err := c.emitter.EmitEvent(ctx, eventConfigUpdate, []byte(payload)); err != nil {
+		c.logger.Errorf("[ApplyCoreConfig] RTMR3 names config content that was not applied and the record could not be restored: %v", err)
+		return errors.Join(cause, fmt.Errorf("RTMR3 still names the config this change did not apply, and restoring it failed: %w", err))
+	}
+	c.logger.Info("[ApplyCoreConfig] Change aborted; RTMR3 record restored to the config on disk")
+	return cause
 }
 
 // InvalidContainerError is returned when an invalid container alias is provided
@@ -496,8 +771,10 @@ func (c *Ctrl) SyncService(ctx context.Context, imageName, imageDigest string) e
 // so the reference built here is the only description of what runs — which is
 // what lets it later be recorded as one, in a log that cannot be rewritten.
 //
-// The order of operations is unchanged, and still leaves the contract for last
-// so it is only updated once the containers are running the new image:
+// The order of the container work is unchanged, and still leaves the contract
+// for last so it is only updated once the containers are running the new image.
+// The RTMR3 record goes in front of all of it:
+// 0. Record the reference in RTMR3
 // 1. Pull image
 // 2. Stop containers (event -> broker)
 // 3. Recreate containers (broker -> event)
@@ -507,8 +784,24 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 		return nil, err
 	}
 
-	// The one reference this upgrade runs on. Built once so pull, recreate and
-	// the contract sync cannot end up describing different images.
+	if !c.changing.TryLock() {
+		return nil, ErrChangeInProgress
+	}
+	defer c.changing.Unlock()
+
+	// Detached from the caller's request, and bounded.
+	//
+	// Detached because a client disconnect must not abort an upgrade half way, and
+	// must not be able to make the record and the restore fail selectively — that is
+	// the caller choosing which half of the accounting happens. Bounded because this
+	// call holds the lock that now also gates start/stop/restart, and PullImage has no
+	// timeout of its own: an unbounded pull would otherwise leave an operator unable
+	// to so much as restart the broker to recover.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), upgradeTimeout)
+	defer cancel()
+
+	// The one reference this upgrade runs on. Built once so the record, the pull,
+	// the recreate and the contract sync cannot end up describing different images.
 	ref := c.config.ImageRepo + "@" + digest
 
 	result := &docker.ImageUpdateResult{
@@ -519,6 +812,25 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 	brokerName := containerBroker
 	eventName := containerEvent
 	ingressName := containerIngress
+
+	// Both containers must resolve by their exact names before anything is touched.
+	//
+	// Container lookup falls back to a shortest-substring match, which is fine for a
+	// status endpoint and destructive here. Once a previous attempt has removed the
+	// broker container and failed to create a replacement, the shortest remaining name
+	// containing "0g-serving-provider-broker" is "0g-serving-provider-broker-db" — the
+	// database in this project's own compose file. A retry would then stop it, record
+	// an image change, and recreate the database container running the broker image,
+	// reporting success.
+	//
+	// It is also what the record means: a reader treats the last image record as a
+	// statement about the broker, so the upgrade has to know it acted on the broker.
+	if err := c.verifyExactContainer(ctx, brokerName); err != nil {
+		return nil, err
+	}
+	if err := c.verifyExactContainer(ctx, eventName); err != nil {
+		return nil, err
+	}
 
 	// Step 1: Pull the latest image
 	c.logger.Info("[UpdateImages] Pulling latest image...")
@@ -552,6 +864,47 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 		}
 	}
 
+	// Recorded here: after both containers are stopped, immediately before the only
+	// step that changes which image the broker runs.
+	//
+	// The placement is the security property, not a detail. A reader believes the
+	// last image record, so the ledger has to be true at every instant a quote can be
+	// taken — and a quote can be taken by whatever image is *currently running*,
+	// which is the image under suspicion: the broker mounts /var/run/dstack.sock (it
+	// needs it for GetQuote), and report_data carries no nonce, so any quote it
+	// collects can be replayed forever. Locking the start/stop/restart routes does
+	// not help against that, because the adversary is the live process itself.
+	//
+	// So the record must not exist while a broker is alive that is not on ref. Here,
+	// none is: both containers were just stopped, docker's restart policy does not
+	// fire on a deliberate stop, and the routes that could start one are behind the
+	// lock this call holds. The next broker to exist is the one created on ref below.
+	//
+	// Earlier placements all failed that test. At the top of the function, or after
+	// the pull, the still-running old image could collect a quote naming an image it
+	// was not running — with the pull being unbounded and failable on demand, that
+	// was a window a caller could hold open.
+	//
+	// Still before the change, so a change cannot happen unrecorded: stopping a
+	// container does not alter its image, and the create below is the first thing
+	// that does.
+	if err := c.emitter.EmitEvent(ctx, eventImageUpdate, []byte(ref)); err != nil {
+		// The broker is stopped and nothing was recorded, so the ledger is still
+		// truthful — but leaving it down would turn a dstack hiccup into an outage.
+		// Best effort: on failure the caller gets an error either way.
+		// Its own context, for the reason in abortImageChange: if the record failed
+		// because this call's deadline expired, so would the restart, and the broker
+		// would be left stopped for exactly the reason this branch exists to avoid.
+		startCtx, cancelStart := context.WithTimeout(context.WithoutCancel(ctx), restoreTimeout)
+		defer cancelStart()
+		if startErr := c.dockerClient.StartContainer(startCtx, brokerName); startErr != nil {
+			c.logger.Errorf("[UpdateImages] Could not restart the broker after failing to record the change: %v", startErr)
+		}
+		result.Success = false
+		result.Error = "failed to record the image change in RTMR3: " + err.Error()
+		return result, fmt.Errorf("recording the image change to %s in RTMR3: %w", ref, err)
+	}
+
 	// Step 3: Recreate containers in dependency order (broker -> event)
 	// First recreate broker
 	brokerResult, err := c.dockerClient.RecreateContainer(ctx, brokerName, ref)
@@ -559,10 +912,20 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 		result.UpdatedContainers = append(result.UpdatedContainers, *brokerResult)
 	}
 	if err != nil {
+		// Reassigned first, so a restore that failed reaches the caller: the
+		// handler reports result.Error, not the returned error, when the result
+		// is non-nil — and "RTMR3 is left overstating" is the half an operator
+		// has to act on.
+		err = c.abortImageChange(ctx, err)
 		result.Success = false
 		result.Error = "failed to recreate broker container: " + err.Error()
 		return result, err
 	}
+
+	// Past here the broker is on ref, so the record already says the right thing
+	// and the abort paths below must NOT restore it. Everything that remains —
+	// the health wait, the ingress reload, the event container, the contract sync
+	// — can fail without changing which image the broker is running.
 
 	// Wait for broker to become healthy before starting event
 	if err := c.dockerClient.WaitForHealthy(ctx, brokerName, 2*time.Minute); err != nil {
