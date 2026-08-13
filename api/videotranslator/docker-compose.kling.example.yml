@@ -43,9 +43,14 @@
 #      "无声"/silent rows (std=0.6, pro=0.8) are EVER reachable from this
 #      translator; the with-audio rows exist in a complete price table only
 #      for parity with the vendor's real price list and for forward-readiness
-#      if a future change ever exposes audio as a client-facing option — the
-#      same posture Seedance's own has_video_input=true rows carry today.
-#      Configure this model's billing mode as per_video_second in the
+#      if a future change ever exposes audio as a client-facing option — an
+#      unreachable-today, published-for-completeness row, the same shape a
+#      hypothetical Seedance has_video_input=true row would be IF that
+#      dimension were wired into the router's matching allowlist, which it is
+#      not today (0g-router's videoDimensionKeys recognizes only `resolution`,
+#      `duration_seconds`, and, as of this change, `has_audio` — no
+#      `has_video_input` entry exists on main). Configure this model's
+#      billing mode as per_video_second in the
 #      broker's model pricing (see api/inference/config/model_pricing.go's
 #      BillingModePerVideoSecond) with a resolutionMultiplier keyed on "std"
 #      and "pro" (Kling's own wire tier tokens — see common/videospec/
@@ -56,10 +61,14 @@
 #
 #      The four-row {resolution, has_audio}-dimensioned price table above is
 #      published on the 0G ROUTER side (its own on-chain provider price
-#      data, keyed the same way Seedance's own {resolution, has_video_input}
-#      table is) — see 0g-router's pkg/modelregistry/models.yaml PRICING
-#      NOTE on kling/kling-v3-video-generation for the full reasoning and the
-#      exact wire dimension name.
+#      data) — this is the first two-dimensional video-pricing table the
+#      router's variant-matching allowlist actually recognizes; a
+#      {resolution, has_video_input} table for Seedance has been proposed in
+#      design notes but is NOT wired into 0g-router's videoDimensionKeys
+#      allowlist today, so there is no existing precedent this reuses — see
+#      0g-router's pkg/modelregistry/models.yaml PRICING NOTE on
+#      kling/kling-v3-video-generation for the full reasoning and the exact
+#      wire dimension name.
 #   4. Keep TEE verification: this sidecar reports the vendor's TLS
 #      certificate back to the broker (Zg-Upstream-Cert-Fingerprint), so the
 #      provider can stay providerType: centralized instead of falling back to
