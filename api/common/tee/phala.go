@@ -26,8 +26,10 @@ const DefaultDstackSocket = "/var/run/dstack.sock"
 // socket. That socket also serves EmitEvent, from the same unauthenticated handler, so any
 // container holding it can append to RTMR3 — including a record about the image it is itself
 // running, which is what makes the ledger unable to describe it. Such a deployment points
-// this at the controller's attestation proxy instead, which forwards GetQuote, Info and
-// GetKey and nothing else.
+// this at the controller's attestation proxy instead, which forwards GetQuote and Info and
+// nothing else — deliberately not GetKey, because a key the broker can derive is a key it can
+// keep across an upgrade. Signing goes through that proxy too, which is why setting the socket
+// switches both halves at once (see teeSocketEnvVar).
 //
 // The wire protocol is identical either way, which is the point: nothing else in this
 // package changes, and the difference is one path in the compose file.
