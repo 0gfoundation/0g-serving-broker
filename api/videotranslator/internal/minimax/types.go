@@ -25,11 +25,14 @@ const (
 	TaskStatusExpired   = "expired"
 )
 
-// ContentItem is one element of a create request's content array. Only the
-// text item (the prompt) is populated today; image/video/audio reference
-// roles (first_frame/reference_image/...) are out of scope until the
-// OpenAI-facing side grows a matching input, mirroring how the DashScope
-// translator defers reference-image support.
+// ContentItem is one element of a create request's content array. Text and
+// first_frame image items are populated today (translate.ToMiniMaxCreateRequest
+// builds a first_frame ImageURL/Role item from the OpenAI request's
+// input_reference); the remaining reference roles (reference_image/
+// reference_video/reference_audio) and the video_url/audio_url content types
+// are out of scope until the OpenAI-facing side grows a matching input — this
+// integration only exposes text-to-video and single-first-frame
+// image-to-video, the two capabilities the OpenAI Video API can express.
 type ContentItem struct {
 	Type string `json:"type"`
 	Text string `json:"text,omitempty"`
