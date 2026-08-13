@@ -48,9 +48,14 @@ type CurrentImageFunc func(ctx context.Context) (string, error)
 // stops being able to verify. That is what stops an attestation taken before an upgrade
 // from authorising an unbounded future.
 //
-// A sibling of encKeyPath rather than its parent: dstack derivation is hierarchical, so
-// deriving the signing key at "/<digest>" would make it an ancestor of everything else under
-// that digest, and holding it would be holding the subtree.
+// A sibling of encKeyPath rather than its parent.
+//
+// Not because derivation is hierarchical — it is not. dstack runs HKDF over the FULL path
+// string, so "/<digest>" and "/<digest>/e2ee-enc" are independent and holding one gives nothing
+// about the other. The suffix is there so neither key is the other's prefix as a matter of
+// naming, which keeps a later path added under "/<digest>" from looking like it inherits
+// something. Worth stating, because the same flatness is why the legacy signer at "/" does not
+// compromise any per-image key — and because someone reading the older claim would build on it.
 func signerKeyPath(digest string) string { return SignerKeyPath(digest) }
 
 // SignerKeyPath is signerKeyPath, exported because the RTMR3 recorder derives the same address

@@ -58,10 +58,18 @@ func digestFor(imageName string, repoDigests []string) string {
 		}
 	}
 
-	// No entry for that repository: an image addressed by ID, or a name the
-	// daemon normalized to something else. Answering with the first entry keeps
-	// the previous behaviour rather than reporting nothing at all.
-	if len(repoDigests) > 0 {
+	// No entry for that repository. Two ways to get here: the image was addressed by ID
+	// (repoOf of "sha256:<hex>" matches no repository, so this is that path's ONLY
+	// behaviour), or the daemon normalized the name to something else.
+	//
+	// One entry is unambiguous — that is the image's only known repository, so its digest is
+	// the answer. More than one is not, and answering with the first would reinstate exactly
+	// what the loop above exists to remove: the entry that happens to sort first, which for
+	// an image known under both an origin and a mirror can be the mirror's, with a different
+	// manifest digest. That digest decides which key signs responses, so a wrong answer makes
+	// the derived address disagree with the RTMR3 record — surfacing at a client rather than
+	// here. Refusing puts the failure at the lookup, where it can be explained.
+	if len(repoDigests) == 1 {
 		if _, digest, ok := strings.Cut(repoDigests[0], "@"); ok {
 			return digest
 		}

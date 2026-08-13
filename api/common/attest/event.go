@@ -72,6 +72,10 @@ import (
 // the TCG entries the firmware wrote into RTMR0-2.
 const RuntimeEventType uint32 = 0x08000001
 
+// rtmr3Index is the register an application can extend. RTMR0-2 are the
+// firmware's, sealed by the time any container runs.
+const rtmr3Index uint32 = 3
+
 // TdxEvent is one entry of the event_log a dstack GetQuote response carries.
 type TdxEvent struct {
 	IMR          uint32 `json:"imr"`
@@ -87,18 +91,15 @@ type RuntimeEvent struct {
 	Payload []byte
 }
 
-// RuntimeEvents pulls the runtime events out of a GetQuote event_log, in the
-// order the log carries them.
-//
-// Entries the firmware wrote are skipped: only RuntimeEventType extends RTMR3
-// with an application's own name and payload.
+// RuntimeEvents pulls this project's RTMR3 records out of a GetQuote event_log,
+// in the order the log carries them.
 //
 // The digest each entry declares is ignored, not checked. It is not an
-// independent statement about anything — ReplayRTMR3 recomputes every digest from
-// the name and payload, so an entry whose declared digest disagrees changes
-// nothing, and an entry whose name or payload was altered fails the comparison
-// against the quote's RTMR3. Checking it separately would only report the same
-// tampering twice.
+// independent statement about anything: the verifier that reported
+// event_log_verified recomputed every digest from the name and payload and
+// folded them into the registers the quote signs, so an entry whose declared
+// digest disagrees changes nothing, and one whose name or payload was altered
+// already failed there. Checking it again would report the same tampering twice.
 func RuntimeEvents(eventLogJSON []byte) ([]RuntimeEvent, error) {
 	var entries []TdxEvent
 	if err := json.Unmarshal(eventLogJSON, &entries); err != nil {
@@ -107,7 +108,13 @@ func RuntimeEvents(eventLogJSON []byte) ([]RuntimeEvent, error) {
 
 	events := make([]RuntimeEvent, 0, len(entries))
 	for i, entry := range entries {
-		if entry.EventType != RuntimeEventType {
+		// Both conditions, and the register is the one that matters here. A caller reaches
+		// this holding a log the verifier vouched for — but event_log_verified covers all
+		// four registers, so an entry carrying the runtime type on IMR 0-2 is exactly as
+		// "verified" as one on RTMR3. Only RTMR3 is extendable after boot, so only RTMR3 can
+		// hold a record a container wrote; folding one from another register in would let an
+		// entry among the firmware's measurements be read as ours.
+		if entry.EventType != RuntimeEventType || entry.IMR != rtmr3Index {
 			continue
 		}
 		payload, err := hex.DecodeString(entry.EventPayload)

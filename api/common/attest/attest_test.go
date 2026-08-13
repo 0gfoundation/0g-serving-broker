@@ -130,6 +130,33 @@ func TestRuntimeEventsAgainstARealLog(t *testing.T) {
 	}
 }
 
+// The register is part of what makes a record ours, not just the event type.
+//
+// A caller reaches RuntimeEvents holding a log a verifier vouched for — but event_log_verified
+// covers all four registers, so an entry carrying the runtime type on IMR 0-2 is exactly as
+// "verified" as one on RTMR3. Only RTMR3 is extendable after boot, so only RTMR3 can hold a
+// record a container wrote. Without the register filter, an entry among the firmware's
+// measurements would be read as ours.
+func TestRuntimeEventsTakeOnlyTheRegisterAContainerCanWrite(t *testing.T) {
+	log := `[
+	  {"imr":0,"event_type":134217729,"digest":"","event":"zg-image-update","event_payload":"6265666f7265"},
+	  {"imr":3,"event_type":134217729,"digest":"","event":"zg-image-update","event_payload":"6d696e65"},
+	  {"imr":2,"event_type":134217729,"digest":"","event":"zg-image-update","event_payload":"616674657200"},
+	  {"imr":3,"event_type":2147483659,"digest":"","event":"firmware","event_payload":"00"}
+	]`
+
+	events, err := RuntimeEvents([]byte(log))
+	if err != nil {
+		t.Fatalf("RuntimeEvents() = %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("RuntimeEvents() returned %d events, want only the RTMR3 one: %+v", len(events), events)
+	}
+	if got := string(events[0].Payload); got != "mine" {
+		t.Errorf("payload = %q, want the RTMR3 entry's", got)
+	}
+}
+
 // A caller cannot hand this package unverified inputs by accident: every field of VerifiedQuote
 // is something a dstack-verifier response supplies, and a zero value is refused rather than
 // treated as "nothing to check".
