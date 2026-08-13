@@ -31,12 +31,26 @@
 #   3. Billing: Kling bills PER SECOND (usage.duration, the vendor's own
 #      billed-seconds field) — NOT per token like Seedance — with price
 #      varying by resolution tier (std=720p / pro=1080p) AND by whether audio
-#      was generated. The operator's real price list is two-dimensional:
+#      was generated. The operator's real price list is two-dimensional, IN
+#      RMB/CNY (人民币元 — this is what Aliyun bills the OPERATOR, not what
+#      0G bills the end user; see the paragraph below):
 #
-#        720P            0.9 元/秒
-#        1080P           1.2 元/秒
-#        720P 无声 (silent)   0.6 元/秒
-#        1080P 无声 (silent)  0.8 元/秒
+#        720P            0.9 元(人民币/RMB/CNY)/秒
+#        1080P           1.2 元(人民币/RMB/CNY)/秒
+#        720P 无声 (silent)   0.6 元(人民币/RMB/CNY)/秒
+#        1080P 无声 (silent)  0.8 元(人民币/RMB/CNY)/秒
+#
+#      This repo has NO currency-conversion code anywhere — these RMB figures
+#      never appear as a code literal, only in this comment, precisely so
+#      nothing here could silently misinterpret them. The operator must
+#      manually convert this RMB cost (plus their own margin) into whatever
+#      unit their OWN billing.resolutionMultipliers (native, in 0G-token wei)
+#      or pricing_usd (USD decimal string) actually uses — there is no
+#      automatic RMB→wei or RMB→USD conversion anywhere in this repo. Typing
+#      "0.6"/"0.8" verbatim into either of those fields, unconverted, would
+#      misprice every request (e.g. treating 0.6 RMB as if it were 0.6 USD
+#      overcharges end users by ~7x; treating it as 0.6 wei of 0G's own
+#      token undercharges by many orders of magnitude).
 #
 #      This integration hardcodes audio:false on every create (no OpenAI
 #      Video API field exposes it — see translate/kling.go), so only the two
