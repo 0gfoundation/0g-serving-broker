@@ -21,7 +21,26 @@
 #      resolution/duration-bucketed pricing) in the broker's model pricing —
 #      see api/inference/config/model_pricing.go. The translator maps MiniMax's
 #      usage.total_seconds onto the broker's usage.output_video_duration field,
-#      which is what resolveVideoBilling meters.
+#      which is what resolveVideoBilling meters. Also set `vendor: minimax` on
+#      that model's billing config so common/videospec resolves the same
+#      (duration, tier) this translator resolves for the broker's pre-flight
+#      balance reserve — omitting it disables that reserve for this model (the
+#      request still goes out, gated only by the minimum locked balance; see
+#      common/videospec's package doc).
+#
+# Input modes this translator supports, all through the SAME /videos request
+# shape:
+#   - text-to-video: prompt only.
+#   - image-to-video (first frame): input_reference.image_url OR
+#     input_reference.file_id — UNLIKE Kling/Seedance, MiniMax accepts BOTH:
+#     image_url is forwarded as-is (http(s) or data: URI), file_id is mapped
+#     onto MiniMax's own mm_file://{id} vendor handle (see
+#     translate.ToMiniMaxCreateRequest / firstFrameReference). This is the one
+#     vendor of the three where file_id is NOT rejected.
+# H3 has no watermark or audio-toggle parameter at all (confirmed against the
+# vendor's own API reference) — there is nothing to force off or expose here,
+# unlike Kling (forces both off) or Seedance (forces watermark off, leaves
+# audio at the vendor's own default-on).
 #   4. Keep TEE verification: this sidecar reports the vendor's TLS certificate
 #      back to the broker (Zg-Upstream-Cert-Fingerprint), so the provider can stay
 #      providerType: centralized instead of falling back to the non-verifiable
@@ -87,6 +106,7 @@ services:
       # to sign a routing proof when they differ (reason: domain_mismatch), so a
       # domestic-site account must change BOTH this and upstreamDomain.
       # - MINIMAX_BASE_URL=https://api.minimaxi.com   # domestic site; then upstreamDomain: api.minimaxi.com
+      # - MINIMAX_REQUEST_TIMEOUT_SECONDS=30
     networks:
       - localhost
 
