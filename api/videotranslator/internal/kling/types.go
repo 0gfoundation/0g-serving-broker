@@ -54,16 +54,15 @@ type CreateInput struct {
 // field is optional on the wire (the vendor applies its own documented
 // default when a field is omitted: mode="pro", aspect_ratio="16:9",
 // duration=5, audio=false, watermark=false-in-general-use) — but this
-// integration ALWAYS sends Watermark=false explicitly (never omitted): no
-// paying customer wants Kling's watermark, and the OpenAI Video API has no
-// field for a client to opt back in. Audio is likewise never sent true (no
-// OpenAI Video API field exposes it), but IS omitted rather than forced
-// false: unlike Watermark, whose vendor-side "default" in general use is
-// documented as inconsistent, Kling's own documented default for `audio` is
-// already false, so there's nothing to force. Duration/Mode/AspectRatio are
-// omitted (nil/zero) when the client's request doesn't determine one,
-// letting the vendor apply its own documented default rather than this
-// integration inventing one.
+// integration ALWAYS sends Audio=false AND Watermark=false EXPLICITLY
+// (never omitted, never nil): no paying customer wants Kling's watermark
+// (and the OpenAI Video API has no field for a client to opt back in), and
+// audio generation bills extra with no OpenAI Video API field to request it
+// either, so both are hardcoded rather than left to whatever the vendor's
+// own default happens to be. Duration/Mode/AspectRatio, by contrast, ARE
+// omitted (zero/"") when the client's request doesn't determine one, letting
+// the vendor apply its own documented default rather than this integration
+// inventing one.
 type CreateParameters struct {
 	Mode        string `json:"mode,omitempty"`
 	AspectRatio string `json:"aspect_ratio,omitempty"`
