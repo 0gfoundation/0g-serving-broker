@@ -18,10 +18,12 @@
 //
 // This file holds ONLY the contract and the handful of things that are genuinely
 // vendor-independent. It deliberately does NOT hold a struct describing "the
-// shape of a vendor's rules": the two vendors here differ on every axis, a third
+// shape of a vendor's rules": the vendors registered here differ on every axis
+// (bounds, clamp-vs-vendor-decides, tier derivation shape), one of them
 // (ByteDance Seedance) bills in tokens rather than seconds, and a shared shape
 // would have to grow a field for each — changing a type every existing vendor
-// depends on. Two samples looking alike is not a general form.
+// depends on. A handful of vendors looking alike is not a general form, and each
+// new vendor added here is expected to keep testing that, not just add a count.
 //
 // So each vendor implements Spec in its own file and keeps its own logic, exactly
 // as the translate package keeps one mapper per vendor. Adding a vendor means

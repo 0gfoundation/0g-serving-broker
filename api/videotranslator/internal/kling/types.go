@@ -123,9 +123,15 @@ type GetOutput struct {
 // hardcodes audio:false on every create, so this dimension never varies and
 // needs no client-facing handling; it is carried here for wire fidelity only.
 type GetUsage struct {
-	Duration   json.Number `json:"duration,omitempty"`
-	Size       string      `json:"size,omitempty"`
-	FPS        json.Number `json:"fps,omitempty"`
+	Duration json.Number `json:"duration,omitempty"`
+	Size     string      `json:"size,omitempty"`
+	FPS      json.Number `json:"fps,omitempty"`
+	// SR is the vendor's own directly-reported resolution tier for this clip
+	// (e.g. "720", "1080" — see translate.klingBillingTier, which prefers
+	// this over re-deriving a guess from Size). The ALL-CAPS "SR" tag is
+	// deliberate, confirmed against the vendor's real wire field name — every
+	// other field here is lowercase snake_case, but this one is not a typo to
+	// "fix"; doing so would silently break unmarshaling this field.
 	SR         string      `json:"SR,omitempty"`
 	Audio      *bool       `json:"audio,omitempty"`
 	VideoCount json.Number `json:"video_count,omitempty"`

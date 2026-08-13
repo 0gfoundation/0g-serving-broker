@@ -162,15 +162,18 @@ func (c *Client) FetchContent(ctx context.Context, videoURL string) (*http.Respo
 }
 
 // APIError is returned for any Kling request-level failure — a non-200 HTTP
-// status. Kling (like DashScope's own HappyHorse and Seedance, in this
-// repo's implementations of both) reports request-level failures with real
+// status. Confirmed via Aliyun's own Model Studio error-code documentation:
+// Kling/DashScope-family requests report request-level failures with real
 // HTTP status codes only, not a code buried in a 200 body, so do() below
-// treats a non-200 as the error. MiniMax is the outlier: it ALSO treats a
-// 200 carrying a non-zero base_resp.status_code as a request-level failure,
-// a defensive fallback for its older API surface that Kling has no
-// equivalent of. Callers can errors.As this to distinguish a request Kling
-// rejected outright (bad auth, bad parameter, quota) from a genuine
-// transport/5xx failure (see handler.writeKlingError).
+// treats a non-200 as the error. Seedance's own client makes the same
+// non-200-only assumption, but (per that file's own doc) defensively rather
+// than confirmed against a dedicated error-code reference — don't treat that
+// as settled fact for Seedance the way it is here for Kling. MiniMax is the
+// outlier: it ALSO treats a 200 carrying a non-zero base_resp.status_code as
+// a request-level failure, a defensive fallback for its older API surface
+// that Kling has no equivalent of. Callers can errors.As this to distinguish
+// a request Kling rejected outright (bad auth, bad parameter, quota) from a
+// genuine transport/5xx failure (see handler.writeKlingError).
 type APIError struct {
 	StatusCode int
 	Code       string
