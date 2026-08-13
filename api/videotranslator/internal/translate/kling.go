@@ -334,6 +334,22 @@ func FromKlingGetTaskResponse(publicID string, resp kling.GetTaskResponse) Video
 	// identical "YYYY-MM-DD HH:mm:ss.SSS" UTC+8 format). Both stay zero
 	// (omitted) if submit_time isn't present/parsable, rather than reporting
 	// a misleading time derived from "now".
+	//
+	// The OpenAI Video API's own expires_at is documented as "when the
+	// downloadable assets expire" — NOT when the task record itself becomes
+	// unqueryable. Kling actually documents a DIFFERENT, much longer window
+	// for that: video_url is valid for 30 days, not 24 hours. Using the 24h
+	// task_id window here is deliberate anyway, not a mismatch by accident:
+	// GetVideoContent (handler/video_kling.go) is stateless and NEVER caches
+	// video_url — it re-queries GetTask on every call — so once task_id
+	// stops being queryable (past 24h, task_status turns UNKNOWN), THIS
+	// system can no longer discover video_url at all, regardless of whether
+	// Kling's own CDN link would have kept working for the full 30 days. The
+	// 24h figure is therefore the real, binding "downloadable via this
+	// system" bound for a 0G client, even though it's a narrower reading
+	// than Kling's own video_url validity. Do NOT "fix" this to 30 days
+	// without first adding video_url caching — that would report an
+	// expires_at the system cannot actually honor.
 	if createdAt, ok := parseDashScopeTime(resp.Output.SubmitTime); ok {
 		out.CreatedAt = createdAt
 		out.ExpiresAt = createdAt + int64(klingTaskIDValidity.Seconds())
