@@ -21,14 +21,6 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/config"
 )
 
-// attestSocketEnvVar is where the controller serves quotes and derived keys to the broker.
-//
-// Empty, the default, means it serves nothing: the deployment still gives the broker dstack's
-// own socket, and behaviour is unchanged. Set it, mount the same path into the broker, and
-// take dstack's socket away from the broker — the last of those three is the one that buys
-// anything, and this exists so it can be done without the broker losing its quotes.
-const attestSocketEnvVar = "ATTEST_PROXY_SOCKET"
-
 func Main() {
 	cfg := config.GetConfig()
 
@@ -71,7 +63,7 @@ func Main() {
 	// Only when asked: this is how a deployment stops mounting dstack's socket into the
 	// broker, and a deployment that still mounts it needs nothing here. See attestproxy for
 	// why the mount is what matters and this is only what makes removing it possible.
-	if socket := os.Getenv(attestSocketEnvVar); socket != "" {
+	if socket := os.Getenv(attestproxy.SocketEnvVar); socket != "" {
 		// Registered before stopProxy, so LIFO runs the shutdown first and the socket
 		// removal second. The other order closes the listener under a server that has not
 		// been told to stop, which surfaces as an accept error and a fatal exit on every

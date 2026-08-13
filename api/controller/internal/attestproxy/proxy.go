@@ -35,6 +35,14 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/log"
 )
 
+// SocketEnvVar names where this proxy listens, and so also whether it runs at all.
+//
+// Read by the recorder as well as by the wiring: the RTMR3 record binds an address derived
+// per image, which is only the address the broker publishes when the broker signs through
+// this proxy. A deployment with a controller but no proxy would record something no quote can
+// ever match, so it refuses to record at all.
+const SocketEnvVar = "ATTEST_PROXY_SOCKET"
+
 // forwarded is every dstack method this proxy will pass on.
 //
 // Adding an entry is a security decision, not a convenience one. All three are read-only
