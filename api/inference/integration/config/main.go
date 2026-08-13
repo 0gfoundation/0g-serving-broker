@@ -160,7 +160,6 @@ func networkConfigOrEmpty(c *Config) *NetworkConfig {
 type ControllerConfig struct {
 	Enable         bool     `yaml:"enable,omitempty"`
 	AdminAddresses []string `yaml:"adminAddresses,omitempty"`
-	Image          string   `yaml:"image,omitempty"`
 }
 
 // durationYAML carries a Go duration value as a string. UnmarshalYAML accepts
@@ -325,6 +324,7 @@ type DeploymentConfig struct {
 	// The image this deployment pins, split the way the broker reports it on-chain.
 	ImageRepo            string
 	ImageDigest          string
+	BrokerImage          string
 	ControllerPort       string // Host port for controller (if exposed)
 	ControllerExposePort bool   // Whether to expose controller port
 }
@@ -349,6 +349,16 @@ const dockerComposeTemplate = `services:
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - HF_ENDPOINT=https://hf-mirror.com
+    # Present because the broker declares depends_on: vllm: condition: service_healthy whenever
+    # an LLM is deployed, and compose refuses to start at all against a target that has none.
+    # The non-alicloud vllm below has always had one; this block did not, so alicloud with an
+    # LLM rendered a file docker rejects.
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 600s
     restart: always
     logging:
       driver: "json-file"
@@ -485,7 +495,19 @@ const dockerComposeTemplate = `services:
 
   # Main broker service
   0g-serving-provider-broker:
-    image: ghcr.io/0gfoundation/0g-serving-broker@sha256:02f86cec7e827c16888e667fbcfa889aea7532a188df36ee06bd57375c9a89dd
+{{- if .UseController}}
+    # Pinned only with a controller, which finds this container by exact name and refuses to
+    # act on anything else — without it compose names the container
+    # <project>-0g-serving-provider-broker-1 and every upgrade is refused.
+    #
+    # Gated because a pinned name is global to the docker daemon, and the wizard supports
+    # several deployments per host through COMPOSE_PROJECT_NAME and a per-project network.
+    # Pinning unconditionally would make a second deployment on the same host fail on a
+    # name conflict — trading an isolation property every deployment has for a guard only a
+    # controller deployment needs.
+    container_name: 0g-serving-provider-broker
+{{- end}}
+    image: {{.BrokerImage}}
 {{- if not .UseNginx}}
     ports:
       - "{{.Ports.Nginx80}}:3080"
@@ -517,7 +539,14 @@ const dockerComposeTemplate = `services:
 {{- end}}
 {{- end}}
     volumes:
-      - {{.ConfigPath}}:/etc/config.yaml
+      # Read-only, so the only writer of this file is the controller — which is what
+      # makes zg-config-update a complete account of it. Nothing in the broker or the
+      # event service writes it (the sole writer in the tree is ApplyCoreConfig), so
+      # this takes no capability either of them uses; it removes one they should not
+      # have. Without it a broker image could rewrite its own pricing, targetUrl or
+      # verifiability and no record would exist, so "no config record" would mean
+      # nothing at all.
+      - {{.ConfigPath}}:/etc/config.yaml:ro
 {{- if eq .TeeNode "alicloud"}}
       - tee-key-data:/data
 {{- end}}
@@ -572,6 +601,15 @@ const dockerComposeTemplate = `services:
 {{- end}}
     restart: unless-stopped
     depends_on:
+{{- if and .UseController (ne .TeeNode "hardhat") (ne .TeeNode "alicloud")}}
+      # With TEE_SOCKET set this container cannot finish starting until the controller answers
+      # /SignerAddress, and it panics rather than falling back to a local key. service_started
+      # (not service_healthy) and only in this direction — the controller has no reverse
+      # dependency here, so there is no cycle. Without it the broker crash-loops until it
+      # happens to win the race, which converges by luck rather than by construction.
+      0g-controller:
+        condition: service_started
+{{- end}}
       mysql:
         condition: service_healthy
 {{- if .DeployLLM}}
@@ -589,7 +627,10 @@ const dockerComposeTemplate = `services:
 
   # Event service starts after broker is ready
   0g-serving-provider-event:
-    image: ghcr.io/0gfoundation/0g-serving-broker@sha256:02f86cec7e827c16888e667fbcfa889aea7532a188df36ee06bd57375c9a89dd
+{{- if .UseController}}
+    container_name: 0g-serving-provider-event
+{{- end}}
+    image: {{.BrokerImage}}
     environment:
       - CONFIG_FILE=/etc/config.yaml
 {{- if and .UseController (ne .TeeNode "hardhat") (ne .TeeNode "alicloud")}}
@@ -609,7 +650,14 @@ const dockerComposeTemplate = `services:
 {{- end}}
 {{- end}}
     volumes:
-      - {{.ConfigPath}}:/etc/config.yaml
+      # Read-only, so the only writer of this file is the controller — which is what
+      # makes zg-config-update a complete account of it. Nothing in the broker or the
+      # event service writes it (the sole writer in the tree is ApplyCoreConfig), so
+      # this takes no capability either of them uses; it removes one they should not
+      # have. Without it a broker image could rewrite its own pricing, targetUrl or
+      # verifiability and no record would exist, so "no config record" would mean
+      # nothing at all.
+      - {{.ConfigPath}}:/etc/config.yaml:ro
 {{- if eq .TeeNode "alicloud"}}
       - tee-key-data:/data
 {{- end}}
@@ -641,6 +689,10 @@ const dockerComposeTemplate = `services:
         max-file: "5"
     restart: unless-stopped
     depends_on:
+{{- if and .UseController (ne .TeeNode "hardhat") (ne .TeeNode "alicloud")}}
+      0g-controller:
+        condition: service_started
+{{- end}}
       0g-serving-provider-broker:
         condition: service_healthy
 {{- if .UseNginx}}
@@ -650,7 +702,8 @@ const dockerComposeTemplate = `services:
 
 {{- if .UseController}}
   0g-controller:
-    image: ghcr.io/0gfoundation/0g-serving-broker@sha256:02f86cec7e827c16888e667fbcfa889aea7532a188df36ee06bd57375c9a89dd
+    container_name: 0g-controller
+    image: {{.BrokerImage}}
 {{- if .ControllerExposePort}}
     ports:
       - "{{.ControllerPort}}:3090"
@@ -823,6 +876,7 @@ type TemplateData struct {
 	AttestSocketPath     string
 	ImageRepo            string
 	ImageDigest          string
+	BrokerImage          string
 	ControllerPort       string
 	ControllerExposePort bool
 }
@@ -1464,6 +1518,7 @@ func main() {
 	// on-chain and the image compose actually starts cannot drift apart. Release CI
 	// rewrites brokerImage on every build, and this follows it.
 	deployConfig.ImageRepo, deployConfig.ImageDigest = splitPinnedImage(brokerImage)
+	deployConfig.BrokerImage = brokerImage
 	deployConfig.AttestSocketDir = attestSocketDir
 	deployConfig.AttestSocketPath = attestSocketDir + "/tee.sock"
 	deployConfig.ControllerExposePort = controllerConfig.ExposePort
@@ -1666,7 +1721,6 @@ func generateYAMLConfig(originalDir string, deployLLM bool, targetTeeAddress str
 		config.Controller = ControllerConfig{
 			Enable:         true,
 			AdminAddresses: []string{controllerAdminAddress},
-			Image:          "ghcr.io/0gfoundation/0g-serving-broker@sha256:02f86cec7e827c16888e667fbcfa889aea7532a188df36ee06bd57375c9a89dd",
 		}
 	}
 
@@ -1901,6 +1955,7 @@ func generateDeploymentFiles(config *DeploymentConfig) error {
 		UseController:        config.UseController,
 		AttestSocketDir:      config.AttestSocketDir,
 		AttestSocketPath:     config.AttestSocketPath,
+		BrokerImage:          config.BrokerImage,
 		ImageRepo:            config.ImageRepo,
 		ImageDigest:          config.ImageDigest,
 		ControllerPort:       config.ControllerPort,
