@@ -1221,7 +1221,11 @@ type DockerConfig struct {
 	APIVersion string `yaml:"apiVersion"` // Docker API version, default 1.41
 }
 
-// IngressAllowedEnvKeys whitelist of environment variables that can be modified for ingress
+// IngressAllowedEnvKeys narrows what GET /v1/config/ingress reports.
+//
+// A display filter, not a permission boundary: no API writes the ingress environment any
+// more, because what the ingress routes traffic to belongs to the compose file, where
+// compose_hash covers it. It exists so the response omits the keys not listed here.
 var IngressAllowedEnvKeys = []string{
 	"CLOUDFLARE_API_TOKEN",
 	"DOMAIN",

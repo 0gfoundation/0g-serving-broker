@@ -39,9 +39,9 @@ func (h *Handler) RegisterRoutes(v1 *gin.RouterGroup) {
 		config.GET("/core", h.GetCoreConfig)
 		config.PUT("/core", h.UpdateCoreConfig)
 
-		// Ingress config - environment variables
+		// Ingress config - environment variables. Read-only: what the ingress routes
+		// traffic to is fixed by the compose file, not editable through this API.
 		config.GET("/ingress", h.GetIngressConfig)
-		config.PUT("/ingress", h.UpdateIngressConfig)
 
 		// Prometheus config - base64 encoded YAML
 		config.GET("/prometheus", h.GetPrometheusConfig)
@@ -282,31 +282,6 @@ func (h *Handler) GetIngressConfig(ctx *gin.Context) {
 	}
 
 	ctx.JSON(http.StatusOK, gin.H{"env": env})
-}
-
-// UpdateIngressConfigRequest is the request body for updating ingress configuration
-type UpdateIngressConfigRequest struct {
-	Env map[string]string `json:"env" binding:"required"`
-}
-
-// UpdateIngressConfig updates the ingress configuration
-func (h *Handler) UpdateIngressConfig(ctx *gin.Context) {
-	var req UpdateIngressConfigRequest
-	if err := ctx.ShouldBindJSON(&req); err != nil {
-		ctx.JSON(http.StatusBadRequest, gin.H{"error": "env field is required"})
-		return
-	}
-
-	if err := h.ctrl.UpdateIngressConfig(ctx, req.Env); err != nil {
-		if _, ok := err.(*ctrl.ForbiddenEnvKeyError); ok {
-			ctx.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
-			return
-		}
-		ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	ctx.JSON(http.StatusOK, gin.H{"message": "ingress config updated"})
 }
 
 // GetPrometheusConfig returns the current Prometheus configuration

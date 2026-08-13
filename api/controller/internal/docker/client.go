@@ -705,10 +705,13 @@ func (c *Client) ReloadNginx(ctx context.Context, containerName string) error {
 
 var _ = container.Summary{}
 
-// RecreateContainerWithEnv recreates a container with updated environment variables
-// - For init containers (waitForExit=true): waits for container to exit and checks exit code
-// - For service containers (waitForExit=false): starts container and returns immediately
-func (c *Client) RecreateContainerWithEnv(ctx context.Context, containerName string, envUpdates map[string]string, waitForExit bool) error {
+// RerunContainerWithEnv recreates an init container with updated environment variables,
+// waits for it to exit, and checks its exit code.
+//
+// Init containers only. The service-container variant went with the ingress config write
+// path: nothing edits a long-running container's environment any more, so the branch that
+// started one and returned without waiting had no callers left.
+func (c *Client) RerunContainerWithEnv(ctx context.Context, containerName string, envUpdates map[string]string) error {
 	// 1. Get container ID
 	containerID, err := c.getContainerID(ctx, containerName)
 	if err != nil {
@@ -724,17 +727,10 @@ func (c *Client) RecreateContainerWithEnv(ctx context.Context, containerName str
 	// Get the actual container name (without leading slash)
 	actualName := strings.TrimPrefix(inspect.Name, "/")
 
-	// 3. Stop the container
-	timeout := 30
-	if waitForExit {
-		timeout = 10 // shorter timeout for init containers
-	}
-	stopErr := c.cli.ContainerStop(ctx, containerID, container.StopOptions{Timeout: &timeout})
-	if stopErr != nil && !waitForExit {
-		// For service containers, stop error is fatal
-		return stopErr
-	}
-	// For init containers, ignore stop error (might already be stopped)
+	// 3. Stop the container. A stop error is ignored: an init container has usually
+	// exited already.
+	timeout := 10
+	_ = c.cli.ContainerStop(ctx, containerID, container.StopOptions{Timeout: &timeout})
 
 	// 4. Remove the old container
 	if err := c.cli.ContainerRemove(ctx, containerID, container.RemoveOptions{}); err != nil {
@@ -781,34 +777,20 @@ func (c *Client) RecreateContainerWithEnv(ctx context.Context, containerName str
 		return err
 	}
 
-	// 9. For init containers, wait for exit and check exit code
-	if waitForExit {
-		statusCh, errCh := c.cli.ContainerWait(ctx, createResp.ID, container.WaitConditionNotRunning)
-		select {
-		case err := <-errCh:
-			if err != nil {
-				return err
-			}
-		case status := <-statusCh:
-			if status.StatusCode != 0 {
-				return &InitContainerFailedError{Name: containerName, ExitCode: int(status.StatusCode)}
-			}
+	// 9. Wait for exit and check the exit code
+	statusCh, errCh := c.cli.ContainerWait(ctx, createResp.ID, container.WaitConditionNotRunning)
+	select {
+	case err := <-errCh:
+		if err != nil {
+			return err
+		}
+	case status := <-statusCh:
+		if status.StatusCode != 0 {
+			return &InitContainerFailedError{Name: containerName, ExitCode: int(status.StatusCode)}
 		}
 	}
 
 	return nil
-}
-
-// RerunContainerWithEnv reruns an init container with updated environment variables
-// Wrapper for RecreateContainerWithEnv with waitForExit=true
-func (c *Client) RerunContainerWithEnv(ctx context.Context, containerName string, envUpdates map[string]string) error {
-	return c.RecreateContainerWithEnv(ctx, containerName, envUpdates, true)
-}
-
-// UpdateContainerEnv updates environment variables and restarts a service container
-// Wrapper for RecreateContainerWithEnv with waitForExit=false
-func (c *Client) UpdateContainerEnv(ctx context.Context, containerName string, envUpdates map[string]string) error {
-	return c.RecreateContainerWithEnv(ctx, containerName, envUpdates, false)
 }
 
 // mergeEnv merges environment variables, new values override old ones
