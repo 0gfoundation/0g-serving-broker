@@ -201,6 +201,16 @@ func TestToKlingCreateRequest(t *testing.T) {
 			t.Errorf("ftp:// must NOT be rejected by ValidateKlingCreateRequest (silent degrade is the documented behavior) — got %v", err)
 		}
 	})
+
+	t.Run("data:image first_frame also silently degrades — Kling's media.url is documented HTTP/HTTPS only, unlike MiniMax/Seedance", func(t *testing.T) {
+		got, err := ToKlingCreateRequest(CreateVideoRequest{Prompt: "p", InputReferenceImageURL: "data:image/png;base64,aGVsbG8="})
+		if err != nil {
+			t.Fatalf("ToKlingCreateRequest: %v", err)
+		}
+		if len(got.Input.Media) != 0 {
+			t.Fatalf("data: URI must silently degrade to no media (Kling has no documented base64 support), got %+v", got.Input.Media)
+		}
+	})
 }
 
 func TestFromKlingCreateResponse(t *testing.T) {
@@ -255,7 +265,7 @@ func TestFromKlingGetTaskResponse_SucceededBillsOnUsageDuration(t *testing.T) {
 		t.Errorf("Status = %q, want completed", out.Status)
 	}
 	if out.Size != "std" {
-		t.Errorf("Size = %q, want std (tier derived from usage.size)", out.Size)
+		t.Errorf("Size = %q, want std (no usage.SR here, falls back to usage.size)", out.Size)
 	}
 	if out.Seconds != "5" {
 		t.Errorf("Seconds = %q, want 5", out.Seconds)
@@ -265,6 +275,42 @@ func TestFromKlingGetTaskResponse_SucceededBillsOnUsageDuration(t *testing.T) {
 	}
 	if out.Error != nil {
 		t.Errorf("succeeded task must not carry an Error, got %+v", out.Error)
+	}
+}
+
+func TestKlingBillingTier(t *testing.T) {
+	tests := []struct {
+		name string
+		sr   string
+		size string
+		want string
+	}{
+		{"SR=720 wins outright, no size needed", "720", "", "std"},
+		{"SR=1080 wins outright, no size needed", "1080", "", "pro"},
+		{"SR present but conflicts with size — SR (the vendor's own reported tier) wins", "1080", "1280*720", "pro"},
+		{"SR absent falls back to size-derived guess", "", "1920*1080", "pro"},
+		{"SR unrecognized falls back to size-derived guess", "4k", "1280*720", "std"},
+		{"neither usable -> empty", "", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := klingBillingTier(tt.sr, tt.size); got != tt.want {
+				t.Errorf("klingBillingTier(%q, %q) = %q, want %q", tt.sr, tt.size, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFromKlingGetTaskResponse_PrefersUsageSROverSize(t *testing.T) {
+	// A deliberately conflicting size (would derive "std" alone) to prove SR,
+	// not size, is what actually wins in the full response path.
+	resp := kling.GetTaskResponse{
+		Output: kling.GetOutput{TaskStatus: kling.TaskStatusSucceeded},
+		Usage:  &kling.GetUsage{Duration: json.Number("5"), Size: "1280*720", SR: "1080"},
+	}
+	out := FromKlingGetTaskResponse("v0_x", resp)
+	if out.Size != "pro" {
+		t.Errorf("Size = %q, want pro (usage.SR must win over the conflicting usage.size)", out.Size)
 	}
 }
 

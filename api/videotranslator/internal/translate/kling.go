@@ -116,17 +116,23 @@ func sizeToKlingAspectRatio(size string) string {
 }
 
 // klingReferenceImage applies Kling's reference-image scheme allowlist to one
-// raw client value: public http(s) URLs and data:image Base64 URIs are
-// accepted; anything else yields "" — the request degrades to text-to-video
-// rather than forwarding an unvetted value, mirroring MiniMax's/Seedance's
-// identical, deliberately documented policy for the same situation.
+// raw client value: only public http(s) URLs are accepted; anything else
+// (including a data:image Base64 URI) yields "" — the request degrades to
+// text-to-video rather than forwarding an unvetted value. Unlike MiniMax/
+// Seedance, whose vendors document base64 data: URI support alongside
+// http(s), Kling's own media.url field is documented as HTTP/HTTPS ONLY
+// (help.aliyun.com/zh/model-studio/kling-video-generation-api-reference/) —
+// forwarding a data: URI here would not gracefully degrade, it would very
+// likely fail as a malformed URL at the vendor. So this allowlist is
+// deliberately narrower than its MiniMax/Seedance siblings, not a copy of
+// their policy.
 func klingReferenceImage(raw string) string {
 	u := strings.TrimSpace(raw)
 	if u == "" {
 		return ""
 	}
 	lower := strings.ToLower(u)
-	if strings.HasPrefix(lower, "https://") || strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "data:image/") {
+	if strings.HasPrefix(lower, "https://") || strings.HasPrefix(lower, "http://") {
 		return u
 	}
 	return ""
@@ -234,11 +240,43 @@ func FromKlingCreateResponse(req CreateVideoRequest, resp kling.CreateResponse) 
 // usage.size is empty or unparsable (the caller then leaves VideoResponse.Size
 // unset, and the router's own billing falls back to the requested size — see
 // its videoResolution derivation).
+//
+// This is the FALLBACK reading only — see klingBillingTier, which prefers
+// usage.SR (the vendor's own directly-reported tier) and calls this only when
+// SR is absent or unrecognized.
 func klingTierFromUsageSize(raw string) string {
 	if raw == "" {
 		return ""
 	}
 	return klingSpec.Tier(strings.ReplaceAll(raw, "*", "x"))
+}
+
+// klingSRTokens maps usage.SR's documented values (help.aliyun.com/zh/
+// model-studio/kling-video-generation-api-reference/: "生成视频的分辨率档位.
+// 示例值：720") onto this package's std/pro tier vocabulary. The docs give
+// only an example value, not an exhaustive enum, so an unrecognized SR value
+// is NOT an error — klingBillingTier falls back to the usage.size-derived
+// guess rather than failing the response over a field this integration
+// cannot fully validate against.
+var klingSRTokens = map[string]string{
+	"720":  "std",
+	"1080": "pro",
+}
+
+// klingBillingTier reports the tier this clip actually rendered at, for the
+// router's resolution-tiered variant pricing. It prefers usage.SR — Kling's
+// own directly-reported "resolution tier of the generated video" — over
+// re-deriving a guess from usage.size's pixel dimensions via a threshold
+// snap: SR is the vendor's own answer to the exact question being asked,
+// while a pixel-threshold derivation is this package's best re-creation of
+// that answer from a DIFFERENT field. Falling back to size only when SR is
+// empty or an unrecognized value keeps today's behavior as the safety net,
+// not a regression.
+func klingBillingTier(sr, size string) string {
+	if tok, ok := klingSRTokens[strings.TrimSpace(sr)]; ok {
+		return tok
+	}
+	return klingTierFromUsageSize(size)
 }
 
 // FromKlingGetTaskResponse translates a Kling get-task response into the
@@ -261,8 +299,10 @@ func FromKlingGetTaskResponse(publicID string, resp kling.GetTaskResponse) Video
 		// resolution-tiered variant pricing matches what was really billed —
 		// not just what was requested (see the router's videoResolution
 		// derivation, which prefers this field and falls back to the
-		// requested size only when it is empty).
-		if tok := klingTierFromUsageSize(resp.Usage.Size); tok != "" {
+		// requested size only when it is empty). Prefers usage.SR (the
+		// vendor's own reported tier) over the usage.size pixel-threshold
+		// guess — see klingBillingTier's doc.
+		if tok := klingBillingTier(resp.Usage.SR, resp.Usage.Size); tok != "" {
 			out.Size = tok
 		}
 		if d := string(resp.Usage.Duration); d != "" {
