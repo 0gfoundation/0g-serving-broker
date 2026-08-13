@@ -110,6 +110,13 @@ type GetOutput struct {
 	OrigPrompt        string `json:"orig_prompt,omitempty"`
 	Code              string `json:"code,omitempty"`
 	Message           string `json:"message,omitempty"`
+	// SubmitTime is when this task was submitted ("YYYY-MM-DD HH:mm:ss.SSS",
+	// UTC+8 — the identical format/zone DashScope's own get-task response
+	// uses), mapped onto the broker's unified VideoResponse.CreatedAt by
+	// translate.FromKlingGetTaskResponse. task_id itself is documented as
+	// queryable for a fixed 24h window from submission, so ExpiresAt is
+	// derived from this the same way DashScope's translator derives its own.
+	SubmitTime string `json:"submit_time,omitempty"`
 }
 
 // GetUsage is the billed-quantity block Kling reports once a task completes.

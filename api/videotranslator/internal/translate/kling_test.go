@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/0glabs/0g-serving-broker/videotranslator/internal/kling"
 )
@@ -166,7 +167,7 @@ func TestToKlingCreateRequest(t *testing.T) {
 		}
 	})
 
-	t.Run("unparsable size omits both mode and aspect_ratio", func(t *testing.T) {
+	t.Run("unparsable size on text-to-video omits mode but DEFAULTS aspect_ratio (required with no vendor default for t2v)", func(t *testing.T) {
 		got, err := ToKlingCreateRequest(CreateVideoRequest{Prompt: "p", Size: "garbage"})
 		if err != nil {
 			t.Fatalf("ToKlingCreateRequest: %v", err)
@@ -174,8 +175,18 @@ func TestToKlingCreateRequest(t *testing.T) {
 		if got.Parameters.Mode != "" {
 			t.Errorf("Mode = %q, want omitted", got.Parameters.Mode)
 		}
+		if got.Parameters.AspectRatio != "16:9" {
+			t.Errorf("AspectRatio = %q, want 16:9 default (aspect_ratio is required for text-to-video, unlike mode)", got.Parameters.AspectRatio)
+		}
+	})
+
+	t.Run("unparsable size on image-to-video omits aspect_ratio (vendor derives it from the first frame)", func(t *testing.T) {
+		got, err := ToKlingCreateRequest(CreateVideoRequest{Prompt: "p", Size: "garbage", InputReferenceImageURL: "https://cdn/a.png"})
+		if err != nil {
+			t.Fatalf("ToKlingCreateRequest: %v", err)
+		}
 		if got.Parameters.AspectRatio != "" {
-			t.Errorf("AspectRatio = %q, want omitted", got.Parameters.AspectRatio)
+			t.Errorf("AspectRatio = %q, want omitted — image-to-video's aspect_ratio is genuinely optional (vendor follows the first frame)", got.Parameters.AspectRatio)
 		}
 	})
 
@@ -276,6 +287,32 @@ func TestFromKlingGetTaskResponse_SucceededBillsOnUsageDuration(t *testing.T) {
 	if out.Error != nil {
 		t.Errorf("succeeded task must not carry an Error, got %+v", out.Error)
 	}
+}
+
+func TestFromKlingGetTaskResponse_SubmitTimePopulatesCreatedAtExpiresAt(t *testing.T) {
+	wantSubmitTime := time.Date(2026, 4, 20, 17, 55, 17, 75_000_000, time.FixedZone("UTC+8", 8*3600))
+
+	t.Run("submit_time present", func(t *testing.T) {
+		resp := kling.GetTaskResponse{
+			Output: kling.GetOutput{TaskStatus: kling.TaskStatusRunning, SubmitTime: "2026-04-20 17:55:17.075"},
+		}
+		out := FromKlingGetTaskResponse("v0_x", resp)
+		if out.CreatedAt != wantSubmitTime.Unix() {
+			t.Errorf("CreatedAt = %d, want %d", out.CreatedAt, wantSubmitTime.Unix())
+		}
+		wantExpiresAt := wantSubmitTime.Unix() + int64(24*time.Hour/time.Second)
+		if out.ExpiresAt != wantExpiresAt {
+			t.Errorf("ExpiresAt = %d, want %d (submit_time + 24h)", out.ExpiresAt, wantExpiresAt)
+		}
+	})
+
+	t.Run("submit_time missing leaves created_at/expires_at at zero, not a guessed 'now'", func(t *testing.T) {
+		resp := kling.GetTaskResponse{Output: kling.GetOutput{TaskStatus: kling.TaskStatusRunning}}
+		out := FromKlingGetTaskResponse("v0_x", resp)
+		if out.CreatedAt != 0 || out.ExpiresAt != 0 {
+			t.Errorf("CreatedAt/ExpiresAt = %d/%d, want 0/0 when submit_time is absent", out.CreatedAt, out.ExpiresAt)
+		}
+	})
 }
 
 func TestKlingBillingTier(t *testing.T) {

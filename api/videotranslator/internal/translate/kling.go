@@ -8,10 +8,19 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"time"
 
 	"github.com/0glabs/0g-serving-broker/common/videospec"
 	"github.com/0glabs/0g-serving-broker/videotranslator/internal/kling"
 )
+
+// klingTaskIDValidity is how long a task_id can be queried after submission
+// (help.aliyun.com/zh/model-studio/kling-video-generation-api-reference/:
+// "任务ID。查询有效期24小时") — the identical 24h window DashScope's own
+// dashScopeTaskIDValidity documents, kept as Kling's own constant (not a
+// shared one) so a future divergence between the two vendors' windows
+// doesn't require unpicking a shared value.
+const klingTaskIDValidity = 24 * time.Hour
 
 // IsRecognizedKlingStatus reports whether status is one of the six documented
 // task_status values. StatusFromKling collapses everything else to "failed"
@@ -186,6 +195,23 @@ func ToKlingCreateRequest(req CreateVideoRequest) (kling.CreateRequest, error) {
 		media = append(media, kling.MediaItem{Type: "first_frame", URL: ref})
 	}
 
+	// aspect_ratio: unlike mode, this one is NOT universally optional. Per
+	// Aliyun's own docs, it is REQUIRED with no default for text-to-video
+	// (and for the omni model's reference-generation modes this integration
+	// doesn't build); it is genuinely optional ONLY when a first-frame image
+	// is present, since the vendor then derives the ratio from that image
+	// ("以首帧的宽高比为基准，无需填写") and ignores whatever is sent here. So
+	// an empty/unparsable "size" must still yield a real value for a
+	// text-to-video request — omitting the field there (this integration's
+	// earlier behavior) risks an InvalidParameter rejection from the vendor,
+	// not a graceful vendor-side default. "16:9" is the same landscape
+	// fallback this package's siblings apply when their own vendor's ratio
+	// can't be derived from "size" either.
+	aspectRatio := sizeToKlingAspectRatio(req.Size)
+	if aspectRatio == "" && len(media) == 0 {
+		aspectRatio = "16:9"
+	}
+
 	audio := false
 	watermark := false
 	return kling.CreateRequest{
@@ -195,11 +221,12 @@ func ToKlingCreateRequest(req CreateVideoRequest) (kling.CreateRequest, error) {
 			Media:  media,
 		},
 		Parameters: kling.CreateParameters{
-			// Mode/AspectRatio come from the shared spec / the ratio table above;
-			// "" (unrecognized/absent "size") omits the field and lets the vendor
-			// apply its own documented default (mode="pro", aspect_ratio="16:9").
+			// Mode comes from the shared spec: "" (unrecognized/absent "size")
+			// omits the field and lets the vendor apply its own documented
+			// default (mode="pro") — unlike AspectRatio, Mode really is
+			// optional with a real vendor-side default in every case.
 			Mode:        klingSpec.Tier(req.Size),
-			AspectRatio: sizeToKlingAspectRatio(req.Size),
+			AspectRatio: aspectRatio,
 			Duration:    duration,
 			Audio:       &audio,
 			Watermark:   &watermark,
@@ -292,6 +319,18 @@ func FromKlingGetTaskResponse(publicID string, resp kling.GetTaskResponse) Video
 		Object: "video",
 		Status: status,
 		Prompt: resp.Output.OrigPrompt,
+	}
+
+	// created_at/expires_at are derived from submit_time — Kling never
+	// reports an expiry directly, but documents a fixed 24h task_id query
+	// window from submission, exactly like DashScope (reuses that same
+	// parser: Kling is DashScope-family transport and documents the
+	// identical "YYYY-MM-DD HH:mm:ss.SSS" UTC+8 format). Both stay zero
+	// (omitted) if submit_time isn't present/parsable, rather than reporting
+	// a misleading time derived from "now".
+	if createdAt, ok := parseDashScopeTime(resp.Output.SubmitTime); ok {
+		out.CreatedAt = createdAt
+		out.ExpiresAt = createdAt + int64(klingTaskIDValidity.Seconds())
 	}
 
 	if resp.Usage != nil {
