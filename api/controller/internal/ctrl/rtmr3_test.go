@@ -14,6 +14,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/0glabs/0g-serving-broker/common/attest"
 	commonconfig "github.com/0glabs/0g-serving-broker/common/config"
 	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/controller/internal/docker"
@@ -245,7 +246,7 @@ func TestConfigChangeIsRecordedBeforeItHappens(t *testing.T) {
 	}
 
 	sum := sha256.Sum256([]byte(content))
-	wantEmit := "emit " + eventConfigUpdate + " " + hex.EncodeToString(sum[:])
+	wantEmit := "emit " + attest.EventConfigUpdate + " " + hex.EncodeToString(sum[:])
 	ops := l.all()
 	if len(ops) == 0 || ops[0] != wantEmit {
 		t.Fatalf("ops = %v, want %q first", ops, wantEmit)
@@ -317,7 +318,7 @@ func TestImageChangeIsRecordedOnceNoBrokerIsRunning(t *testing.T) {
 	}
 
 	ops := l.all()
-	emit := l.indexOf("emit " + eventImageUpdate + " " + imageRepo + "@" + testDigest)
+	emit := l.indexOf("emit " + attest.EventImageUpdate + " " + imageRepo + "@" + testDigest)
 	if emit < 0 {
 		t.Fatalf("ops = %v, want the image change recorded", ops)
 	}
@@ -416,7 +417,7 @@ func TestRestoreFailsClosedWhenTheImageIsUnknown(t *testing.T) {
 	}
 	// attest.ResolveRunningState refuses a payload that pins no digest, which is the
 	// whole point: refusing beats believing the record being replaced.
-	payload := strings.TrimPrefix(ops[0], "emit "+eventImageUpdate+" ")
+	payload := strings.TrimPrefix(ops[0], "emit "+attest.EventImageUpdate+" ")
 	if strings.Contains(payload, "@") {
 		t.Errorf("recorded %q, want a payload that pins no digest", payload)
 	}
@@ -469,7 +470,7 @@ func TestFailedConfigWriteRestoresTheRecord(t *testing.T) {
 	}
 
 	sum := sha256.Sum256([]byte(onDisk))
-	want := "emit " + eventConfigUpdate + " " + hex.EncodeToString(sum[:])
+	want := "emit " + attest.EventConfigUpdate + " " + hex.EncodeToString(sum[:])
 	if ops := l.all(); len(ops) != 1 || ops[0] != want {
 		t.Errorf("ops = %v, want %q — the hash of what is actually on disk", ops, want)
 	}
@@ -621,7 +622,7 @@ func TestRestoreRunsOnItsOwnContext(t *testing.T) {
 	}
 
 	sum := sha256.Sum256([]byte(onDisk))
-	want := "emit " + eventConfigUpdate + " " + hex.EncodeToString(sum[:])
+	want := "emit " + attest.EventConfigUpdate + " " + hex.EncodeToString(sum[:])
 	if ops := l.all(); len(ops) != 1 || ops[0] != want {
 		t.Errorf("ops = %v, want %q — the restore must run even on a dead context", ops, want)
 	}
