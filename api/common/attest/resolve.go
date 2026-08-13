@@ -25,8 +25,8 @@ import (
 // Payloads are bare bytes rather than JSON because a reader has to reproduce them
 // exactly, and JSON leaves key order, spacing and escaping free.
 const (
-	// EventImageUpdate carries "<repo>@sha256:<64hex>", the reference an upgrade
-	// runs on.
+	// EventImageUpdate carries "<repo>@sha256:<64hex> <0xsigner> <enc_pub>": the
+	// reference an upgrade runs on, then both keys derived from that image.
 	EventImageUpdate = "zg-image-update"
 	// EventConfigUpdate carries hex(sha256(config file content)).
 	EventConfigUpdate = "zg-config-update"
@@ -62,6 +62,10 @@ var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
 // hexSHA256Pattern is the bare form zg-config-update carries.
 var hexSHA256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// encPubPattern is a 32-byte X25519 public key in hex. Same shape as hexSHA256Pattern and
+// deliberately a separate name: they are different values that happen to be the same width.
+var encPubPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // VerifiedQuote is the part of an attestation a caller must already have established, and the
 // reason this package no longer looks at raw quote bytes.
@@ -124,6 +128,21 @@ type RunningState struct {
 	// per-image key is derivable only inside the CVM, so any divergence between the two would
 	// be accepted rather than refused.
 	BrokerSigner string
+	// BrokerEncPub is the enclave encryption public key the ledger binds to BrokerDigest, hex,
+	// and it is non-empty ONLY when it was checked against the quote's report_data.
+	//
+	// So empty means "do not seal anything to this deployment with what you have" — either no
+	// record bound a key (the compose path) or the quote used the older layout, which carries
+	// none. It never means "unchecked but probably fine".
+	//
+	// A client that seals a request MUST use this rather than report_data's copy on its own.
+	// report_data is chosen by the attesting process, and the address the ledger binds is
+	// PUBLIC — it is in the very event log the client just read — so an image that is not the
+	// recorded one can publish the recorded ADDRESS beside an enc_pub of its own. It can never
+	// sign a response under that address, so the response check would eventually refuse it. By
+	// then the request was already sealed: the plaintext is gone before the signature that
+	// would have caught it exists.
+	BrokerEncPub string
 	// ConfigSHA256 is the hex SHA-256 of the config file content, from the last
 	// recorded config change.
 	//
@@ -226,8 +245,8 @@ func ResolveRunningState(v VerifiedQuote, tcbInfoJSON []byte, brokerService stri
 		}
 		switch event.Event {
 		case EventImageUpdate:
-			digest, signer, err := imageRecord(string(event.Payload))
-			state.BrokerDigest, state.BrokerSigner, state.DigestSource, imageErr = digest, signer, DigestSourceEvent, err
+			digest, signer, encPub, err := imageRecord(string(event.Payload))
+			state.BrokerDigest, state.BrokerSigner, state.BrokerEncPub, state.DigestSource, imageErr = digest, signer, encPub, DigestSourceEvent, err
 		case EventConfigUpdate:
 			sum := string(event.Payload)
 			if configErr = nil; !hexSHA256Pattern.MatchString(sum) {
@@ -277,6 +296,28 @@ func ResolveRunningState(v VerifiedQuote, tcbInfoJSON []byte, brokerService stri
 		if !strings.EqualFold(state.BrokerSigner, quoteSigner) {
 			return nil, fmt.Errorf("the last %s record binds signer %s to %s, but the quote names %s: the process holding the signing key is not the one the ledger describes",
 				EventImageUpdate, state.BrokerSigner, state.BrokerDigest, quoteSigner)
+		}
+
+		// The enc_pub too, and for a reason the signer check does not cover. Checking only the
+		// address leaves a client sealing its REQUEST to a key of the attesting process's
+		// choosing: the address the ledger binds is public, so an image that is not the
+		// recorded one can publish it beside its own enc_pub. The response signature would
+		// eventually refuse that image — but the prompt is already gone by then.
+		quoteEncPub, err := EncPubFromReportData(v.ReportData)
+		if err != nil {
+			return nil, fmt.Errorf("reading the quote's enc_pub: %w", err)
+		}
+		if quoteEncPub == "" {
+			// The older report_data layout carries no enc_pub, so there is nothing to compare
+			// the record's against. The digest and the signer still stand — but the key is
+			// blanked rather than passed through unchecked, because a caller cannot tell
+			// "vouched for" from "we never looked", and the one place it matters is sealing a
+			// request, where using the wrong key cannot be undone by a later signature check.
+			// A client that intends to seal must fetch the §4.2 quote.
+			state.BrokerEncPub = ""
+		} else if !strings.EqualFold(state.BrokerEncPub, quoteEncPub) {
+			return nil, fmt.Errorf("the last %s record binds enc_pub %s to %s, but the quote names %s: a request sealed to the quote's key would reach code the ledger does not describe",
+				EventImageUpdate, state.BrokerEncPub, state.BrokerDigest, quoteEncPub)
 		}
 		return state, nil
 	}
@@ -415,38 +456,43 @@ func appComposeOf(tcbInfoJSON []byte) (string, error) {
 	return tcbInfo.AppCompose, nil
 }
 
-// imageRecord reads a zg-image-update payload: an image reference, then the address of the
-// signing key derived from that image.
+// imageRecord reads a zg-image-update payload: an image reference, then both keys derived from
+// that image — the response-signing address and the enclave encryption public key.
 //
-//	ghcr.io/0gfoundation/0g-serving-broker@sha256:<64hex> 0x<40hex>
+//	ghcr.io/0gfoundation/0g-serving-broker@sha256:<64hex> 0x<40hex> <64hex>
 //
 // A payload naming no digest is how the writer says it could not establish the truth, and is
 // refused — the point of it emitting one at all is that refusing beats believing the record it
 // replaced.
 //
-// A payload with a digest but no address is refused for the same reason rather than treated as
-// an older format to tolerate. Such a record would be exactly as plausible as a correct one and
-// exactly as unverifiable, and it is the shape an attacker would choose: the digest a reviewer
-// is looking for, with nothing tying it to whoever holds the key. No released controller writes
-// that form.
-func imageRecord(payload string) (digest, signer string, err error) {
+// A payload with a digest but only one key, or none, is refused for the same reason rather than
+// treated as an older format to tolerate. Such a record would be exactly as plausible as a
+// correct one and exactly as unverifiable, and it is the shape an attacker would choose: the
+// digest a reviewer is looking for, with nothing tying it to whoever holds the keys. Both are
+// required together rather than checked as far as they go, because a half-checked record is the
+// state a caller cannot distinguish from a checked one. No released controller writes that form.
+func imageRecord(payload string) (digest, signer, encPub string, err error) {
 	fields := strings.Fields(payload)
 	if len(fields) == 0 {
-		return "", "", fmt.Errorf("%s payload is empty", EventImageUpdate)
+		return "", "", "", fmt.Errorf("%s payload is empty", EventImageUpdate)
 	}
 	digest, err = digestOfImageRef(fields[0])
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
-	if len(fields) < 2 {
-		return "", "", fmt.Errorf("%s record %q names an image but no signer address, so nothing ties that image to the key signing responses", EventImageUpdate, payload)
+	if len(fields) < 3 {
+		return "", "", "", fmt.Errorf("%s record %q names an image but not both keys, so nothing ties that image to the key signing responses or the key requests are sealed to", EventImageUpdate, payload)
 	}
-	if len(fields) > 2 {
-		return "", "", fmt.Errorf("%s payload %q has %d fields, want an image reference and a signer address", EventImageUpdate, payload, len(fields))
+	if len(fields) > 3 {
+		return "", "", "", fmt.Errorf("%s payload %q has %d fields, want an image reference, a signer address and an enc_pub", EventImageUpdate, payload, len(fields))
 	}
 	signer = strings.ToLower(fields[1])
 	if !addressPattern.MatchString(signer) {
-		return "", "", fmt.Errorf("%s record %q does not carry an address", EventImageUpdate, payload)
+		return "", "", "", fmt.Errorf("%s record %q does not carry an address", EventImageUpdate, payload)
 	}
-	return digest, signer, nil
+	encPub = strings.ToLower(fields[2])
+	if !encPubPattern.MatchString(encPub) {
+		return "", "", "", fmt.Errorf("%s record %q does not carry a 32-byte enc_pub", EventImageUpdate, payload)
+	}
+	return digest, signer, encPub, nil
 }

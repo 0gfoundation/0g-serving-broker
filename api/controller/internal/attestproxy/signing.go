@@ -92,7 +92,12 @@ func SignerAddressOf(key *ecdsa.PrivateKey) string {
 
 // encKeyPath is the derivation path for the enclave encryption key, per image for the same
 // reason. tee.EncKeyDerivePathSuffix keeps the two sides agreeing on one string.
-func encKeyPath(digest string) string { return "/" + digest + tee.EncKeyDerivePathSuffix }
+func encKeyPath(digest string) string { return EncKeyPath(digest) }
+
+// EncKeyPath is encKeyPath, exported for the same reason SignerKeyPath is: the RTMR3 recorder
+// derives this key's public half before writing a record that binds it. One string, three
+// callers — this proxy, the recorder, and (through tee.EncKeyDerivePathSuffix) the broker.
+func EncKeyPath(digest string) string { return "/" + digest + tee.EncKeyDerivePathSuffix }
 
 // handleLocal serves the operations above, or reports that the path is not one of them.
 func (p *Proxy) handleLocal(w http.ResponseWriter, r *http.Request) bool {
