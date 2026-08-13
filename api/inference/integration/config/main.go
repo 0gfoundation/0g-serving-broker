@@ -493,7 +493,7 @@ const dockerComposeTemplate = `services:
     environment:
       - PORT=3080
       - CONFIG_FILE=/etc/config.yaml
-{{- if .UseController}}
+{{- if and .UseController (ne .TeeNode "hardhat") (ne .TeeNode "alicloud")}}
       # What this container reports on-chain as the image it runs. The controller rewrites
       # both whenever it recreates this container on a new digest, so the pair moves with
       # the image; a recreated container inherits the old environment, and without them the
@@ -592,7 +592,7 @@ const dockerComposeTemplate = `services:
     image: ghcr.io/0gfoundation/0g-serving-broker@sha256:02f86cec7e827c16888e667fbcfa889aea7532a188df36ee06bd57375c9a89dd
     environment:
       - CONFIG_FILE=/etc/config.yaml
-{{- if .UseController}}
+{{- if and .UseController (ne .TeeNode "hardhat") (ne .TeeNode "alicloud")}}
       - IMAGE_REPO={{.ImageRepo}}
       - IMAGE_DIGEST={{.ImageDigest}}
       - TEE_SOCKET={{.AttestSocketPath}}
@@ -640,6 +640,9 @@ const dockerComposeTemplate = `services:
         max-size: "100m"
         max-file: "5"
     restart: unless-stopped
+    depends_on:
+      0g-serving-provider-broker:
+        condition: service_healthy
 {{- if .UseNginx}}
       nginx:
         condition: service_healthy
@@ -683,6 +686,9 @@ const dockerComposeTemplate = `services:
       start_period: 10s
     restart: unless-stopped
 {{- if or (eq .TeeNode "hardhat") (eq .TeeNode "alicloud")}}
+    # Only where the broker does not wait on this container in turn. With the attestation
+    # proxy in play the broker cannot finish starting until this serves /SignerAddress, so
+    # waiting on the broker's health here would make the two wait for each other forever.
     depends_on:
       0g-serving-provider-broker:
         condition: service_healthy
@@ -779,7 +785,7 @@ const dockerComposeTemplate = `services:
 {{- end}}
 volumes:
   mysql-data:
-{{- if .UseController}}
+{{- if and .UseController (ne .TeeNode "hardhat") (ne .TeeNode "alicloud")}}
   # Carries the controller's attestation socket to the broker and the event service. Nothing
   # else may mount it: anything that can reach that socket can have the broker's signing key
   # applied to a hash of its choosing.
