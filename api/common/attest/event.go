@@ -12,12 +12,24 @@
 // Constructing a VerifiedQuote is the caller asserting all of it. POST the GetQuote triple to
 // a dstack-verifier you run yourself, and require:
 //
-//	is_valid                          the whole verdict
-//	details.quote_verified            the DCAP chain
-//	details.event_log_verified        the log replays into the quote's registers
-//	details.tcb_status == "UpToDate"  and details.advisory_ids empty
-//	details.os_image_is_dev == false  and os_image_hash_verified
-//	details.key_provider.id           equals the KMS root key you trust
+//	is_valid                             the whole verdict
+//	details.quote_verified               the DCAP chain
+//	details.event_log_verified           the log replays into the quote's registers
+//	details.os_image_hash_verified       the guest OS is a published dstack image
+//	details.tcb_status == "UpToDate"     and details.advisory_ids empty
+//	details.app_info.key_provider_info   hex-encoded JSON; its "id" must be the KMS
+//	                                     root key you trust
+//
+// Checked by running 0.5.4 and 0.5.11 against the same real quote, not read off a changelog.
+// The details object above is identical in both, and so is every value in it. An earlier draft
+// of this list required os_image_is_dev and acpi_tables_verified: NEITHER version returns them,
+// and a caller asserting on a field the response does not carry gets the zero value rather than
+// an error — so `os_image_is_dev == false` passes on a response that never mentioned it.
+//
+// Run the verifier matching the CVM's dstack version. What differs across versions is app_info,
+// and one difference has teeth: device_id is computed differently, so the same quote yields
+// 57e6967e… under 0.5.4 and f308e198… under 0.5.11. That is the value DstackApp.allowedDeviceIds
+// gates on, so reading it from the wrong version compares against an allowlist it cannot match.
 //
 // Run your own instance rather than someone else's: calling a verifier you do not control
 // moves the trust root onto it, which is the one thing every rule below exists to avoid.
