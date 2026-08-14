@@ -523,8 +523,52 @@ func (c *Ctrl) ApplyCoreConfig(ctx context.Context, configContent string) error 
 	if err := c.dockerClient.RestartContainer(ctx, containerEvent); err != nil {
 		return fmt.Errorf("failed to restart event: %w", err)
 	}
+	// Restarting is enough to move a container's IP, so this path needs the same
+	// re-resolution the image path does.
+	if err := c.reloadIngress(ctx); err != nil {
+		return err
+	}
 
 	return nil
+}
+
+// reloadIngress makes the reverse proxy re-resolve the containers behind it.
+//
+// Recreating a container gives it a new IP, and the proxy in front of the broker
+// resolves its backend once — at config load — and then caches that address. So
+// every image change and every config change leaves the proxy dialling an address
+// nothing answers on, and the provider stops responding to the outside world while
+// looking healthy from the inside: the broker's health check passes, the RTMR3
+// record is written, the contract is updated, and a request from within the compose
+// network succeeds, because everything except the proxy resolves DNS per call.
+//
+// Measured on a mainnet deployment: after an in-band upgrade every request through
+// the ingress terminated with haproxy's SC flag (the backend refused the
+// connection) while curl from inside that same container returned 200.
+//
+// A restart rather than a signal. SIGUSR2 reloads haproxy in master-worker mode,
+// but the ingress image is not ours to depend on, and for a process that does not
+// handle USR2 the default action is to terminate — so the signal is either a reload
+// or an accident depending on an image we do not control. The restart costs a few
+// seconds of the port, which is free here: both callers have just stopped the broker
+// for far longer than that, so nothing is being interrupted that was still working.
+//
+// A deployment with no ingress is not an error. Only its absence is tolerated,
+// though — a restart that fails for any other reason is reported, because the
+// alternative is a provider that is unreachable and says nothing about it.
+func (c *Ctrl) reloadIngress(ctx context.Context) error {
+	err := c.dockerClient.RestartContainer(ctx, containerIngress)
+	if err == nil {
+		c.logger.Infof("[reloadIngress] Restarted %s so it re-resolves the recreated containers", containerIngress)
+		return nil
+	}
+
+	var notFound *docker.ContainerNotFoundError
+	if errors.As(err, &notFound) {
+		c.logger.Infof("[reloadIngress] No %s in this deployment; nothing in front of the broker to re-resolve", containerIngress)
+		return nil
+	}
+	return fmt.Errorf("restarting %s so it re-resolves the recreated containers: %w", containerIngress, err)
 }
 
 // AmbiguousContainerError is returned when a container the upgrade must act on cannot
@@ -1058,6 +1102,18 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 	if err != nil {
 		result.Success = false
 		result.Error = "failed to recreate event container: " + err.Error()
+		return result, err
+	}
+
+	// Before the contract write, because this is what restores traffic: the proxy in
+	// front of the broker is still dialling the container this upgrade replaced.
+	if err := c.reloadIngress(ctx); err != nil {
+		// Reported rather than logged. The image did change and the ledger says so
+		// truthfully, but until this succeeds the provider answers nothing from
+		// outside — and the existing convention for "the change happened and the
+		// operation did not finish" is exactly this.
+		result.Success = false
+		result.Error = err.Error() + " — the new image is running and recorded, but nothing outside the CVM can reach it until this is done"
 		return result, err
 	}
 
