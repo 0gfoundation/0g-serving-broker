@@ -52,9 +52,9 @@ const (
 //
 // Deliberate deviation from Spec's "pass raw to your parser UNTRIMMED" rule, and
 // the reason is the rule's own reason. That instruction exists so a reading here
-// matches the VENDOR-SIDE reader — and for MiniMax/Kling/DashScope the raw string
-// is forwarded to the vendor's parser, which does not trim, so trimming here
-// would resolve a duration the vendor would not.
+// matches the VENDOR-SIDE reader — and for MiniMax/DashScope the raw string is
+// forwarded to the vendor's parser, which does not trim, so trimming here would
+// resolve a duration the vendor would not.
 //
 // Seedance's vendor-side reader is not the vendor at all: this integration's
 // translator parses "seconds" itself and sends the vendor a JSON INTEGER it
