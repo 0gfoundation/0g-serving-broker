@@ -78,6 +78,19 @@ func (e *fakeEmitter) EmitEvent(ctx context.Context, event string, payload []byt
 // proceed unless each resolves by its exact name. The upgrade tests instead fail the
 // *second* container create — the event container's — which is past everything they
 // assert and short of the contract sync, which would need a chain to talk to.
+// withIngress adds broker-ingress to what fakeChangeDaemon lists, and ingressFails
+// makes restarting it fail. Package-level rather than parameters because twenty
+// existing tests call this helper and none of them care.
+var (
+	withIngress  bool
+	ingressFails bool
+	// eventCreates lets a test get past the second container. Off by default: every
+	// pre-existing test here uses that failure to reach an abort path.
+	eventCreates bool
+)
+
+const ingressID = "cafe" + "000000000000000000000000000000000000000000000000000000000000"
+
 func fakeChangeDaemon(t *testing.T, l *opLog, pullBody string) *docker.Client {
 	t.Helper()
 
@@ -91,16 +104,27 @@ func fakeChangeDaemon(t *testing.T, l *opLog, pullBody string) *docker.Client {
 			l.add("pull")
 			_, _ = w.Write([]byte(pullBody))
 		case strings.HasSuffix(r.URL.Path, "/containers/json"):
-			_ = json.NewEncoder(w).Encode([]map[string]any{
+			list := []map[string]any{
 				{"Id": brokerID, "Names": []string{"/0g-serving-provider-broker"}},
 				{"Id": eventID, "Names": []string{"/0g-serving-provider-event"}},
 				{"Id": selfID, "Names": []string{"/0g-controller"}},
-			})
+			}
+			// Off by default, so the twenty existing op-sequence assertions keep
+			// describing a deployment with nothing in front of the broker.
+			if withIngress {
+				list = append(list, map[string]any{"Id": ingressID, "Names": []string{"/" + containerIngress}})
+			}
+			_ = json.NewEncoder(w).Encode(list)
 		case strings.HasSuffix(r.URL.Path, "/containers/create"):
 			creates++
 			if creates == 1 {
 				l.add("create broker")
 				_ = json.NewEncoder(w).Encode(map[string]any{"Id": "beef" + strings.Repeat("0", 60)})
+				return
+			}
+			if eventCreates {
+				l.add("create event")
+				_ = json.NewEncoder(w).Encode(map[string]any{"Id": "feed" + strings.Repeat("0", 60)})
 				return
 			}
 			l.add("create event refused")
@@ -110,7 +134,13 @@ func fakeChangeDaemon(t *testing.T, l *opLog, pullBody string) *docker.Client {
 			l.add("stop " + containerOf(r.URL.Path, "/stop"))
 			w.WriteHeader(http.StatusNoContent)
 		case strings.HasSuffix(r.URL.Path, "/restart"):
-			l.add("restart " + containerOf(r.URL.Path, "/restart"))
+			name := containerOf(r.URL.Path, "/restart")
+			l.add("restart " + name)
+			if ingressFails && strings.Contains(r.URL.Path, ingressID) {
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]any{"message": "no such image"})
+				return
+			}
 			w.WriteHeader(http.StatusNoContent)
 		case strings.HasSuffix(r.URL.Path, "/start"):
 			l.add("start")
@@ -770,5 +800,101 @@ func TestUpgradeRefusesWithoutTheAttestationProxy(t *testing.T) {
 	// Before anything is touched: no derivation, no pull, no emit, no container stopped.
 	if ops := l.all(); len(ops) != 0 {
 		t.Fatalf("refused after acting: %v", ops)
+	}
+}
+
+// upgradePastRecreate runs UpdateImages and swallows what happens after the
+// containers exist. Deliberate: the step after them is the contract write, these
+// tests have no chain, and SyncService panics rather than erroring without one. The
+// ingress reload is ordered before that write — it is what restores traffic — so
+// everything these tests assert on has already been recorded by the time this
+// returns.
+func upgradePastRecreate(t *testing.T, c *Ctrl) {
+	t.Helper()
+	defer func() { _ = recover() }()
+	_, _ = c.UpdateImages(context.Background(), testDigest)
+}
+
+// The proxy in front of the broker resolves its backend once and caches the
+// address, so a recreated container leaves it dialling nothing. An upgrade that
+// does not restart it finishes "successfully" and takes the provider off the air.
+//
+// Measured on a mainnet deployment before this existed: every request through the
+// ingress ended with haproxy's SC flag while curl from inside that same container
+// returned 200 — healthy everywhere except where it counts.
+//
+// Asserted on the op log rather than the returned error, because UpdateImages goes
+// on to write the contract and these tests have no chain. The reload is ordered
+// before that write on purpose — it is what restores traffic — so reaching it is
+// what this checks.
+func TestUpgradeRestartsTheIngressSoItRefindsTheBroker(t *testing.T) {
+	withIngress, eventCreates = true, true
+	t.Cleanup(func() { withIngress, eventCreates = false, false })
+
+	l := &opLog{}
+	c := newChangeCtrl(t, l, nil, "", okPull)
+	upgradePastRecreate(t, c)
+
+	ops := l.all()
+	restart, lastCreate := -1, -1
+	for i, op := range ops {
+		// The op log carries container IDs, because that is what the daemon's URL
+		// carries — asserting on the name here would match nothing and pass anyway.
+		if strings.HasPrefix(op, "restart ") && strings.Contains(op, ingressID) {
+			restart = i
+		}
+		if strings.HasPrefix(op, "create ") {
+			lastCreate = i
+		}
+	}
+	if restart < 0 {
+		t.Fatalf("the ingress was never restarted, so it is still dialling the container this upgrade replaced: %v", ops)
+	}
+	// After both containers exist, or it would re-resolve to the old address again.
+	if restart < lastCreate {
+		t.Errorf("restarted the ingress at %d, before the last create at %d: %v", restart, lastCreate, ops)
+	}
+}
+
+// A deployment with no proxy in front of the broker is not an error — there is
+// nothing to re-resolve, and nothing must be touched looking for it.
+func TestUpgradeWithoutAnIngressTouchesNothing(t *testing.T) {
+	eventCreates = true // withIngress stays false: the fake lists no broker-ingress
+	t.Cleanup(func() { eventCreates = false })
+
+	l := &opLog{}
+	c := newChangeCtrl(t, l, nil, "", okPull)
+	upgradePastRecreate(t, c)
+
+	for _, op := range l.all() {
+		if strings.Contains(op, ingressID) {
+			t.Errorf("touched %s in a deployment that has none: %v", containerIngress, l.all())
+		}
+	}
+}
+
+// And a restart that fails for any other reason is reported. Swallowing it is the
+// one outcome that must not happen: the image is running, the record is written —
+// and nothing outside the CVM can reach any of it.
+func TestUpgradeReportsAnIngressThatWillNotRestart(t *testing.T) {
+	withIngress, ingressFails, eventCreates = true, true, true
+	t.Cleanup(func() { withIngress, ingressFails, eventCreates = false, false, false })
+
+	l := &opLog{}
+	c := newChangeCtrl(t, l, nil, "", okPull)
+
+	result, err := c.UpdateImages(context.Background(), testDigest)
+	if err == nil {
+		t.Fatal("UpdateImages() = nil, want the failed ingress restart reported")
+	}
+	if result == nil || result.Success {
+		t.Fatalf("result = %+v, want Success=false so the caller knows the provider is unreachable", result)
+	}
+	if !strings.Contains(result.Error, containerIngress) {
+		t.Errorf("Error = %q, should name the container that needs restarting", result.Error)
+	}
+	// The image did change, and the result still says so.
+	if len(result.UpdatedContainers) == 0 {
+		t.Error("UpdatedContainers is empty, so the caller cannot tell the image moved")
 	}
 }
