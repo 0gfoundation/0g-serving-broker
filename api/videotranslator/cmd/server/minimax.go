@@ -36,11 +36,6 @@ func MiniMaxMain() {
 	client := minimax.NewClient(cfg.MiniMaxBaseURL, &http.Client{Timeout: cfg.RequestTimeout, Transport: transport})
 	videoHandler := handler.NewMiniMaxVideoHandler(client, logger)
 
-	// handler.NewEngine(), NOT gin.New(): this installs UpstreamTLSReport(),
-	// the second mandatory TEE-routing-proof half (the first is
-	// minimax.Client.do()'s Observe(resp.TLS) call). Without it
-	// Zg-Upstream-Cert-Fingerprint is never emitted and the broker refuses to
-	// sign the routing proof.
 	engine := handler.NewEngine()
 	engine.POST("/videos", videoHandler.CreateVideo)
 	engine.GET("/videos/:id", videoHandler.GetVideo)

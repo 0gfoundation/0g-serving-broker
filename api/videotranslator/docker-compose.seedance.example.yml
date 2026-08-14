@@ -85,16 +85,6 @@
 #     integration and are not implemented as a distinct feature or endpoint
 #     here.
 #
-# Watermark is always forced off (no client-usable OpenAI Video API field for
-# it, and no paying customer wants a watermark). generate_audio, by contrast,
-# is left UNSET on every create — the vendor's own default applies, which is
-# audio ON for Seedance's audio-visual-sync models. This is the opposite of
-# Kling (which forces audio off unconditionally, because Kling's audio bills
-# extra) — Seedance's per-second-token billing formula does not vary with
-# whether audio was generated, so there is no cost surprise to guard against
-# here, and this integration exposes no client-facing control for either
-# vendor's audio behavior.
-#
 # SEEDANCE_BASE_URL, if set, MUST be scheme+host only (e.g.
 # https://ark.ap-southeast.bytepluses.com) — NOT
 # https://ark.ap-southeast.bytepluses.com/api/v3. The /api/v3 version lives

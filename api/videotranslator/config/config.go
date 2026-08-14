@@ -18,13 +18,10 @@ type Config struct {
 	Port string
 	// DashScopeBaseURL overrides the DashScope API base URL (defaults to the
 	// public endpoint when empty) — mainly for pointing at a test double.
-	// MUST be scheme+host only (no path) — the version/service path lives in
-	// the client's path constants; a path suffix here would double-prefix
-	// every call, the same risk every vendor's base URL here shares.
 	DashScopeBaseURL string
 	// MiniMaxBaseURL overrides the MiniMax API base URL (defaults to the public
 	// overseas endpoint when empty) — for a domestic-site account or a test
-	// double. MUST be scheme+host only (no path) — see DashScopeBaseURL's doc.
+	// double.
 	MiniMaxBaseURL string
 	// SeedanceBaseURL overrides the ByteDance Seedance API base URL (defaults
 	// to the BytePlus ap-southeast-1 endpoint when empty). MUST be scheme+host
@@ -38,8 +35,8 @@ type Config struct {
 	// universal public endpoint to fall back to. An empty value here means
 	// KlingMain fails fast at startup rather than silently constructing
 	// requests against no host at all. MUST still be scheme+host only (no
-	// path) — see DashScopeBaseURL's doc; this vendor is exempt from having a
-	// default, not from the path-suffix risk.
+	// path, same reason as SeedanceBaseURL above) — this vendor is exempt
+	// from having a default, not from the path-suffix risk.
 	KlingBaseURL string
 	// RequestTimeout bounds each outbound API call to the vendor.
 	RequestTimeout time.Duration
