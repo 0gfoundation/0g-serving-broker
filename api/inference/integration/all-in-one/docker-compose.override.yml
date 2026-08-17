@@ -1,0 +1,18 @@
+# Use the broker built from current source (adds assay.enabled + new config
+# schema) instead of the pinned upstream digest.
+services:
+  # The current contracts' hardhat.config validates ALL networks at load; the
+  # zgTestnet*/zgMainnet ones read keys from env. Supply dummy 32-byte keys so
+  # config validation passes (only the localhost network is actually used).
+  hardhat-node-with-contract:
+    environment:
+      ZG_TESTNET_V4_PRIVATE_KEY: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+      ZG_TESTNET_DEV_PRIVATE_KEY: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+      ZG_MAINNET_PRIVATE_KEY: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+
+  0g-serving-provider-broker:
+    image: 0g-serving-broker:local
+  0g-serving-provider-event:
+    image: 0g-serving-broker:local
+  0g-controller:
+    image: 0g-serving-broker:local
