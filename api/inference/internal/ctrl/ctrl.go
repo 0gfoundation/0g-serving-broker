@@ -2,8 +2,6 @@ package ctrl
 
 import (
 	"context"
-	"crypto/ed25519"
-	"encoding/hex"
 	"fmt"
 	"math/big"
 	"net/http"
@@ -12,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/patrickmn/go-cache"
 
 	"github.com/0glabs/0g-serving-broker/common/log"
@@ -59,16 +58,24 @@ type Ctrl struct {
 	// per request and excludes REJECT'd requests from settlement. Set from
 	// cfg.Assay.Enabled; off by default so the path is fully inert until opted in.
 	assayVerdictFilter bool
-	// assayVerifierPubkey, when non-nil, is the Ed25519 key the verifier signs
-	// verdicts with (cfg.Assay.VerifierPubkey). A verdict is then only recorded
-	// if ZG-Verdict-Sig verifies over the verdict + request hash — the verdict
-	// decides settlement, so it must be authenticated. nil = legacy
+	// assayVerifierAddress, when non-nil, is the verifier's secp256k1 signing
+	// address (cfg.Assay.VerifierAddress). A verdict is then only recorded if
+	// ZG-Verdict-Sig recovers to this address over the verdict + request hash —
+	// the verdict decides settlement, so it must be authenticated. nil = legacy
 	// trust-the-header mode.
-	assayVerifierPubkey ed25519.PublicKey
+	assayVerifierAddress *common.Address
 	// assayStrictVerdict records INVALID_SIG (settlement-excluded) for
 	// responses whose verdict is missing/unverifiable, so header stripping
-	// can't launder a REJECT. Only meaningful with assayVerifierPubkey set.
+	// can't launder a REJECT. Only meaningful with assayVerifierAddress set.
 	assayStrictVerdict bool
+	// assayVerifierURL, when non-empty, is where settlement fetches the
+	// batch's final verdicts (POST {url}/v1/settlement/check) before
+	// deciding to settle — required to resolve PENDING verdicts from the
+	// verifier's non-blocking mode. Empty = decide on recorded verdicts only.
+	assayVerifierURL string
+	// assayCheckWaitMs is forwarded as wait_ms on the settlement check: how
+	// long the verifier may hold the request waiting for in-flight audits.
+	assayCheckWaitMs int
 
 	// allowTokenBilledSTT gates billSpeechToTextByTokens. Defaults to false
 	// because the requests.input_count column conflates seconds (whisper)
@@ -218,20 +225,20 @@ func New(
 		}
 	}
 
-	// Parse the Assay verifier's verdict-signing key up front: a malformed key
+	// Parse the Assay verifier's signing address up front: a malformed address
 	// with verification "on" must fail loudly at boot, not silently downgrade
 	// to trusting unauthenticated verdicts on the settlement path.
-	var assayPubkey ed25519.PublicKey
-	if cfg.Assay.VerifierPubkey != "" {
-		raw, err := hex.DecodeString(strings.TrimPrefix(cfg.Assay.VerifierPubkey, "0x"))
-		if err != nil || len(raw) != ed25519.PublicKeySize {
-			panic(fmt.Sprintf("assay.verifierPubkey must be %d hex bytes (ed25519 public key), got %q",
-				ed25519.PublicKeySize, cfg.Assay.VerifierPubkey))
+	var assayVerifierAddr *common.Address
+	if cfg.Assay.VerifierAddress != "" {
+		if !common.IsHexAddress(cfg.Assay.VerifierAddress) {
+			panic(fmt.Sprintf("assay.verifierAddress must be a 20-byte hex Ethereum address, got %q",
+				cfg.Assay.VerifierAddress))
 		}
-		assayPubkey = ed25519.PublicKey(raw)
+		a := common.HexToAddress(cfg.Assay.VerifierAddress)
+		assayVerifierAddr = &a
 	}
-	if cfg.Assay.StrictVerdict && assayPubkey == nil {
-		panic("assay.strictVerdict requires assay.verifierPubkey to be set")
+	if cfg.Assay.StrictVerdict && assayVerifierAddr == nil {
+		panic("assay.strictVerdict requires assay.verifierAddress to be set")
 	}
 
 	p := &Ctrl{
@@ -246,8 +253,10 @@ func New(
 		priceFeed:            cfg.PriceFeed,
 		concurrencyLimit:     cfg.ConcurrencyLimit,
 		assayVerdictFilter:   cfg.Assay.Enabled,
-		assayVerifierPubkey:  assayPubkey,
+		assayVerifierAddress: assayVerifierAddr,
 		assayStrictVerdict:   cfg.Assay.StrictVerdict,
+		assayVerifierURL:     strings.TrimSuffix(cfg.Assay.VerifierURL, "/"),
+		assayCheckWaitMs:     cfg.Assay.SettlementCheckWaitMs,
 		allowTokenBilledSTT:  cfg.AllowTokenBilledSpeechToText,
 		priceCache:           priceCache,
 		svcCache:             svcCache,

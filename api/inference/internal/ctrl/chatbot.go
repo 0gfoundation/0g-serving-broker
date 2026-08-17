@@ -4,9 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/ed25519"
 	"crypto/tls"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,6 +18,10 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/andybalholm/brotli"
+	"github.com/ethereum/go-ethereum/accounts"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/gin-gonic/gin"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
@@ -32,13 +34,16 @@ import (
 )
 
 // recordAssayVerdict persists the Assay/LDD audit verdict from the verifier's
-// ZG-Verdict response header onto the request row, so settlement can exclude
-// REJECT'd requests from the TEE-signed batch. No-op when the integration is
-// disabled, for whitelisted (unbilled) traffic, or when the upstream set no
-// verdict header (fail-open).
+// ZG-Verdict response header onto the request row. With a non-blocking
+// verifier this is PENDING (audit queued) or UNVERIFIED (sampled out); the
+// final PASS/REJECT is fetched by the settlement gate from the verifier's
+// /v1/settlement/check (see gateSettlementWithAssay), which is what decides
+// whether the batch settles. No-op when the integration is disabled, for
+// whitelisted (unbilled) traffic, or when the upstream set no verdict header
+// (fail-open).
 //
-// The verdict is a settlement input, so when assay.verifierPubkey is
-// configured it is only acted on if the verifier's Ed25519 signature
+// The verdict is a settlement input, so when assay.verifierAddress is
+// configured it is only acted on if the verifier's secp256k1 signature
 // (ZG-Verdict-Sig) verifies over the verdict + this request's hash — an
 // unauthenticated plaintext header must not decide who gets paid. The hash
 // (sent upstream as ZG-Request-Hash) makes each signature single-use, so a
@@ -51,9 +56,9 @@ func (c *Ctrl) recordAssayVerdict(resp *http.Response, reqModel model.Request) {
 	}
 	verdict := resp.Header.Get(constant.HeaderZGVerdict)
 
-	if c.assayVerifierPubkey != nil {
+	if c.assayVerifierAddress != nil {
 		sig := resp.Header.Get(constant.HeaderZGVerdictSig)
-		if verdict == "" || !verifyAssayVerdictSig(c.assayVerifierPubkey, verdict, reqModel.RequestHash, sig) {
+		if verdict == "" || !verifyAssayVerdictSig(*c.assayVerifierAddress, verdict, reqModel.RequestHash, sig) {
 			if !c.assayStrictVerdict {
 				if verdict != "" {
 					c.logger.Warnf("Assay: dropping unauthenticated verdict %q for request %s (bad/missing %s)",
@@ -75,22 +80,33 @@ func (c *Ctrl) recordAssayVerdict(resp *http.Response, reqModel model.Request) {
 	}
 }
 
-// verifyAssayVerdictSig checks the verifier's Ed25519 signature over the
-// domain-separated verdict payload. Pure so it can be unit-tested without a
-// Ctrl. Payload layout must match the verifier's signer
-// (pipeline/verifier_node/serve_verifier.py in 0g-assay):
+// verifyAssayVerdictSig recovers the signer of the verifier's secp256k1
+// EIP-191 signature over the domain-separated verdict payload and checks it
+// against the pinned verifier address (the same recovery on-chain ecrecover
+// performs). Pure so it can be unit-tested without a Ctrl. Payload layout must
+// match the verifier's signer (pipeline/verifier_node/serve_verifier.py in
+// 0g-assay):
 //
 //	"assay-verdict-v1|" + verdict + "|" + requestHash
-func verifyAssayVerdictSig(pubkey ed25519.PublicKey, verdict, requestHash, sigB64 string) bool {
-	if sigB64 == "" {
+func verifyAssayVerdictSig(signer common.Address, verdict, requestHash, sigHex string) bool {
+	if sigHex == "" {
 		return false
 	}
-	sig, err := base64.StdEncoding.DecodeString(sigB64)
-	if err != nil || len(sig) != ed25519.SignatureSize {
+	sig, err := hexutil.Decode(sigHex)
+	if err != nil || len(sig) != 65 {
 		return false
+	}
+	// go-ethereum's SigToPub wants the recovery id in {0,1}; EIP-191 signers
+	// emit {27,28}.
+	if sig[64] >= 27 {
+		sig[64] -= 27
 	}
 	payload := constant.AssayVerdictDomain + "|" + verdict + "|" + requestHash
-	return ed25519.Verify(pubkey, []byte(payload), sig)
+	pub, err := crypto.SigToPub(accounts.TextHash([]byte(payload)), sig)
+	if err != nil {
+		return false
+	}
+	return crypto.PubkeyToAddress(*pub) == signer
 }
 
 // ChatSignature, SigningAlgo, ChatPrefix, and the chat-signing helpers

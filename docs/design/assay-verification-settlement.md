@@ -99,7 +99,8 @@ sequenceDiagram
     U->>B: POST /v1/chat/completions
     B->>DB: CreateRequest (RequestHash = nonce, fee = 0)
     B->>V: forward request (targetUrl) + header ZG-Request-Hash
-    V-->>B: 200 OK + headers ZG-Verdict, ZG-Verdict-Sig
+    V-->>B: 200 OK + headers ZG-Verdict (PENDING/UNVERIFIED), ZG-Verdict-Sig
+    Note over V: sampled requests audit in the background (non-blocking)
     Note over B: handleChargingResponse / handleChargingStreamResponse
     B->>B: verify Ed25519 sig over "assay-verdict-v1|verdict|hash"
     B->>DB: recordAssayVerdict → UpdateRequestVerdict(hash, verdict)
@@ -109,6 +110,15 @@ sequenceDiagram
 
 `recordAssayVerdict` is a no-op when the integration is disabled, for whitelisted
 (unbilled) traffic, or when no `ZG-Verdict` header is present (**fail-open**).
+
+**Non-blocking verdicts.** The verifier answers immediately: a sampled request
+carries `ZG-Verdict: PENDING` (its LDD recompute is queued in a background
+worker), an unsampled one `UNVERIFIED`. The final `PASS`/`REJECT` is fetched by
+the settlement gate from the verifier's `POST /v1/settlement/check` (§5), so
+clients never wait on the FP32 recompute. The verifier's legacy blocking mode
+(`--sync-verify`) still puts the final verdict in the response header, and
+`force_verify` traffic (dashboard samples, dataset-test overrides) always
+verifies inline.
 
 ### Verdict authentication
 
@@ -215,49 +225,71 @@ billions of requests/day, a small fixed `rate` over enough traffic catches a
 cheater with high probability, and the proving cost amortizes to negligible.
 This is the "randomized auditing reduces proving cost" result.
 
-### Inline vs deferred sampling
+### Inline vs asynchronous sampling
 
-| | **Inline (current)** | **Deferred (Tier-2, not built)** |
+| | **Inline (`--sync-verify`)** | **Asynchronous (default)** |
 |---|---|---|
-| When recompute runs | during the request | at settlement, on the cached commitments |
-| Hot-path latency | sampled requests pay FP32 cost | none (only cache commitment at request time) |
-| Verdict availability | immediately, in `ZG-Verdict` header | only after the settlement-time `/audit` call |
-| Extra needs | none | persist commitments + a request-id join key + an `/audit` endpoint |
+| When recompute runs | during the request | right after the response, in a background worker |
+| Hot-path latency | sampled requests pay FP32 cost | none — every response returns at GPU speed |
+| Verdict availability | immediately, in `ZG-Verdict` header | header says `PENDING`; final verdict via `POST /v1/settlement/check` |
+| Extra needs | none | in-memory verdict store keyed by `ZG-Request-Hash` + the settlement check (§5) |
 
 The sampling math is identical either way; the only difference is **when** the
-recompute cost is paid. Tier-1 (this document) consumes the inline verdict.
+recompute cost is paid and where the final verdict is read. The async mode is
+what makes verification invisible to client latency; the settlement gate (§5)
+is what makes it still bite at billing time.
 
 ---
 
 ## 5. Settlement-time flow (verdict enforcement)
 
-Settlement is already batch-based. The only addition is a filter step
-immediately after the unprocessed requests are listed and before they are grouped
-into a TEE-signed batch.
+Settlement is already batch-based. The addition is a **gate** immediately after
+the unprocessed requests are listed and before they are grouped into a
+TEE-signed batch: the broker asks the verifier once for the batch's final
+verdicts (resolving the `PENDING` ones from the async audit path), then
+decides whether the batch settles at all.
 
 ```mermaid
 flowchart TD
     A[SettleFeesWithTEE] --> B[db.ListRequest: unprocessed, not settling]
     B --> C{assay.enabled?}
     C -- no --> E[group by user]
-    C -- yes --> D[filterRejectedRequests]
-    D --> D1[keep PASS / UNVERIFIED / empty]
-    D --> D2[park REJECT via skip_until - retained as evidence]
-    D1 --> E
+    C -- yes --> D[gateSettlementWithAssay]
+    D --> D0[POST verifier /v1/settlement/check with batch hashes]
+    D0 --> D1[authenticate + merge verdicts, persist changes]
+    D1 --> X{any REJECT / INVALID_SIG?}
+    X -- yes --> V[VOID the whole batch: delete all rows, charge nothing]
+    X -- no --> P[park PENDING via skip_until, 5 min]
+    P --> E
     E --> F[createUserSettlement: RequestsHash + TotalFee + TEE EIP-712 signature]
     F --> G[PreviewSettlementResults]
     G --> H[contract.SettleFeesWithTEE batch]
     H --> I[processOutcomes: delete settled rows]
 ```
 
-Key property: a `REJECT`'d request is **never included** in
-`createUserSettlement`, so it contributes neither to `TotalFee` nor to
-`RequestsHash`. The provider simply does not bill for it. Rejected rows are
-parked with `skip_until` (reusing `SkipUntilDuration`) — retained in the DB as
-audit evidence rather than deleted, and re-evaluated on a later cycle.
+Decision rule (per settlement batch):
+
+- **cheating detected** (any `REJECT`, or strict-mode `INVALID_SIG`) → the
+  **entire batch is voided**: every request in it is deleted unsettled and
+  nothing is charged this cycle. The verifier retains the per-request /
+  per-node audit records; the broker logs the flagged hashes as evidence.
+- **audits still pending** → those requests are parked with a short
+  `skip_until` (`AssayPendingRetryDelay`, 5 min) and re-gated on a later
+  cycle; the rest of the batch settles normally.
+- **otherwise** (`PASS` / `UNVERIFIED` / no verdict) → settle normally
+  (fail-open).
+
+The settlement-check results are authenticated exactly like the header path:
+each final verdict carries an Ed25519 signature over
+`"assay-verdict-v1|verdict|hash"` and is only acted on if it verifies against
+`assay.verifierPubkey`. `PENDING`/`UNKNOWN` are transient, arrive unsigned,
+and can only defer — never decide — payment. If the verifier is unreachable
+the gate falls back to the header-recorded verdicts.
 
 Relevant code:
-[`filterRejectedRequests` / `splitRejectedRequests`](../../api/inference/internal/ctrl/settlement_tee.go).
+[`gateSettlementWithAssay` / `resolveAssayVerdicts` / `partitionAssayRequests`](../../api/inference/internal/ctrl/settlement_assay.go);
+verifier-side: `settlement_check` in `pipeline/verifier_node/serve_verifier.py`
+(0g-assay repo).
 
 ---
 
@@ -267,7 +299,7 @@ A single nullable column is added to `request`:
 
 | Column   | Type           | Meaning                                              |
 |----------|----------------|------------------------------------------------------|
-| `verdict`| `varchar(16)`  | `PASS` / `REJECT` / `UNVERIFIED`, or `''` if unrecorded |
+| `verdict`| `varchar(16)`  | `PASS` / `REJECT` / `UNVERIFIED` / `PENDING` (async audit in flight) / `INVALID_SIG` (strict mode), or `''` if unrecorded |
 
 Migration: `add-verdict-to-request`
 ([migrate.go](../../api/inference/internal/db/migrate.go)). The column defaults to
@@ -282,7 +314,16 @@ The feature is **off by default**. Enable it in the inference broker config:
 ```yaml
 # config.yaml
 assay:
-  enabled: true          # record ZG-Verdict and exclude REJECT'd requests from settlement
+  enabled: true          # record ZG-Verdict and gate settlement on the verdicts
+  # Verifier base URL for the pre-settlement verdict check
+  # (POST {verifierUrl}/v1/settlement/check). Required to resolve PENDING
+  # verdicts from the verifier's non-blocking mode; empty = decide on
+  # header-recorded verdicts only (legacy synchronous verifier).
+  verifierUrl: "http://verifier:8200"
+  # How long (ms) the verifier may hold the settlement check waiting for
+  # in-flight audits before answering. 0 = answer immediately; pending
+  # requests are then parked and retried next cycle.
+  settlementCheckWaitMs: 10000
   # Ed25519 pubkey (64 hex chars) the verifier signs verdicts with; read it off
   # the verifier's /health ("verdict_pubkey"). When set, a verdict is only
   # acted on if ZG-Verdict-Sig verifies (see §3, Verdict authentication).
@@ -305,17 +346,25 @@ survives restarts.
 
 ### Behavior matrix
 
-| `ZG-Verdict` | sig | `enabled=false` | `enabled=true`, no pubkey | + `verifierPubkey` | + `strictVerdict` |
+The effective verdict per request is the settlement-check result when
+available, else the header-recorded one:
+
+| verdict | sig | `enabled=false` | `enabled=true`, no pubkey | + `verifierPubkey` | + `strictVerdict` |
 |--------------|-----|-----------------|---------------------------|--------------------|-------------------|
 | `PASS`       | valid   | settled | settled | settled | settled |
 | `UNVERIFIED` | valid   | settled | settled (fail-open) | settled (fail-open) | settled (fail-open) |
-| *(absent)*   | —       | settled | settled (fail-open) | settled (fail-open) | **excluded** (`INVALID_SIG`) |
-| `REJECT`     | valid   | settled | **excluded** | **excluded** | **excluded** |
-| any          | bad/missing | settled | *(trusted as-is)* | ignored → settled | **excluded** (`INVALID_SIG`) |
+| `PENDING`    | —       | settled | parked, re-gated later | parked, re-gated later | parked, re-gated later |
+| `UNKNOWN` (check only) | — | settled | settled (fail-open) | settled (fail-open) | stays parked |
+| *(absent)*   | —       | settled | settled (fail-open) | settled (fail-open) | **batch voided** (`INVALID_SIG`) |
+| `REJECT`     | valid   | settled | **batch voided** | **batch voided** | **batch voided** |
+| any final    | bad/missing | settled | *(trusted as-is)* | ignored → settled | **batch voided** (`INVALID_SIG`) |
 
 Fail-open is intentional in the default modes: a missing or non-`REJECT`
 verdict never blocks revenue. Strict mode inverts that for unauthenticated
-responses so signature stripping cannot launder a `REJECT`.
+responses so signature stripping cannot launder a `REJECT`. "Batch voided"
+means the *entire* settlement batch is discarded unsettled — cheating anywhere
+in the cycle costs the provider the whole cycle's revenue, which is the
+economic teeth behind sampling only a fraction of requests.
 
 ---
 
@@ -324,10 +373,13 @@ responses so signature stripping cannot launder a `REJECT`.
 - **Smart contract** — untouched. `REJECT` exclusion happens before signing.
 - **GPU node** — untouched. It is upstream of the verdict; the broker never
   contacts it.
-- **Verifier** — emits `ZG-Verdict` as before; to support verdict
-  authentication (§3) it additionally signs each verdict (`ZG-Verdict-Sig`)
-  with the key from `--verdict-key`. An older verifier without signing still
-  works in the no-pubkey / non-strict configurations.
+- **Verifier** — emits `ZG-Verdict` as before (now `PENDING`/`UNVERIFIED` in
+  its default non-blocking mode, with the final verdicts served by
+  `POST /v1/settlement/check`); to support verdict authentication (§3) it
+  additionally signs each verdict (`ZG-Verdict-Sig`) with the key from
+  `--verdict-key`. An older verifier without signing still works in the
+  no-pubkey / non-strict configurations, and `--sync-verify` restores the
+  fully synchronous header-only flow.
 - **Existing settlement paths** — inert when `assay.enabled=false`.
 
 ---
@@ -343,10 +395,16 @@ go test ./inference/internal/ctrl/ -run 'Assay|Rejected|Verdict' -v
 
 Covers ([settlement_assay_test.go](../../api/inference/internal/ctrl/settlement_assay_test.go)):
 
-- `TestSplitRejectedRequests` — only `REJECT` is dropped; `PASS`/`UNVERIFIED`/
-  empty are kept, order preserved.
-- `TestFilterRejectedRequestsDisabled` — disabled ⇒ passthrough, no DB access.
-- `TestFilterRejectedRequestsAllPass` — enabled, no rejects ⇒ keep all, no DB access.
+- `TestPartitionAssayRequests` — `REJECT`/`INVALID_SIG` ⇒ cheat, `PENDING` ⇒
+  pending, `PASS`/`UNVERIFIED`/empty ⇒ settleable, order preserved.
+- `TestGateSettlementWithAssayDisabled` — disabled ⇒ passthrough, no DB/HTTP access.
+- `TestGateSettlementWithAssayAllPass` — enabled, no rejects ⇒ keep all, no DB access.
+- `TestResolveAssayVerdicts` — settlement-check merge rules: signed finals
+  adopted, unsigned finals ignored (strict ⇒ `INVALID_SIG`), `PENDING`
+  adopted unsigned, `UNKNOWN` downgrades a stuck `PENDING` fail-open
+  (strict ⇒ stays parked), replayed signatures rejected.
+- `TestVerifyAssayVerdictSig` — signature payload/replay rules (shared with
+  the header path).
 
 ### 9.2 Manual end-to-end (broker + verifier + GPU)
 
@@ -376,10 +434,12 @@ Covers ([settlement_assay_test.go](../../api/inference/internal/ctrl/settlement_
      `REJECT`.
 5. Send a request that yields `REJECT`, then trigger settlement (wait for the
    settlement interval or hit the settle endpoint). Verify:
-   - the `REJECT` row is **not** deleted and is **not** part of any settlement
-     tx (its fee is excluded from the batch `TotalFee`);
-   - it carries a `skip_until` in the future;
-   - `PASS`/`UNVERIFIED` rows in the same window settle and are deleted as usual.
+   - the settlement log shows `Assay: CHEAT DETECTED … voiding the entire
+     settlement batch`;
+   - **no** settlement tx is executed for the cycle and **all** of the batch's
+     rows are deleted unsettled (nothing charged);
+   - on a later cycle with only `PASS`/`UNVERIFIED` rows, settlement executes
+     and deletes them as usual.
 
 ### 9.3 Quick header check
 
@@ -390,38 +450,52 @@ against the verifier:
 curl -si http://VERIFIER_HOST:8200/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"messages":[{"role":"user","content":"hi"}],"max_tokens":8}' | grep -i zg-verdict
-# -> ZG-Verdict: PASS
+# -> ZG-Verdict: PENDING   (async default; UNVERIFIED if sampled out,
+#                           PASS/REJECT only with --sync-verify)
+```
+
+And the settlement check:
+
+```bash
+curl -s http://VERIFIER_HOST:8200/v1/settlement/check \
+  -H 'Content-Type: application/json' \
+  -d '{"request_hashes":["<hash>"],"wait_ms":5000}' | jq
+# -> {"results":{"<hash>":{"verdict":"PASS","node_id":"node_0","sig":"…"}},
+#     "summary":{…},"cheat_detected":false,"settle":true}
 ```
 
 ---
 
 ## 10. Limitations & future work
 
-- **Tier-1 is detection, not economic deterrence.** Be explicit about what
-  enabling this buys: with sampling at rate *r* and fail-open settlement, a
-  provider that cheats on **every** request still collects ≈ (1 − *r*) of its
-  revenue — only the requests that were both sampled *and* REJECT'd are
-  withheld (at *r* = 0.1, ~90% of cheated revenue still settles). There is no
-  penalty, slashing, or reputational consequence on-chain yet. "Verification
-  enabled" therefore means *cheating is detectable and evidenced*, *not*
-  *cheating is unprofitable*. The economics flip only when detection feeds an
-  attribution + penalty mechanism (stake slashing, eviction, or retroactive
-  clawback), which is future work. Until then, treat verdict data as an audit
-  trail and an operational signal, not as revenue protection.
-- **Disposition of rejected rows.** They are parked via `skip_until`
-  (`SkipUntilDuration`), so they reappear and are re-filtered each cycle —
-  effectively never settled, never deleted. If a permanent disposition is
-  desired (hard delete, or move to a dedicated audit table), change
-  `filterRejectedRequests`.
+- **Economics: batch voiding is the deterrent.** With sampling at rate *r*,
+  a single detected `REJECT` voids the **whole settlement batch** — the
+  provider loses the entire cycle's revenue, honest requests included. A
+  provider cheating on fraction *f* of its traffic is caught in a batch of
+  *n* requests with probability ≈ 1 − (1 − r·f)ⁿ, which approaches 1 fast for
+  realistic batch sizes, so sustained cheating forfeits ≈ all revenue rather
+  than ≈ (1 − r) of it. What is still missing on-chain: penalties beyond the
+  withheld batch (stake slashing, eviction, retroactive clawback) — voiding
+  only removes the upside, it doesn't cost the cheater anything they had.
+- **Voiding punishes the batch, not the request.** Honest users' requests in
+  a voided batch are also uncharged (they got their answers free); the
+  provider eats that loss. If per-user rather than per-batch granularity is
+  ever wanted, change the decision rule in `gateSettlementWithAssay`.
+- **Verdict store is in-memory.** A verifier restart forgets PENDING audits;
+  the settlement check answers `UNKNOWN` and the broker fails open
+  (non-strict) for those requests. Persisting the verdict store is future
+  work if that window matters.
 - **Sampling.** With verifier sampling enabled, most requests return
   `UNVERIFIED` and settle under fail-open. This matches the paper's randomized
   auditing: detection probability depends on the cheating fraction, not on
   verifying every request. See §4 for the timing, strategies, and the N-vs-α
   argument.
-- **Tier-2 (deferred batch audit).** Instead of inline verdict capture, the
-  broker could forward its `RequestHash` to the verifier and call a batch
-  `/audit` endpoint at settlement time. That needs a request-id header and an
-  audit client; it is not required for Tier-1.
+- **Tier-2 (deferred batch audit) — now largely built.** The broker forwards
+  `RequestHash` upstream and calls the batch `/v1/settlement/check` at
+  settlement time; the verifier audits asynchronously after responding. What
+  remains of the original Tier-2 idea is persisting commitments so audits can
+  be re-run (or deferred entirely) instead of the audit racing the settlement
+  cycle in memory.
 - **Node attribution & penalties.** Attributing a `REJECT` to a specific GPU
   node (for routing de-weighting or stake slashing) is a verifier-side concern
   and does not change the broker settlement path described here.

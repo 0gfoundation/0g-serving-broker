@@ -395,17 +395,32 @@ type Config struct {
 	} `yaml:"settlement"`
 	// Assay gates the Immaculate/LDD verifiable-inference integration. When
 	// Enabled, the broker records the verifier's ZG-Verdict per request and
-	// excludes REJECT'd requests from settlement. Fail-open: a missing or
+	// gates settlement on the verdicts: any REJECT in a settlement batch voids
+	// the whole batch (nothing is charged). Fail-open: a missing or
 	// non-REJECT verdict is treated as settleable.
 	Assay struct {
 		Enabled bool `yaml:"enabled"`
-		// VerifierPubkey is the verifier's Ed25519 public key (64 hex chars).
-		// When set, a ZG-Verdict is only acted on if its ZG-Verdict-Sig
-		// verifies over the verdict + this request's hash — the verdict is a
-		// settlement input, so it must be authenticated, not just read off a
-		// plaintext header. Empty = legacy trust-the-header mode.
-		VerifierPubkey string `yaml:"verifierPubkey"`
-		// StrictVerdict (requires VerifierPubkey): treat a missing or
+		// VerifierURL is the Assay verifier's base URL (e.g.
+		// "http://verifier:8200"). When set, settlement first asks the
+		// verifier (POST /v1/settlement/check) for the batch's final
+		// verdicts — the response headers only carry PENDING/UNVERIFIED in
+		// the verifier's non-blocking mode, so this query is what resolves
+		// asynchronous audits. Empty = decide on header-recorded verdicts
+		// only (legacy synchronous verifier).
+		VerifierURL string `yaml:"verifierUrl"`
+		// SettlementCheckWaitMs is how long the verifier may hold the
+		// settlement check waiting for still-running audits to finish
+		// before answering (bounded verifier-side). 0 = answer immediately;
+		// pending requests are then retried on a later settlement cycle.
+		SettlementCheckWaitMs int `yaml:"settlementCheckWaitMs"`
+		// VerifierAddress is the verifier's secp256k1 signing address (20-byte
+		// hex Ethereum address). When set, a ZG-Verdict is only acted on if its
+		// ZG-Verdict-Sig recovers to this address over the verdict + this
+		// request's hash — the verdict is a settlement input, so it must be
+		// authenticated, not just read off a plaintext header. Empty = legacy
+		// trust-the-header mode.
+		VerifierAddress string `yaml:"verifierAddress"`
+		// StrictVerdict (requires VerifierAddress): treat a missing or
 		// badly-signed verdict as INVALID_SIG and exclude the request from
 		// settlement, so stripping the header can't launder a REJECT. Off by
 		// default (fail-open Tier-1: unauthenticated verdicts are ignored but

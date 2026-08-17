@@ -185,10 +185,11 @@ func (c *Ctrl) SettleFeesWithTEE(ctx context.Context) error {
 			return errors.Wrap(err, "list request from db")
 		}
 		
-		// Assay: drop requests the verifier flagged REJECT before they enter the
-		// TEE-signed settlement batch — the provider does not bill for inferences
-		// that failed LDD verification.
-		reqs = c.filterRejectedRequests(reqs)
+		// Assay gate: fetch the batch's final audit verdicts from the verifier
+		// (resolving PENDING async audits) and decide — any REJECT voids the
+		// whole batch (nothing charged), pending audits are parked for a later
+		// cycle, everything else settles. See gateSettlementWithAssay.
+		reqs = c.gateSettlementWithAssay(ctx, reqs)
 
 		if len(reqs) == 0 {
 			c.logger.Infof("No more requests to settle after %d rounds", round)
@@ -673,45 +674,6 @@ func (c *Ctrl) processOutcomes(outcomes []*SettlementOutcome) {
 			c.logger.Infof("User %s: temporary failure %s", outcome.User.Hex(), outcome.Status.String())
 		}
 	}
-}
-
-// filterRejectedRequests removes requests the Assay verifier flagged REJECT
-// (recorded from the authenticated ZG-Verdict header), plus INVALID_SIG rows
-// (strict mode: verdict missing or failed signature verification), so they are
-// excluded from the TEE-signed settlement batch — the provider does not bill
-// for inferences that failed LDD verification. Excluded rows are parked via
-// skip_until (retained in the DB as audit evidence, not deleted) and
-// re-evaluated on a later cycle. No-op when the Assay integration is disabled;
-// fail-open for PASS/UNVERIFIED and for requests with no recorded verdict.
-func (c *Ctrl) filterRejectedRequests(reqs []model.Request) []model.Request {
-	if !c.assayVerdictFilter {
-		return reqs
-	}
-	kept, rejected := splitRejectedRequests(reqs)
-	if len(rejected) > 0 {
-		c.logger.Warnf("Assay: excluding %d REJECT'd/INVALID_SIG request(s) from settlement", len(rejected))
-		if err := c.markRequestsWithSkipUntil(rejected, constant.SkipUntilDuration); err != nil {
-			c.logger.Warnf("Assay: failed to park rejected requests: %v", err)
-		}
-	}
-	return kept
-}
-
-// splitRejectedRequests partitions reqs into the ones to keep (verdict PASS,
-// UNVERIFIED, or unrecorded) and the request hashes of the excluded ones
-// (verdict REJECT, or INVALID_SIG from strict-mode signature failures),
-// preserving input order. Pure (no DB); the side effects live in
-// filterRejectedRequests.
-func splitRejectedRequests(reqs []model.Request) (kept []model.Request, rejectedHashes []string) {
-	kept = reqs[:0]
-	for _, req := range reqs {
-		if req.Verdict == constant.AssayVerdictReject || req.Verdict == constant.AssayVerdictInvalidSig {
-			rejectedHashes = append(rejectedHashes, req.RequestHash)
-			continue
-		}
-		kept = append(kept, req)
-	}
-	return kept, rejectedHashes
 }
 
 // Helper functions (simplified and consolidated)

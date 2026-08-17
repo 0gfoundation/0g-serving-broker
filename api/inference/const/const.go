@@ -65,6 +65,16 @@ const (
 	AssayVerdictPass       = "PASS"
 	AssayVerdictReject     = "REJECT"
 	AssayVerdictUnverified = "UNVERIFIED"
+	// AssayVerdictPending is the verifier's non-blocking response verdict: the
+	// request was sampled for audit and the LDD recompute is still running in
+	// the background. The final verdict is fetched from the verifier's
+	// POST /v1/settlement/check before the request may settle.
+	AssayVerdictPending = "PENDING"
+	// AssayVerdictUnknown is returned by the verifier's settlement check for a
+	// request hash it has no record of (e.g. verifier restart; the verdict
+	// store is in-memory). Treated as no-information: fail-open outside strict
+	// mode, kept pending in strict mode.
+	AssayVerdictUnknown = "UNKNOWN"
 	// AssayVerdictInvalidSig is recorded locally (never sent by the verifier)
 	// when assay.strictVerdict is on and a response's verdict is missing or
 	// fails signature verification — such requests are excluded from
@@ -137,6 +147,12 @@ var (
 	TEESettlementBatchSize = 50
 
 	SkipUntilDuration = 1 * time.Hour
+
+	// AssayPendingRetryDelay parks a request whose Assay audit is still
+	// PENDING at settlement time. Much shorter than SkipUntilDuration: the
+	// audit backlog usually drains in seconds, so the request should be
+	// re-evaluated on the next settlement cycle, not an hour later.
+	AssayPendingRetryDelay = 5 * time.Minute
 
 	// EIP-712 constants matching the contract
 	// DOMAIN_TYPEHASH = keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)")
