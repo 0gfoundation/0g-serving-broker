@@ -211,6 +211,11 @@ func (c *Ctrl) SettleFeesWithTEE(ctx context.Context) error {
 			// Don't return immediately — always process outcomes for completed batches
 		}
 
+		// SPML payout (before processOutcomes deletes the settled rows):
+		// accrue each settled request's fee onto its node's cumulative and
+		// invoice the assay for signed PayoutVouchers. Never fails settlement.
+		c.settleAssayPayout(ctx, batch.Outcomes)
+
 		// Process outcomes (delete/skip requests) — runs even if execution had partial errors
 		c.processOutcomes(batch.Outcomes)
 

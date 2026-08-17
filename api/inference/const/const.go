@@ -55,6 +55,15 @@ const (
 	// payload, making each signature single-use.
 	HeaderZGRequestHash = "ZG-Request-Hash"
 
+	// HeaderZGNode is the response header naming the GPU backend that served
+	// the request (the verifier's node registry id) — end-to-end attribution
+	// for per-node payout cumulatives.
+	HeaderZGNode = "ZG-Node"
+
+	// AssayInvoicePath is the verifier endpoint the broker posts per-node
+	// cumulatives to after settlement (SPML payout step 10).
+	AssayInvoicePath = "/v1/payout/invoice"
+
 	// AssayVerdictDomain domain-separates verdict signatures from the GPU
 	// node's commitment signatures ("assay-commitment-v1").
 	AssayVerdictDomain = "assay-verdict-v1"

@@ -281,6 +281,29 @@ func (d *DB) Migrate() error {
 				return tx.AutoMigrate(&Request{})
 			},
 		},
+		{
+			ID: "add-node-to-request",
+			Migrate: func(tx *gorm.DB) error {
+				type Request struct {
+					Node string `gorm:"type:varchar(64);not null;default:''"`
+				}
+				return tx.AutoMigrate(&Request{})
+			},
+		},
+		{
+			ID: "create-assay-payout",
+			Migrate: func(tx *gorm.DB) error {
+				type AssayPayout struct {
+					Node           string     `gorm:"type:varchar(64);primaryKey"`
+					Cumulative     string     `gorm:"type:varchar(255);not null;default:'0'"`
+					Epoch          int64      `gorm:"type:bigint;not null;default:0"`
+					PendingCovered string     `gorm:"type:text;not null"`
+					Invoiced       bool       `gorm:"type:tinyint(1);not null;default:0"`
+					UpdatedAt      *time.Time `gorm:"type:datetime"`
+				}
+				return tx.AutoMigrate(&AssayPayout{})
+			},
+		},
 	})
 
 	return errors.Wrap(m.Migrate(), "migrate database")

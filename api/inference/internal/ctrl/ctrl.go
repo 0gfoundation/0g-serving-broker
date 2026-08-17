@@ -76,6 +76,13 @@ type Ctrl struct {
 	// assayCheckWaitMs is forwarded as wait_ms on the settlement check: how
 	// long the verifier may hold the request waiting for in-flight audits.
 	assayCheckWaitMs int
+	// assayPayoutEnabled drives the SPML voucher flow: after settlement the
+	// broker accumulates each settled request's fee onto its node's
+	// cumulative and invoices the verifier for signed PayoutVouchers.
+	assayPayoutEnabled bool
+	// assayVerifierCutBps is the assay's cut in basis points of each newly
+	// settled amount (the on-chain cut cap independently bounds it).
+	assayVerifierCutBps int64
 
 	// allowTokenBilledSTT gates billSpeechToTextByTokens. Defaults to false
 	// because the requests.input_count column conflates seconds (whisper)
@@ -257,6 +264,8 @@ func New(
 		assayStrictVerdict:   cfg.Assay.StrictVerdict,
 		assayVerifierURL:     strings.TrimSuffix(cfg.Assay.VerifierURL, "/"),
 		assayCheckWaitMs:     cfg.Assay.SettlementCheckWaitMs,
+		assayPayoutEnabled:   cfg.Assay.Payout.Enabled,
+		assayVerifierCutBps:  cfg.Assay.Payout.VerifierCutBps,
 		allowTokenBilledSTT:  cfg.AllowTokenBilledSpeechToText,
 		priceCache:           priceCache,
 		svcCache:             svcCache,

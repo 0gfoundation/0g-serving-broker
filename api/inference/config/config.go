@@ -426,6 +426,17 @@ type Config struct {
 		// default (fail-open Tier-1: unauthenticated verdicts are ignored but
 		// the request still settles).
 		StrictVerdict bool `yaml:"strictVerdict"`
+		// Payout drives the SPML voucher flow (docs/spml-design §4 C): after
+		// each successful settlement the broker accumulates every settled
+		// request's fee onto its serving node's cumulative and invoices the
+		// verifier (POST /v1/payout/invoice), which validates against its own
+		// ledger and signs PayoutVouchers the GPUs redeem on-chain.
+		Payout struct {
+			Enabled bool `yaml:"enabled"`
+			// VerifierCutBps is the assay's cut in basis points of each
+			// settled amount (also enforced on-chain via the cut cap).
+			VerifierCutBps int64 `yaml:"verifierCutBps"`
+		} `yaml:"payout"`
 	} `yaml:"assay"`
 	RevenueTransfer struct {
 		TargetAddress string        `yaml:"targetAddress"`

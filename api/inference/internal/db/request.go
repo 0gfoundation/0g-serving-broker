@@ -140,6 +140,13 @@ func (d *DB) UpdateRequestWithAccurateTokens(requestHash, inputFee, outputFee, t
 // UpdateRequestVerdict records the Assay/LDD audit verdict (from the verifier's
 // ZG-Verdict response header) on a request. Used by settlement to exclude
 // REJECT'd requests from the TEE-signed batch.
+func (d *DB) UpdateRequestNode(requestHash, node string) error {
+	return d.db.
+		Model(&model.Request{}).
+		Where(&model.Request{RequestHash: requestHash}).
+		Update("node", node).Error
+}
+
 func (d *DB) UpdateRequestVerdict(requestHash, verdict string) error {
 	return d.db.
 		Model(&model.Request{}).

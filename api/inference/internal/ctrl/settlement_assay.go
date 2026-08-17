@@ -63,6 +63,18 @@ func (c *Ctrl) gateSettlementWithAssay(ctx context.Context, reqs []model.Request
 			c.logger.Warnf("Assay: settlement check against %s failed (falling back to recorded verdicts): %v",
 				c.assayVerifierURL, err)
 		} else {
+			// Backfill node attribution from the settlement check for rows
+			// whose ZG-Node response header was lost (payout needs it).
+			for i := range reqs {
+				if reqs[i].Node == "" {
+					if r, ok := results[reqs[i].RequestHash]; ok && r.NodeID != "" {
+						reqs[i].Node = r.NodeID
+						if err := c.db.UpdateRequestNode(reqs[i].RequestHash, r.NodeID); err != nil {
+							c.logger.Warnf("Assay: failed to backfill node %q for request %s: %v", r.NodeID, reqs[i].RequestHash, err)
+						}
+					}
+				}
+			}
 			changed := resolveAssayVerdicts(reqs, results, c.assayVerifierAddress, c.assayStrictVerdict)
 			for hash, verdict := range changed {
 				if err := c.db.UpdateRequestVerdict(hash, verdict); err != nil {

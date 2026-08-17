@@ -56,6 +56,16 @@ func (c *Ctrl) recordAssayVerdict(resp *http.Response, reqModel model.Request) {
 	}
 	verdict := resp.Header.Get(constant.HeaderZGVerdict)
 
+	// Node attribution (ZG-Node): which GPU served this request. Recorded
+	// unauthenticated — the assay independently re-checks attribution against
+	// its own ledger before signing any voucher (design §4 step 11), so a
+	// wrong node here can shift nothing.
+	if node := resp.Header.Get(constant.HeaderZGNode); node != "" {
+		if err := c.db.UpdateRequestNode(reqModel.RequestHash, node); err != nil {
+			c.logger.Warnf("Assay: failed to record node %q for request %s: %v", node, reqModel.RequestHash, err)
+		}
+	}
+
 	if c.assayVerifierAddress != nil {
 		sig := resp.Header.Get(constant.HeaderZGVerdictSig)
 		if verdict == "" || !verifyAssayVerdictSig(*c.assayVerifierAddress, verdict, reqModel.RequestHash, sig) {
