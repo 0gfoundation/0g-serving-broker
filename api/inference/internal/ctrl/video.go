@@ -509,6 +509,29 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 	_ = json.Unmarshal(body, &respFields)
 	billingAction := classifyVideoStatus(respFields.Status)
 
+	// Resolve the per-token tier price ONCE, here — before the branch that defers
+	// billing to the poller, which stamps this price onto the job and never
+	// revisits it, and after the status is known so a create the vendor already
+	// failed is not metered as a request billed off-table.
+	//
+	// From the REQUEST, which is the only thing that exists at the deferral point
+	// and the right source anyway: the tier the vendor renders is the tier the
+	// translator sends it, derived from this same size by these same recorded
+	// rules (videospec), which is what the balance gate already held against. So
+	// the tier that PRICES a request can differ from the one recorded as its
+	// rate_class further down, which prefers the size the vendor echoed — the
+	// price must agree with what the gate held, and reconciliation must group by
+	// what was actually rendered.
+	//
+	// Skipped for whitelisted traffic, which is never billed, and narrowed to
+	// per_video_token so no other mode pays for a second parse of the body.
+	if !reqModel.IsWhitelisted && billingAction != videoActionSkipFailed && c.Service.HasMultiModelPricing() {
+		if e := c.resolveModelPricing(ctx); e != nil && e.Billing != nil && e.Billing.Mode == config.BillingModePerVideoToken {
+			_, rawSize := rawVideoRequestFields(reqBody, ctx.Request.Header.Get("Content-Type"))
+			outputPrice = c.videoTokenUnitPrice(e.Billing, outputPrice, c.VideoBillingTier(ctx, rawSize), true)
+		}
+	}
+
 	// Record who created this job BEFORE writing the response to the client (below) and
 	// before branching on billing outcome, so the ownership check gating GET /videos/{id} and
 	// .../content (proxy.go's AuthRequiredPrefixes path — see issue #591) is guaranteed to

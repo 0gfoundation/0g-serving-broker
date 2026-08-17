@@ -33,17 +33,40 @@
 #      per_unit_table config still receives a best-effort actual-seconds
 #      echo as a fallback signal, but per_video_token is the accurate mode
 #      for this vendor.)
-#      Also set `vendor: seedance` on that model's billing config. It does NOT
-#      produce a pre-flight balance reserve — a per_video_token fee is a token
-#      count the vendor computes and only reports once it has rendered, so no
-#      reading of the request can predict it, and those creates are gated on
-#      the minimum locked balance alone (metered as
-#      broker_video_reserve_skipped_total{reason="unpredictable_units"}; size
-#      that floor with this vendor's per-clip cost in mind). What naming the
-#      vendor DOES buy is the recorded rules in common/videospec: settlement
-#      records the resolved tier (480p/720p) as rate_class instead of whatever
-#      "size" the client sent, so a reconciliation can group by tier, and an
-#      unpriceable "seconds" is refused before the vendor is ever called.
+#      per_video_token also needs a tokenPriceTiers table. Without one the
+#      broker starts (loudly) but publishes no per-token price row, and that
+#      row is the only channel a per-token price has to whoever pays this
+#      broker: GET /v1/models otherwise carries just the flat `video` scalar,
+#      which a consumer can only read as a per-SECOND rate — off by this
+#      vendor's ~21,600 tokens per second. One row per resolution tier, each a
+#      multiplier in (0, 1] over the entry's outputPrice, so set outputPrice to
+#      the DEAREST tier you serve and scale the rest down from it. Seedance 2.5
+#      currently serves only 480p and 720p, and prices them the SAME, so today
+#      the dearest tier is that shared rate and both rows are 1:
+#        billing:
+#          mode: per_video_token
+#          vendor: seedance
+#          tokenPriceTiers:
+#            - resolution: 480p
+#              multiplier: 1
+#            - resolution: 720p
+#              multiplier: 1
+#      (If 1080p ever becomes servable it is the dearer rate: outputPrice moves
+#      to it at multiplier 1 and these two drop to their share of it. The
+#      vendor's cheaper with-video-input rate has no row because nothing can
+#      reach it — the OpenAI Video API's input_reference is an image, so no
+#      client can signal a video reference, and the 0G router hardcodes that
+#      dimension to false for the same reason.)
+#      Also set `vendor: seedance` on that model's billing config. Naming the
+#      vendor buys the recorded rules in common/videospec: the balance gate
+#      estimates the token count from the vendor's published per-second rate
+#      and holds a real amount before forwarding (a vendor without such a rule
+#      is metered as
+#      broker_video_reserve_skipped_total{reason="unpredictable_units"} and
+#      gated on the minimum locked balance alone), settlement records the
+#      resolved tier (480p/720p) as rate_class instead of whatever "size" the
+#      client sent, so a reconciliation can group by tier, and an unpriceable
+#      "seconds" is refused before the vendor is ever called.
 #   4. Keep TEE verification: this sidecar reports the vendor's TLS
 #      certificate back to the broker (Zg-Upstream-Cert-Fingerprint), so the
 #      provider can stay providerType: centralized instead of falling back to

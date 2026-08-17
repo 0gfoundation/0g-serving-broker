@@ -149,10 +149,13 @@ func newModelCacheTokenBilling(cfg config.CacheTokenBillingConfig) *ModelCacheTo
 
 // ModelPricing holds per-token pricing in the smallest unit (wei).
 type ModelPricing struct {
-	Prompt            string                  `json:"prompt"`
-	Completion        string                  `json:"completion"`
-	Image             string                  `json:"image,omitempty"`
-	Video             string                  `json:"video,omitempty"`
+	Prompt     string `json:"prompt"`
+	Completion string `json:"completion"`
+	Image      string `json:"image,omitempty"`
+	Video      string `json:"video,omitempty"`
+	// VideoUnit names what one Video buys — see videoPriceUnit. Omitted when
+	// the model's billing shape gives the flat scalar no single-unit meaning.
+	VideoUnit         string                  `json:"video_unit,omitempty"`
 	TieredPricing     []ModelPricingTier      `json:"tiered_pricing,omitempty"`
 	CacheTokenBilling *ModelCacheTokenBilling `json:"cache_token_billing,omitempty"`
 	// Variants lists NATIVE (wei) per-resolution/per-bucket prices for a
@@ -180,24 +183,68 @@ type ModelPricingUSD struct {
 	// video-generation model (decimal string). Set alongside Prompt/Completion
 	// (both reported as "0", not omitted), same convention as Image above.
 	Video string `json:"video,omitempty"`
+	// VideoUnit is the USD counterpart of ModelPricing.VideoUnit — the same
+	// name for the same unit, since the two blocks price one quantity in two
+	// denominations.
+	VideoUnit string `json:"video_unit,omitempty"`
 	// Variants is the USD counterpart of ModelPricing.Variants — same rows,
 	// UnitPrice expressed as a USD decimal string instead of wei.
 	Variants []ModelPriceVariant `json:"variants,omitempty"`
 }
 
-// unitVideoSecond and unitVideoClip are the two currently-supported values of
-// ModelPriceVariant.Unit. They are the GET /v1/models projection of
-// config.BillingModePerVideoSecond / config.BillingModePerUnitTable and must
-// stay in sync with that enum. This is a closed vocabulary — new values
-// should be added deliberately (and documented, since the router repo's
-// catalog ingestion depends on recognizing them) rather than left as free
-// text, because Unit tells the consumer how to USE UnitPrice (multiply by a
-// requested quantity vs. treat as an already-final total), which is
-// computation, not just display.
+// unitVideoSecond, unitVideoClip and unitVideoToken are the currently-supported
+// values of ModelPriceVariant.Unit. They are the GET /v1/models projection of
+// config.BillingModePerVideoSecond / config.BillingModePerUnitTable /
+// config.BillingModePerVideoToken and must stay in sync with that enum. This is
+// a closed vocabulary — new values should be added deliberately (and
+// documented, since the router repo's catalog ingestion depends on recognizing
+// them) rather than left as free text, because Unit tells the consumer how to
+// USE UnitPrice (multiply by a requested quantity vs. treat as an already-final
+// total), which is computation, not just display.
 const (
 	unitVideoSecond = "video_second"
 	unitVideoClip   = "video_clip"
+	// unitVideoToken: multiply by the vendor-reported usage.completion_tokens.
+	// NOT per 1M tokens — the vendor quotes its rate that way and a consumer
+	// that assumes it would undercharge by a factor of a million, so UnitPrice
+	// here is the final price of ONE token like every other unit in this list.
+	unitVideoToken = "video_token"
 )
+
+// videoPriceUnit names what one unit of ModelPricing.Video buys, so a consumer
+// need not guess the dimension of a bare positive integer.
+//
+// ONLY per_video_token answers, and the omissions are deliberate rather than
+// unfinished:
+//
+//   - per_video_second is what a consumer with no unit already assumes — the
+//     0G router's no-variants fallback bills video × seconds — so naming it
+//     adds no information. It would add RISK: that scalar is the BASELINE
+//     (multiplier-1.0) rate, and resolutionMultipliers is not capped at 1
+//     (DefaultVideoSizeRatios ships a 2.0), so telling a scalar-only consumer
+//     "multiply this by seconds" invites a systematic 2× underquote on a
+//     model whose dear tiers cost more than its baseline. Its `variants` rows
+//     carry the real per-tier rates; a consumer that reads only the scalar is
+//     better served by the assumption it already had.
+//   - per_unit_table's scalar prices one TABLE unit, a quantity only its
+//     variants rows define, so it has no name in this vocabulary at all.
+//
+// per_video_token is safe to name for the reason those are not: its tier
+// multipliers ARE capped at 1 (see config.VideoTokenPriceTier), so the scalar
+// is a true per-token ceiling. And it is the one shape where the fallback
+// assumption is catastrophic rather than merely imprecise — read as a
+// per-second rate, a per-token price is wrong by the vendor's tokens-per-second
+// (~21,600 for 720p Seedance), not by a factor of two.
+//
+// This does not replace the `variants` rows: it disambiguates the flat scalar
+// for a consumer that reads only that, and it is absent from every broker older
+// than this change, so a consumer must still have a fallback.
+func videoPriceUnit(billing *config.BillingConfig) string {
+	if billing != nil && billing.Mode == config.BillingModePerVideoToken {
+		return unitVideoToken
+	}
+	return ""
+}
 
 // ModelPriceVariant is one priced (dimension...) combination for a model
 // whose billing varies by request shape (resolution, duration, ...) rather
@@ -262,6 +309,23 @@ func (h *Handler) derivePerUnitUSD(unitLabel, millionTokens, model string) (stri
 	return value, true
 }
 
+// tokenVariantDimensions builds a per_video_token row's dimension map.
+//
+// has_video_input is a constant "false", not a configured value: nothing this
+// broker serves can carry a video input (see config.VideoTokenPriceTier), so
+// there is no `true` price to publish. It is emitted anyway because it is how a
+// consumer TELLS a token-priced table from any other — the 0G router classifies
+// one only by rows carrying exactly {resolution, has_video_input} — and a row
+// missing it falls back to being read as a per-second rate, which for a
+// token-billed model is wrong by the vendor's tokens-per-second, not by a
+// rounding.
+func tokenVariantDimensions(resolution string) map[string]string {
+	return map[string]string{
+		"resolution":      resolution,
+		"has_video_input": "false",
+	}
+}
+
 // sortVariantsByResolution orders variants by their "resolution" dimension so
 // the JSON response is deterministic across requests — Go map iteration
 // (BillingConfig.ResolutionMultipliers) is randomized, and per_unit_table
@@ -305,14 +369,14 @@ func videoPriceVariantsNative(billing *config.BillingConfig, basePriceWei string
 		}
 		variants := make([]ModelPriceVariant, 0, len(billing.ResolutionMultipliers))
 		for res, mult := range billing.ResolutionMultipliers {
-			rat := new(big.Rat).SetFloat64(mult)
-			if rat == nil {
-				// mult is NaN/Inf — config validation already rejects mult <= 0,
-				// so this should be unreachable; skip rather than panic.
+			// The same scaling the token table publishes, so both video variant
+			// paths obey one rule — floor, but a priced tier never rounds to free.
+			// (mult NaN/Inf reports !ok; resolutionMultipliers validation rejects
+			// mult <= 0 but NOT NaN, so this is the guard, not a formality.)
+			price, ok := config.ScaledUnitPrice(base, mult)
+			if !ok {
 				continue
 			}
-			rat.Mul(rat, new(big.Rat).SetInt(base))
-			price := new(big.Int).Quo(rat.Num(), rat.Denom())
 			variants = append(variants, ModelPriceVariant{
 				Dimensions: map[string]string{"resolution": res},
 				Unit:       unitVideoSecond,
@@ -339,14 +403,26 @@ func videoPriceVariantsNative(billing *config.BillingConfig, basePriceWei string
 		}
 		return variants
 	case config.BillingModePerVideoToken:
-		// No per-model resolution/dimension variance to project here: a
-		// per_video_token model's per-{resolution,has_video_input} price table
-		// (see design doc §13.1.1/§13.1.2) is published as router-side
-		// on-chain provider price data, not derived from this operator config
-		// block. Explicit nil, not the fallthrough default, so a reader can
-		// tell this is a decision — there is nothing for THIS function to
-		// project — not a forgotten case.
-		return nil
+		if len(billing.TokenPriceTiers) == 0 {
+			return nil
+		}
+		variants := make([]ModelPriceVariant, 0, len(billing.TokenPriceTiers))
+		for _, t := range billing.TokenPriceTiers {
+			price, ok := config.ScaledUnitPrice(base, t.Multiplier)
+			if !ok {
+				// Multiplier is NaN/Inf — config validation rejects it, so this is
+				// unreachable; skip rather than publish a row with no price.
+				continue
+			}
+			variants = append(variants, ModelPriceVariant{
+				Dimensions: tokenVariantDimensions(t.Resolution),
+				Unit:       unitVideoToken,
+				UnitPrice:  price.String(),
+			})
+		}
+		// Configured slice order, not sorted: same as per_unit_table above, and
+		// already deterministic.
+		return variants
 	default:
 		return nil
 	}
@@ -372,8 +448,8 @@ func videoPriceVariantsUSD(billing *config.BillingConfig, baseUSD string) []Mode
 		}
 		variants := make([]ModelPriceVariant, 0, len(billing.ResolutionMultipliers))
 		for res, mult := range billing.ResolutionMultipliers {
-			rat := new(big.Rat).SetFloat64(mult)
-			if rat == nil {
+			rat, ok := config.MultiplierRat(mult)
+			if !ok {
 				continue
 			}
 			rat.Mul(rat, base)
@@ -403,11 +479,23 @@ func videoPriceVariantsUSD(billing *config.BillingConfig, baseUSD string) []Mode
 		}
 		return variants
 	case config.BillingModePerVideoToken:
-		// Same rationale as videoPriceVariantsNative's identical case: no
-		// per-model variance to project from this config block for a
-		// per_video_token model — explicit nil so this reads as a decision,
-		// not a forgotten case.
-		return nil
+		if len(billing.TokenPriceTiers) == 0 {
+			return nil
+		}
+		variants := make([]ModelPriceVariant, 0, len(billing.TokenPriceTiers))
+		for _, t := range billing.TokenPriceTiers {
+			rat, ok := config.MultiplierRat(t.Multiplier)
+			if !ok {
+				continue
+			}
+			rat.Mul(rat, base)
+			variants = append(variants, ModelPriceVariant{
+				Dimensions: tokenVariantDimensions(t.Resolution),
+				Unit:       unitVideoToken,
+				UnitPrice:  pricefeed.TrimTrailingZeros(rat.FloatString(18)),
+			})
+		}
+		return variants
 	default:
 		return nil
 	}
@@ -567,14 +655,24 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 				// single-model video/image path's normalized-and-trimmed formatting,
 				// so numerically identical prices render identically regardless of
 				// which pricing shape (single- or multi-model) served the request.
-				if video, ok := h.derivePerUnitUSD("second", mp.OutputPriceUSDPerMillionTokens, mp.Model); ok {
-					obj.PricingUSD = &ModelPricingUSD{Prompt: "0", Completion: "0", Video: video}
+				// The unit label is the model's own, not a hardcoded "second": a
+				// per_video_token entry derives a per-TOKEN price here (same ÷1e6
+				// either way), and a diagnostic that names the wrong unit is exactly
+				// what this change exists to stop shipping.
+				videoUnit := videoPriceUnit(mp.Billing)
+				unitLabel := videoUnit
+				if unitLabel == "" {
+					unitLabel = "second"
+				}
+				if video, ok := h.derivePerUnitUSD(unitLabel, mp.OutputPriceUSDPerMillionTokens, mp.Model); ok {
+					obj.PricingUSD = &ModelPricingUSD{Prompt: "0", Completion: "0", Video: video, VideoUnit: videoUnit}
 					obj.PricingUSD.Variants = videoPriceVariantsUSD(mp.Billing, video)
 				}
 				if ratUSDPerOG != nil {
 					if outRat, err := pricefeed.ParseUSDPerMillion(mp.OutputPriceUSDPerMillionTokens); err == nil {
 						if wei, err := pricefeed.USDPerMillionToWeiPerToken(outRat, ratUSDPerOG); err == nil {
 							obj.Pricing.Video = wei.String()
+							obj.Pricing.VideoUnit = videoUnit
 							obj.Pricing.Variants = videoPriceVariantsNative(mp.Billing, wei.String())
 						}
 					}
@@ -614,6 +712,7 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 				// `video` (not the token `completion` field, which would mislead
 				// OpenAI-compatible clients into a per-token reading).
 				obj.Pricing.Video = mp.OutputPrice
+				obj.Pricing.VideoUnit = videoPriceUnit(mp.Billing)
 				obj.Pricing.Variants = videoPriceVariantsNative(mp.Billing, mp.OutputPrice)
 			} else {
 				obj.Pricing.Prompt = mp.InputPrice
@@ -697,6 +796,11 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 		obj.Pricing.Prompt = svc.InputPrice
 		obj.Pricing.Completion = svc.OutputPrice
 		obj.Pricing.Video = svc.OutputPrice
+		// No video_unit: a single-model video service bills seconds × the
+		// resolution ratio, and GetVideoSizeRatio's defaults go up to 2.0 with no
+		// variants table to correct for it — see videoPriceUnit for why naming a
+		// baseline rate "per second" is worse than leaving the consumer's existing
+		// per-second assumption alone.
 	default:
 		obj.Pricing.Prompt = svc.InputPrice
 		obj.Pricing.Completion = svc.OutputPrice
@@ -787,6 +891,9 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 		// above). Deriving with the same ÷1e6 used by the wei conversion keeps
 		// pricing_usd.video consistent with pricing.video — same derivation as
 		// the image case above.
+		// No video_unit here either, for the same reason as the native scalar
+		// above — the two blocks price one quantity, so they must not disagree
+		// about whether that quantity has a name.
 		if video, ok := h.derivePerUnitUSD("second", svc.OutputPriceUSDPerMillionTokens, ""); ok {
 			obj.PricingUSD = &ModelPricingUSD{Prompt: "0", Completion: "0", Video: video}
 		}
