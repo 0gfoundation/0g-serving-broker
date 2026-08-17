@@ -349,6 +349,15 @@ func (d *DB) Migrate() error {
 			},
 		},
 		{
+			ID: "add-node-to-request",
+			Migrate: func(tx *gorm.DB) error {
+				type Request struct {
+					Node string `gorm:"type:varchar(64);not null;default:''"`
+				}
+				return tx.AutoMigrate(&Request{})
+			},
+		},
+		{
 			ID: "create-video-poll-job",
 			Migrate: func(tx *gorm.DB) error {
 				// Tracks a POST /videos call that returned a non-terminal (queued/in_progress)
@@ -440,6 +449,20 @@ func (d *DB) Migrate() error {
 					TeeSignerAddress string `gorm:"type:varchar(42)"`
 				}
 				return tx.AutoMigrate(&AdapterKey{})
+			},
+		},
+		{
+			ID: "create-assay-payout",
+			Migrate: func(tx *gorm.DB) error {
+				type AssayPayout struct {
+					Node           string     `gorm:"type:varchar(64);primaryKey"`
+					Cumulative     string     `gorm:"type:varchar(255);not null;default:'0'"`
+					Epoch          int64      `gorm:"type:bigint;not null;default:0"`
+					PendingCovered string     `gorm:"type:text;not null"`
+					Invoiced       bool       `gorm:"type:tinyint(1);not null;default:0"`
+					UpdatedAt      *time.Time `gorm:"type:datetime"`
+				}
+				return tx.AutoMigrate(&AssayPayout{})
 			},
 		},
 	})
