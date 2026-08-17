@@ -6,6 +6,7 @@ import (
 	"errors"
 	"math/big"
 	"net/http"
+	"reflect"
 	"testing"
 	"time"
 
@@ -1615,5 +1616,167 @@ func TestNewModelCacheTokenBilling(t *testing.T) {
 				t.Errorf("write1h = %d/%d, want %d/%d", got.Write1hMultiplierNumerator, got.Write1hMultiplierDenominator, tt.wantWrite1hNum, tt.wantWrite1hDen)
 			}
 		})
+	}
+}
+
+// tieredTokenPricing is a table with a REAL per-token spread, so the projection
+// math below is visible in the output. It is deliberately not labelled as any
+// vendor's table: Seedance, the vendor this mode exists for, prices every tier
+// it serves at the same rate per token — its per-second differences are already
+// the token count — so a correct Seedance config is all-1.0 multipliers. See
+// config.VideoTokenPriceTier.
+var tieredTokenPricing = []config.VideoTokenPriceTier{
+	{Resolution: "480p", Multiplier: 0.5},
+	{Resolution: "720p", Multiplier: 0.5},
+	{Resolution: "1080p", Multiplier: 1},
+}
+
+// TestGetModels_VideoVariants_PerVideoToken_Native pins the shape a
+// per_video_token model publishes — the whole subject of issue #665, because
+// this feed is the ONLY channel a tiered per-token price has to a consumer.
+//
+// Every field is load-bearing downstream: the router recognizes a token-priced
+// table only by rows carrying EXACTLY {resolution, has_video_input} with
+// unit=video_token, and multiplies unit_price by usage.completion_tokens
+// directly. A row missing has_video_input, or a unit_price quoted per million
+// tokens, is not a display bug — it is a fee off by a factor of ~1e6.
+func TestGetModels_VideoVariants_PerVideoToken_Native(t *testing.T) {
+	svcCfg := config.Service{
+		Type: "video-generation",
+		ModelPricing: []config.ModelPricingEntry{
+			{
+				Model:       "tiered-video-model",
+				OutputPrice: "1000000", // wei per completion token
+				Billing: &config.BillingConfig{
+					Mode:            config.BillingModePerVideoToken,
+					TokenPriceTiers: tieredTokenPricing,
+				},
+			},
+		},
+	}
+	if err := svcCfg.BuildModelPricingMap(); err != nil {
+		t.Fatalf("BuildModelPricingMap: %v", err)
+	}
+
+	mock := &mockModelsCtrl{
+		service:       model.Service{ModelType: "tiered-video-model", Type: "video-generation"},
+		serviceConfig: svcCfg,
+	}
+	h := newModelsTestHandler(mock)
+	w := performRequest(h.GetModels, "GET", "/v1/models", "", nil)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+	var resp ModelListResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+	m := resp.Data[0]
+
+	if m.Pricing.VideoUnit != "video_token" {
+		t.Errorf("pricing.video_unit = %q, want video_token — without it the flat pricing.video reads as a per-SECOND rate", m.Pricing.VideoUnit)
+	}
+	// has_video_input is a constant "false" on every row: it is how a consumer
+	// recognises a token-priced table, and nothing this broker serves can carry a
+	// video input — see tokenVariantDimensions.
+	want := []ModelPriceVariant{
+		{Dimensions: map[string]string{"resolution": "480p", "has_video_input": "false"}, Unit: "video_token", UnitPrice: "500000"},
+		{Dimensions: map[string]string{"resolution": "720p", "has_video_input": "false"}, Unit: "video_token", UnitPrice: "500000"},
+		{Dimensions: map[string]string{"resolution": "1080p", "has_video_input": "false"}, Unit: "video_token", UnitPrice: "1000000"},
+	}
+	if !reflect.DeepEqual(m.Pricing.Variants, want) {
+		t.Errorf("variants = %+v, want %+v (configured order, both dimensions on every row)", m.Pricing.Variants, want)
+	}
+}
+
+// TestGetModels_VideoVariants_PerVideoToken_USD is the USD counterpart: the same
+// rows, priced as decimal USD per ONE completion token.
+func TestGetModels_VideoVariants_PerVideoToken_USD(t *testing.T) {
+	rate, _ := new(big.Rat).SetString("1")
+	svcCfg := config.Service{
+		Type:              "video-generation",
+		PriceDenomination: "USD",
+		ModelPricing: []config.ModelPricingEntry{
+			{
+				Model: "tiered-video-model",
+				// The pipeline's per-1M normalization of a $0.0000107-per-token price.
+				OutputPriceUSDPerMillionTokens: "10.7",
+				InputPriceUSDPerMillionTokens:  "0",
+				Billing: &config.BillingConfig{
+					Mode:            config.BillingModePerVideoToken,
+					TokenPriceTiers: tieredTokenPricing,
+				},
+			},
+		},
+	}
+	if err := svcCfg.BuildModelPricingMap(); err != nil {
+		t.Fatalf("BuildModelPricingMap: %v", err)
+	}
+
+	mock := &mockModelsCtrl{
+		service:        model.Service{ModelType: "tiered-video-model", Type: "video-generation"},
+		serviceConfig:  svcCfg,
+		priceFeedIsUSD: true,
+		priceFeedSnapshot: pricefeed.Snapshot{
+			RateUSDPerOG: rate,
+			LastUpdate:   time.Now(),
+			Populated:    true,
+		},
+		priceFeedThreshold:      5 * time.Minute,
+		priceFeedUpdateInterval: time.Hour,
+	}
+	h := newModelsTestHandler(mock)
+	w := performRequest(h.GetModels, "GET", "/v1/models", "", nil)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+	var resp ModelListResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+	m := resp.Data[0]
+
+	if m.PricingUSD == nil {
+		t.Fatal("pricing_usd missing")
+	}
+	if m.PricingUSD.VideoUnit != "video_token" || m.Pricing.VideoUnit != "video_token" {
+		t.Errorf("video_unit = (%q native, %q usd), want video_token in both", m.Pricing.VideoUnit, m.PricingUSD.VideoUnit)
+	}
+	// $10.7 per 1M tokens is $0.0000107 per token; the 480p tier is half of it.
+	if m.PricingUSD.Video != "0.0000107" {
+		t.Errorf("pricing_usd.video = %q, want 0.0000107", m.PricingUSD.Video)
+	}
+	if len(m.PricingUSD.Variants) != 3 {
+		t.Fatalf("expected 3 USD variants, got %d: %+v", len(m.PricingUSD.Variants), m.PricingUSD.Variants)
+	}
+	v0 := m.PricingUSD.Variants[0]
+	if v0.Dimensions["resolution"] != "480p" || v0.Dimensions["has_video_input"] != "false" || v0.Unit != "video_token" || v0.UnitPrice != "0.00000535" {
+		t.Errorf("pricing_usd.variants[0] = %+v, want {480p, false, video_token, 0.00000535}", v0)
+	}
+}
+
+// TestVideoPriceUnit: only per_video_token names its unit. The omissions are the
+// point — a per_video_second scalar is the BASELINE rate under uncapped
+// resolution multipliers, so naming it invites a scalar-only consumer to
+// underquote every dear tier, and per_unit_table's scalar prices a table unit
+// that only its variants rows define. See videoPriceUnit.
+func TestVideoPriceUnit(t *testing.T) {
+	for _, tt := range []struct {
+		mode config.BillingMode
+		want string
+	}{
+		{config.BillingModePerVideoToken, "video_token"},
+		{config.BillingModePerVideoSecond, ""},
+		{config.BillingModePerUnitTable, ""},
+		{config.BillingModePerImage, ""},
+	} {
+		if got := videoPriceUnit(&config.BillingConfig{Mode: tt.mode}); got != tt.want {
+			t.Errorf("videoPriceUnit(%q) = %q, want %q", tt.mode, got, tt.want)
+		}
+	}
+	if got := videoPriceUnit(nil); got != "" {
+		t.Errorf("videoPriceUnit(nil) = %q, want empty", got)
 	}
 }

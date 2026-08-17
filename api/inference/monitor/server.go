@@ -63,15 +63,21 @@ var (
 	// it must be alertable rather than a silent skip.
 	VideoBillingSkippedTotal prometheus.Counter
 
-	// VideoTableMissTotal counts video-generation requests whose observed
-	// (resolution, duration) had no exact per_unit_table row, labeled by whether a
-	// bucket still covered it (reason=next_bucket) or nothing did and the table
-	// maximum was charged (reason=uncovered).
+	// VideoTableMissTotal counts video-generation requests PRICED at a figure no
+	// row of the model's configured price table names, labeled by reason: an
+	// observed (resolution, duration) with no exact per_unit_table row, whether a
+	// longer bucket still covered it (reason=next_bucket) or nothing did and the
+	// table maximum was charged (reason=uncovered); or a per_video_token resolution
+	// with no tokenPriceTiers row (reason=token_tier_uncovered).
+	//
+	// PRICED, not billed, and the two diverge for reason=token_tier_uncovered —
+	// see VideoTableMissTokenTier for why that reason is counted a step earlier
+	// than its siblings.
 	//
 	// Deliberately NOT folded into VideoBillingSkippedTotal: that one means the video
 	// was served WITHOUT being billed, and an operator alerting on it is asking "am I
-	// giving away output?". A table miss is billed — just at a fallback price rather
-	// than the one /v1/models advertises for the request. Different question,
+	// giving away output?". A table miss is charged for — just at a fallback price
+	// rather than the one /v1/models advertises for the request. Different question,
 	// different urgency, different fix (add the row), so it gets its own series.
 	VideoTableMissTotal *prometheus.CounterVec
 
@@ -410,7 +416,7 @@ func PrometheusInit(serverName, providerAddress string) {
 	VideoTableMissTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_video_table_miss_total",
-			Help:        "Video-generation requests whose (resolution, duration) had no exact per_unit_table row, labeled by reason (next_bucket = a longer bucket covered it; uncovered = nothing did, table maximum charged). Non-zero means clients are billed a price GET /v1/models does not advertise for their request — add the missing rows.",
+			Help:        "Video-generation requests priced off-table — at a price the model's configured price table does not name — labeled by reason (next_bucket = no exact per_unit_table row but a longer bucket covered it; uncovered = nothing did, table maximum charged; token_tier_uncovered = no tokenPriceTiers row for the observed per_video_token tier, unscaled outputPrice charged). Non-zero means clients are charged a price GET /v1/models does not advertise for their request — add the missing rows.",
 			ConstLabels: constLabels,
 		},
 		[]string{"reason"},
@@ -818,6 +824,20 @@ const (
 	// VideoTableMissUncovered: nothing at or above the observation exists for that
 	// resolution, so the table maximum across every resolution was charged.
 	VideoTableMissUncovered = "uncovered"
+	// VideoTableMissTokenTier: a per_video_token model's tokenPriceTiers has no
+	// row for the observed resolution, so the request is priced at the entry's
+	// unscaled outputPrice — the advertised per-token ceiling, never an underbill,
+	// but also not a price /v1/models publishes a row for, so whoever pays this
+	// broker is pricing the same request from a fallback of their own. Fixed by
+	// adding the row.
+	//
+	// Counted when the price is RESOLVED, which for this mode is when the create
+	// comes back — before the vendor has rendered anything. A token-billed create
+	// is always asynchronous, so a create that later fails, expires, or outlives
+	// the poller is counted here and never billed. That over-counts by the
+	// failure rate rather than by the miss rate: the gap it reports (an unpriced
+	// tier) is real for every one of them.
+	VideoTableMissTokenTier = "token_tier_uncovered"
 )
 
 // Reasons a video create could not be reserved for before forwarding.
