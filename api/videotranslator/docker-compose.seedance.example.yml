@@ -41,19 +41,25 @@
 #      vendor's ~21,600 tokens per second. One row per resolution tier, each a
 #      multiplier in (0, 1] over the entry's outputPrice, so set outputPrice to
 #      the DEAREST tier you serve and scale the rest down from it. Seedance 2.5
-#      currently serves only 480p and 720p, and prices them the SAME, so today
-#      the dearest tier is that shared rate and both rows are 1:
+#      serves 480p, 720p and 1080p; 480p and 720p share ONE rate (10.70 USD
+#      per 1M tokens without video input) and 1080p is dearer (11.70), so
+#      outputPrice is 1080p's and the other two are its share of it:
 #        billing:
 #          mode: per_video_token
 #          vendor: seedance
 #          tokenPriceTiers:
 #            - resolution: 480p
-#              multiplier: 1
+#              multiplier: 0.9145299145299145   # 10.70 / 11.70
 #            - resolution: 720p
+#              multiplier: 0.9145299145299145
+#            - resolution: 1080p
 #              multiplier: 1
-#      (If 1080p ever becomes servable it is the dearer rate: outputPrice moves
-#      to it at multiplier 1 and these two drop to their share of it. The
-#      vendor's cheaper with-video-input rate has no row because nothing can
+#      (Those rates move — 1080p has carried a time-limited discount — so
+#      re-read the vendor's card rather than trusting these. Configure the
+#      ORIGINAL rate, not a promotional one: the vendor does not announce when
+#      a promotion ends, and at the discounted 1080p rate the dearest tier
+#      becomes 480p/720p, which moves outputPrice and every multiplier with it.
+#      The vendor's cheaper with-video-input rate has no row because nothing can
 #      reach it — the OpenAI Video API's input_reference is an image, so no
 #      client can signal a video reference, and the 0G router hardcodes that
 #      dimension to false for the same reason.)
@@ -64,7 +70,7 @@
 #      is metered as
 #      broker_video_reserve_skipped_total{reason="unpredictable_units"} and
 #      gated on the minimum locked balance alone), settlement records the
-#      resolved tier (480p/720p) as rate_class instead of whatever "size" the
+#      resolved tier (480p/720p/1080p) as rate_class instead of whatever "size" the
 #      client sent, so a reconciliation can group by tier, and an unpriceable
 #      "seconds" is refused before the vendor is ever called.
 #   4. Keep TEE verification: this sidecar reports the vendor's TLS
@@ -126,13 +132,13 @@
 # The rules are recorded once, in common/videospec, and both the broker's
 # balance gate and this translator read them — see that package's doc.
 #
-# Resolution: 480p/720p ONLY (narrower than 2.0's 480p/720p/1080p/4k —
-# live-confirmed: 1080p/4k are rejected outright for "dreamina-
-# seedance-2-5-260628" with InvalidParameter). A client requesting a
-# 1080p/4K-equivalent size silently gets a 720p video instead of a 400 (the
-# translator's existing snap-not-reject resolution handling). There is no
-# 4K tier for this model at all, so 2.0's 4K-specific vendor rate limit
-# (15 RPM / 1 concurrent) does not apply here.
+# Resolution: 480p/720p/1080p (narrower than 2.0's 480p/720p/1080p/4k — 4k is
+# live-confirmed rejected outright for "dreamina-seedance-2-5-260628" with
+# InvalidParameter; 1080p was too when this was written, and the vendor has
+# since opened it). A client requesting a 4K-equivalent size silently gets a
+# 1080p video instead of a 400 (the translator's existing snap-not-reject
+# resolution handling). There is no 4K tier for this model at all, so 2.0's
+# 4K-specific vendor rate limit (15 RPM / 1 concurrent) does not apply here.
 services:
   0g-seedance-video-translator:
     image: ghcr.io/0gfoundation/0g-serving-broker:latest

@@ -385,10 +385,13 @@ func TestDropUnreachableTokenTiers(t *testing.T) {
 		Vendor: string(videospec.VendorSeedance),
 		TokenPriceTiers: []VideoTokenPriceTier{
 			{Resolution: " 720P ", Multiplier: 1},
-			// Seedance rejects 1080p and its Tier() snaps such a request to 720p, so
-			// this row can never be selected. Published, it would quote a consumer
-			// half price for a job settlement charges at the 720p row's full rate.
-			{Resolution: "1080p", Multiplier: 0.5},
+			// Seedance rejects 4k and its Tier() snaps such a request to the nearest
+			// tier it does serve, so this row can never be selected. Published, it
+			// would quote a consumer half price for a job settlement charges at
+			// another row's full rate. (1080p used to be the example here — the
+			// vendor has since opened it, which is exactly why this test names a
+			// tier and not a spelling.)
+			{Resolution: "4k", Multiplier: 0.5},
 			// A pixel size is not a table key either — and resolving it onto 720p is
 			// exactly what must NOT happen to the row above.
 			{Resolution: "1280x720", Multiplier: 0.25},

@@ -36,10 +36,10 @@ func TestSeedanceCreateVideo_TranslatesAndForwardsAuth(t *testing.T) {
 		"model":   "dreamina-seedance-2-5-260628",
 		"prompt":  "a cat playing piano",
 		"seconds": "5",
-		// 2.5 only supports 480p/720p (1080p/4k are rejected by the vendor);
-		// a "1080p" client request now silently snaps DOWN to 720p — the
-		// nearest supported tier — rather than passing through unchanged.
-		"size": "1080p",
+		// A tier the vendor does NOT serve (4k) silently snaps DOWN to the
+		// nearest one it does, rather than passing through unchanged and
+		// earning a 400 from the vendor's strict validation.
+		"size": "3840x2160",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/videos", body)
 	req.Header.Set("Content-Type", contentType)
@@ -57,8 +57,8 @@ func TestSeedanceCreateVideo_TranslatesAndForwardsAuth(t *testing.T) {
 	if gotReq.Model != "dreamina-seedance-2-5-260628" || len(gotReq.Content) != 1 || gotReq.Content[0].Text != "a cat playing piano" {
 		t.Errorf("seedance create request = %+v", gotReq)
 	}
-	if gotReq.Resolution != "720p" {
-		t.Errorf("resolution = %q, want 720p (2.5 snaps a 1080p-equivalent request down to the nearest supported tier)", gotReq.Resolution)
+	if gotReq.Resolution != "1080p" {
+		t.Errorf("resolution = %q, want 1080p (a 4K request snaps down to the nearest supported tier)", gotReq.Resolution)
 	}
 
 	var resp map[string]interface{}

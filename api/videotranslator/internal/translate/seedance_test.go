@@ -57,12 +57,11 @@ func TestNormalizeSeedanceResolution(t *testing.T) {
 		want string
 	}{
 		{"480p", "480p"},
-		{"720P", "720p"}, // case-insensitive token match
-		// 1080p/4k are no longer exact-match tokens (2.5 only supports
-		// 480p/720p, live-confirmed: 1080p/4k are rejected with
-		// InvalidParameter) -- these fall through to the unparsable-size
-		// default (which happens to also be 720p).
-		{"1080p", defaultSeedanceResolution},
+		{"720P", "720p"},   // case-insensitive token match
+		{"1080p", "1080p"}, // opened by the vendor after this integration was written
+		// 4k is still not an exact-match token (live-confirmed: rejected with
+		// InvalidParameter), so it falls through to the unparsable-size default
+		// (which happens to also be 720p).
 		{"4K", defaultSeedanceResolution},
 		{"1280x720", "720p"},
 		// This codebase's own documented standard 480p pixel size (see
@@ -73,11 +72,12 @@ func TestNormalizeSeedanceResolution(t *testing.T) {
 		// longer side (832 vs. 1280) gets it right.
 		{"832x480", "480p"},
 		{"480x832", "480p"},
-		// Pixel sizes that used to snap to 1080p/4K now collapse to 720p —
-		// the nearest tier the model actually supports (§5.2: a conscious
-		// silent-downgrade, not a 400).
-		{"1920x1080", "720p"},
-		{"3840x2160", "720p"},
+		// 1080p is served (the vendor opened it after the integration was
+		// written), so its pixel size addresses it rather than snapping down.
+		{"1920x1080", "1080p"},
+		// 4K still is not, and collapses to the nearest tier the model does
+		// support (§5.2: a conscious silent-downgrade, not a 400).
+		{"3840x2160", "1080p"},
 		// Exact tie: 1056 is equidistant from 480p's 832 and 720p's 720 —
 		// diff(224) == diff(224). Pins the current tie-break (first entry in
 		// seedanceResolutionMaxSides wins a tie, i.e. 480p) so a future
