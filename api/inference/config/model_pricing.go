@@ -5,6 +5,7 @@ import (
 	"log"
 	"math"
 	"math/big"
+	"strconv"
 	"strings"
 
 	"github.com/0glabs/0g-serving-broker/common/videospec"
@@ -179,11 +180,11 @@ const (
 	// usage.completion_tokens already bakes in BOTH input-reference-media
 	// duration and output duration). OutputUnits is a straight passthrough of
 	// the observed token count; the per-unit PRICE (not the unit count) is
-	// what varies by resolution/reference-media-input tier — that variance
-	// lives in the caller's own price table, not here. Distinct from the
-	// general BillingModePerToken (chat/LLM), whose only per-request-shape
-	// variance is input-length tiering, not resolution/media-type — the
-	// wrong axis for a video model.
+	// what varies by resolution/reference-media-input tier — that variance is
+	// configured in BillingConfig.TokenPriceTiers. Distinct from the general
+	// BillingModePerToken (chat/LLM), whose only per-request-shape variance is
+	// input-length tiering, not resolution/media-type — the wrong axis for a
+	// video model.
 	BillingModePerVideoToken BillingMode = "per_video_token"
 )
 
@@ -194,6 +195,57 @@ type BillingUnitTier struct {
 	Resolution string `yaml:"resolution"`
 	Duration   int64  `yaml:"duration"`
 	Units      int64  `yaml:"units"`
+}
+
+// VideoTokenPriceTier prices ONE output-resolution tier of a per_video_token
+// model.
+//
+// For ByteDance Seedance 2.5 — the vendor this mode exists for — every tier it
+// currently serves takes multiplier 1, and configuring anything else UNDER-BILLS.
+// Its published per-SECOND prices do differ by resolution ($0.103 for 480p vs
+// $0.231 for 720p), but that difference is already the token COUNT: both divide
+// by the same $10.7037 per 1M tokens to give 9,626 and 21,590 tokens/s (see
+// common/videospec/seedance.go, which derives both from that one rate). The
+// vendor reports that count itself, so discounting 480p HERE would apply the
+// resolution twice and charge under half of what the vendor bills. 1080p is not
+// a tier to price either: videospec records it as live-rejected, and Tier()
+// snaps a 1080p request to 720p.
+//
+// So why the axis at all: a vendor CAN price a token differently by tier —
+// Seedance's own sheet lists a dearer 1080p rate for whenever 1080p becomes
+// servable — and without somewhere to put that, the only per-token price a
+// broker can publish is a single flat one. Reach for a multiplier below 1 only
+// against a vendor price sheet that states a different per-TOKEN rate for that
+// tier, never to reflect a cheaper per-second one.
+//
+// The vendor's own table has a SECOND axis — a request carrying a video input
+// is ~40% cheaper per token — and this struct deliberately does not. Nothing
+// can reach it: the OpenAI Video API's only reference input is an IMAGE (see
+// the translator's seedanceFirstFrame and common/videospec/seedance.go), so a
+// client cannot signal a video reference, and the 0G router hardcodes the same
+// dimension to false for the same reason. A configurable price for an
+// unreachable cell would be published in GET /v1/models and never charged —
+// a consumer quoting it would quote a price this broker does not honour. The
+// dimension is still PUBLISHED (as a constant false) because that is how a
+// consumer recognises a token-priced table; whoever exposes a video input adds
+// the axis here, in videospec, and in the router together.
+//
+// Multiplier, not an absolute price, for the same reason per_video_second uses
+// ResolutionMultipliers: the entry's OutputPrice stays the single per-token
+// price everything else in the broker already advertises (the on-chain ceiling
+// is the max over entries' OutputPrice), and a tier is a fraction of it. That
+// makes the ceiling correct by construction — which is why validation caps
+// Multiplier at 1: a tier ABOVE the advertised per-token price would be charged
+// but never advertised.
+//
+// The published price for a tier is floor(Multiplier × OutputPrice) — see
+// ScaledUnitPrice, which is the ONE definition both the /v1/models `variants`
+// row and the settlement path use, so what a consumer multiplies by
+// completion_tokens is the same number the broker charges.
+type VideoTokenPriceTier struct {
+	Resolution string `yaml:"resolution"`
+	// Multiplier is this tier's share of the entry's OutputPrice, in (0, 1].
+	Multiplier float64 `yaml:"multiplier"`
 }
 
 // BillingConfig describes how to turn request/response observables into billable
@@ -211,6 +263,14 @@ type BillingConfig struct {
 
 	// Table is the (resolution, duration) → units lookup for per_unit_table.
 	Table []BillingUnitTier `yaml:"table"`
+
+	// TokenPriceTiers is the resolution → per-token price table for
+	// per_video_token, and is rejected for every other mode. It is the ONLY
+	// channel a tiered per-token price has to a consumer: the broker publishes
+	// one `variants` row per entry in GET /v1/models and bills the matching
+	// row's price itself, so an unpriced tier is not a display gap — it is the
+	// model being unbillable downstream (see validateTokenPriceTiers).
+	TokenPriceTiers []VideoTokenPriceTier `yaml:"tokenPriceTiers"`
 
 	// Vendor names the upstream behind this model, so the broker can resolve what
 	// that vendor will ACTUALLY render for a request — the clip length and the
@@ -265,15 +325,89 @@ func (b *BillingConfig) resolutionMultiplier(resolution string) float64 {
 	return 1.0
 }
 
+// TokenPriceMultiplier returns the per-token price multiplier for an observed
+// resolution tier, reporting whether a row covers it. Matching is
+// case/whitespace-insensitive (see normalizeResolution); validateBillingConfig
+// rejects rows that collide under it, so the first match is unambiguous.
+//
+// A miss is reported rather than defaulted to 1.0. The caller bills the
+// unscaled OutputPrice — the advertised ceiling, so never an underbill — but it
+// must be able to say so: an untabled tier means the /v1/models table has no row
+// for this request either, so the consumer that pays this broker is pricing it
+// from a fallback too.
+func (b *BillingConfig) TokenPriceMultiplier(resolution string) (float64, bool) {
+	res := normalizeResolution(resolution)
+	for _, t := range b.TokenPriceTiers {
+		if normalizeResolution(t.Resolution) == res {
+			return t.Multiplier, true
+		}
+	}
+	return 0, false
+}
+
+// MultiplierRat converts a configured multiplier to an exact rational.
+//
+// Through the SHORTEST decimal that round-trips the float, not through
+// big.Rat.SetFloat64: the operator wrote `multiplier: 0.6`, and SetFloat64
+// faithfully represents the binary double they got instead —
+// 0.59999999999999997780 — which then renders as a published USD unit_price of
+// "0.599999999999999978" and floors a native price to 59 wei per 100. The
+// shortest round-tripping decimal is the number they actually typed. Reports
+// false for a NaN/Inf multiplier; validation rejects those.
+func MultiplierRat(multiplier float64) (*big.Rat, bool) {
+	r, ok := new(big.Rat).SetString(strconv.FormatFloat(multiplier, 'g', -1, 64))
+	if !ok {
+		return nil, false
+	}
+	return r, true
+}
+
+// ScaledUnitPrice returns floor(multiplier × base): the per-unit price at one
+// tier of a multiplier-shaped price table, in wei. It is deliberately the ONE
+// definition of the WEI price — GET /v1/models publishes what it returns and the
+// settlement path charges what it returns, so "unit_price × quantity" means the
+// same amount on both sides rather than merely being intended to.
+//
+// The USD `variants` rows are a separate, exact-rational rendering of the same
+// tier (multiplier × the per-unit USD price, no floor and no clamp), so on a
+// rounding boundary they can name a slightly different number than the wei row.
+// That is display, not settlement: every fee this broker charges is in wei, and
+// wei is what this function defines.
+//
+// Floor, matching the direction the rest of the pricing pipeline rounds
+// (pricefeed.USDPerMillionToWeiPerToken's quantization): never overstate what
+// will be charged. Reports false for a multiplier big.Rat cannot represent
+// (NaN/Inf); validation rejects those, so a false here is a caller bug, not
+// operator input.
+//
+// One exception to the floor: a positive base never scales to 0. A sub-1-wei
+// tier price is unrepresentable, and rounding it down means the model is served
+// FREE at that tier — and worse than free, since the reserve gate multiplies by
+// this too, so a zero price also stops concurrent creates from one wallet
+// seeing each other. Clamping to 1 wei cannot break the advertised ceiling
+// either: multipliers are capped at 1, so 1 wei is at most the base itself.
+func ScaledUnitPrice(base *big.Int, multiplier float64) (*big.Int, bool) {
+	rat, ok := MultiplierRat(multiplier)
+	if !ok {
+		return nil, false
+	}
+	rat.Mul(rat, new(big.Rat).SetInt(base))
+	scaled := new(big.Int).Quo(rat.Num(), rat.Denom())
+	if scaled.Sign() == 0 && base.Sign() > 0 {
+		return big.NewInt(1), true
+	}
+	return scaled, true
+}
+
 // OutputUnits computes the billable output-unit count for the resolved
 // observables. per_video_second floors at 1 (a generated clip is always ≥1
 // effective unit); per_image returns the raw scaled count (0 images → 0 units,
 // so a failed/empty generation is not charged); per_unit_table looks up the
 // exact (resolution, duration) row and errors when absent (fail rather than
 // mis-bill); per_video_token passes the vendor-reported token count straight
-// through (the caller's own price table, keyed by resolution/reference-media
-// tier, is what turns that count into a fee — see docs/design). per_token is
-// billed elsewhere and is not a valid input here.
+// through (TokenPriceTiers, which scales the PRICE by resolution, is what turns
+// that count into a fee). per_token is billed elsewhere and is not a valid
+// input here.
 func (b *BillingConfig) OutputUnits(obs BillingObservables) (int64, error) {
 	switch b.Mode {
 	case BillingModePerVideoToken:
@@ -475,10 +609,10 @@ func validateBillingConfig(prefix string, b *BillingConfig, serviceType string) 
 	// per_unit_table, one block down: a knob that appears to work is worse than
 	// one that is absent.
 	//
-	// Per-model price variance for a token-billed model lives in the price table
-	// the caller resolves OutputPrice from, not here.
+	// Per-model price variance for a token-billed model lives in tokenPriceTiers,
+	// which scales the PRICE rather than the count.
 	if b.Mode == BillingModePerVideoToken && len(b.ResolutionMultipliers) > 0 {
-		return fmt.Errorf("invalid config: %s.resolutionMultipliers is ignored by mode %q (the vendor reports the billable token count, so resolution does not scale it) — set per-resolution pricing in the price table instead", prefix, BillingModePerVideoToken)
+		return fmt.Errorf("invalid config: %s.resolutionMultipliers is ignored by mode %q (the vendor reports the billable token count, so resolution does not scale it) — set per-resolution pricing in %s.tokenPriceTiers instead", prefix, BillingModePerVideoToken, prefix)
 	}
 	if b.Mode == BillingModePerUnitTable {
 		if len(b.Table) == 0 {
@@ -504,12 +638,131 @@ func validateBillingConfig(prefix string, b *BillingConfig, serviceType string) 
 	} else if len(b.Table) > 0 {
 		return fmt.Errorf("invalid config: %s.table is only valid for mode %q", prefix, BillingModePerUnitTable)
 	}
+	if b.Mode == BillingModePerVideoToken {
+		if err := validateTokenPriceTiers(prefix, b); err != nil {
+			return err
+		}
+	} else if len(b.TokenPriceTiers) > 0 {
+		return fmt.Errorf("invalid config: %s.tokenPriceTiers is only valid for mode %q", prefix, BillingModePerVideoToken)
+	}
 	if isVideoBillingMode(b.Mode) {
 		validateVideoVendor(prefix, b)
 	} else if b.Vendor != "" {
 		return fmt.Errorf("invalid config: %s.vendor is only valid for the video billing modes", prefix)
 	}
 	return nil
+}
+
+// validateTokenPriceTiers validates a per_video_token model's price table.
+//
+// An EMPTY table warns loudly rather than failing, for the reason
+// validateVideoVendor states one function down: per_video_token already shipped,
+// so a deployment running it today must keep running after a binary upgrade with
+// an unchanged config. Refusing to boot would take the whole provider offline
+// over a table that has a safe runtime answer — every request bills the entry's
+// unscaled outputPrice, metered as
+// broker_video_table_miss_total{reason="token_tier_uncovered"}.
+//
+// It is loud because the consequence is not local. With no table the /v1/models
+// feed carries no video_token-unit `variants` row, and a consumer classifies a
+// model's billing shape by those rows — the 0G router recognises a token-priced
+// table only that way. Left with the flat `video` scalar it either refuses the
+// model outright or bills it as a per-SECOND rate, which for a token-billed
+// model is off by the vendor's tokens-per-second (~21,600 for 720p Seedance).
+// The `video_unit` field this broker also publishes says the right thing, but
+// it is new, so no deployed consumer can be assumed to read it.
+//
+// ROWS, once present, are validated strictly: a malformed row is a typo the
+// operator can fix now, not an upgrade they are midway through. Rows naming a
+// tier the configured vendor never renders are then dropped — see
+// dropUnreachableTokenTiers.
+func validateTokenPriceTiers(prefix string, b *BillingConfig) error {
+	tiers := b.TokenPriceTiers
+	if len(tiers) == 0 {
+		log.Printf("[CONFIG] %s.tokenPriceTiers is empty for mode %q: GET /v1/models will publish no per-token price row, so a consumer can only read this model's flat `video` price as a per-SECOND rate — off by this vendor's tokens-per-second. Every request bills the unscaled outputPrice until a table is set. Add one row per resolution tier the vendor serves.", prefix, BillingModePerVideoToken)
+		return nil
+	}
+	for i, t := range tiers {
+		// Checked AFTER normalization so a whitespace-only row is rejected too: it
+		// normalizes to "", which is exactly what VideoBillingTier returns for "the
+		// request determined no tier" — so such a row would silently become the
+		// price of every unresolvable request.
+		if normalizeResolution(t.Resolution) == "" {
+			return fmt.Errorf("invalid config: %s.tokenPriceTiers[%d].resolution is required", prefix, i)
+		}
+		// > 1 is refused, not clamped: the entry's OutputPrice is what the broker
+		// advertises on-chain as the per-token price, and a tier above it would be
+		// charged without ever having been advertised.
+		if !(t.Multiplier > 0) || t.Multiplier > 1 {
+			return fmt.Errorf("invalid config: %s.tokenPriceTiers[%d].multiplier must be in (0, 1] — it is this tier's share of the entry's outputPrice, which is the advertised per-token ceiling — got %v", prefix, i, t.Multiplier)
+		}
+	}
+	// Drop unreachable rows BEFORE the duplicate check, so the check runs over
+	// exactly the rows that will be billed and published.
+	dropUnreachableTokenTiers(prefix, b)
+	seen := make(map[string]struct{}, len(b.TokenPriceTiers))
+	for _, t := range b.TokenPriceTiers {
+		// Every surviving row is already normalized, so this compares the same
+		// spellings the lookup and the published feed will use.
+		if _, dup := seen[t.Resolution]; dup {
+			return fmt.Errorf("invalid config: %s.tokenPriceTiers has a duplicate resolution=%q row (matched case/whitespace-insensitively)", prefix, t.Resolution)
+		}
+		seen[t.Resolution] = struct{}{}
+	}
+	return nil
+}
+
+// dropUnreachableTokenTiers keeps only the rows a request can actually land on,
+// normalizing their spelling to the vendor's own tier token, and reports each row
+// it removes.
+//
+// A tier row is matched against VideoBillingTier's output, which is
+// spec.Tier(size) — one canonical token per vendor. So a row naming anything else
+// can never be selected: not a typo ("720"), not 1080p on a Seedance that rejects
+// it, and not a pixel size like "1280x720" (the request path snaps one to a tier,
+// but a TABLE KEY is not a request).
+//
+// Such a row is DROPPED, not merely warned about, because leaving it in the table
+// publishes it. GET /v1/models would carry a real unit_price for a tier this
+// broker never charges at — a consumer quoting a 1080p job at that row's 0.25×
+// while settlement snaps the request to 720p and charges 1× is a 4x divergence
+// between the quote and the bill. That is precisely the harm
+// VideoTokenPriceTier's doc refuses to accept for the has-video-input axis, and
+// the resolution axis has no reason to be treated differently.
+//
+// Dropping is also why a pixel-size row is not quietly resolved onto its tier
+// instead: "1280x720" and "1080p" both resolve to 720p on Seedance, one because
+// it means that tier and one because it is REJECTED and falls to the default —
+// so honouring the first would mean a 1080p row silently repricing every 720p
+// request.
+//
+// Removal is reported rather than fatal, for validateVideoVendor's reason:
+// videospec can lag a vendor that has just opened a tier, and refusing to boot
+// over that is worse than the row it is complaining about. The row could not have
+// been billed either way.
+//
+// No vendor rules recorded means there is nothing to check a row against, so
+// every row is kept with its spelling normalized — the same degraded-but-working
+// state a deployment with no `vendor:` already has everywhere else.
+func dropUnreachableTokenTiers(prefix string, b *BillingConfig) {
+	spec, haveSpec := videospec.Get(videospec.Vendor(b.Vendor))
+	kept := b.TokenPriceTiers[:0]
+	for _, t := range b.TokenPriceTiers {
+		norm := normalizeResolution(t.Resolution)
+		if !haveSpec {
+			t.Resolution = norm
+			kept = append(kept, t)
+			continue
+		}
+		if resolved := spec.Tier(t.Resolution); normalizeResolution(resolved) != norm {
+			log.Printf("[CONFIG] %s.tokenPriceTiers: dropping resolution %q — it is not a tier vendor %q renders (its rules resolve that size to %q), so no request could ever be priced by it, and publishing it in GET /v1/models would quote consumers a price this broker never charges. Fix the spelling, or record the tier in common/videospec if the vendor has started serving it.",
+				prefix, t.Resolution, b.Vendor, resolved)
+			continue
+		}
+		t.Resolution = norm
+		kept = append(kept, t)
+	}
+	b.TokenPriceTiers = kept
 }
 
 // validateVideoVendor reports, at load, whether this model can be reserved for

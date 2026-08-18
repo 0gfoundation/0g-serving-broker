@@ -249,10 +249,18 @@ func (c *Ctrl) handleImageEditingResponse(ctx *gin.Context, resp *http.Response,
 	case !c.Service.TargetSeparated:
 		c.logger.Debug("LLM server in the same network, signing image-editing content")
 		if extractErr == nil && len(images) > 0 {
-			_ = c.signImageResponse(sigReqBody, images, chatKey)
+			// Logged, not discarded: signing is a call to the controller now, not an
+			// in-process crypto.Sign, so it fails whenever the controller cannot pin the
+			// running image. Swallowed, the client's later GET of the signature 404s with
+			// nothing pointing back at why. Still not fatal — the response is already served.
+			if err := c.signImageResponse(sigReqBody, images, chatKey); err != nil {
+				c.logger.Errorf("could not sign the image response for %s: %v", chatKey, err)
+			}
 		} else {
 			c.logger.Warnf("No b64 images extracted, falling back to full-body signature: %v", extractErr)
-			_ = c.signChatWithKey(sigReqBody, body, chatKey)
+			if err := c.signChatWithKey(sigReqBody, body, chatKey); err != nil {
+				c.logger.Errorf("could not sign the image response for %s: %v", chatKey, err)
+			}
 		}
 	}
 

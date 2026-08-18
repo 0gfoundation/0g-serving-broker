@@ -3,6 +3,7 @@ package ctrl
 import (
 	"bytes"
 	"errors"
+	"math/big"
 	"mime/multipart"
 	"net/http/httptest"
 	"strings"
@@ -469,6 +470,12 @@ func newEstimatedTokenReserveTestCtrl(t *testing.T) (*Ctrl, *gin.Context) {
 		Billing: &config.BillingConfig{
 			Mode:   config.BillingModePerVideoToken,
 			Vendor: string(videospec.VendorSeedance),
+			// Both tiers at the full price, so a fee still reads as a token count
+			// — this fixture is about the ESTIMATE, not about tier scaling.
+			TokenPriceTiers: []config.VideoTokenPriceTier{
+				{Resolution: "480p", Multiplier: 1},
+				{Resolution: "720p", Multiplier: 1},
+			},
 		},
 	}}
 	if err := c.Service.BuildModelPricingMap(); err != nil {
@@ -628,4 +635,120 @@ func TestWarnVideoTokenEstimateDrift(t *testing.T) {
 			t.Errorf("logged %d lines for a per_video_second model, want 0", rec.errors)
 		}
 	})
+}
+
+// newTieredTokenPriceCtrl builds a Seedance-shaped model whose per-token price
+// differs by tier: 720p at half the entry's outputPrice, 480p unpriced.
+func newTieredTokenPriceCtrl(t *testing.T) (*Ctrl, *gin.Context, *config.BillingConfig) {
+	t.Helper()
+	billing := &config.BillingConfig{
+		Mode:   config.BillingModePerVideoToken,
+		Vendor: string(videospec.VendorSeedance),
+		TokenPriceTiers: []config.VideoTokenPriceTier{
+			{Resolution: "720p", Multiplier: 0.5},
+		},
+	}
+	c := &Ctrl{logger: testLogger()}
+	c.Service.Type = "video-generation"
+	c.Service.ModelType = "vid-1"
+	c.Service.ModelPricing = []config.ModelPricingEntry{{
+		Model:       "vid-1",
+		OutputPrice: "1000",
+		Billing:     billing,
+	}}
+	if err := c.Service.BuildModelPricingMap(); err != nil {
+		t.Fatalf("BuildModelPricingMap: %v", err)
+	}
+	ctx := &gin.Context{}
+	ctx.Set(CtxKeyResolvedModel, "vid-1")
+	ctx.Request = httptest.NewRequest("POST", "/videos", strings.NewReader(""))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	return c, ctx, billing
+}
+
+// TestVideoTokenUnitPrice pins the number the broker charges per token against
+// the number GET /v1/models publishes for the same tier. They are the same call
+// (config.ScaledUnitPrice) precisely so this cannot drift: a consumer computes
+// unit_price × completion_tokens, and if the broker charged anything else, one
+// side of that trade would be systematically wrong on every Seedance request.
+func TestVideoTokenUnitPrice(t *testing.T) {
+	c, _, billing := newTieredTokenPriceCtrl(t)
+
+	if got := c.videoTokenUnitPrice(billing, "1000", "720p", true); got != "500" {
+		t.Errorf("720p price = %q, want 500 (0.5 x 1000)", got)
+	}
+	// The published row for the same tier must be that same number.
+	mult, ok := billing.TokenPriceMultiplier("720p")
+	if !ok {
+		t.Fatal("720p must be tabled")
+	}
+	published, ok := config.ScaledUnitPrice(big.NewInt(1000), mult)
+	if !ok || published.String() != "500" {
+		t.Errorf("published unit_price = %v, must equal the billed price", published)
+	}
+
+	// Every other mode is untouched, so callers can apply this unconditionally.
+	perSecond := &config.BillingConfig{Mode: config.BillingModePerVideoSecond}
+	if got := c.videoTokenUnitPrice(perSecond, "1000", "720p", true); got != "1000" {
+		t.Errorf("per_video_second price = %q, want it untouched", got)
+	}
+	if got := c.videoTokenUnitPrice(nil, "1000", "720p", true); got != "1000" {
+		t.Errorf("no billing block = %q, want outputPrice untouched", got)
+	}
+}
+
+// TestVideoTokenUnitPrice_UntabledTierIsLoudAndConservative: an untabled tier
+// bills the entry's UNSCALED outputPrice — the advertised ceiling, so never an
+// underbill — and must say so. Silence would be the worst outcome: the consumer
+// paying this broker has no row for that request either, so both sides are
+// falling back and neither knows.
+func TestVideoTokenUnitPrice_UntabledTierIsLoudAndConservative(t *testing.T) {
+	c, _, billing := newTieredTokenPriceCtrl(t)
+	rec := &countingLogger{Logger: c.logger}
+	c.logger = rec
+
+	if got := c.videoTokenUnitPrice(billing, "1000", "480p", true); got != "1000" {
+		t.Errorf("untabled tier price = %q, want the unscaled 1000 — never below the table", got)
+	}
+	if rec.errors != 1 {
+		t.Errorf("logged %d lines; an untabled tier must be reported exactly once — a silent fallback is how a pricing gap survives", rec.errors)
+	}
+
+	// The gate prices the same create and must NOT meter it again: the settlement
+	// call above is the one that knows the request was billed.
+	rec.errors = 0
+	if got := c.videoTokenUnitPrice(billing, "1000", "480p", false); got != "1000" {
+		t.Errorf("untabled tier price = %q, want the unscaled 1000 on the gate path too", got)
+	}
+	if rec.errors != 0 {
+		t.Errorf("logged %d lines from the gate; one create must not be counted twice", rec.errors)
+	}
+}
+
+// TestVideoCreateReserve_HoldsTheTierPrice: the gate must hold what settlement
+// will charge. Both go through videoTokenUnitPrice, so a tier at half price
+// holds half as much — a gate that kept holding the ceiling would refuse
+// callers for balance they do have.
+func TestVideoCreateReserve_HoldsTheTierPrice(t *testing.T) {
+	c, ctx := newEstimatedTokenReserveTestCtrl(t)
+	// 100 wei per token, not the fixture's 1: a half-price tier of a 1-wei price
+	// is sub-wei, and ScaledUnitPrice clamps that to 1 rather than to free.
+	c.Service.ModelPricing[0].OutputPrice = "100"
+	c.Service.ModelPricing[0].Billing.TokenPriceTiers = []config.VideoTokenPriceTier{
+		{Resolution: "480p", Multiplier: 1},
+		{Resolution: "720p", Multiplier: 0.5},
+	}
+	if err := c.Service.BuildModelPricingMap(); err != nil {
+		t.Fatalf("BuildModelPricingMap: %v", err)
+	}
+
+	// Same request as TestVideoCreateReserve_EstimatedTokenBilling (8s x 21590
+	// tokens/s at 1 wei per token = 172720), now at the 720p half-price tier.
+	fee, err := c.VideoCreateReserve(ctx, []byte(`{"seconds":8,"size":"1280x720"}`))
+	if err != nil {
+		t.Fatalf("VideoCreateReserve: %v", err)
+	}
+	if fee != "8636000" {
+		t.Errorf("fee = %q, want 8636000 (172720 tokens x floor(0.5 x 100 wei))", fee)
+	}
 }

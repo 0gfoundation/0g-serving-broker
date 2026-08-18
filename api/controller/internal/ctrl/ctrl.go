@@ -19,7 +19,10 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"gopkg.in/yaml.v3"
 
+	"github.com/0glabs/0g-serving-broker/common/attest"
 	"github.com/0glabs/0g-serving-broker/common/log"
+	"github.com/0glabs/0g-serving-broker/common/tee"
+	"github.com/0glabs/0g-serving-broker/controller/internal/attestproxy"
 	"github.com/0glabs/0g-serving-broker/controller/internal/docker"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	"github.com/0glabs/0g-serving-broker/inference/contract"
@@ -47,24 +50,70 @@ type EventEmitter interface {
 	EmitEvent(ctx context.Context, event string, payload []byte) error
 }
 
-// The two events the controller records, and their payloads.
+// SignerDeriver reports the address of the response-signing key derived from an image.
 //
-// This is a wire contract with every verifier that reads RTMR3, and the payload
-// bytes go into the event's digest — so a change to a name or an encoding is a
-// change to the measurement, and old readers stop being able to explain new logs.
-// Payloads are bare bytes rather than JSON for that reason: a verifier has to
-// reproduce them exactly, and JSON leaves key order, spacing and escaping free.
+// The record has to carry this, not just the digest. A reader can replay the ledger and can
+// verify responses against the address in the quote's report_data, but it cannot check that
+// those describe the same thing: report_data is whatever the enclave asked the hardware to sign
+// over, and the per-image key is derivable only inside the CVM. So the ledger would name an
+// image while the signatures came from somewhere unrelated, and nothing would notice — a broker
+// running unreviewed code could publish an address of its own, and a record left standing after
+// a change that did not complete would be believed.
 //
-// The zg- prefix is a namespace. dstack already writes app-id, compose-hash and
-// system-ready into RTMR3, and other components may add their own.
-const (
-	// Payload: "<repo>@sha256:<64hex>", the reference the upgrade runs on.
-	eventImageUpdate = "zg-image-update"
-	// Payload: hex(sha256(config file content)). Records behaviour, not just
-	// code: pricing, verifiability and targetUrl all live in that file, and an
-	// image digest alone would leave them changeable without a trace.
-	eventConfigUpdate = "zg-config-update"
-)
+// Deriving it here closes that, because this side of the socket can do what a reader cannot. The
+// controller derives the address the image WILL have, writes it into the append-only record, and
+// a reader then requires the quote to name the same one.
+//
+// An interface for the same reason EventEmitter is one: so the ordering can be tested.
+type SignerDeriver interface {
+	// ImageKeys returns the response-signing address and the enclave encryption public key
+	// (hex, no 0x) that an image's derivation paths yield.
+	//
+	// Both, not just the address, because report_data carries both. A reader that checked only
+	// the address would still let an image that is not the recorded one publish an enc_pub of
+	// its own — and a client seals its REQUEST to that key before any response signature exists
+	// to contradict it. The prompt would reach unreviewed code and the signature check would
+	// come too late to matter.
+	ImageKeys(ctx context.Context, digest string) (signer, encPub string, err error)
+}
+
+// dstackSignerDeriver derives through the guest agent, which is the only thing holding the app
+// key the derivation starts from.
+type dstackSignerDeriver struct {
+	client *dstack.DstackClient
+}
+
+func (d dstackSignerDeriver) ImageKeys(ctx context.Context, digest string) (string, string, error) {
+	if !imageDigestPattern.MatchString(digest) {
+		return "", "", fmt.Errorf("cannot derive keys for %q, which is not a digest", digest)
+	}
+
+	signerMaterial, err := d.client.GetKey(ctx, attestproxy.SignerKeyPath(digest), "")
+	if err != nil {
+		return "", "", fmt.Errorf("deriving the signing key for %s: %w", digest, err)
+	}
+	// Both steps shared with the proxy that signs with this key, deliberately: the address in
+	// the record has to be the address that signs, and two copies of "parse, take the address,
+	// pick a spelling" would drift.
+	key, err := attestproxy.SignerKeyFromMaterial(signerMaterial.Key)
+	if err != nil {
+		return "", "", fmt.Errorf("deriving the signer for %s: %w", digest, err)
+	}
+
+	// Same path and same pass-through the broker uses: EncPublicKeyFromMaterial hands the
+	// material to deriveEncKey exactly as getEncKey does, hex string as bytes and not decoded.
+	// Diverge on either and the recorded key is not the one requests can be opened with.
+	encMaterial, err := d.client.GetKey(ctx, attestproxy.EncKeyPath(digest), "")
+	if err != nil {
+		return "", "", fmt.Errorf("deriving the enc key for %s: %w", digest, err)
+	}
+	encPub, err := tee.EncPublicKeyFromMaterial(encMaterial.Key)
+	if err != nil {
+		return "", "", fmt.Errorf("deriving the enc public key for %s: %w", digest, err)
+	}
+
+	return attestproxy.SignerAddressOf(key), hex.EncodeToString(encPub), nil
+}
 
 // Ceilings on how long a recorded change may hold the controller.
 //
@@ -154,6 +203,7 @@ type Ctrl struct {
 	fullConfig   *config.Config // Full config for accessing Service configuration
 	dockerClient *docker.Client
 	emitter      EventEmitter
+	deriver      SignerDeriver
 
 	// Serializes the two paths that record into RTMR3 and then act.
 	//
@@ -205,6 +255,10 @@ func NewCtrl(fullConfig *config.Config, logger log.Logger) (*Ctrl, error) {
 		allowedIPs[ip] = true
 	}
 
+	// One client for both jobs it does over that socket: appending to RTMR3, and deriving the
+	// per-image key whose address goes into the record.
+	dstackClient := dstack.NewDstackClient()
+
 	ctrl := &Ctrl{
 		config:       cfg,
 		fullConfig:   fullConfig,
@@ -214,7 +268,8 @@ func NewCtrl(fullConfig *config.Config, logger log.Logger) (*Ctrl, error) {
 		// refused to start without it would take the read-only endpoints down too.
 		// An upgrade attempted without the socket fails at the emit, before
 		// anything is touched, which is the outcome that matters.
-		emitter:        dstack.NewDstackClient(),
+		emitter:        dstackClient,
+		deriver:        dstackSignerDeriver{client: dstackClient},
 		adminAddresses: adminAddresses,
 		allowedIPs:     allowedIPs,
 		logger:         logger,
@@ -450,7 +505,7 @@ func (c *Ctrl) ApplyCoreConfig(ctx context.Context, configContent string) error 
 	defer cancel()
 
 	sum := sha256.Sum256([]byte(configContent))
-	if err := c.emitter.EmitEvent(ctx, eventConfigUpdate, []byte(hex.EncodeToString(sum[:]))); err != nil {
+	if err := c.emitter.EmitEvent(ctx, attest.EventConfigUpdate, []byte(hex.EncodeToString(sum[:]))); err != nil {
 		return fmt.Errorf("recording the config change in RTMR3: %w", err)
 	}
 
@@ -468,8 +523,52 @@ func (c *Ctrl) ApplyCoreConfig(ctx context.Context, configContent string) error 
 	if err := c.dockerClient.RestartContainer(ctx, containerEvent); err != nil {
 		return fmt.Errorf("failed to restart event: %w", err)
 	}
+	// Restarting is enough to move a container's IP, so this path needs the same
+	// re-resolution the image path does.
+	if err := c.reloadIngress(ctx); err != nil {
+		return err
+	}
 
 	return nil
+}
+
+// reloadIngress makes the reverse proxy re-resolve the containers behind it.
+//
+// Recreating a container gives it a new IP, and the proxy in front of the broker
+// resolves its backend once — at config load — and then caches that address. So
+// every image change and every config change leaves the proxy dialling an address
+// nothing answers on, and the provider stops responding to the outside world while
+// looking healthy from the inside: the broker's health check passes, the RTMR3
+// record is written, the contract is updated, and a request from within the compose
+// network succeeds, because everything except the proxy resolves DNS per call.
+//
+// Measured on a mainnet deployment: after an in-band upgrade every request through
+// the ingress terminated with haproxy's SC flag (the backend refused the
+// connection) while curl from inside that same container returned 200.
+//
+// A restart rather than a signal. SIGUSR2 reloads haproxy in master-worker mode,
+// but the ingress image is not ours to depend on, and for a process that does not
+// handle USR2 the default action is to terminate — so the signal is either a reload
+// or an accident depending on an image we do not control. The restart costs a few
+// seconds of the port, which is free here: both callers have just stopped the broker
+// for far longer than that, so nothing is being interrupted that was still working.
+//
+// A deployment with no ingress is not an error. Only its absence is tolerated,
+// though — a restart that fails for any other reason is reported, because the
+// alternative is a provider that is unreachable and says nothing about it.
+func (c *Ctrl) reloadIngress(ctx context.Context) error {
+	err := c.dockerClient.RestartContainer(ctx, containerIngress)
+	if err == nil {
+		c.logger.Infof("[reloadIngress] Restarted %s so it re-resolves the recreated containers", containerIngress)
+		return nil
+	}
+
+	var notFound *docker.ContainerNotFoundError
+	if errors.As(err, &notFound) {
+		c.logger.Infof("[reloadIngress] No %s in this deployment; nothing in front of the broker to re-resolve", containerIngress)
+		return nil
+	}
+	return fmt.Errorf("restarting %s so it re-resolves the recreated containers: %w", containerIngress, err)
 }
 
 // AmbiguousContainerError is returned when a container the upgrade must act on cannot
@@ -568,10 +667,33 @@ func (c *Ctrl) restoreImageRecord(ctx context.Context) error {
 		// the attested image.
 		c.logger.Warnf("[UpdateImages] %q resolved to container %q, recording the running image as unknown", containerBroker, status.Name)
 	default:
-		payload = status.Image
+		// The record must bind the address too, or a reader refuses it — which is the right
+		// outcome when the truth cannot be established, and the wrong one here, where it can.
+		// Derived from the digest this container actually runs, so the record describes the
+		// process that will answer the next quote.
+		//
+		// On its own budget, a fraction of the restore's, because the emit below still has to
+		// happen. The derivation and the emit talk to the SAME dstack socket, so the failure that
+		// most plausibly requires a restore is also the one that hangs the derivation — and
+		// letting it consume the whole deadline would leave the emit failing instantly on an
+		// expired context, with the stale record standing as the ledger's last word.
+		lookupCtx, cancelLookup := context.WithTimeout(ctx, restoreTimeout/3)
+		defer cancelLookup()
+
+		digest, digestErr := c.RunningBrokerDigest(lookupCtx)
+		if digestErr != nil {
+			c.logger.Warnf("[UpdateImages] Could not resolve the broker's digest to restore the RTMR3 record, recording it as unknown: %v", digestErr)
+			break
+		}
+		signer, encPub, keyErr := c.deriver.ImageKeys(lookupCtx, digest)
+		if keyErr != nil {
+			c.logger.Warnf("[UpdateImages] Could not derive the keys for %s to restore the RTMR3 record, recording it as unknown: %v", digest, keyErr)
+			break
+		}
+		payload = c.config.ImageRepo + "@" + digest + " " + signer + " " + encPub
 	}
 
-	return c.emitter.EmitEvent(ctx, eventImageUpdate, []byte(payload))
+	return c.emitter.EmitEvent(ctx, attest.EventImageUpdate, []byte(payload))
 }
 
 // abortConfigChange restores the config record and returns the error to report.
@@ -599,7 +721,7 @@ func (c *Ctrl) abortConfigChange(ctx context.Context, cause error) error {
 		payload = hex.EncodeToString(sum[:])
 	}
 
-	if err := c.emitter.EmitEvent(ctx, eventConfigUpdate, []byte(payload)); err != nil {
+	if err := c.emitter.EmitEvent(ctx, attest.EventConfigUpdate, []byte(payload)); err != nil {
 		c.logger.Errorf("[ApplyCoreConfig] RTMR3 names config content that was not applied and the record could not be restored: %v", err)
 		return errors.Join(cause, fmt.Errorf("RTMR3 still names the config this change did not apply, and restoring it failed: %w", err))
 	}
@@ -614,16 +736,6 @@ type InvalidContainerError struct {
 
 func (e *InvalidContainerError) Error() string {
 	return "invalid container alias: " + e.Alias
-}
-
-// ForbiddenEnvKeyError is returned when trying to modify an env key not in the whitelist
-type ForbiddenEnvKeyError struct {
-	Key     string
-	Allowed []string
-}
-
-func (e *ForbiddenEnvKeyError) Error() string {
-	return fmt.Sprintf("environment variable '%s' is not allowed, allowed keys: %v", e.Key, e.Allowed)
 }
 
 // InvalidConfigError is returned when the config content is not valid YAML
@@ -832,6 +944,36 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 		return nil, err
 	}
 
+	// The address the broker's signing key will have once it runs ref, derived before anything
+	// is touched.
+	//
+	// It goes into the record, because a digest alone says nothing about the process that ends up
+	// holding the key — see SignerDeriver. Derived here rather than beside the emit so that a
+	// guest agent that cannot answer costs nothing: the containers are still up, nothing has been
+	// pulled, and the caller gets an error against an untouched deployment.
+	//
+	// Failing rather than recording the digest without an address is the fail-closed direction,
+	// and the only one available. A record naming an image with nothing bound to it is exactly as
+	// plausible as a correct one and exactly as unverifiable, so a reader refuses it — which
+	// would take the deployment down as surely as this does, but after the upgrade rather than
+	// before, and with the ledger permanently carrying the claim.
+	//
+	// Refuse outright if this controller is not serving the attestation proxy. The record binds an
+	// address derived per image, and that is only the address the broker publishes when the broker
+	// signs through this controller. Without the proxy the broker derives its key at a fixed path
+	// instead, so every quote it serves after this would name an address the record does not — and
+	// a reader would refuse the CVM permanently, because no later record can name the right address
+	// either. Unlike an unreadable record, that is unrecoverable, so it must not be reachable by
+	// asking for an upgrade.
+	if os.Getenv(attestproxy.SocketEnvVar) == "" {
+		return nil, fmt.Errorf("refusing to upgrade: %s is unset, so the broker does not sign through this controller and any record written here would name an address no quote can match. On a TEE node, regenerate the deployment so the controller serves the attestation proxy. Elsewhere there is no dstack guest agent to record a change against, and in-place upgrade is not available at all", attestproxy.SocketEnvVar)
+	}
+
+	signer, encPub, err := c.deriver.ImageKeys(ctx, digest)
+	if err != nil {
+		return nil, fmt.Errorf("deriving the keys for %s, which the RTMR3 record must bind: %w", ref, err)
+	}
+
 	// Step 1: Pull the latest image
 	c.logger.Info("[UpdateImages] Pulling latest image...")
 	imageInfo, err := c.dockerClient.PullImage(ctx, ref)
@@ -888,7 +1030,7 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 	// Still before the change, so a change cannot happen unrecorded: stopping a
 	// container does not alter its image, and the create below is the first thing
 	// that does.
-	if err := c.emitter.EmitEvent(ctx, eventImageUpdate, []byte(ref)); err != nil {
+	if err := c.emitter.EmitEvent(ctx, attest.EventImageUpdate, []byte(ref+" "+signer+" "+encPub)); err != nil {
 		// The broker is stopped and nothing was recorded, so the ledger is still
 		// truthful — but leaving it down would turn a dstack hiccup into an outage.
 		// Best effort: on failure the caller gets an error either way.
@@ -897,8 +1039,14 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 		// would be left stopped for exactly the reason this branch exists to avoid.
 		startCtx, cancelStart := context.WithTimeout(context.WithoutCancel(ctx), restoreTimeout)
 		defer cancelStart()
-		if startErr := c.dockerClient.StartContainer(startCtx, brokerName); startErr != nil {
-			c.logger.Errorf("[UpdateImages] Could not restart the broker after failing to record the change: %v", startErr)
+		// Both, not just the broker. This branch runs after both were stopped, so starting
+		// one leaves settlement and event processing down while the broker answers
+		// requests — an outage in the half nobody is watching, reported as an error that
+		// mentions only RTMR3.
+		for _, name := range []string{brokerName, eventName} {
+			if startErr := c.dockerClient.StartContainer(startCtx, name); startErr != nil {
+				c.logger.Errorf("[UpdateImages] Could not restart %s after failing to record the change: %v", name, startErr)
+			}
 		}
 		result.Success = false
 		result.Error = "failed to record the image change in RTMR3: " + err.Error()
@@ -957,6 +1105,18 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 		return result, err
 	}
 
+	// Before the contract write, because this is what restores traffic: the proxy in
+	// front of the broker is still dialling the container this upgrade replaced.
+	if err := c.reloadIngress(ctx); err != nil {
+		// Reported rather than logged. The image did change and the ledger says so
+		// truthfully, but until this succeeds the provider answers nothing from
+		// outside — and the existing convention for "the change happened and the
+		// operation did not finish" is exactly this.
+		result.Success = false
+		result.Error = err.Error() + " — the new image is running and recorded, but nothing outside the CVM can reach it until this is done"
+		return result, err
+	}
+
 	// Step 4: Sync service in the contract with new image digest
 	// This is done AFTER containers are successfully recreated to ensure
 	// the contract always reflects the actual running state
@@ -1009,35 +1169,14 @@ func (c *Ctrl) UpdatePrometheusConfig(ctx context.Context, base64Config string) 
 	return nil
 }
 
-// UpdateIngressConfig updates the ingress container environment variables
-// Validates env keys against the IngressAllowedEnvKeys whitelist
-func (c *Ctrl) UpdateIngressConfig(ctx context.Context, envUpdates map[string]string) error {
-	// Validate env keys against whitelist
-	for key := range envUpdates {
-		allowed := false
-		for _, allowedKey := range config.IngressAllowedEnvKeys {
-			if key == allowedKey {
-				allowed = true
-				break
-			}
-		}
-		if !allowed {
-			return &ForbiddenEnvKeyError{Key: key, Allowed: config.IngressAllowedEnvKeys}
-		}
-	}
-
-	ingressName := containerIngress
-	c.logger.Infof("[UpdateIngressConfig] Updating ingress container %s with env keys: %v", ingressName, mapKeys(envUpdates))
-
-	if err := c.dockerClient.UpdateContainerEnv(ctx, ingressName, envUpdates); err != nil {
-		return fmt.Errorf("failed to update ingress container: %w", err)
-	}
-
-	c.logger.Info("[UpdateIngressConfig] Ingress config updated successfully")
-	return nil
-}
-
-// GetIngressEnv returns the current environment variables of the ingress container
+// GetIngressEnv returns the ingress container's environment, narrowed to the keys
+// worth reporting.
+//
+// Reporting only. Nothing writes these any more: what the ingress routes traffic to is
+// fixed by the compose file, so it is covered by compose_hash and cannot be changed
+// through this API at all. config.IngressAllowedEnvKeys is therefore a display filter
+// here — it keeps a token or a certificate out of the response, not a caller out of the
+// container.
 func (c *Ctrl) GetIngressEnv(ctx context.Context) (map[string]string, error) {
 	ingressName := containerIngress
 	return c.dockerClient.GetContainerEnv(ctx, ingressName, config.IngressAllowedEnvKeys)
@@ -1053,11 +1192,61 @@ func (c *Ctrl) GetPrometheusConfig(ctx context.Context) (string, error) {
 	return env["PROMETHEUS_CONFIG"], nil
 }
 
-// mapKeys returns the keys of a map as a slice
-func mapKeys(m map[string]string) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
+// RunningBrokerDigest reports the digest of the image the broker container runs.
+//
+// The attestation proxy derives per-image keys from it, so it refuses anything it cannot pin
+// down exactly: a name that only matched by substring, a reference carrying no digest, or no
+// container at all. A key derived from a guess would still produce signatures that verify,
+// which is the one outcome worse than refusing to sign.
+func (c *Ctrl) RunningBrokerDigest(ctx context.Context) (string, error) {
+	status, err := c.dockerClient.GetContainerStatus(ctx, containerBroker)
+	if err != nil {
+		return "", fmt.Errorf("reading the broker's image: %w", err)
 	}
-	return keys
+	if status == nil {
+		return "", fmt.Errorf("no %s container", containerBroker)
+	}
+	// Container lookup falls back to a shortest-substring match, which is fine for a status
+	// endpoint and not for this: a neighbour's digest would key a signature the client
+	// attributes to the broker.
+	if status.Name != containerBroker {
+		return "", fmt.Errorf("%q resolved to container %q, not the broker", containerBroker, status.Name)
+	}
+	// A reference that pins a digest already names the image the container was created on,
+	// and no lookup can improve on it.
+	if _, digest, pinned := strings.Cut(status.Image, "@"); pinned {
+		if !imageDigestPattern.MatchString(digest) {
+			return "", fmt.Errorf("the broker runs %q, whose digest is malformed", status.Image)
+		}
+		return digest, nil
+	}
+
+	// Otherwise resolve the image the container is RUNNING, by ID.
+	//
+	// Not by the reference string: a shipping compose file names the image by tag, and
+	// asking the daemon what that tag points at answers "what would start now", which
+	// `docker pull repo:tag` changes underneath a live container. The key would then be
+	// derived from an image that is not the one serving requests — and it would be derived
+	// from the image a reviewer approved while the unreviewed one answered, which is the
+	// exact substitution this whole arrangement exists to prevent.
+	if status.ImageID == "" {
+		return "", fmt.Errorf("the broker runs %q, which pins no digest, and the daemon reported no image ID", status.Image)
+	}
+	info, err := c.dockerClient.GetImageInfo(ctx, status.ImageID)
+	if err != nil {
+		return "", fmt.Errorf("resolving the running image %s to a digest: %w", status.ImageID, err)
+	}
+	if !imageDigestPattern.MatchString(info.Digest) {
+		// Fail closed. An image built locally and never pushed carries no digest at all, and
+		// a signature under a key derived from a guess is worse than no signature, because
+		// it would verify.
+		return "", fmt.Errorf("the running image %s resolves to no digest", status.ImageID)
+	}
+	// An image known under several repositories (a mirror as well as the origin) can carry
+	// more than one manifest digest, and inspecting by ID gives no repository to prefer. If
+	// the entry picked here is not the one the RTMR3 record names, the signer address a
+	// client derives will not match the one in report_data and the client rejects — wrong,
+	// but wrong in the direction that refuses service rather than the one that accepts an
+	// unreviewed image.
+	return info.Digest, nil
 }

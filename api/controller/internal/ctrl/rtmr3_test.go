@@ -13,9 +13,12 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/0glabs/0g-serving-broker/common/attest"
 	commonconfig "github.com/0glabs/0g-serving-broker/common/config"
 	"github.com/0glabs/0g-serving-broker/common/log"
+	"github.com/0glabs/0g-serving-broker/controller/internal/attestproxy"
 	"github.com/0glabs/0g-serving-broker/controller/internal/docker"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 )
@@ -75,6 +78,19 @@ func (e *fakeEmitter) EmitEvent(ctx context.Context, event string, payload []byt
 // proceed unless each resolves by its exact name. The upgrade tests instead fail the
 // *second* container create — the event container's — which is past everything they
 // assert and short of the contract sync, which would need a chain to talk to.
+// withIngress adds broker-ingress to what fakeChangeDaemon lists, and ingressFails
+// makes restarting it fail. Package-level rather than parameters because twenty
+// existing tests call this helper and none of them care.
+var (
+	withIngress  bool
+	ingressFails bool
+	// eventCreates lets a test get past the second container. Off by default: every
+	// pre-existing test here uses that failure to reach an abort path.
+	eventCreates bool
+)
+
+const ingressID = "cafe" + "000000000000000000000000000000000000000000000000000000000000"
+
 func fakeChangeDaemon(t *testing.T, l *opLog, pullBody string) *docker.Client {
 	t.Helper()
 
@@ -88,16 +104,27 @@ func fakeChangeDaemon(t *testing.T, l *opLog, pullBody string) *docker.Client {
 			l.add("pull")
 			_, _ = w.Write([]byte(pullBody))
 		case strings.HasSuffix(r.URL.Path, "/containers/json"):
-			_ = json.NewEncoder(w).Encode([]map[string]any{
+			list := []map[string]any{
 				{"Id": brokerID, "Names": []string{"/0g-serving-provider-broker"}},
 				{"Id": eventID, "Names": []string{"/0g-serving-provider-event"}},
 				{"Id": selfID, "Names": []string{"/0g-controller"}},
-			})
+			}
+			// Off by default, so the twenty existing op-sequence assertions keep
+			// describing a deployment with nothing in front of the broker.
+			if withIngress {
+				list = append(list, map[string]any{"Id": ingressID, "Names": []string{"/" + containerIngress}})
+			}
+			_ = json.NewEncoder(w).Encode(list)
 		case strings.HasSuffix(r.URL.Path, "/containers/create"):
 			creates++
 			if creates == 1 {
 				l.add("create broker")
 				_ = json.NewEncoder(w).Encode(map[string]any{"Id": "beef" + strings.Repeat("0", 60)})
+				return
+			}
+			if eventCreates {
+				l.add("create event")
+				_ = json.NewEncoder(w).Encode(map[string]any{"Id": "feed" + strings.Repeat("0", 60)})
 				return
 			}
 			l.add("create event refused")
@@ -107,7 +134,13 @@ func fakeChangeDaemon(t *testing.T, l *opLog, pullBody string) *docker.Client {
 			l.add("stop " + containerOf(r.URL.Path, "/stop"))
 			w.WriteHeader(http.StatusNoContent)
 		case strings.HasSuffix(r.URL.Path, "/restart"):
-			l.add("restart " + containerOf(r.URL.Path, "/restart"))
+			name := containerOf(r.URL.Path, "/restart")
+			l.add("restart " + name)
+			if ingressFails && strings.Contains(r.URL.Path, ingressID) {
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]any{"message": "no such image"})
+				return
+			}
 			w.WriteHeader(http.StatusNoContent)
 		case strings.HasSuffix(r.URL.Path, "/start"):
 			l.add("start")
@@ -208,9 +241,52 @@ func testLogger(t *testing.T) log.Logger {
 	return l
 }
 
+// testSigner is what fakeDeriver answers, so a test can assert on the whole record.
+const (
+	testSigner = "0x1111111111111111111111111111111111111111"
+	testEncPub = "beef000000000000000000000000000000000000000000000000000000000123"
+)
+
+// fakeDeriver stands in for the guest agent's key derivation. err makes a derivation that cannot
+// answer testable, which has to abort the upgrade rather than record a digest with nothing bound
+// to it; block makes it hang until its context is done, which is how the socket behaves when the
+// guest agent is wedged — the same failure that most plausibly caused the upgrade to need
+// restoring in the first place.
+type fakeDeriver struct {
+	log   *opLog
+	err   error
+	block bool
+	seen  []string
+}
+
+func (d *fakeDeriver) ImageKeys(ctx context.Context, digest string) (string, string, error) {
+	d.seen = append(d.seen, digest)
+	if d.log != nil {
+		d.log.add("derive " + digest)
+	}
+	if d.block {
+		<-ctx.Done()
+		return "", "", ctx.Err()
+	}
+	if d.err != nil {
+		return "", "", d.err
+	}
+	return testSigner, testEncPub, nil
+}
+
+// imageRecord is the payload the recorder writes: the reference, then both keys derived from
+// that image.
+func imageRecord(ref string) string { return ref + " " + testSigner + " " + testEncPub }
+
 func newChangeCtrl(t *testing.T, l *opLog, emitErr error, configFile string, pullBody string) *Ctrl {
 	t.Helper()
+	return newChangeCtrlWithDeriver(t, l, emitErr, configFile, pullBody, &fakeDeriver{log: l})
+}
+
+func newChangeCtrlWithDeriver(t *testing.T, l *opLog, emitErr error, configFile string, pullBody string, deriver SignerDeriver) *Ctrl {
+	t.Helper()
 	t.Cleanup(docker.SetHostnameForTests(selfHost))
+	t.Setenv(attestproxy.SocketEnvVar, "/var/run/zg-tee/tee.sock")
 	return &Ctrl{
 		config: config.ControllerConfig{
 			ImageRepo:  imageRepo,
@@ -218,6 +294,7 @@ func newChangeCtrl(t *testing.T, l *opLog, emitErr error, configFile string, pul
 		},
 		dockerClient: fakeChangeDaemon(t, l, pullBody),
 		emitter:      &fakeEmitter{log: l, err: emitErr},
+		deriver:      deriver,
 		logger:       testLogger(t),
 	}
 }
@@ -245,7 +322,7 @@ func TestConfigChangeIsRecordedBeforeItHappens(t *testing.T) {
 	}
 
 	sum := sha256.Sum256([]byte(content))
-	wantEmit := "emit " + eventConfigUpdate + " " + hex.EncodeToString(sum[:])
+	wantEmit := "emit " + attest.EventConfigUpdate + " " + hex.EncodeToString(sum[:])
 	ops := l.all()
 	if len(ops) == 0 || ops[0] != wantEmit {
 		t.Fatalf("ops = %v, want %q first", ops, wantEmit)
@@ -317,7 +394,7 @@ func TestImageChangeIsRecordedOnceNoBrokerIsRunning(t *testing.T) {
 	}
 
 	ops := l.all()
-	emit := l.indexOf("emit " + eventImageUpdate + " " + imageRepo + "@" + testDigest)
+	emit := l.indexOf("emit " + attest.EventImageUpdate + " " + imageRecord(imageRepo+"@"+testDigest))
 	if emit < 0 {
 		t.Fatalf("ops = %v, want the image change recorded", ops)
 	}
@@ -383,8 +460,89 @@ func TestFailedPullRecordsNothing(t *testing.T) {
 		t.Fatal("UpdateImages() = nil, want the pull to fail")
 	}
 
-	if ops := l.all(); len(ops) != 1 || ops[0] != "pull" {
-		t.Errorf("ops = %v, want the pull and nothing else", ops)
+	// The derivation runs first — deliberately, so an unreachable guest agent costs an untouched
+	// deployment rather than a pull — but it writes nothing. What matters is that no record and no
+	// container operation happened.
+	for _, op := range l.all() {
+		if op != "pull" && !strings.HasPrefix(op, "derive ") {
+			t.Errorf("ops = %v, want only the derivation and the pull", l.all())
+			break
+		}
+	}
+	if l.indexOf("pull") < 0 {
+		t.Errorf("ops = %v, want the pull to have been attempted", l.all())
+	}
+}
+
+// The record must bind a signer, so a derivation that cannot answer has to abort the upgrade —
+// before anything is pulled, stopped or recreated.
+//
+// Recording the digest without an address would not be the lenient option. A reader refuses such
+// a record, so the deployment would go down just the same, except after the upgrade instead of
+// before it and with the ledger permanently carrying a claim nothing can check.
+func TestUpgradeRefusesWhenTheSignerCannotBeDerived(t *testing.T) {
+	l := &opLog{}
+	c := newChangeCtrlWithDeriver(t, l, nil, "", okPull, &fakeDeriver{log: l, err: errors.New("dstack.sock: connection refused")})
+
+	if _, err := c.UpdateImages(context.Background(), testDigest); err == nil {
+		t.Fatal("UpdateImages() = nil, want a refusal when the signer cannot be derived")
+	}
+	for _, op := range l.all() {
+		if !strings.HasPrefix(op, "derive ") {
+			t.Errorf("ops = %v, want nothing but the failed derivation — no pull, no stop, no record", l.all())
+			break
+		}
+	}
+}
+
+// The restore record must bind a signer too, derived from the image the broker is RUNNING rather
+// than the one the failed upgrade asked for — naming the requested one is precisely the stale
+// overstatement this exists to correct.
+func TestRestoreBindsTheSignerOfTheRunningImage(t *testing.T) {
+	l := &opLog{}
+	c := newChangeCtrl(t, l, nil, "", okPull)
+
+	if err := c.restoreImageRecord(context.Background()); err != nil {
+		t.Fatalf("restoreImageRecord() = %v", err)
+	}
+	want := "emit " + attest.EventImageUpdate + " " + imageRecord(imageRepo+"@"+prevDigest)
+	if ops := l.all(); len(ops) == 0 || ops[len(ops)-1] != want {
+		t.Errorf("ops = %v, want the last to be %q", ops, want)
+	}
+}
+
+// The derivation and the emit talk to the same socket, so a derivation that hangs must not eat
+// the whole restore budget and leave the corrective emit with none — the stale record would then
+// stand as the ledger's last word, which is the failure this function exists to prevent.
+func TestRestoreKeepsBudgetForTheEmitWhenTheDerivationHangs(t *testing.T) {
+	l := &opLog{}
+	c := newChangeCtrlWithDeriver(t, l, nil, "", okPull, &fakeDeriver{log: l, block: true})
+
+	ctx, cancel := context.WithTimeout(context.Background(), restoreTimeout)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- c.restoreImageRecord(ctx) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("restoreImageRecord() = %v, want it to record something despite the hang", err)
+		}
+	case <-time.After(restoreTimeout):
+		t.Fatal("restoreImageRecord did not return within the restore budget")
+	}
+
+	var emitted string
+	for _, op := range l.all() {
+		if strings.HasPrefix(op, "emit "+attest.EventImageUpdate+" ") {
+			emitted = strings.TrimPrefix(op, "emit "+attest.EventImageUpdate+" ")
+		}
+	}
+	if emitted == "" {
+		t.Fatalf("ops = %v, want the corrective record to have been emitted", l.all())
+	}
+	if strings.Contains(emitted, "@") {
+		t.Errorf("recorded %q, want a payload that pins no digest", emitted)
 	}
 }
 
@@ -416,7 +574,7 @@ func TestRestoreFailsClosedWhenTheImageIsUnknown(t *testing.T) {
 	}
 	// attest.ResolveRunningState refuses a payload that pins no digest, which is the
 	// whole point: refusing beats believing the record being replaced.
-	payload := strings.TrimPrefix(ops[0], "emit "+eventImageUpdate+" ")
+	payload := strings.TrimPrefix(ops[0], "emit "+attest.EventImageUpdate+" ")
 	if strings.Contains(payload, "@") {
 		t.Errorf("recorded %q, want a payload that pins no digest", payload)
 	}
@@ -469,7 +627,7 @@ func TestFailedConfigWriteRestoresTheRecord(t *testing.T) {
 	}
 
 	sum := sha256.Sum256([]byte(onDisk))
-	want := "emit " + eventConfigUpdate + " " + hex.EncodeToString(sum[:])
+	want := "emit " + attest.EventConfigUpdate + " " + hex.EncodeToString(sum[:])
 	if ops := l.all(); len(ops) != 1 || ops[0] != want {
 		t.Errorf("ops = %v, want %q — the hash of what is actually on disk", ops, want)
 	}
@@ -621,8 +779,122 @@ func TestRestoreRunsOnItsOwnContext(t *testing.T) {
 	}
 
 	sum := sha256.Sum256([]byte(onDisk))
-	want := "emit " + eventConfigUpdate + " " + hex.EncodeToString(sum[:])
+	want := "emit " + attest.EventConfigUpdate + " " + hex.EncodeToString(sum[:])
 	if ops := l.all(); len(ops) != 1 || ops[0] != want {
 		t.Errorf("ops = %v, want %q — the restore must run even on a dead context", ops, want)
+	}
+}
+
+// A deployment with a controller but no attestation proxy is the one case where recording the
+// truth is worse than refusing: the broker derives at a fixed path, so no record this controller
+// writes can ever match a quote, and no later record can repair it either.
+func TestUpgradeRefusesWithoutTheAttestationProxy(t *testing.T) {
+	l := &opLog{}
+	c := newChangeCtrl(t, l, nil, "", okPull)
+	t.Setenv(attestproxy.SocketEnvVar, "")
+
+	if _, err := c.UpdateImages(context.Background(), testDigest); err == nil {
+		t.Fatal("UpdateImages() = nil, want a refusal when the attestation proxy is not served")
+	}
+
+	// Before anything is touched: no derivation, no pull, no emit, no container stopped.
+	if ops := l.all(); len(ops) != 0 {
+		t.Fatalf("refused after acting: %v", ops)
+	}
+}
+
+// upgradePastRecreate runs UpdateImages and swallows what happens after the
+// containers exist. Deliberate: the step after them is the contract write, these
+// tests have no chain, and SyncService panics rather than erroring without one. The
+// ingress reload is ordered before that write — it is what restores traffic — so
+// everything these tests assert on has already been recorded by the time this
+// returns.
+func upgradePastRecreate(t *testing.T, c *Ctrl) {
+	t.Helper()
+	defer func() { _ = recover() }()
+	_, _ = c.UpdateImages(context.Background(), testDigest)
+}
+
+// The proxy in front of the broker resolves its backend once and caches the
+// address, so a recreated container leaves it dialling nothing. An upgrade that
+// does not restart it finishes "successfully" and takes the provider off the air.
+//
+// Measured on a mainnet deployment before this existed: every request through the
+// ingress ended with haproxy's SC flag while curl from inside that same container
+// returned 200 — healthy everywhere except where it counts.
+//
+// Asserted on the op log rather than the returned error, because UpdateImages goes
+// on to write the contract and these tests have no chain. The reload is ordered
+// before that write on purpose — it is what restores traffic — so reaching it is
+// what this checks.
+func TestUpgradeRestartsTheIngressSoItRefindsTheBroker(t *testing.T) {
+	withIngress, eventCreates = true, true
+	t.Cleanup(func() { withIngress, eventCreates = false, false })
+
+	l := &opLog{}
+	c := newChangeCtrl(t, l, nil, "", okPull)
+	upgradePastRecreate(t, c)
+
+	ops := l.all()
+	restart, lastCreate := -1, -1
+	for i, op := range ops {
+		// The op log carries container IDs, because that is what the daemon's URL
+		// carries — asserting on the name here would match nothing and pass anyway.
+		if strings.HasPrefix(op, "restart ") && strings.Contains(op, ingressID) {
+			restart = i
+		}
+		if strings.HasPrefix(op, "create ") {
+			lastCreate = i
+		}
+	}
+	if restart < 0 {
+		t.Fatalf("the ingress was never restarted, so it is still dialling the container this upgrade replaced: %v", ops)
+	}
+	// After both containers exist, or it would re-resolve to the old address again.
+	if restart < lastCreate {
+		t.Errorf("restarted the ingress at %d, before the last create at %d: %v", restart, lastCreate, ops)
+	}
+}
+
+// A deployment with no proxy in front of the broker is not an error — there is
+// nothing to re-resolve, and nothing must be touched looking for it.
+func TestUpgradeWithoutAnIngressTouchesNothing(t *testing.T) {
+	eventCreates = true // withIngress stays false: the fake lists no broker-ingress
+	t.Cleanup(func() { eventCreates = false })
+
+	l := &opLog{}
+	c := newChangeCtrl(t, l, nil, "", okPull)
+	upgradePastRecreate(t, c)
+
+	for _, op := range l.all() {
+		if strings.Contains(op, ingressID) {
+			t.Errorf("touched %s in a deployment that has none: %v", containerIngress, l.all())
+		}
+	}
+}
+
+// And a restart that fails for any other reason is reported. Swallowing it is the
+// one outcome that must not happen: the image is running, the record is written —
+// and nothing outside the CVM can reach any of it.
+func TestUpgradeReportsAnIngressThatWillNotRestart(t *testing.T) {
+	withIngress, ingressFails, eventCreates = true, true, true
+	t.Cleanup(func() { withIngress, ingressFails, eventCreates = false, false, false })
+
+	l := &opLog{}
+	c := newChangeCtrl(t, l, nil, "", okPull)
+
+	result, err := c.UpdateImages(context.Background(), testDigest)
+	if err == nil {
+		t.Fatal("UpdateImages() = nil, want the failed ingress restart reported")
+	}
+	if result == nil || result.Success {
+		t.Fatalf("result = %+v, want Success=false so the caller knows the provider is unreachable", result)
+	}
+	if !strings.Contains(result.Error, containerIngress) {
+		t.Errorf("Error = %q, should name the container that needs restarting", result.Error)
+	}
+	// The image did change, and the result still says so.
+	if len(result.UpdatedContainers) == 0 {
+		t.Error("UpdatedContainers is empty, so the caller cannot tell the image moved")
 	}
 }

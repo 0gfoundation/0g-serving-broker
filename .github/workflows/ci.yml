@@ -33,6 +33,13 @@ jobs:
       working-directory: api
       run: go test -cover ./...
 
+    # Its own Go module, so `api`'s ./... does not reach it. This is the tool that generates
+    # a provider's docker-compose.yml, and its tests are what check the generated file still
+    # parses and still withholds the dstack and docker sockets from the broker.
+    - name: Test the deployment config generator
+      working-directory: api/inference/integration/config
+      run: go test ./...
+
   integration-test:
     runs-on: ubuntu-latest
     steps:

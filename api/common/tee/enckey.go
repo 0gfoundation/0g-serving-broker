@@ -30,6 +30,12 @@ const (
 	// (§4.1).
 	encKeyDerivePath = "/e2ee-enc"
 
+	// EncKeyDerivePathSuffix is encKeyDerivePath, exported so the controller's
+	// attestation proxy derives the enclave encryption key on the same path this
+	// package does. One string, two callers: if they disagree the broker gets a key
+	// nothing sealed to.
+	EncKeyDerivePathSuffix = encKeyDerivePath
+
 	// encKeyHKDFInfo domain-separates the HKDF expansion that turns the raw
 	// TEE-derived material into the KEM seed, so this key stream can never collide
 	// with another use of the same material.
@@ -132,4 +138,24 @@ func deriveEncKey(material []byte) (pccrypto.PrivateKey, pccrypto.PublicKey, err
 func keyID(encPub pccrypto.PublicKey) []byte {
 	h := sha256.Sum256(encPub)
 	return h[:keyIDLen]
+}
+
+// EncPublicKeyFromMaterial returns just the public half of the keypair deriveEncKey builds.
+//
+// Exported for the RTMR3 recorder. The record binds the signing address so a reader can refuse
+// a quote whose report_data names a different one — but report_data carries enc_pub too, and a
+// reader that checked only the address would still let an image that is not the recorded one
+// publish an enc_pub of its own. A client seals its request to that key before any response
+// signature exists to contradict it, so the prompt reaches the wrong image and the signature
+// check comes too late to matter. Binding both closes that: the controller can compute this
+// from the material it already derives for /GetEncKey, and a reader cannot.
+//
+// material is what the derivation service returned, passed through exactly as getEncKey passes
+// it — the hex string as bytes, not decoded — or the two sides derive different keys.
+func EncPublicKeyFromMaterial(material string) (pccrypto.PublicKey, error) {
+	_, pub, err := deriveEncKey([]byte(material))
+	if err != nil {
+		return nil, err
+	}
+	return pub, nil
 }

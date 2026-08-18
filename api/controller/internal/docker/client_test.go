@@ -234,8 +234,7 @@ func selfAndOther() []map[string]any {
 }
 
 // One entry per getContainerID call site, so none of them can be repointed at
-// unguardedContainerID with the suite still green. RecreateContainerWithEnv is
-// covered through UpdateContainerEnv, which is one of its two wrappers.
+// unguardedContainerID with the suite still green.
 func TestWritePathsRefuseSelf(t *testing.T) {
 	stubHostname(t, selfHost)
 
@@ -248,8 +247,8 @@ func TestWritePathsRefuseSelf(t *testing.T) {
 			return err
 		},
 		"ReloadNginx": func(c *Client) error { return c.ReloadNginx(context.Background(), brokerName) },
-		"UpdateContainerEnv": func(c *Client) error {
-			return c.UpdateContainerEnv(context.Background(), brokerName, map[string]string{"A": "B"})
+		"RerunContainerWithEnv": func(c *Client) error {
+			return c.RerunContainerWithEnv(context.Background(), brokerName, map[string]string{"A": "B"})
 		},
 	}
 
@@ -538,10 +537,10 @@ func TestPullImage(t *testing.T) {
 		}
 	})
 
-	// Falls back to the first entry rather than reporting nothing: an image the
-	// daemon lists under some other name still has a digest worth reporting, and
-	// GET /v1/images/info answering "" would read as "no digest at all".
-	t.Run("a repository with no entry falls back to the first", func(t *testing.T) {
+	// One entry is unambiguous even when it names another repository: that is the image's
+	// only known name, so its digest is the answer, and answering "" would read as "no digest
+	// at all" on GET /v1/images/info.
+	t.Run("a single entry under another repository is still the answer", func(t *testing.T) {
 		c := fakeDaemon(t, okStream, []string{"0gfoundation/mirror@" + digestOther})
 
 		info, err := c.PullImage(context.Background(), repo+":latest")
@@ -550,6 +549,27 @@ func TestPullImage(t *testing.T) {
 		}
 		if info.Digest != digestOther {
 			t.Errorf("Digest = %q, want %q", info.Digest, digestOther)
+		}
+	})
+
+	// Two entries and no match is ambiguous, and answering with either would reinstate what
+	// the repository match exists to remove: for an image known under both an origin and a
+	// mirror, the entry that sorts first can be the mirror's, with a different manifest
+	// digest. That digest decides which key signs responses, so a wrong answer makes the
+	// derived signer disagree with the RTMR3 record — a failure that surfaces at a client
+	// instead of here. Refuse.
+	t.Run("several entries and no match reports nothing", func(t *testing.T) {
+		c := fakeDaemon(t, okStream, []string{
+			"0gfoundation/mirror@" + digestOther,
+			"0gfoundation/other@" + digestWanted,
+		})
+
+		info, err := c.PullImage(context.Background(), repo+":latest")
+		if err != nil {
+			t.Fatalf("PullImage() = %v, want nil", err)
+		}
+		if info.Digest != "" {
+			t.Errorf("Digest = %q, want empty when the repository is ambiguous", info.Digest)
 		}
 	})
 
@@ -576,6 +596,71 @@ func TestPullImage(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "unauthorized") {
 			t.Errorf("PullImage() = %v, want error mentioning the daemon's reason", err)
+		}
+	})
+}
+
+// A recreated container must stop claiming to match the compose definition it no longer
+// matches.
+//
+// Everything else about it is copied faithfully, and the compose config hash was too. That
+// quietly broke attestation: RTMR3 resets when the CVM reboots and dstack runs
+// `compose up` on the way back, so with the label intact compose leaves the upgraded
+// container alone — the ledger is empty while the upgraded image runs, and a reader falls
+// back to the compose-pinned digest and reports an image that is not running.
+//
+// Verified against a real `docker compose`: with the label copied, `up` leaves the swapped
+// image running; deleting the label is not enough, because compose does not recreate on a
+// missing one; replacing it with a value that cannot match does recreate.
+func TestRecreateContainerInvalidatesTheComposeConfigHash(t *testing.T) {
+	const realHash = "82c4aee88832d186592104b816d46ded3ae262e578e46cb34cbcc763d32a3460"
+
+	t.Run("the hash is replaced and everything else survives", func(t *testing.T) {
+		labels := map[string]string{
+			composeConfigHashLabel:            realHash,
+			"com.docker.compose.project":      "provider",
+			"com.docker.compose.service":      "0g-serving-provider-broker",
+			"com.docker.compose.oneoff":       "False",
+			"org.opencontainers.image.source": "https://example.invalid",
+		}
+
+		got := invalidateComposeConfigHash(labels)
+
+		if got[composeConfigHashLabel] == realHash {
+			t.Error("config hash was carried over, so compose would leave the upgraded container in place")
+		}
+		// Never a real hash, which is 64 hex characters, so it cannot collide with one.
+		if len(got[composeConfigHashLabel]) == 64 {
+			t.Errorf("replacement %q is hash-shaped, want one that cannot collide", got[composeConfigHashLabel])
+		}
+		// The project and service labels are how compose recognises the container at all.
+		// Dropping them would orphan it rather than have it recreated.
+		for _, k := range []string{"com.docker.compose.project", "com.docker.compose.service",
+			"com.docker.compose.oneoff", "org.opencontainers.image.source"} {
+			if got[k] != labels[k] {
+				t.Errorf("label %s = %q, want it preserved as %q", k, got[k], labels[k])
+			}
+		}
+		// The caller's map is the inspect result; rewriting it in place would edit a value
+		// the rest of the recreate still reads.
+		if labels[composeConfigHashLabel] != realHash {
+			t.Error("the input map was mutated")
+		}
+	})
+
+	// A deployment that is not compose-managed has no such label, and inventing one could
+	// confuse whatever else is reading them.
+	t.Run("nothing is added when the label is absent", func(t *testing.T) {
+		labels := map[string]string{"unrelated": "1"}
+		got := invalidateComposeConfigHash(labels)
+		if _, ok := got[composeConfigHashLabel]; ok {
+			t.Errorf("got %v, want no compose label invented", got)
+		}
+	})
+
+	t.Run("nil labels are left alone", func(t *testing.T) {
+		if got := invalidateComposeConfigHash(nil); len(got) != 0 {
+			t.Errorf("got %v, want nothing", got)
 		}
 	})
 }

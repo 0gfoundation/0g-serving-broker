@@ -86,13 +86,19 @@ func TestSeedanceTier(t *testing.T) {
 		{"the documented 480p size snaps to 480p", "832x480", "480p"},
 		{"portrait is judged by the longer side too", "480x832", "480p"},
 		{"the documented 720p size snaps to 720p", "1280x720", "720p"},
-		{"a tier this model does not serve snaps down", "1920x1080", "720p"},
+		{"a 1080p token addresses the tier the vendor has since opened", "1080p", "1080p"},
+		{"the documented 1080p size snaps to 1080p", "1920x1080", "1080p"},
+		{"a tier this model does not serve snaps down", "3840x2160", "1080p"},
 		{"an unparsable size falls to the default", "wide", "720p"},
 		{"an empty size falls to the default", "", "720p"},
 		// 1056 is equidistant from 832 and 1280. First entry wins, so this pins
 		// the ORDER of seedanceTierMaxSides: reordering it silently reprices every
 		// tied size, which is a decision that should have to edit a test.
 		{"an exact tie takes the first entry", "1056x1056", "480p"},
+		// The tie 1080p introduced, pinned for the same reason: 1600 is equidistant
+		// from 720p's 1280 and 1080p's 1920, and the order must keep resolving it to
+		// the CHEAPER tier.
+		{"the 720p/1080p tie also takes the first entry", "1600x900", "720p"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -104,16 +110,17 @@ func TestSeedanceTier(t *testing.T) {
 }
 
 // TestSeedanceResolutionToken: the "" answer is the load-bearing one — it is how
-// a caller tells a tier token apart from pixel dimensions. 1080p/4k must report
-// themselves as NOT tokens: 2.5 is live-confirmed to reject both, and recognising
-// them would forward a value the vendor refuses.
+// a caller tells a tier token apart from pixel dimensions. 4k must report itself
+// as NOT a token: the vendor still rejects it, and recognising it would forward a
+// value the vendor refuses. 1080p is on the other side of that line now — the
+// vendor opened it — so it must report its canonical spelling.
 func TestSeedanceResolutionToken(t *testing.T) {
-	for _, tok := range []string{"480p", "720p", "480P", " 720p "} {
+	for _, tok := range []string{"480p", "720p", "1080p", "480P", " 1080P "} {
 		if Seedance.ResolutionToken(tok) == "" {
 			t.Errorf("ResolutionToken(%q) = \"\", want a canonical token", tok)
 		}
 	}
-	for _, notTok := range []string{"1080p", "4k", "2K", "1280x720", "", "p"} {
+	for _, notTok := range []string{"4k", "2K", "1280x720", "", "p"} {
 		if got := Seedance.ResolutionToken(notTok); got != "" {
 			t.Errorf("ResolutionToken(%q) = %q, want \"\"", notTok, got)
 		}
@@ -145,6 +152,7 @@ func TestSeedanceEstimateBillableTokens(t *testing.T) {
 		{"720p at its published rate", "5", "1280x720", 5 * seedance720pTokensPerSecond, true},
 		{"a 720p token addresses the same tier", "5", "720p", 5 * seedance720pTokensPerSecond, true},
 		{"480p at its own rate", "5", "480p", 5 * seedance480pTokensPerSecond, true},
+		{"1080p at its own rate", "5", "1080p", 5 * seedance1080pTokensPerSecond, true},
 		// Duration goes through NormalizeSeconds, so the estimate reflects what the
 		// vendor will RENDER, not what was asked for — a request under the floor is
 		// rendered (and billed) at 4s.
@@ -192,6 +200,9 @@ func TestSeedanceRatesMatchThePublishedPrices(t *testing.T) {
 		{"480p", seedance480pTokensPerSecond, 0.103},
 		{"720p", seedance720pTokensPerSecond, 0.231},
 	} {
+		// 1080p is deliberately absent: the vendor publishes no per-second price for
+		// it, which is why its rate is formula-derived. TestSeedance1080pRateMatchesTheFormula
+		// is what stands in for this check there.
 		t.Run(tt.tier, func(t *testing.T) {
 			impliedUSD := float64(tt.ratePerSecond) * usdPerMillionTokens / 1e6
 			if drift := math.Abs(impliedUSD-tt.publishedUSDPerS) / tt.publishedUSDPerS; drift > 0.002 {
@@ -227,6 +238,31 @@ func TestSeedanceRatesMatchThePublishedPrices(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestSeedance1080pRateMatchesTheFormula is the 1080p half of the check above.
+//
+// It cannot compare against a published per-second price — the vendor prices this
+// tier per 1M tokens only — so it checks the one thing that IS published: the
+// token formula, evaluated at the tier's frame size. That makes this a typo guard
+// rather than an independent confirmation, and the difference is worth knowing:
+// if the vendor renders 1080p at something other than 1920x1080x24, this test
+// keeps passing and the estimate is wrong. The drift check in the broker
+// (ctrl.WarnVideoTokenEstimateDrift) is what would say so against real traffic.
+func TestSeedance1080pRateMatchesTheFormula(t *testing.T) {
+	const want = 1920 * 1080 * 24 / 1024
+	if seedance1080pTokensPerSecond != want {
+		t.Errorf("seedance1080pTokensPerSecond = %d, formula gives %d",
+			seedance1080pTokensPerSecond, want)
+	}
+	// The same formula on 720p, against the price-derived rate that tier actually
+	// uses: 0.05% apart. This is the evidence that trusting the formula for 1080p
+	// is reasonable, so it fails here if that stops being true.
+	const formula720p = 1280 * 720 * 24 / 1024
+	if drift := math.Abs(float64(formula720p-seedance720pTokensPerSecond)) / seedance720pTokensPerSecond; drift > 0.005 {
+		t.Errorf("the formula gives %d tokens/s for 720p against the price-derived %d (%.2f%% apart) — it no longer supports the 1080p rate above",
+			formula720p, seedance720pTokensPerSecond, drift*100)
+	}
 }
 
 // TestSeedanceSatisfiesTokenEstimator: the broker reaches this through the registry

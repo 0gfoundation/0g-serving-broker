@@ -356,7 +356,11 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 	// Sign response if needed
 	if !c.Service.TargetSeparated {
 		c.logger.Debug("LLM server in the same network, signing speech-to-text response")
-		_ = c.signChatWithKey(reqBody, body, chatKey)
+		// Logged rather than discarded, for the reason in image_editing: signing is an RPC
+		// to the controller now and refuses when the running image cannot be pinned.
+		if err := c.signChatWithKey(reqBody, body, chatKey); err != nil {
+			c.logger.Errorf("could not sign the transcription for %s: %v", chatKey, err)
+		}
 	}
 
 	// Skip billing for whitelisted users, but record whitelist traffic metrics and
@@ -492,7 +496,9 @@ func (c *Ctrl) handleStreamingSpeechToText(ctx *gin.Context, resp *http.Response
 	// Sign response if needed
 	if !c.Service.TargetSeparated {
 		c.logger.Debug("LLM server in the same network, signing streaming speech-to-text response")
-		_ = c.signChatWithKey(reqBody, rawBody.Bytes(), chatKey)
+		if err := c.signChatWithKey(reqBody, rawBody.Bytes(), chatKey); err != nil {
+			c.logger.Errorf("could not sign the transcription for %s: %v", chatKey, err)
+		}
 	}
 
 	// streamErr (set inside ctx.Stream above) is intentionally NOT returned

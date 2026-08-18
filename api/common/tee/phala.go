@@ -16,7 +16,35 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 )
 
-type PhalaTappdClient struct{}
+// DefaultDstackSocket is where the guest agent listens, and where this client goes unless
+// told otherwise.
+const DefaultDstackSocket = "/var/run/dstack.sock"
+
+// PhalaTappdClient talks the dstack guest-agent RPC over a unix socket.
+//
+// The socket is a field because a hardened deployment does not give the broker dstack's own
+// socket. That socket also serves EmitEvent, from the same unauthenticated handler, so any
+// container holding it can append to RTMR3 — including a record about the image it is itself
+// running, which is what makes the ledger unable to describe it. Such a deployment points
+// this at the controller's attestation proxy instead, which forwards GetQuote and Info and
+// nothing else — deliberately not GetKey, because a key the broker can derive is a key it can
+// keep across an upgrade. Signing goes through that proxy too, which is why setting the socket
+// switches both halves at once (see teeSocketEnvVar).
+//
+// The wire protocol is identical either way, which is the point: nothing else in this
+// package changes, and the difference is one path in the compose file.
+type PhalaTappdClient struct {
+	socket string
+}
+
+// NewPhalaTappdClient returns a client for the given socket, or the dstack default when the
+// path is empty.
+func NewPhalaTappdClient(socket string) *PhalaTappdClient {
+	if socket == "" {
+		socket = DefaultDstackSocket
+	}
+	return &PhalaTappdClient{socket: socket}
+}
 
 // QuoteResponseWithNvidia wraps the original GetQuoteResponse with nvidia_payload field
 type QuoteResponseWithNvidia struct {
@@ -45,7 +73,10 @@ func (c *PhalaTappdClient) TdxQuote(ctx context.Context, reportData []byte, nvQu
 		return "", errors.Wrap(err, "failed to marshal payload")
 	}
 
-	endpoint := "/var/run/dstack.sock"
+	endpoint := c.socket
+	if endpoint == "" {
+		endpoint = DefaultDstackSocket
+	}
 	baseURL := "http://localhost"
 	httpClient := &http.Client{
 		Transport: &http.Transport{
@@ -146,7 +177,13 @@ func (c *PhalaTappdClient) TdxQuote(ctx context.Context, reportData []byte, nvQu
 }
 
 func (c *PhalaTappdClient) DeriveKey(ctx context.Context, path string) (string, error) {
-	client := dstack.NewDstackClient()
+	// The same socket TdxQuote uses, so a deployment that has moved to the controller's
+	// proxy derives its keys through it too rather than silently falling back to dstack's.
+	var opts []dstack.DstackClientOption
+	if c.socket != "" {
+		opts = append(opts, dstack.WithEndpoint(c.socket))
+	}
+	client := dstack.NewDstackClient(opts...)
 
 	res, err := client.GetKey(ctx, path, "")
 	if err != nil {

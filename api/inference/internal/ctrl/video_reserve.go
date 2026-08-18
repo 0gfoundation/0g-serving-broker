@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"math/big"
 	"mime"
 	"mime/multipart"
 	"strconv"
@@ -166,12 +167,15 @@ func (c *Ctrl) VideoCreateReserve(ctx *gin.Context, reqBody []byte) (string, err
 	if err != nil {
 		return "", errors.Wrap(err, "get billing prices for video reserve")
 	}
-	// The same unit math the settlement path runs, so the amount held and the
-	// amount eventually charged are computed the same way rather than merely
-	// intended to agree. estimatedTokens is 0 for every seconds-billed mode, which
-	// ignores it.
+	// The same unit math AND the same per-unit price the settlement path runs, so
+	// the amount held and the amount eventually charged are computed the same way
+	// rather than merely intended to agree. estimatedTokens is 0 for every
+	// seconds-billed mode, which ignores it; videoTokenUnitPrice is a no-op for
+	// every mode but per_video_token.
 	units := c.videoOutputUnits(ctx, seconds, tier, estimatedTokens)
-	fee, err := util.Multiply(prices.OutputPrice, units)
+	// reportMiss=false: the settlement path prices this same create and meters an
+	// untabled tier there — see videoTokenUnitPrice.
+	fee, err := util.Multiply(c.videoTokenUnitPrice(billing, prices.OutputPrice, tier, false), units)
 	if err != nil {
 		return "", errors.Wrap(err, "calculate video reserve fee")
 	}
@@ -328,6 +332,64 @@ func (c *Ctrl) VideoBillingTier(ctx context.Context, size string) string {
 	// there too, but says so — the rate_class it produces is empty rather than a
 	// pixel dimension masquerading as a price class.
 	return spec.Tier(size)
+}
+
+// videoTokenUnitPrice resolves the per-token price a per_video_token request
+// bills at: the entry's outputPrice scaled by the tokenPriceTiers row covering
+// this resolution tier. Returns outputPrice untouched for every other billing
+// mode, so callers can apply it unconditionally.
+//
+// Both the balance gate and settlement call it, so the amount held and the
+// amount charged come from one computation rather than two that agree by
+// intention. It is also, by ScaledUnitPrice, the exact number GET /v1/models
+// publishes as that tier's variant unit_price — which is what makes "unit_price
+// × completion_tokens" mean the same fee to a consumer as it does here.
+//
+// An untabled tier bills the UNSCALED outputPrice — the advertised ceiling, so
+// never an underbill — and says so loudly: the same conservative-and-loud
+// treatment videoOutputUnits gives a per_unit_table miss, for the same reason
+// (the consumer paying this broker has no row for that request either).
+//
+// reportMiss belongs to the SETTLEMENT caller only. Both callers price the same
+// create, so metering both would double every reading of
+// broker_video_table_miss_total{reason="token_tier_uncovered"} — and the gate
+// runs before the balance check, so it would also count creates that are
+// refused and never billed. The metric's help text says "billed at a price the
+// table does not name", and settlement is the call that knows that happened.
+func (c *Ctrl) videoTokenUnitPrice(billing *config.BillingConfig, outputPrice, tier string, reportMiss bool) string {
+	if billing == nil || billing.Mode != config.BillingModePerVideoToken {
+		return outputPrice
+	}
+	mult, ok := billing.TokenPriceMultiplier(tier)
+	if !ok {
+		if reportMiss {
+			monitor.RecordVideoTableMiss(monitor.VideoTableMissTokenTier)
+			// Keyed on the configured VENDOR, exactly as skipVideoReserve is, never
+			// on the tier: VideoBillingTier hands back the client's raw `size`
+			// unchanged whenever no videospec rules resolved it — which an unset
+			// `vendor:` only warns about at load — so a tier key is caller-chosen in
+			// precisely the deployment this line fires on. logProofSkip's memo is
+			// shared across every reason and flushes when it overflows, so one client
+			// cycling sizes would un-throttle the routing-proof lines too. The tier
+			// is still NAMED in the message, truncated like every other echo of a
+			// caller-supplied size in this file.
+			c.logProofSkip("token_tier_uncovered", billing.Vendor,
+				"video per_video_token: no tokenPriceTiers row for resolution %q; billing the unscaled outputPrice %s per token — operator should add this row",
+				truncateForLog([]byte(tier), 80), outputPrice)
+		}
+		return outputPrice
+	}
+	base, ok := new(big.Int).SetString(outputPrice, 10)
+	if !ok {
+		c.logger.Errorf("video per_video_token: outputPrice %q is not an integer; billing it unscaled", outputPrice)
+		return outputPrice
+	}
+	scaled, ok := config.ScaledUnitPrice(base, mult)
+	if !ok {
+		c.logger.Errorf("video per_video_token: tokenPriceTiers multiplier %v for resolution %q is not representable; billing outputPrice unscaled", mult, tier)
+		return outputPrice
+	}
+	return scaled.String()
 }
 
 // WarnVideoDurationDrift reports a vendor rendering a clip length the recorded

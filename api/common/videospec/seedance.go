@@ -95,11 +95,13 @@ func (seedance) NormalizeSeconds(raw string) (int64, SecondsOutcome) {
 // resolution tier — a list, not a mapping, because the canonical spelling is the
 // element itself (lowercase, as the vendor spells it).
 //
-// 2.5 serves ONLY these two: 1080p and 4k are live-confirmed rejected with
-// InvalidParameter, so unlike MiniMax's list this one holds no forward-looking
-// entries. A future model that serves more would need its own list, not an
-// addition to this one — being recognised here means being forwarded.
-var seedanceResolutionTokens = []string{"480p", "720p"}
+// 1080p was NOT here originally: an early live probe had it rejected with
+// InvalidParameter, and the vendor has since opened it (its published rate card
+// now prices a 1080p row for dreamina-seedance-2-5-260628). 4k stays out —
+// still rejected, and unlike MiniMax's list this one holds no forward-looking
+// entries: being recognised here means being FORWARDED, so a tier is added the
+// day the vendor serves it and not before.
+var seedanceResolutionTokens = []string{"480p", "720p", "1080p"}
 
 // SeedanceDefaultTier is what this integration sends when the request names no
 // recognisable tier.
@@ -119,14 +121,16 @@ const SeedanceDefaultTier = "720p"
 // 720p, billing a client who asked for the cheap tier at the expensive one.
 //
 // Order is load-bearing on an exact tie (longer side 1056 is equidistant from
-// both): the first entry wins, so a reordering changes which tier a tied size
-// snaps to. Pinned by a test for exactly that reason.
+// 480p and 720p, 1600 from 720p and 1080p): the first entry wins, so a tie
+// snaps DOWN to the cheaper tier, and a reordering silently reprices it. Pinned
+// by a test for exactly that reason.
 var seedanceTierMaxSides = []struct {
 	token   string
 	maxSide float64
 }{
 	{"480p", 832},
 	{"720p", 1280},
+	{"1080p", 1920},
 }
 
 // ResolutionToken reports whether a "size" is one of this vendor's tier tokens,
@@ -201,6 +205,18 @@ const (
 	// seedance480pTokensPerSecond and seedance720pTokensPerSecond: see above.
 	seedance480pTokensPerSecond = 9626
 	seedance720pTokensPerSecond = 21590
+	// seedance1080pTokensPerSecond comes from the FORMULA, not the price table,
+	// because the vendor publishes no per-second figure for this tier — only its
+	// per-1M-token rate (11.70 without video input, against 10.70 for the two
+	// tiers above). 1920x1080x24/1024 = 48,600 exactly.
+	//
+	// That is the guess the comment above avoids for the other two, so it is worth
+	// saying why it is tolerable here: the same formula, run on 720p's documented
+	// 1280x720, gives 21,600 against the price-derived 21,590 — 0.05% out. The
+	// only free variable is the rendered frame size, and 1080p is 1920x1080 by
+	// definition of the tier. Replace this with a price-derived figure the day the
+	// vendor publishes a 1080p per-second price.
+	seedance1080pTokensPerSecond = 48600
 )
 
 // seedanceTokensPerSecond is the billable token rate for each tier.
@@ -224,8 +240,9 @@ const (
 // request is the case no key could fix anyway: ratio="adaptive" hands the shape to
 // the reference image, so nothing in the request determines it.
 var seedanceTokensPerSecond = map[string]int64{
-	"480p": seedance480pTokensPerSecond,
-	"720p": seedance720pTokensPerSecond,
+	"480p":  seedance480pTokensPerSecond,
+	"720p":  seedance720pTokensPerSecond,
+	"1080p": seedance1080pTokensPerSecond,
 }
 
 // EstimateBillableTokens implements TokenEstimator: the tier's per-second rate
@@ -246,6 +263,6 @@ func (s seedance) EstimateBillableTokens(rawSeconds, rawSize string) (int64, boo
 	}
 	// No overflow guard, and that is not an omission: seconds is bounded by
 	// SeedanceMaxSeconds (30) and the rate by the table above, so the product is at
-	// most 30 × 21,590 ≈ 6.5e5 — far inside int64.
+	// most 30 × 48,600 ≈ 1.5e6 — far inside int64.
 	return seconds * perSecond, true
 }

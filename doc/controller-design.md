@@ -142,6 +142,84 @@ operations listed above are refused and the error names the hostname; reads are
 unaffected. `PUT /v1/config/core` writes the config file before it restarts
 anything, so in that state it returns 500 with the file already rewritten.
 
+### 3.1b Attestation proxy — keeping the ledger out of the broker's reach
+
+dstack serves `EmitEvent` on `/var/run/dstack.sock` from the **same unauthenticated handler**
+as `GetQuote`, and binds that socket `0777`. So every container that mounts it can append to
+RTMR3 — including a record about the image it is itself running. That is why a record cannot
+describe a container which mounts that socket: the thing being described could have written
+the description.
+
+The broker mounts it today only because that is where `GetQuote` and `DeriveKey` live.
+
+The controller can serve those instead, on a second socket, forwarding two read-only dstack
+methods and answering three more itself:
+
+```
+POST /GetQuote       forwarded — the attestation itself
+POST /Info           forwarded — tcb_info, which TdxQuote assembles into its response
+POST /Sign           answered here — {hash} → 65 raw signature bytes under the running image's key
+POST /SignerAddress  answered here — the address of that key
+POST /GetEncKey      answered here — the running image's enclave encryption key
+POST /GetKey         NOT forwarded
+```
+
+`/EmitEvent` is never forwarded, and the set is a fixed allowlist rather than a denylist — a
+denylist is wrong by default the moment dstack adds a method.
+
+`/GetKey` is withheld for a second, independent reason: it derives keys by path, so a broker
+holding it could derive the *previous* image's signing key and keep signing with it after an
+upgrade — which would leave a pre-upgrade attestation verifying forever. The three operations
+that replace it hand over no signing key at all. See doc/design/per-image-signing.md.
+
+```yaml
+  0g-controller:
+    environment:
+      - ATTEST_PROXY_SOCKET=/var/run/zg-tee/tee.sock
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock     # only the controller keeps this
+      - zg-tee:/var/run/zg-tee
+
+  0g-serving-provider-broker:            # and the event container, identically
+    environment:
+      - TEE_SOCKET=/var/run/zg-tee/tee.sock
+    volumes:
+      - zg-tee:/var/run/zg-tee
+      # - /var/run/dstack.sock:/var/run/dstack.sock   ← removed; this is the line that matters
+```
+
+Both variables default to empty, which is exactly today's behaviour: the controller serves
+nothing and the broker uses dstack's socket. So this changes nothing until a deployment opts
+in, and invariant 1 holds — a controller-disabled deployment is untouched.
+
+**Three things worth being precise about.**
+
+**The proxy is not what provides the property. Removing the mount is.** A modified broker
+image does not run our code, so nothing written in the broker constrains it. What the proxy
+does is make the removal *possible*, by giving an honest broker somewhere else to ask.
+
+**A reader still cannot check that the mount is gone.** That is settled by the caller pinning
+`compose_hash` to a compose it reviewed — and the socket assignment is written in that
+compose, so reviewing it is how you learn the answer. Deriving it inside the verifier was
+tried and reverted; see §5.1a.
+
+**On its own this does not make the running digest provable** — and what closes the gap turned
+out not to be a nonce. With the ledger confined to the controller a provider can no longer
+*forge* a record, but it could still serve a **stale genuine quote** taken while it ran a
+different image, because `report_data` carries no nonce.
+
+Freshness binding was the obvious answer and is not the one taken, because it defeats replay
+of an old quote and not forgery of a new one. What closes it instead is making the signing key
+follow the image: `S = KDF(appKey, "/<digest>/sign")`, held by the controller and never handed
+out, with the record binding `S`'s address so a reader can require the quote to name the same
+one. A stale quote then names a key that no longer signs anything, so it invalidates itself
+with no protocol change on the verifier side. See doc/design/per-image-signing.md.
+
+Reachability is the volume mount, not an authentication check. That is deliberate: the broker
+cannot sign with an admin wallet, and who mounts a volume is declared per service in the
+compose file, so `compose_hash` covers it — the same discipline dstack applies to its own
+socket.
+
 ### 3.2 Environment Variable Support
 
 Both whitelists can be configured via environment variables, which **replace**
@@ -173,9 +251,28 @@ Set these in the compose file. §4.4 covers what that does and does not close.
 
 | Method | Path                      | Description                    |
 | ------ | ------------------------- | ------------------------------ |
-| GET    | `/v1/configs/:name`       | Get current config of specific container |
-| PUT    | `/v1/configs/:name`       | Update config of specific container |
-| POST   | `/v1/configs/:name/apply` | Update config and restart container |
+| GET    | `/v1/config/core`         | Get the config file shared by broker and event |
+| PUT    | `/v1/config/core`         | Write that file and restart broker + event |
+| GET    | `/v1/config/ingress`      | Report the ingress container's environment |
+| GET    | `/v1/config/prometheus`   | Get the Prometheus config (base64) |
+| PUT    | `/v1/config/prometheus`   | Rerun prometheus-init with a new config |
+
+**Breaking change**: `PUT /v1/config/ingress` has been **removed** and now returns
+**404**, indistinguishable from an unknown path.
+
+What the ingress routes traffic to is not something a running deployment should be able
+to change. It was editable through this API, against a whitelist that included
+`TARGET_ENDPOINT`, `DOMAIN` and `GATEWAY_DOMAIN` — so an admin wallet could repoint the
+front end at a different upstream — and it left no record anywhere. Those values now come from the compose file only, which means
+`compose_hash` covers them: a reader can see what they are, and they cannot change without
+the deployment's identity changing.
+
+`GET /v1/config/ingress` stays. `config.IngressAllowedEnvKeys` still narrows what it
+reports, but it is a display filter now — it keeps a token or a certificate out of the
+response, not a caller out of the container.
+
+Changing an ingress value means editing the compose file and redeploying, exactly as with
+the container names (§3.1) and the two whitelists (§4.4).
 
 ### 4.3 Image Management API
 
@@ -227,7 +324,8 @@ if the environment variable is set, editing the config file alone will not do it
 and nothing else, and it writes the same file the controller loads. A caller
 holding one admin wallet can write `controller.adminAddresses`,
 `controller.allowedIPs`, `controller.imageRepo` or `controller.docker.host` there,
-and the controller reads them at its next start. `ADMIN_ADDRESS` / `ALLOWED_IPS`
+and the controller reads them at its next start. (`PUT /v1/config/ingress` used to be a
+second such route, reaching the ingress upstream; it is gone — see §4.2.) `ADMIN_ADDRESS` / `ALLOWED_IPS`
 override the first two (§3.2); nothing overrides the other two. **Set those env
 vars in the compose file** — and note that no code path enforces a floor on the
 number of remaining admins.
@@ -281,7 +379,7 @@ on that process being honest later.
 
 | event | payload (bare bytes, not JSON) | emitted before |
 |---|---|---|
-| `zg-image-update` | `<repo>@sha256:<64hex>` — the reference the upgrade runs on | `POST /v1/images/update` touches any container |
+| `zg-image-update` | `<repo>@sha256:<64hex> <0xsigner> <enc_pub>` — the reference the upgrade runs on, then both keys derived from that image | `POST /v1/images/update` touches any container |
 | `zg-config-update` | `hex(sha256(<config file content>))` | `PUT /v1/config/core` writes the file |
 
 **Not everything is covered.** `PUT /v1/config/ingress` and
@@ -327,27 +425,51 @@ signature verifies. Nothing on the reader side can tell it from a real upgrade, 
 the payloads are unauthenticated bytes and any container on the socket can derive the
 same keys, so there is no signature to check.
 
-**A challenge nonce does not fix this.** Freshness binding defeats *replay* of a quote
-captured earlier; it does nothing against *forgery*, because the modified image can
-forge the record and then take a fresh quote carrying the verifier's nonce. Only two
-things close it, and both are decisions outside this repository:
+Neither a signature on the record nor a challenge nonce fixes that *while the broker can
+reach the socket*. There is no key to sign with that the broker cannot also derive (`GetKey`
+derives by path and any container may ask for any path), and freshness binding defeats
+*replay* of an old quote, not forgery of a new one — the modified image forges the record and
+then takes a fresh quote carrying the verifier's own nonce.
 
-- **Take the socket away from the broker** — it asks the controller for quotes and
-  derived keys instead of holding `/var/run/dstack.sock`. Coherent with the rest of the
-  design, since the controller's image is pinned by `compose_hash` and cannot upgrade
-  itself, but it makes the broker depend on the controller at startup.
-- **Sign the record payloads** with a key the broker cannot obtain. `GetKey` derives from
-  the app key by path and any container can ask for any path, so the key has to reach the
-  controller out of band, with the public half in the compose file (which `compose_hash`
-  authenticates).
+Which is why the fix is the mount, not a signature: take that socket away and the broker can
+neither append nor derive. Once that holds, a signature on the record does become worth
+something, and the record does carry one — the address of the key derived from the image it
+names (§3.1b).
 
-(A third possibility is upstream: dstack restricting `EmitEvent` by caller or namespace.)
+**Whether the ledger is confined is a property of the compose file, and the caller is the
+one who can settle it.** `attest.ResolveRunningState` returns `ComposeHash`, the hash of the
+compose the CVM actually booted, bound to the quote by hardware. Compare it against the hash
+of a compose you published and reviewed, and you know — by reading a document you control —
+whether anything upgradeable can reach that socket. Same discipline as the expected-digest
+set (§D3): the answer comes from software the user installed, never from the party being
+checked.
 
-Read the accounting below accordingly. Against a provider who has replaced the broker
-image, RTMR3 proves nothing on its own. What it does give you today is a truthful account
-of what the *controller* did: an in-TEE upgrade can no longer be performed silently or
-misreport itself by accident, which is what closes the gap that motivated the work — an
-upgrade leaving no trace at all.
+> **Tried and reverted: having `attest` derive this from `app_compose`.** It looks like it
+> should work, since `compose_hash` authenticates the compose text. It does not. The mount
+> shapes that reach a socket are an open set — a whole-directory bind (`/var/run:/var/run`),
+> a named volume with a bind `driver_opts`, a YAML alias, `extends:`, or an interpolation
+> that splits the path, since `app_compose` stores the compose text *uninterpolated*. And the
+> fields that would identify the broker are the wrong ones: the controller locates containers
+> by `container_name`, while a compose `services:` key is free to differ, and in this
+> project's own compose the controller shares the broker's **image string** and differs only
+> by `command:` — so the naive sibling test refuses the very shape it was meant to bless. A
+> parser that answers "probably not" here is worse than none, because it reads as a
+> guarantee. Do not re-add it.
+
+So: **while a deployment leaves that socket with the broker, an event-sourced digest is an
+audit record of what the controller did, not proof of what is running.** The way to make it
+proof is to route the broker's quotes through the controller — its image is pinned by
+`compose_hash` and it cannot upgrade itself (§4.4), so a ledger only it can write is worth
+reading.
+
+That is now done rather than deferred: the controller serves the attestation socket (§3.1b),
+the generated compose withholds both dstack's and docker's socket from the broker, and the
+broker signs through the controller with a key derived from the image it runs. The condition
+in the paragraph above is therefore the switch: a deployment that regenerates its compose with
+a controller gets the strong reading, and one that does not keeps the audit-record reading.
+
+What the accounting below buys in the meantime is not nothing, and it is what motivated the
+work: an in-TEE upgrade can no longer be performed silently, or misreport itself by accident.
 
 #### The invariant, stated properly
 
@@ -447,6 +569,15 @@ a ledger that does not describe the container it just started.
 This requires `/var/run/dstack.sock` mounted into the controller. It is not
 dialled at startup, so the read-only endpoints keep working without it; an upgrade
 attempted without it fails at the record, before anything is touched.
+
+The reader for this ledger is `api/common/attest`, in this repository so that the
+format and the reader cannot drift apart —
+`attest.ResolveRunningState(quote, event_log, tcb_info, brokerService)` replays
+RTMR3, anchors the event log and the compose file back to the signed quote, and
+answers which image and config are running. Both sides take the event names from
+`attest`. It stops short of verifying the quote's DCAP signature and of judging
+whether the answer is acceptable; the digest list for the latter has to come from
+software the *user* installed, never from the provider being checked.
 
 ### 5.2 Image Update Workflow
 

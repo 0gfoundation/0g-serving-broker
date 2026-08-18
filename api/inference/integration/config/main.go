@@ -160,7 +160,6 @@ func networkConfigOrEmpty(c *Config) *NetworkConfig {
 type ControllerConfig struct {
 	Enable         bool     `yaml:"enable,omitempty"`
 	AdminAddresses []string `yaml:"adminAddresses,omitempty"`
-	Image          string   `yaml:"image,omitempty"`
 }
 
 // durationYAML carries a Go duration value as a string. UnmarshalYAML accepts
@@ -316,7 +315,16 @@ type DeploymentConfig struct {
 	TappServiceURL string // TAPP service URL for AliCloud mode
 	TappAppID      string // TAPP AppID for AliCloud mode
 	// Controller configuration
-	UseController        bool   // Whether to deploy controller service
+	UseController bool // Whether to deploy controller service
+	// Where the controller serves quotes and signatures once it holds dstack's socket
+	// alone. A directory on a shared named volume, because the socket is created at
+	// runtime by whichever side starts first.
+	AttestSocketDir  string
+	AttestSocketPath string
+	// The image this deployment pins, split the way the broker reports it on-chain.
+	ImageRepo            string
+	ImageDigest          string
+	BrokerImage          string
 	ControllerPort       string // Host port for controller (if exposed)
 	ControllerExposePort bool   // Whether to expose controller port
 }
@@ -341,6 +349,16 @@ const dockerComposeTemplate = `services:
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - HF_ENDPOINT=https://hf-mirror.com
+    # Present because the broker declares depends_on: vllm: condition: service_healthy whenever
+    # an LLM is deployed, and compose refuses to start at all against a target that has none.
+    # The non-alicloud vllm below has always had one; this block did not, so alicloud with an
+    # LLM rendered a file docker rejects.
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 600s
     restart: always
     logging:
       driver: "json-file"
@@ -477,7 +495,19 @@ const dockerComposeTemplate = `services:
 
   # Main broker service
   0g-serving-provider-broker:
-    image: ghcr.io/0gfoundation/0g-serving-broker@sha256:02f86cec7e827c16888e667fbcfa889aea7532a188df36ee06bd57375c9a89dd
+{{- if .UseController}}
+    # Pinned only with a controller, which finds this container by exact name and refuses to
+    # act on anything else — without it compose names the container
+    # <project>-0g-serving-provider-broker-1 and every upgrade is refused.
+    #
+    # Gated because a pinned name is global to the docker daemon, and the wizard supports
+    # several deployments per host through COMPOSE_PROJECT_NAME and a per-project network.
+    # Pinning unconditionally would make a second deployment on the same host fail on a
+    # name conflict — trading an isolation property every deployment has for a guard only a
+    # controller deployment needs.
+    container_name: 0g-serving-provider-broker
+{{- end}}
+    image: {{.BrokerImage}}
 {{- if not .UseNginx}}
     ports:
       - "{{.Ports.Nginx80}}:3080"
@@ -485,6 +515,18 @@ const dockerComposeTemplate = `services:
     environment:
       - PORT=3080
       - CONFIG_FILE=/etc/config.yaml
+{{- if and .UseController (ne .TeeNode "hardhat") (ne .TeeNode "alicloud")}}
+      # What this container reports on-chain as the image it runs. The controller rewrites
+      # both whenever it recreates this container on a new digest, so the pair moves with
+      # the image; a recreated container inherits the old environment, and without them the
+      # broker would come up on the new image still announcing the previous digest.
+      - IMAGE_REPO={{.ImageRepo}}
+      - IMAGE_DIGEST={{.ImageDigest}}
+      # Quotes and signatures come from the controller, not from dstack directly. Setting
+      # this is only what makes the missing mount below workable; the missing mount is what
+      # provides the property. See api/common/tee for both halves.
+      - TEE_SOCKET={{.AttestSocketPath}}
+{{- end}}
 {{- if eq .TeeNode "hardhat"}}
       - NETWORK=hardhat
 {{- else if eq .TeeNode "phala"}}
@@ -497,7 +539,14 @@ const dockerComposeTemplate = `services:
 {{- end}}
 {{- end}}
     volumes:
-      - {{.ConfigPath}}:/etc/config.yaml
+      # Read-only, so the only writer of this file is the controller — which is what
+      # makes zg-config-update a complete account of it. Nothing in the broker or the
+      # event service writes it (the sole writer in the tree is ApplyCoreConfig), so
+      # this takes no capability either of them uses; it removes one they should not
+      # have. Without it a broker image could rewrite its own pricing, targetUrl or
+      # verifiability and no record would exist, so "no config record" would mean
+      # nothing at all.
+      - {{.ConfigPath}}:/etc/config.yaml:ro
 {{- if eq .TeeNode "alicloud"}}
       - tee-key-data:/data
 {{- end}}
@@ -506,8 +555,26 @@ const dockerComposeTemplate = `services:
       - ./logs/event:/var/log/event
 {{- end}}
 {{- if and (ne .TeeNode "hardhat") (ne .TeeNode "alicloud")}}
+{{- if .UseController}}
+      # Neither dstack's socket nor docker's. That is the point, and it is the only part
+      # of this file that provides a property rather than describing one:
+      #
+      #   - dstack serves EmitEvent from the same unauthenticated handler as GetQuote and
+      #     binds that socket 0777, so a container holding it can append to RTMR3 —
+      #     including a record about the image it is itself running, which is what would
+      #     make such a record unable to describe it.
+      #   - it also serves GetKey, so a container holding it can derive the previous
+      #     image's signing key and keep signing with it after an upgrade, leaving a
+      #     pre-upgrade attestation verifying forever.
+      #   - docker's socket lets a container stop, remove and recreate any other, which is
+      #     what would make this file unable to say who may change what.
+      #
+      # Adding either back silently voids the attestation chain in doc/attestation-trust-chain.md.
+      - zg-tee:{{.AttestSocketDir}}
+{{- else}}
       - /var/run/dstack.sock:/var/run/dstack.sock
       - /var/run/docker.sock:/var/run/docker.sock
+{{- end}}
 {{- end}}
     command: 0g-inference-server
     networks:
@@ -534,6 +601,15 @@ const dockerComposeTemplate = `services:
 {{- end}}
     restart: unless-stopped
     depends_on:
+{{- if and .UseController (ne .TeeNode "hardhat") (ne .TeeNode "alicloud")}}
+      # With TEE_SOCKET set this container cannot finish starting until the controller answers
+      # /SignerAddress, and it panics rather than falling back to a local key. service_started
+      # (not service_healthy) and only in this direction — the controller has no reverse
+      # dependency here, so there is no cycle. Without it the broker crash-loops until it
+      # happens to win the race, which converges by luck rather than by construction.
+      0g-controller:
+        condition: service_started
+{{- end}}
       mysql:
         condition: service_healthy
 {{- if .DeployLLM}}
@@ -551,9 +627,17 @@ const dockerComposeTemplate = `services:
 
   # Event service starts after broker is ready
   0g-serving-provider-event:
-    image: ghcr.io/0gfoundation/0g-serving-broker@sha256:02f86cec7e827c16888e667fbcfa889aea7532a188df36ee06bd57375c9a89dd
+{{- if .UseController}}
+    container_name: 0g-serving-provider-event
+{{- end}}
+    image: {{.BrokerImage}}
     environment:
       - CONFIG_FILE=/etc/config.yaml
+{{- if and .UseController (ne .TeeNode "hardhat") (ne .TeeNode "alicloud")}}
+      - IMAGE_REPO={{.ImageRepo}}
+      - IMAGE_DIGEST={{.ImageDigest}}
+      - TEE_SOCKET={{.AttestSocketPath}}
+{{- end}}
 {{- if eq .TeeNode "hardhat"}}
       - NETWORK=hardhat
 {{- else if eq .TeeNode "phala"}}
@@ -566,7 +650,14 @@ const dockerComposeTemplate = `services:
 {{- end}}
 {{- end}}
     volumes:
-      - {{.ConfigPath}}:/etc/config.yaml
+      # Read-only, so the only writer of this file is the controller — which is what
+      # makes zg-config-update a complete account of it. Nothing in the broker or the
+      # event service writes it (the sole writer in the tree is ApplyCoreConfig), so
+      # this takes no capability either of them uses; it removes one they should not
+      # have. Without it a broker image could rewrite its own pricing, targetUrl or
+      # verifiability and no record would exist, so "no config record" would mean
+      # nothing at all.
+      - {{.ConfigPath}}:/etc/config.yaml:ro
 {{- if eq .TeeNode "alicloud"}}
       - tee-key-data:/data
 {{- end}}
@@ -574,7 +665,13 @@ const dockerComposeTemplate = `services:
       - ./logs/event:/var/log/inference
 {{- end}}
 {{- if and (ne .TeeNode "hardhat") (ne .TeeNode "alicloud")}}
+{{- if .UseController}}
+      # Same reasoning as the broker: this container runs the same image and signs with the
+      # same key, so handing it dstack's socket would undo the arrangement just as completely.
+      - zg-tee:{{.AttestSocketDir}}
+{{- else}}
       - /var/run/dstack.sock:/var/run/dstack.sock
+{{- end}}
 {{- end}}
     command: 0g-inference-event
     networks:
@@ -592,6 +689,10 @@ const dockerComposeTemplate = `services:
         max-file: "5"
     restart: unless-stopped
     depends_on:
+{{- if and .UseController (ne .TeeNode "hardhat") (ne .TeeNode "alicloud")}}
+      0g-controller:
+        condition: service_started
+{{- end}}
       0g-serving-provider-broker:
         condition: service_healthy
 {{- if .UseNginx}}
@@ -601,7 +702,8 @@ const dockerComposeTemplate = `services:
 
 {{- if .UseController}}
   0g-controller:
-    image: ghcr.io/0gfoundation/0g-serving-broker@sha256:02f86cec7e827c16888e667fbcfa889aea7532a188df36ee06bd57375c9a89dd
+    container_name: 0g-controller
+    image: {{.BrokerImage}}
 {{- if .ControllerExposePort}}
     ports:
       - "{{.ControllerPort}}:3090"
@@ -609,9 +711,23 @@ const dockerComposeTemplate = `services:
     environment:
       - PORT=3090
       - CONFIG_FILE=/etc/config.yaml
+{{- if and (ne .TeeNode "hardhat") (ne .TeeNode "alicloud")}}
+      # Serving this makes the broker's missing dstack mount survivable: quotes and
+      # signatures are answered here, on an allowlist that forwards GetQuote and Info and
+      # nothing else, and answers Sign / SignerAddress / GetEncKey itself without ever
+      # handing over a key.
+      - ATTEST_PROXY_SOCKET={{.AttestSocketPath}}
+{{- end}}
     volumes:
       - {{.ConfigPath}}:/etc/config.yaml
       - /var/run/docker.sock:/var/run/docker.sock
+{{- if and (ne .TeeNode "hardhat") (ne .TeeNode "alicloud")}}
+      # The only container that gets it. It writes the RTMR3 record before every change it
+      # makes, and derives the per-image signing key, so it is also the only container whose
+      # image being reviewed matters — nothing records the controller's own image.
+      - /var/run/dstack.sock:/var/run/dstack.sock
+      - zg-tee:{{.AttestSocketDir}}
+{{- end}}
     command: 0g-controller
     networks:
       - default
@@ -622,9 +738,14 @@ const dockerComposeTemplate = `services:
       retries: 3
       start_period: 10s
     restart: unless-stopped
+{{- if or (eq .TeeNode "hardhat") (eq .TeeNode "alicloud")}}
+    # Only where the broker does not wait on this container in turn. With the attestation
+    # proxy in play the broker cannot finish starting until this serves /SignerAddress, so
+    # waiting on the broker's health here would make the two wait for each other forever.
     depends_on:
       0g-serving-provider-broker:
         condition: service_healthy
+{{- end}}
 
 {{- end}}
 {{- if .UseMonitoring}}
@@ -717,6 +838,12 @@ const dockerComposeTemplate = `services:
 {{- end}}
 volumes:
   mysql-data:
+{{- if and .UseController (ne .TeeNode "hardhat") (ne .TeeNode "alicloud")}}
+  # Carries the controller's attestation socket to the broker and the event service. Nothing
+  # else may mount it: anything that can reach that socket can have the broker's signing key
+  # applied to a hash of its choosing.
+  zg-tee:
+{{- end}}
 {{- if .UseMonitoring}}
   prometheus-config:
 {{- end}}
@@ -745,6 +872,11 @@ type TemplateData struct {
 	TappServiceURL       string
 	TappAppID            string
 	UseController        bool
+	AttestSocketDir      string
+	AttestSocketPath     string
+	ImageRepo            string
+	ImageDigest          string
+	BrokerImage          string
 	ControllerPort       string
 	ControllerExposePort bool
 }
@@ -1382,6 +1514,13 @@ func main() {
 	deployConfig.TeeNode = teeNodeType
 	deployConfig.UseMonitoring = useMonitoring
 	deployConfig.UseController = controllerConfig.Enable
+	// Derived from the one pinned reference below, so the environment the broker reports
+	// on-chain and the image compose actually starts cannot drift apart. Release CI
+	// rewrites brokerImage on every build, and this follows it.
+	deployConfig.ImageRepo, deployConfig.ImageDigest = splitPinnedImage(brokerImage)
+	deployConfig.BrokerImage = brokerImage
+	deployConfig.AttestSocketDir = attestSocketDir
+	deployConfig.AttestSocketPath = attestSocketDir + "/tee.sock"
 	deployConfig.ControllerExposePort = controllerConfig.ExposePort
 	deployConfig.ControllerPort = controllerConfig.HostPort
 
@@ -1582,7 +1721,6 @@ func generateYAMLConfig(originalDir string, deployLLM bool, targetTeeAddress str
 		config.Controller = ControllerConfig{
 			Enable:         true,
 			AdminAddresses: []string{controllerAdminAddress},
-			Image:          "ghcr.io/0gfoundation/0g-serving-broker@sha256:02f86cec7e827c16888e667fbcfa889aea7532a188df36ee06bd57375c9a89dd",
 		}
 	}
 
@@ -1815,6 +1953,11 @@ func generateDeploymentFiles(config *DeploymentConfig) error {
 		TappServiceURL:       config.TappServiceURL,
 		TappAppID:            config.TappAppID,
 		UseController:        config.UseController,
+		AttestSocketDir:      config.AttestSocketDir,
+		AttestSocketPath:     config.AttestSocketPath,
+		BrokerImage:          config.BrokerImage,
+		ImageRepo:            config.ImageRepo,
+		ImageDigest:          config.ImageDigest,
 		ControllerPort:       config.ControllerPort,
 		ControllerExposePort: config.ControllerExposePort,
 	}
@@ -2542,4 +2685,31 @@ func isValidURL(value string) bool {
 
 func isNotEmpty(value string) bool {
 	return strings.TrimSpace(value) != ""
+}
+
+// brokerImage is the image every service in the generated compose runs.
+//
+// One constant so the pinned reference and the IMAGE_REPO / IMAGE_DIGEST pair the broker
+// reports on-chain cannot disagree. Release CI rewrites this line by pattern, which is why
+// it is written out in full rather than assembled.
+const brokerImage = "ghcr.io/0gfoundation/0g-serving-broker@sha256:02f86cec7e827c16888e667fbcfa889aea7532a188df36ee06bd57375c9a89dd"
+
+// attestSocketDir is where the controller's attestation socket lives, on a named volume
+// shared with the broker and the event service and with nothing else.
+const attestSocketDir = "/var/run/zg-tee"
+
+// splitPinnedImage splits "repo@sha256:…" into its halves, and answers empty strings for a
+// reference that pins nothing.
+//
+// Empty is deliberate rather than a guess: the broker treats a half-populated pair as
+// unknown and reports no image at all, which is right. Reporting a repository with an
+// invented digest would write a real on-chain image change out of a missing value, and the
+// contract reads any change to those fields as an image change and un-acknowledges the
+// provider for it.
+func splitPinnedImage(ref string) (repo, digest string) {
+	repo, digest, pinned := strings.Cut(ref, "@")
+	if !pinned {
+		return "", ""
+	}
+	return repo, digest
 }
