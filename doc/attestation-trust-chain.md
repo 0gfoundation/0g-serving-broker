@@ -5,8 +5,6 @@ What a user is told, and why they can believe it, when
 - the request passes through a **router that is not a TEE and is not trusted**, and
 - the **broker component is upgradeable in place**, without the CVM's `compose_hash` changing.
 
-This document states the finished scheme. It does not argue for it.
-
 ---
 
 ## The claim
@@ -30,7 +28,7 @@ hardware or cryptography; a link marked 👤 is a one-time human check the user 
 | 1 | The attestation is genuine and unmodified in transit | ⚙ DCAP signature over the quote. The router carries it but cannot alter it. |
 | 2 | Which **deployment** this is | ⚙ `compose_hash` is in the signed report body at `mr_config_id[1:33]`, and `sha256(tcb_info.app_compose) == compose_hash`, so the quote carries its own authenticated compose file. |
 | 3 | That deployment is the one the user reviewed | 👤 The user compares `compose_hash` against the hash of a compose file they read. |
-| 4 | **Only the controller can write the ledger** | 👤 read from that reviewed compose: the broker mounts no `/var/run/dstack.sock`; only the controller does. ⚙ Changing that changes `compose_hash`, which link 3 catches. |
+| 4 | **Only the controller can write the ledger** | 👤 read from that reviewed compose: the broker mounts no `/var/run/dstack.sock`; only the controller does, and **nothing in the deployment yields root inside the CVM** (see step 1). ⚙ Changing any of that and **redeploying** changes `compose_hash`, which link 3 catches. Editing the compose *inside* a running CVM does not — see the residual assumption on what `compose_hash` measures. This link is mechanical only once step 1's root-channel review has been done; without it, it is a human check about a file that may not be the one running. |
 | 5 | Which **image** the broker runs | ⚙ RTMR3 is append-only and covered by the signature. Replay the runtime events; the last `zg-image-update` names it, as `<repo>@<digest> <0xsigner> <enc_pub>`. Link 4 is why that record can be believed. |
 | 6 | That image is one the user recognises | 👤 The digest is compared against a set the user obtained **for themselves** — built from source they read, or taken from a release they have a reason to trust — never fetched from the provider being checked. |
 | 7 | **Both keys belong to that image** | ⚙ The record binds the address of `S = KDF(appKey, "/<digest>/sign")` **and** the public half of the enclave encryption key at `"/<digest>/e2ee-enc"`, both derived by the controller before it makes the change. The reader requires the quote's `report_data` to name the same two. Without this they are unconnected: `report_data` is whatever the enclave asked the hardware to sign over, and both keys are derivable only inside the CVM, so a broker could publish keys of its own and a record left over from a change that never completed would be believed. The enc_pub half is not redundant with the signature — the bound **address is public**, so an unrecorded image can publish it beside its own enc_pub, and a client seals its request before any signature exists to contradict it. |
@@ -42,6 +40,13 @@ Links 1–2, 5, 7–10 are mechanical. Links 3, 4 and 6 are the user's, and they
 discipline throughout: **the trust root comes from somewhere the user chose, never from the
 party being verified.** Where it is kept does not matter — an SDK constant, a config file, two
 hex strings in a notes file. Only its provenance does.
+
+**Link 4 carries the weight of the mechanical links above it.** RTMR3 says what was written, not
+who wrote it, so links 5 and 7 are worth exactly what link 4 is worth — and link 4 is a review,
+not a measurement. Anyone with root inside the CVM reaches `/var/run/dstack.sock` regardless of
+which container mounts it, and can then forge records and derive any image's keys. So the
+review's real subject is not the volume list: it is **whether anything in the deployment can
+yield root at all.** Step 1 below is written to that.
 
 ---
 
@@ -77,6 +82,9 @@ A modified broker image gains nothing from running our code differently: it cann
 the ledger (link 4), cannot obtain the previous `S` (link 8), and cannot derive keys itself
 because the controller serves `GetQuote` and `Info` but never `GetKey` or `EmitEvent`.
 
+All three are container-boundary properties, so all three rest on step 1's access-path review —
+see link 4.
+
 ---
 
 ## What each party must be trusted for
@@ -84,7 +92,8 @@ because the controller serves `GetQuote` and `Info` but never `GetKey` or `EmitE
 | Party | Must be honest? |
 |---|---|
 | Intel TDX + DCAP | **Yes** — the cryptographic root |
-| dstack OS image, KMS key-release policy | **Yes** — covered by `mrtd` / `rtmr0-2` and the on-chain policy |
+| **The dstack OS image** | **Yes** — `os_image_hash_verified` establishes which published image is running, and everything below this row assumes that image grants no access path of its own. Reviewing the image is what settles that; an attestation reports its identity, not its contents. |
+| dstack KMS key-release policy | **Yes** — the on-chain `DstackApp` decides which compose hashes and devices get keys, and its owner decides that |
 | **Controller image** | **Yes** — but pinned by `compose_hash`, reviewed by the user, and it cannot upgrade itself |
 | **Broker image** | **No** ← the objective |
 | **Router** | **No** |
@@ -95,8 +104,31 @@ because the controller serves `GetQuote` and `Info` but never `GetKey` or `EmitE
 
 ## What the user actually does
 
-1. **Once, per release: read the compose file.** Four things in it are load-bearing, and
-   missing any one of them voids a different link:
+1. **Once, per release: read the manifest, and the OS image it names.**
+
+   `tcb_info.app_compose` is the whole manifest, not just the compose file, and step 3 below
+   anchors it to the quote. Everything here is read from it.
+
+   **First, the root channels — because root inside the CVM defeats every item after it.**
+   `/var/run/dstack.sock` is a path in the CVM's filesystem, so root reaches it whatever the
+   volume list says, and can then forge RTMR3 records and derive any image's keys:
+
+   - **`pre_launch_script` installs no shell credential.** The script is in the manifest, so
+     read it in full and check what it does with `DSTACK_ROOT_PUBLIC_KEY`,
+     `DSTACK_AUTHORIZED_KEYS`, `DSTACK_ROOT_PASSWORD` and `/dstack/user_config`. The first three
+     are environment values and the fourth is host-supplied; none of the four is measured, so a
+     script that consumes any of them opens an access path whose use leaves no trace. A
+     deployment that needs interactive access is a deployment where these links hold by policy
+     rather than by construction — a decision to take deliberately, not to discover.
+   - **`allowed_envs` carries no root channel** — no `DSTACK_ROOT_PUBLIC_KEY`,
+     `DSTACK_AUTHORIZED_KEYS` or `DSTACK_ROOT_PASSWORD`. The list is measured; the values are
+     not, which is why the list is the only thing you can check.
+   - **No service is privileged, mounts the host root, or holds `/var/run/docker.sock`** except
+     the controller. Any of those is root by another name.
+   - **The `os_image_hash` names an OS image you have reviewed.** See the trust table above
+     for why the verifier's verdict on it does not settle this one.
+
+   **Then the confinement, which is what the volume list is for:**
 
    - the **broker** and **event** services mount neither `/var/run/dstack.sock` (link 4 —
      that socket also serves `GetKey`, so holding it means being able to derive any image's
@@ -112,7 +144,7 @@ because the controller serves `GetQuote` and `Info` but never `GetKey` or `EmitE
      the broker image's key, so a fourth container mounting it can mint response proofs
      attributed to a reviewed image, and nothing in RTMR3 records that container's existence.
 
-   Then keep two values: that compose file's `compose_hash`, and the broker digests you accept.
+   Then keep two values: that manifest's `compose_hash`, and the broker digests you accept.
    Keep them however you like — this is a person with two hex strings, not necessarily a program
    with a config. What matters is only that you got them yourself and that you compare against
    them, rather than reading them out of the attestation you are about to check.
@@ -167,9 +199,8 @@ stays good until a response signature fails to verify against it. There is no se
 hold and no interval to pick, which matters because the first callers are plain API clients
 with neither.
 
-Reusing the address is not a cost/safety trade — it is safe, and for a reason worth stating
-because everything above exists to produce it. Suppose the provider upgrades an hour after you
-verified. The controller derives from the image that is now running, so it signs with a
+Reusing the address is safe, not a cost/safety trade. Suppose the provider upgrades an hour
+after you verified. The controller derives from the image that is now running, so it signs with a
 different key; the upgrade restarted the broker, so its quote names that key too. Your very
 next response therefore fails to verify. **The window in which you are unaware the image
 changed is zero responses**, so re-fetching a quote per request buys nothing but a DCAP
@@ -211,14 +242,34 @@ each one is a link that fails silently if you skip it:
 | `quote_verified` | `true` | that the quote is a real TDX quote from genuine Intel hardware — everything else is arithmetic on numbers a provider could have typed |
 | `event_log_verified` | `true` | that the log replays onto the quote's registers. The log arrives over plain HTTP from the party being described; this is the only thing that makes it evidence, and steps 3–5 read records out of **exactly the bytes you sent here** |
 | `tcb_status` | `UpToDate` | a platform with a published unpatched vulnerability. Any other value comes with `advisory_ids` and is a decision to make deliberately, not a pass to wave through |
-| `os_image_is_dev` | `false` | a development guest image, which can carry debug facilities that void the confidentiality the whole chain rests on |
+| `advisory_ids` | empty | the same decision, itemised |
 | `os_image_hash_verified` | `true` | a guest OS the provider built rather than a published dstack image |
-| `acpi_tables_verified` | `true` | firmware configuration that was never measured |
-| `key_provider` | the KMS you expect | a CVM whose keys came from somewhere other than the KMS whose on-chain policy you read |
+| `app_info.key_provider_info` | names the KMS you expect | a CVM whose keys came from somewhere other than the KMS whose on-chain policy you read. Hex-encoded JSON: decode it and compare the `id`, which is the provider's root public key |
 
-`tcb_status`, `os_image_is_dev`, `os_image_hash_verified` and `acpi_tables_verified` are four
-checks this project never made when it verified quotes itself. Getting them is the reason the
-recommendation changed.
+Field names above come from **running 0.5.4 and 0.5.11 against the same real CVM**, not from a
+changelog. The response is nested as `{is_valid, details:{…, app_info:{…}}, reason}`, and the
+`details` object is **identical in both versions**, value for value.
+
+Assert only on fields the response carries. `os_image_is_dev` and `acpi_tables_verified` are not
+among them in either version, and a checker asserting on an absent field reads the zero value —
+so `os_image_is_dev == false` **passes** on a response that never mentioned it.
+
+**Run the verifier matching your CVM's dstack version.** What moves between versions is
+`app_info`, and one difference has teeth:
+
+| | 0.5.4 | 0.5.11 |
+|---|---|---|
+| `app_info.device_id` for one quote | `57e6967e…` | `f308e198…` |
+| `app_info.mrtd`, `rtmr0`–`rtmr3` | returned | dropped |
+| an empty request body | `422` | `200` with `is_valid: false` |
+| why a tampered input failed | `"Quote verification failed"` | `"RTMR3 mismatch, quoted: … replayed: …"` |
+
+`device_id` is what `DstackApp.allowedDeviceIds` gates on, so reading it from the wrong version
+compares against an allowlist it cannot match. Both versions **refuse** the same tampered inputs;
+only the newer one says why.
+
+`tcb_status`, `advisory_ids` and `os_image_hash_verified` are three checks this project never
+made when it verified quotes itself. Getting them is the reason the recommendation changed.
 
 ```python
 # 3-5. verify.py — the checks the verifier does not make, because they are about our records.
@@ -265,10 +316,8 @@ else:
     bound_signer, bound_enc_pub, source = None, None, "compose"
 
 # A reference naming a tag says which name was asked for, not which image answers. Refuse
-# rather than resolve it: a tag is resolved by the provider's daemon, which is the party being
-# checked. A deployment whose compose pins `:latest` or `:dev1` therefore cannot be verified
-# at all until it either pins a digest or records an upgrade — and that is the state of
-# today's production deployments, so expect to stop here on one.
+# rather than resolve it: a tag is resolved by the daemon being checked. Until a deployment
+# pins a digest or records an upgrade, there is nothing here to compare.
 assert "@" in ref, f"the {source} names {ref!r}, which pins no digest — refuse"
 digest = ref.split("@", 1)[1]
 
@@ -363,21 +412,28 @@ assert sig["text"] == expected, f"signed {sig['text']}, exchanged {expected}"
 
 ### What this produces on a deployment today
 
-Run against a current production CVM's attestation, this gets through step 3 —
-`sha256(app_compose)` matches the compose hash in the signed report body, and the event log
-replays onto the quote's RTMR3 exactly — and then **refuses at step 4**, because that
-deployment's compose names `ghcr.io/0gfoundation/0g-serving-broker:dev1` and a tag is resolved
-by the provider's own daemon.
+A deployment whose compose pins a tag rather than a digest gets through step 3 and **refuses at
+step 4**: a tag names which image was asked for, not which one answers.
 
-Both of those were checked against a real report, by hand, before the verifier became the
-recommendation: the anchor holds and the replay lands. What has not been run end to end is
-`POST /verify` against that same report, so treat the platform half's four extra judgements as
-the reason to use it rather than as something this file has confirmed for our deployments.
+A deployment with a controller completes the whole procedure. Measured on a Phala CVM, through a
+real `POST /v1/images/update`:
 
-The refusal point is the shortest description of what this whole series changes. The mechanical
-parts already work today; what is missing is a deployment that pins what it runs. After it
-regenerates its compose with a controller, step 4 answers from the ledger and step 5 has an
-address to compare.
+```
+dstack-verifier (0.5.4 and 0.5.11, same verdict):
+    is_valid=true  quote_verified=true  event_log_verified=true
+    os_image_hash_verified=true  tcb_status=UpToDate  advisory_ids=[]
+
+RTMR3:   zg-image-update  <repo>@sha256:7b6d09d7…  0x8020f2e5…  35acc938…
+report_data (§4.2):       signer 0x8020f2e5…       enc_pub 35acc938…
+
+step 4 → the ledger, step 5 → both keys match
+```
+
+Two negative results from the same run, because a check that never refuses proves nothing.
+Altering the signer inside the event log is caught by **the verifier**, as an RTMR3 replay
+mismatch, before this procedure sees it. Altering `report_data`'s enc_pub while leaving the
+signer honest passes every platform check and is caught **here**, at step 5 — which is the case
+that binding both keys exists for.
 
 ### Two things a manual verifier must not do
 
@@ -393,10 +449,21 @@ address to compare.
 
 ---
 
-## Residual assumptions, stated plainly
+## Residual assumptions
 
+- **`compose_hash` measures a declaration, not what runs.** It is `sha256(app-compose.json)`,
+  taken once at boot. What docker actually runs is `/tapp/docker-compose.yaml`, materialised
+  from the manifest **only if that file does not already exist** — dstack's boot script is
+  `if ! [ -f docker-compose.yaml ]; then jq -r '.docker_compose_file' app-compose.json > …; fi`,
+  and it never regenerates it. So an edit made inside a running CVM survives every reboot and
+  changes no measurement — and nothing in the attestation reports that one happened.
+
+  This is why step 1's first half exists. The volume list is only worth reading if nothing in
+  the deployment can obtain root to edit it afterwards. Closing that is a deployment discipline
+  rather than a check: deny the access paths, and the edit becomes impossible instead of
+  invisible.
 - **Step 1 cannot be automated away.** Whether the deployment confines RTMR3 writers is a
-  property of the compose file. A verifier cannot derive it from the compose text: the ways
+  property of the manifest. A verifier cannot derive it from the compose text: the ways
   a container can reach a socket are an open set, and the fields that would identify the
   broker are not the ones the controller uses. It is a document review, and
   `compose_hash` makes that review durable for every later version.
@@ -415,11 +482,20 @@ address to compare.
   reader would report the reviewed digest while unreviewed code answered. That is why the
   label invalidation is part of this chain and not a tidiness fix.
 - **A reboot reverts an in-place upgrade.** It follows from the point above: after a reboot
-  the container comes back on the image the compose file pins. So an in-place upgrade is a
-  way to change what runs *until the next boot*, not a way to change the deployment. Making
-  one persist means a new compose file, which changes `compose_hash` and is therefore a
-  change the user sees at link 3. The revert also changes the signer address back, which
-  resets the acknowledgement a second time.
+  the container comes back on the image `/tapp/docker-compose.yaml` pins. So an in-place
+  upgrade is a way to change what runs *until the next boot*, not a way to change the
+  deployment. Making one persist means changing that file — which, if the root channels are
+  closed, can only be done by changing the manifest, so `compose_hash` moves and the user sees
+  it at link 3. If they are not closed, the file can be edited in place and the change persists
+  with no measurement moving at all; the revert then goes to whatever the edited file names.
+  The revert also changes the signer address back, which resets the acknowledgement a second
+  time.
+- **Nothing consumes this chain yet.** `attest.ResolveRunningState` is a library, and no
+  caller in this repository or the SDK invokes it — the linker drops it from the shipped
+  binary as dead code, which is how this was noticed. Every property above is available and
+  none of it is being checked, so a deployment that satisfies all ten links and one that
+  satisfies none are, today, indistinguishable to a user. This is the largest gap in the
+  document and it is not a code defect in anything described here.
 - **An upgrade is not transparent to users.** `Service.teeSignerAcknowledged` resets when
   `teeSignerAddress` or `additionalInfo` changes, and recovery is `onlyOwner`. Every
   in-place upgrade therefore needs the contract owner to re-acknowledge. This is the
@@ -445,11 +521,11 @@ address to compare.
 
 Every link now has code. Two things the code cannot supply:
 
-- **Nothing in this repository calls `ResolveRunningState`.** It is a library; the chain
-  terminates in the client, and a client that skips step 2 gets none of links 5–8. Whatever
-  ships as the verifier has to call dstack's verifier and require every field in the table
-  above, then make the binding comparison, and must not cache a signer address across
-  sessions — caching one is exactly how a stale attestation stops self-invalidating.
+- **Nothing calls `ResolveRunningState`** — see the residual assumption above, which states
+  what that costs. What ships as the verifier has to call dstack's verifier and require every
+  field in the table above, then make the binding comparison, and must not cache a signer
+  address across sessions: caching one is exactly how a stale attestation stops
+  self-invalidating.
 - **The KMS's `compose_hash` authorization policy is outside this repository.** The app key
   follows a persisted `app_id`, not `compose_hash`, so redeploying with a different compose
   file re-derives the same app key. Only the KMS's check at CVM registration gates that;
