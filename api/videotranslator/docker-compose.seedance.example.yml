@@ -135,9 +135,10 @@
 # Resolution: 480p/720p/1080p (narrower than 2.0's 480p/720p/1080p/4k — 4k is
 # live-confirmed rejected outright for "dreamina-seedance-2-5-260628" with
 # InvalidParameter; 1080p was too when this was written, and the vendor has
-# since opened it). A client requesting a 4K-equivalent size silently gets a
-# 1080p video instead of a 400 (the translator's existing snap-not-reject
-# resolution handling). There is no 4K tier for this model at all, so 2.0's
+# since opened it). A client naming 4k gets a downgrade rather than a 400 (the
+# translator's existing snap-not-reject resolution handling), and which tier
+# depends on how it asked: a 4K PIXEL SIZE snaps to 1080p, while the bare token
+# "4k" is not a recognised token at all and falls to the 720p default. There is no 4K tier for this model at all, so 2.0's
 # 4K-specific vendor rate limit (15 RPM / 1 concurrent) does not apply here.
 services:
   0g-seedance-video-translator:
