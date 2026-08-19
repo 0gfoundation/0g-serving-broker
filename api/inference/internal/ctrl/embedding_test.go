@@ -263,3 +263,47 @@ func TestHandleEmbeddingResponse_NonPositivePromptTokensFallsBack(t *testing.T) 
 		})
 	}
 }
+
+// TestHandleEmbeddingResponse_WhitelistedStampsRateClass is the regression
+// guard for a real gap: chatbot's decodeAndProcess stamps the applied
+// input-length tier as rate_class on whitelisted (unbilled) traffic so
+// reconciliation can still group it per-tier the way the vendor's statement
+// does (see chatbot.go's whitelisted branch). handleEmbeddingResponse's own
+// whitelisted branch called recordWhitelistedUsage with a hardcoded "" instead
+// of computing it — the exact analog gap for embedding's whitelisted path,
+// even though the general (billed) embedding path already applies tiered
+// pricing (embeddingTieredInputPrice / TestEmbeddingTieredInputPrice).
+func TestHandleEmbeddingResponse_WhitelistedStampsRateClass(t *testing.T) {
+	c := newChatbotTestCtrl(t, config.Service{ProviderType: constant.ProviderTypeDecentralized})
+	mockDB := &mockReconciliationDB{}
+	c.reconciliationDB = mockDB
+	c.tieredPricing = config.TieredPricingConfig{
+		Enabled: true,
+		Tiers: []config.PricingTier{
+			{MaxInputTokens: 100, InputMultiplier: 1, InputMultiplierDenominator: 1},
+			{MaxInputTokens: 0, InputMultiplier: 3, InputMultiplierDenominator: 2},
+		},
+	}
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(w)
+	ctx.Request = httptest.NewRequest("POST", "/v1/proxy/embeddings", nil)
+
+	// 500 prompt tokens falls into the unbounded 1.5x tier.
+	respBody := []byte(`{"object":"list","data":[],"model":"m","usage":{"prompt_tokens":500,"total_tokens":500}}`)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{},
+		Body:       io.NopCloser(bytes.NewReader(respBody)),
+	}
+
+	reqModel := model.Request{IsWhitelisted: true, ServiceName: "embedding", RequestHash: "h"}
+	err := c.handleEmbeddingResponse(ctx, resp, model.User{}, "0", []byte(`{"model":"m","input":"hi"}`), reqModel)
+	require.NoError(t, err)
+
+	require.Len(t, mockDB.calls, 1)
+	assert.NotEqual(t, "", mockDB.calls[0].RateClass,
+		"whitelisted embedding traffic must still stamp the applied tier as rate_class, like chatbot's decodeAndProcess does, so reconciliation can group it per-tier")
+	assert.Equal(t, "tier:unbounded", mockDB.calls[0].RateClass)
+}

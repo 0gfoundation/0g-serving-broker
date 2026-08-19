@@ -130,7 +130,16 @@ func (c *Ctrl) handleEmbeddingResponse(ctx *gin.Context, resp *http.Response, _ 
 		metricModel := c.metricModel(ctx)
 		monitor.RecordTokens(embeddingMetricLabel, metricModel, int64(usage.PromptTokens), 0)
 		monitor.RecordWhitelistTokens(embeddingMetricLabel, metricModel, int64(usage.PromptTokens), 0)
-		c.recordWhitelistedUsage(reqModel, int64(usage.PromptTokens), 0, 0, 0, "")
+		// Stamp the applied input-length tier so whitelisted embedding traffic (unbilled
+		// by the broker, but still billed by the vendor at the tiered rate) reconciles
+		// per-tier like billable traffic — mirrors decodeAndProcess's identical stamp for
+		// whitelisted chatbot traffic. Best-effort: a pricing lookup failure just leaves
+		// it "".
+		var rateClass string
+		if prices, err := c.GetBillingPrices(ctx); err == nil {
+			rateClass = matchedTierRateClass(c.effectiveTiers(prices.Tiers), usage.PromptTokens)
+		}
+		c.recordWhitelistedUsage(reqModel, int64(usage.PromptTokens), 0, 0, 0, rateClass)
 		return nil
 	}
 

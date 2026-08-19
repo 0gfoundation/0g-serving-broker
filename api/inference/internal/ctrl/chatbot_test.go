@@ -23,6 +23,7 @@ import (
 
 	teeutil "github.com/0glabs/0g-serving-broker/common/tee"
 	"github.com/0glabs/0g-serving-broker/inference/config"
+	"github.com/0glabs/0g-serving-broker/inference/model"
 )
 
 // generateTestCert creates a self-signed certificate for testing TLS state.
@@ -63,6 +64,18 @@ func newChatbotTestCtrl(t *testing.T, svc config.Service) *Ctrl {
 	}
 	addr := crypto.PubkeyToAddress(privateKey.PublicKey)
 
+	// serviceCache is pre-seeded (matching newUSDOverlayCtrl's pattern in
+	// service_test.go) so GetBillingPrices/GetCachedService resolve without a
+	// contract call — needed by the whitelisted billing paths that stamp a
+	// tiered-pricing rate_class (they call GetBillingPrices even for
+	// unbilled/whitelisted traffic; see decodeAndProcess and
+	// handleEmbeddingResponse's whitelisted branches).
+	serviceCache := cache.New(5*time.Minute, 10*time.Minute)
+	serviceCache.Set("current_service", model.Service{
+		InputPrice:  "1",
+		OutputPrice: "1",
+	}, cache.DefaultExpiration)
+
 	return &Ctrl{
 		Service: svc,
 		teeService: &teeutil.TeeService{
@@ -70,6 +83,7 @@ func newChatbotTestCtrl(t *testing.T, svc config.Service) *Ctrl {
 			Address:        addr,
 		},
 		svcCache:            cache.New(5*time.Minute, 10*time.Minute),
+		serviceCache:        serviceCache,
 		chatCacheExpiration: 5 * time.Minute,
 		logger:              &testAsyncLoggerImpl{},
 	}
