@@ -447,6 +447,51 @@ func TestGetModels_ImagePricingForImageTypes(t *testing.T) {
 	}
 }
 
+// TestGetModels_TPMRateLimit_TokenServiceTypes pins that GET /v1/models
+// advertises the enforced per-user TPM limit for every token-billed service
+// type. Regression guard: "embedding" was missing from this switch — the
+// admission check (CheckPerUserTPMLimit) enforced TPM for embedding, but this
+// endpoint silently omitted tokens_per_minute from the response, so a caller
+// reading /v1/models would see no TPM limit for a model that was in fact
+// throttled by one.
+func TestGetModels_TPMRateLimit_TokenServiceTypes(t *testing.T) {
+	types := []string{"chatbot", "speech-to-text", "embedding"}
+	for _, svcType := range types {
+		t.Run(svcType, func(t *testing.T) {
+			mock := &mockModelsCtrl{
+				service: model.Service{
+					ModelType: "some-model",
+					Type:      svcType,
+				},
+				serviceConfig: config.Service{},
+				concurrencyLimitConfig: config.ConcurrencyLimitConfig{
+					PerUserTPM: 12345,
+				},
+			}
+
+			h := newModelsTestHandler(mock)
+			w := performRequest(h.GetModels, "GET", "/v1/models", "", nil)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected status 200, got %d", w.Code)
+			}
+
+			var resp ModelListResponse
+			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("failed to parse response: %v", err)
+			}
+
+			m := resp.Data[0]
+			if m.RateLimits == nil {
+				t.Fatalf("expected rate_limits to be present for %s", svcType)
+			}
+			if m.RateLimits.TokensPerMinute != 12345 {
+				t.Errorf("expected rate_limits.tokens_per_minute=12345 for %s, got %d", svcType, m.RateLimits.TokensPerMinute)
+			}
+		})
+	}
+}
+
 // TestGetModels_ImagePricingUSD pins the USD-denominated image-service shape:
 // the per-image price surfaces under pricing.image (wei) and pricing_usd.image
 // (USD), while the per-token prompt/completion fields report 0 (an image model
