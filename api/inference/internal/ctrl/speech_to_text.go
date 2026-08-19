@@ -316,11 +316,9 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 	// Debug: log response content
 	c.logger.Debugf("Decompressed response length: %d", len(decompressedBody))
 	if len(decompressedBody) > 0 {
-		previewLen := len(decompressedBody)
-		if previewLen > 200 {
-			previewLen = 200
-		}
-		c.logger.Debugf("Response preview (first %d chars): %s", previewLen, string(decompressedBody[:previewLen]))
+		// Fingerprint, not a preview: this body is the transcription, which is what the
+		// user said. See bodyFingerprintForLog.
+		c.logger.Debugf("Response %s", bodyFingerprintForLog(decompressedBody))
 	}
 
 	// Parse response to extract usage
@@ -335,7 +333,7 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 		seconds, ok := subtitleDurationSeconds(string(decompressedBody))
 		if !ok {
 			c.logger.Warnf("Failed to parse speech-to-text response for usage extraction: %v", err)
-			c.logger.Debugf("Raw response causing parse error: %s", string(decompressedBody))
+			c.logger.Debugf("Response that failed to parse: %s", bodyFingerprintForLog(decompressedBody))
 			// Plain text carries no timing signal — fall back to estimated billing
 			return c.updateSpeechToTextFallback(ctx, reqModel, string(decompressedBody))
 		}

@@ -528,10 +528,11 @@ func (c *Ctrl) doVideoPollRequest(job model.VideoPollJob) (body []byte, respHead
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		// Bounded: an error body can be arbitrarily large (or, from a misbehaving
-		// intermediary, echo back request content), and this logs on every retry until the
-		// job resolves — truncate rather than writing the full body to broker logs each time.
-		c.logger.Warnf("video poll job %d: poll returned status %d (will retry): %s", job.ID, resp.StatusCode, truncateForLog(respBody, 500))
+		// Fingerprinted rather than truncated. The comment this replaces had the risk
+		// right — a misbehaving intermediary can echo request content into an error body —
+		// but bounding it kept the leak and only made it smaller, on a line that logs at
+		// Warn and so runs at the default level. See bodyFingerprintForLog.
+		c.logger.Warnf("video poll job %d: poll returned status %d (will retry): %s", job.ID, resp.StatusCode, bodyFingerprintForLog(respBody))
 		return nil, nil, nil, false
 	}
 
