@@ -330,7 +330,7 @@ func (p *Proxy) Close() {
 
 func (p *Proxy) Start() error {
 	switch p.ctrl.Service.Type {
-	case "zgStorage", "chatbot", "text-to-image", "speech-to-text", "image-editing", "video-generation":
+	case "zgStorage", "chatbot", "text-to-image", "speech-to-text", "image-editing", "video-generation", "embedding":
 		p.AddHTTPRoute(p.ctrl.Service.TargetURL, p.ctrl.Service.Type)
 	default:
 		return errors.New("invalid service type")
@@ -652,7 +652,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		// Only inject the limiter that applies to this service type to prevent
 		// accidental cross-type consumption in service handlers.
 		switch svcType {
-		case "chatbot", "speech-to-text":
+		case "chatbot", "speech-to-text", "embedding":
 			if p.perUserTPMLimiter != nil {
 				ctx.Set("tpmLimiter", p.perUserTPMLimiter)
 			}
@@ -684,7 +684,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		var resourceInfo *middleware.RateLimitInfo
 		var resourceType string
 		switch svcType {
-		case "chatbot", "speech-to-text":
+		case "chatbot", "speech-to-text", "embedding":
 			if p.perUserTPMLimiter != nil {
 				remaining, resetSecs := p.perUserTPMLimiter.GetRemaining(userAddress)
 				resourceInfo = &middleware.RateLimitInfo{

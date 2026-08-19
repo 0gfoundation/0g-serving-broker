@@ -57,16 +57,21 @@ func (c *Ctrl) handleEmbeddingResponse(ctx *gin.Context, resp *http.Response, _ 
 	}
 
 	// For forwarder providers, strip #184 upstream identity/cost leak fields
-	// before the body is signed or forwarded — same treatment speech-to-text
-	// and image-editing give their own responses, and for the same reason:
-	// sanitize-before-sign keeps the signature bound to what the client
-	// receives. Handles decompression itself (see its own doc).
-	clientBody := body
+	// before the body is used for extraction, signing, or forwarding — same
+	// treatment speech-to-text and image-editing give their own responses,
+	// and for the same reason: sanitize-before-sign keeps the signature bound
+	// to what the client receives. Reassigns `body` itself (rather than a
+	// separate clientBody) so every later use of `body` — write, parse,
+	// AND sign — is consistently the sanitized bytes; a separate variable
+	// here previously let the signature bind to the pre-sanitization body
+	// while the client received the sanitized one, breaking verification for
+	// exactly the forwarder+centralized case this feature targets.
+	// Handles decompression itself (see its own doc).
 	if c.Service.IsForwarder() {
-		clientBody = c.sanitizeForwarderResponseBody(ctx, body, resp.Header.Get("Content-Encoding"))
+		body = c.sanitizeForwarderResponseBody(ctx, body, resp.Header.Get("Content-Encoding"))
 	}
 
-	if _, writeErr := ctx.Writer.Write(clientBody); writeErr != nil {
+	if _, writeErr := ctx.Writer.Write(body); writeErr != nil {
 		if c.isClientDisconnectError(writeErr) {
 			ctx.Set("ignoreError", true)
 			c.logger.Warnf("Client disconnected during embedding response, billing for completed response (%d bytes)", len(body))
@@ -76,12 +81,12 @@ func (c *Ctrl) handleEmbeddingResponse(ctx *gin.Context, resp *http.Response, _ 
 		}
 	}
 
-	// Decompress (if the client-facing sanitization above did not already,
-	// i.e. a non-forwarder provider) so usage can be parsed regardless of
-	// upstream compression.
-	decompressedBody := clientBody
+	// Decompress (if the forwarder sanitization above did not already, i.e. a
+	// non-forwarder provider) so usage can be parsed regardless of upstream
+	// compression.
+	decompressedBody := body
 	if contentEncoding := resp.Header.Get("Content-Encoding"); contentEncoding != "" && !c.Service.IsForwarder() {
-		if decoded, derr := decodeBody(clientBody, contentEncoding); derr == nil {
+		if decoded, derr := decodeBody(body, contentEncoding); derr == nil {
 			decompressedBody = decoded
 		}
 	}
@@ -95,6 +100,8 @@ func (c *Ctrl) handleEmbeddingResponse(ctx *gin.Context, resp *http.Response, _ 
 	// bound at request time); an in-network decentralized provider gets a plain
 	// content signature. Mirrors chatbot/image-editing's identical dispatch —
 	// see handleImageEditingResponse for why these two cases don't overlap.
+	// Signs `body`, which is the sanitized bytes as of the reassignment above
+	// (identical to what was written to the client).
 	switch {
 	case c.Service.IsCentralized():
 		fingerprint := ctx.GetString(CtxKeyUpstreamCertFingerprint)
@@ -108,7 +115,13 @@ func (c *Ctrl) handleEmbeddingResponse(ctx *gin.Context, resp *http.Response, _ 
 	}
 
 	usage := parsed.Usage
-	if usage == nil || (usage.PromptTokens == 0 && usage.TotalTokens == 0) {
+	// Trigger on PromptTokens alone (<=0, not "both PromptTokens and
+	// TotalTokens are zero"): a provider reporting
+	// {"prompt_tokens":0,"total_tokens":50} must still fall back to the
+	// estimate, and <=0 (not just ==0) also catches a misbehaving provider
+	// reporting negative usage, which would otherwise flow into a negative
+	// fee below.
+	if usage == nil || usage.PromptTokens <= 0 {
 		usage = estimateEmbeddingUsageFromRequest(reqBody)
 	}
 
@@ -181,23 +194,33 @@ func (c *Ctrl) consumeEmbeddingLimiter(ctx *gin.Context, tokens int) {
 
 // estimateEmbeddingUsageFromRequest is the last-resort fallback when the
 // provider's response carries no billable usage — never silently bill 0 for
-// a real embedding call. Estimates from the REQUEST's `input` field (string
-// or array of strings) since, unlike chat/STT, an embeddings response echoes
-// no content back to estimate from.
+// a real embedding call. Estimates from the REQUEST's `input` field (string,
+// array of strings, or OpenAI's pre-tokenized int-array shape) since, unlike
+// chat/STT, an embeddings response echoes no content back to estimate from.
 func estimateEmbeddingUsageFromRequest(reqBody []byte) *EmbeddingUsage {
 	var req struct {
 		Input json.RawMessage `json:"input"`
 	}
+	if len(reqBody) == 0 || json.Unmarshal(reqBody, &req) != nil {
+		return &EmbeddingUsage{PromptTokens: 1, TotalTokens: 1}
+	}
+
 	var text string
-	if len(reqBody) > 0 && json.Unmarshal(reqBody, &req) == nil {
-		var single string
-		if json.Unmarshal(req.Input, &single) == nil {
-			text = single
-		} else {
-			var many []string
-			if json.Unmarshal(req.Input, &many) == nil {
-				text = strings.Join(many, " ")
-			}
+	var single string
+	var many []string
+	switch {
+	case json.Unmarshal(req.Input, &single) == nil:
+		text = single
+	case json.Unmarshal(req.Input, &many) == nil:
+		text = strings.Join(many, " ")
+	default:
+		// Pre-tokenized input (a flat token-ID array, or a batch of such
+		// arrays) isn't text at all — each ID is already one token, so count
+		// elements directly rather than falling through to a word-count
+		// estimate of an empty string, which would floor to 1 token
+		// regardless of the batch's real size.
+		if tokens := countTokenIDs(req.Input); tokens > 0 {
+			return &EmbeddingUsage{PromptTokens: tokens, TotalTokens: tokens}
 		}
 	}
 
@@ -210,4 +233,23 @@ func estimateEmbeddingUsageFromRequest(reqBody []byte) *EmbeddingUsage {
 	}
 
 	return &EmbeddingUsage{PromptTokens: estimatedTokens, TotalTokens: estimatedTokens}
+}
+
+// countTokenIDs counts tokens when `input` is a flat token-ID array or a batch
+// (array of such arrays) — OpenAI's pre-tokenized Embeddings request shape.
+// Returns 0 if `input` doesn't match either shape.
+func countTokenIDs(input json.RawMessage) int {
+	var batches [][]int
+	if json.Unmarshal(input, &batches) == nil {
+		total := 0
+		for _, b := range batches {
+			total += len(b)
+		}
+		return total
+	}
+	var ids []int
+	if json.Unmarshal(input, &ids) == nil {
+		return len(ids)
+	}
+	return 0
 }
