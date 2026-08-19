@@ -156,7 +156,19 @@ rather than from the provider:
 1. **`compose_hash` of the deployment you reviewed.** `sha256` of the `app_compose` manifest.
    Reviewing it means checking the four things in step 1 above — the sockets the broker does
    not mount, the controller being the only holder of `dstack.sock`, the controller's own
-   image digest, and the exact set of services mounting the attestation-socket volume.
+   image digest, and the exact set of services mounting the attestation-socket volume — and
+   one more that is about where your plaintext goes rather than who can write the ledger:
+   **`TARGET_URL` in the broker's environment.** The broker unseals a request and forwards it
+   there, so it is a value to read rather than merely to pin.
+
+   Read it as a **literal** in `docker_compose_file`. `compose_hash` is
+   `sha256(app_compose)`, and that manifest carries the compose text as submitted — so
+   `- TARGET_URL=http://0gm-sglang:8000/v1` is covered, while `- TARGET_URL=${TARGET_URL}`
+   covers only the reference and leaves the value in the encrypted-environment channel,
+   which nothing measures. The two are indistinguishable from inside the CVM, so this is a
+   check only you can make. A deployment that leaves the target in the broker's config file
+   is the same case: that file arrives the same way, and the manifest holds
+   `BROKER_CONFIG=${BROKER_CONFIG:-}` rather than its content.
 2. **The broker image digests you accept.** Built from source you read, or taken from a
    release you have a reason to trust. Never read out of the quote you are about to check.
 

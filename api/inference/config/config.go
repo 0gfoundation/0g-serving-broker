@@ -63,6 +63,12 @@ func normalizeProviderIdentity(identity *string) error {
 // it does not need to: the compose is hashed into the CVM measurement, so cheating
 // that way changes the quote — the same trust boundary every other part of the
 // deployment already rests on. See docs/design/sidecar-routing-proof.md.
+//
+// That argument needs the target itself to be in the compose, which is what
+// TARGET_URL is for (see targetURLEnvVar). A deployment that leaves this value in
+// the config file alone leaves it outside compose_hash, and then the reasoning above
+// covers the shim's declaration while saying nothing about whether the broker is
+// pointed at it.
 func validateInEnclaveTarget(targetURL string) error {
 	u, err := url.Parse(targetURL)
 	if err != nil {
@@ -1774,6 +1780,10 @@ func migrateDeprecated(cfg *Config, raw map[string]interface{}) error {
 	return nil
 }
 
+// targetURLEnvVar overrides service.targetUrl from the compose file, which is the only
+// place a user can read it from an attested source. See loadConfig for why it wins.
+const targetURLEnvVar = "TARGET_URL"
+
 func loadConfig(cfg *Config) error {
 	configPath := "/etc/config/config.yaml"
 	if envPath := os.Getenv("CONFIG_FILE"); envPath != "" {
@@ -1802,6 +1812,37 @@ func loadConfig(cfg *Config) error {
 
 	if err := migrateDeprecated(cfg, raw); err != nil {
 		return err
+	}
+
+	// TARGET_URL takes precedence over the file, so that the deployment can put this
+	// value where a verifier can read it.
+	//
+	// It decides where a request goes after the broker unseals it, so a user checking
+	// a deployment has to be able to read it — which means it has to sit inside what
+	// compose_hash covers. The config file does not: it arrives as an encrypted
+	// environment variable and an init container writes it into a volume, so the
+	// measured text holds BROKER_CONFIG=${BROKER_CONFIG:-} and never the content.
+	//
+	// **Only a literal value in the compose is measured.** compose_hash is
+	// sha256(app-compose.json), whose docker_compose_file field is the compose text as
+	// submitted, so `- TARGET_URL=http://0gm-sglang:8000/v1` is covered while
+	// `- TARGET_URL=${TARGET_URL}` covers the reference and leaves the value in the
+	// same unmeasured channel the config file uses. Writing the reference form gains
+	// nothing at all.
+	//
+	// This process cannot tell those apart — inside the container both arrive as an
+	// expanded string — so nothing here claims the value is attested. That check
+	// belongs to the reader, against app_compose; doc/attestation-trust-chain.md says
+	// to look for the literal.
+	//
+	// Precedence rather than fallback: if the file could override it, the half a user
+	// cannot verify would decide, which is the whole point of moving the value.
+	if envTarget := strings.TrimSpace(os.Getenv(targetURLEnvVar)); envTarget != "" {
+		if cfg.Service.TargetURL != "" && cfg.Service.TargetURL != envTarget {
+			log.Printf("[CONFIG] %s=%q takes precedence over service.targetUrl=%q from the config file",
+				targetURLEnvVar, envTarget, cfg.Service.TargetURL)
+		}
+		cfg.Service.TargetURL = envTarget
 	}
 
 	if cfg.Service.ModelInfo != nil {
