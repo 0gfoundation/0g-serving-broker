@@ -156,7 +156,13 @@ rather than from the provider:
 1. **`compose_hash` of the deployment you reviewed.** `sha256` of the `app_compose` manifest.
    Reviewing it means checking the four things in step 1 above — the sockets the broker does
    not mount, the controller being the only holder of `dstack.sock`, the controller's own
-   image digest, and the exact set of services mounting the attestation-socket volume.
+   image digest, and the exact set of services mounting the attestation-socket volume — and
+   one more that is about where your plaintext goes rather than who can write the ledger:
+   **`TARGET_URL` in the broker's environment.** The broker unseals a request and forwards it
+   there, so it is a value to read rather than merely to pin. It has to be in the compose to
+   be readable at all: a deployment that leaves the target in the broker's config file leaves
+   it outside `compose_hash`, because that file arrives as an encrypted environment variable
+   and only the reference to it is measured.
 2. **The broker image digests you accept.** Built from source you read, or taken from a
    release you have a reason to trust. Never read out of the quote you are about to check.
 

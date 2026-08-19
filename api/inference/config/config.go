@@ -63,6 +63,12 @@ func normalizeProviderIdentity(identity *string) error {
 // it does not need to: the compose is hashed into the CVM measurement, so cheating
 // that way changes the quote — the same trust boundary every other part of the
 // deployment already rests on. See docs/design/sidecar-routing-proof.md.
+//
+// That argument needs the target itself to be in the compose, which is what
+// TARGET_URL is for (see targetURLEnvVar). A deployment that leaves this value in
+// the config file alone leaves it outside compose_hash, and then the reasoning above
+// covers the shim's declaration while saying nothing about whether the broker is
+// pointed at it.
 func validateInEnclaveTarget(targetURL string) error {
 	u, err := url.Parse(targetURL)
 	if err != nil {
@@ -1774,6 +1780,10 @@ func migrateDeprecated(cfg *Config, raw map[string]interface{}) error {
 	return nil
 }
 
+// targetURLEnvVar overrides service.targetUrl from the compose file, which is the only
+// place a user can read it from an attested source. See loadConfig for why it wins.
+const targetURLEnvVar = "TARGET_URL"
+
 func loadConfig(cfg *Config) error {
 	configPath := "/etc/config/config.yaml"
 	if envPath := os.Getenv("CONFIG_FILE"); envPath != "" {
@@ -1802,6 +1812,28 @@ func loadConfig(cfg *Config) error {
 
 	if err := migrateDeprecated(cfg, raw); err != nil {
 		return err
+	}
+
+	// TARGET_URL wins over the file, because only one of the two is attested.
+	//
+	// This value decides where an unsealed request goes, so a user verifying the
+	// deployment has to be able to read it — and reading it means it has to be
+	// somewhere compose_hash covers. The config file is not: it arrives as an
+	// encrypted environment variable and is written into a volume, so
+	// compose_hash covers the reference (BROKER_CONFIG=${BROKER_CONFIG:-}) and
+	// never the content. An environment variable set in the compose file itself
+	// is covered, verbatim, and a reader sees the hostname rather than a hash.
+	//
+	// Env wins rather than merely filling a gap: if the file could override it,
+	// the unattested half would decide, which is the whole thing this exists to
+	// prevent. Disagreement is logged because it means the deployment is carrying
+	// two answers, and the attested one is being used.
+	if envTarget := strings.TrimSpace(os.Getenv(targetURLEnvVar)); envTarget != "" {
+		if cfg.Service.TargetURL != "" && cfg.Service.TargetURL != envTarget {
+			log.Printf("[CONFIG] %s=%q overrides service.targetUrl=%q from the config file; the environment value is the one compose_hash covers",
+				targetURLEnvVar, envTarget, cfg.Service.TargetURL)
+		}
+		cfg.Service.TargetURL = envTarget
 	}
 
 	if cfg.Service.ModelInfo != nil {
