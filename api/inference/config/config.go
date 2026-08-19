@@ -1814,23 +1814,32 @@ func loadConfig(cfg *Config) error {
 		return err
 	}
 
-	// TARGET_URL wins over the file, because only one of the two is attested.
+	// TARGET_URL takes precedence over the file, so that the deployment can put this
+	// value where a verifier can read it.
 	//
-	// This value decides where an unsealed request goes, so a user verifying the
-	// deployment has to be able to read it — and reading it means it has to be
-	// somewhere compose_hash covers. The config file is not: it arrives as an
-	// encrypted environment variable and is written into a volume, so
-	// compose_hash covers the reference (BROKER_CONFIG=${BROKER_CONFIG:-}) and
-	// never the content. An environment variable set in the compose file itself
-	// is covered, verbatim, and a reader sees the hostname rather than a hash.
+	// It decides where a request goes after the broker unseals it, so a user checking
+	// a deployment has to be able to read it — which means it has to sit inside what
+	// compose_hash covers. The config file does not: it arrives as an encrypted
+	// environment variable and an init container writes it into a volume, so the
+	// measured text holds BROKER_CONFIG=${BROKER_CONFIG:-} and never the content.
 	//
-	// Env wins rather than merely filling a gap: if the file could override it,
-	// the unattested half would decide, which is the whole thing this exists to
-	// prevent. Disagreement is logged because it means the deployment is carrying
-	// two answers, and the attested one is being used.
+	// **Only a literal value in the compose is measured.** compose_hash is
+	// sha256(app-compose.json), whose docker_compose_file field is the compose text as
+	// submitted, so `- TARGET_URL=http://0gm-sglang:8000/v1` is covered while
+	// `- TARGET_URL=${TARGET_URL}` covers the reference and leaves the value in the
+	// same unmeasured channel the config file uses. Writing the reference form gains
+	// nothing at all.
+	//
+	// This process cannot tell those apart — inside the container both arrive as an
+	// expanded string — so nothing here claims the value is attested. That check
+	// belongs to the reader, against app_compose; doc/attestation-trust-chain.md says
+	// to look for the literal.
+	//
+	// Precedence rather than fallback: if the file could override it, the half a user
+	// cannot verify would decide, which is the whole point of moving the value.
 	if envTarget := strings.TrimSpace(os.Getenv(targetURLEnvVar)); envTarget != "" {
 		if cfg.Service.TargetURL != "" && cfg.Service.TargetURL != envTarget {
-			log.Printf("[CONFIG] %s=%q overrides service.targetUrl=%q from the config file; the environment value is the one compose_hash covers",
+			log.Printf("[CONFIG] %s=%q takes precedence over service.targetUrl=%q from the config file",
 				targetURLEnvVar, envTarget, cfg.Service.TargetURL)
 		}
 		cfg.Service.TargetURL = envTarget
