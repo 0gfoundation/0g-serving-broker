@@ -869,7 +869,7 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 		hasLimits = true
 	}
 	switch svc.Type {
-	case constant.ServiceTypeChatbot, constant.ServiceTypeSpeechToText:
+	case constant.ServiceTypeChatbot, constant.ServiceTypeSpeechToText, constant.ServiceTypeEmbedding:
 		if concurrencyLimits.PerUserTPM > 0 {
 			rl.TokensPerMinute = concurrencyLimits.PerUserTPM
 			hasLimits = true
