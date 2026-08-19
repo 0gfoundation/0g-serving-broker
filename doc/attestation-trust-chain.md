@@ -343,8 +343,11 @@ else:
 # ties the evidence to this CVM is that the code collecting it runs here and is measured,
 # and this signature is what distinguishes the bytes that code emitted from any others.
 from eth_keys import KeyAPI            # any secp256k1 recovery will do
-from eth_utils import keccak            # keccak, not sha256: this is an eth_personal signature
+from eth_utils import keccak            # keccak, not sha256
 
+# The personal_sign prefix is applied to the body's keccak DIGEST, not to the body. A
+# caller reaching for eth_account.recover_message(encode_defunct(RAW_BODY)) recovers a
+# different address and finds nothing wrong with its own code.
 sig = bytes.fromhex(HEADERS["ZG-Quote-Signature"].removeprefix("0x"))
 signed = keccak(b"\x19Ethereum Signed Message:\n32" + keccak(RAW_BODY))
 recovered = KeyAPI().ecdsa_recover(signed, KeyAPI.Signature(sig[:64] + bytes([sig[64] - 27])))
@@ -352,9 +355,16 @@ assert recovered.to_address() == signer, "response body is not this signer's"
 
 # Only now does the GPU evidence describe this deployment's GPU. Verifying the evidence
 # itself is separate and needs NVIDIA's tools; what this establishes is whose evidence it is.
-gpu_nonce = Q["nvidia_payload"]["nonce"] if Q.get("nvidia_payload") else None
+#
+# The nonce is keccak256 of the report_data *handed to* the quote, and the two layouts hand
+# over different lengths. §4.2 hands over all 64 bytes. The older layout hands over the
+# 42-byte ASCII address and the hardware zero-pads it, so hashing the 64 bytes that come
+# back gives an answer that never matches — an honest provider failing a check that was
+# computed wrongly.
+gpu_nonce = (Q.get("nvidia_payload") or {}).get("nonce")
 if gpu_nonce:
-    assert gpu_nonce == keccak(rd).hex(), "GPU evidence was raised for another quote"
+    challenged = rd if int.from_bytes(rd[52:56], "big") == 1 else rd[:42]
+    assert gpu_nonce == keccak(challenged).hex(), "GPU evidence was raised for another quote"
 
 print(f"image {digest} (from the {source}), responses signed by {signer}, seal to {seal_to}")
 ```

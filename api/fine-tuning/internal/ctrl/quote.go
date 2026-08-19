@@ -14,6 +14,14 @@ func (c *Ctrl) GetQuote(ctx context.Context, legacy bool) (string, error) {
 	return c.teeService.GetQuote(legacy), nil
 }
 
+// QuoteSignature returns the signature over exactly the bytes GetQuote returns for the
+// same argument, or nil when signing was unavailable when the quote was built. See the
+// inference broker's ctrl.QuoteSignature for what it is for: nvidia_payload rides in this
+// response and nothing else authenticates it.
+func (c *Ctrl) QuoteSignature(legacy bool) []byte {
+	return c.teeService.GetQuoteSignature(legacy)
+}
+
 func (c *Ctrl) getProviderSignerAddress(ctx context.Context) common.Address {
 	return c.teeService.Address
 }

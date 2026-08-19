@@ -10,6 +10,11 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// quoteSignatureHeader carries the signature over the quote response body. Must stay in
+// the CORS Access-Control-Expose-Headers list in handler.go: a browser caller that cannot
+// read it is told, by doc/attestation-trust-chain.md, that nvidia_payload says nothing.
+const quoteSignatureHeader = "ZG-Quote-Signature"
+
 // GetQuote
 //
 //	@Description  This endpoint allows you to get a quote
@@ -32,19 +37,13 @@ func (h *Handler) GetQuote(ctx *gin.Context) {
 		return
 	}
 
-	// Signed with the key report_data binds, over the exact bytes below. See
-	// ctrl.SignQuoteResponse for why: nvidia_payload rides in this body and has no
-	// self-authentication of its own, so without this a caller cannot tell the
-	// measured image's GPU evidence from evidence substituted in transit.
-	//
-	// A failure here is not fatal to the response. The fields that authenticate
-	// themselves still do, and refusing to serve a quote because the signer is
-	// briefly unreachable would deny the verification path over a strictly weaker
-	// problem. A caller that requires the header is the one who decides.
-	if sig, err := h.ctrl.SignQuoteResponse([]byte(quote)); err != nil {
-		h.logger.Warnf("serving quote unsigned: %v", err)
-	} else {
-		ctx.Header("ZG-Quote-Signature", hexutil.Encode(sig))
+	// Signed with the key report_data binds, over exactly these bytes. See
+	// ctrl.QuoteSignature for why: nvidia_payload rides in this body and has no
+	// self-authentication of its own, so without this a caller cannot tell the measured
+	// image's GPU evidence from evidence substituted in transit. Computed at sync time,
+	// not here — this endpoint is unauthenticated and the body is a cached constant.
+	if sig := h.ctrl.QuoteSignature(legacy); sig != nil {
+		ctx.Header(quoteSignatureHeader, hexutil.Encode(sig))
 	}
 
 	ctx.String(http.StatusOK, quote)

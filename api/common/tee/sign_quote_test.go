@@ -3,6 +3,7 @@ package tee
 import (
 	"testing"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 )
 
@@ -44,7 +45,7 @@ func TestSignRecoversToBoundAddress(t *testing.T) {
 	}
 }
 
-func recoverAddr(t *testing.T, body, sig []byte) (addr [20]byte) {
+func recoverAddr(t *testing.T, body, sig []byte) common.Address {
 	t.Helper()
 	prefixed := crypto.Keccak256([]byte("\x19Ethereum Signed Message:\n32"), crypto.Keccak256(body))
 	v := append(append([]byte{}, sig[:64]...), sig[64]-27)

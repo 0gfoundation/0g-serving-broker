@@ -4,8 +4,13 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/gin-gonic/gin"
 )
+
+// quoteSignatureHeader carries the signature over the quote response body, spelled the
+// same as the inference broker's so one client rule covers both.
+const quoteSignatureHeader = "ZG-Quote-Signature"
 
 // GetQuote
 //
@@ -27,6 +32,13 @@ func (h *Handler) GetQuote(ctx *gin.Context) {
 	if err != nil {
 		handleBrokerError(ctx, err, "read quote")
 		return
+	}
+
+	// Same reason as the inference broker's: this body carries nvidia_payload, which
+	// nothing else authenticates. Both services share one TeeService and this service
+	// syncs with nvQuote on outside hardhat, so the gap was identical here.
+	if sig := h.ctrl.QuoteSignature(legacy); sig != nil {
+		ctx.Header(quoteSignatureHeader, hexutil.Encode(sig))
 	}
 
 	ctx.String(http.StatusOK, quote)
