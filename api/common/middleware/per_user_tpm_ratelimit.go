@@ -179,11 +179,11 @@ func (rl *PerUserTPMLimiter) EffectiveTPM(userID string) int {
 	return int(math.Round(float64(r) * 60))
 }
 
-// CheckPerUserTPMLimit checks per-user TPM limit for token-based services (chatbot, speech-to-text).
+// CheckPerUserTPMLimit checks per-user TPM limit for token-based services (chatbot, speech-to-text, embedding).
 // Returns true if allowed, false if rate limited (response already written).
 // Non-token-based services always return true (TPM doesn't apply).
 func CheckPerUserTPMLimit(limiter *PerUserTPMLimiter, c *gin.Context, userAddress string, serviceType string) bool {
-	if limiter == nil || (serviceType != "chatbot" && serviceType != "speech-to-text") {
+	if limiter == nil || (serviceType != "chatbot" && serviceType != "speech-to-text" && serviceType != "embedding") {
 		return true
 	}
 
