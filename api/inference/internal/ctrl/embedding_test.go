@@ -3,6 +3,7 @@ package ctrl
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -81,6 +82,49 @@ func TestEstimateEmbeddingUsageFromRequest(t *testing.T) {
 	}
 }
 
+// TestEmbeddingTieredInputPrice is the regression guard for a real bug:
+// updateEmbeddingWithUsage used to bill every embedding request at the flat
+// base InputPrice, never applying input-length tiered pricing
+// (service.tieredPricing / a model's own Tiers) the way chatbot's
+// updateAccountWithUsage does. TieredPricingConfig is documented as applying
+// to "all downstream fee calculations" and is not gated to any service type —
+// GET /v1/models advertises tiered_pricing for an embedding service exactly
+// the same as for chatbot — so silently skipping it here meant an operator's
+// advertised (and, for Qwen models, likely enabled — see TieredPricingConfig's
+// own doc comment) tiered price never matched what was actually billed.
+func TestEmbeddingTieredInputPrice(t *testing.T) {
+	tiers := []config.PricingTier{
+		{MaxInputTokens: 100, InputMultiplier: 1, InputMultiplierDenominator: 1},
+		{MaxInputTokens: 0, InputMultiplier: 3, InputMultiplierDenominator: 2}, // unbounded catch-all, 1.5x
+	}
+
+	t.Run("no tiers configured: passthrough, no rate class", func(t *testing.T) {
+		price, rateClass, err := embeddingTieredInputPrice(nil, "1000", 50)
+		require.NoError(t, err)
+		assert.Equal(t, "1000", price)
+		assert.Equal(t, "", rateClass)
+	})
+
+	t.Run("within base tier: unmultiplied", func(t *testing.T) {
+		price, rateClass, err := embeddingTieredInputPrice(tiers, "1000", 50)
+		require.NoError(t, err)
+		assert.Equal(t, "1000", price)
+		assert.NotEqual(t, "", rateClass)
+	})
+
+	t.Run("above base tier: 1.5x multiplier applied", func(t *testing.T) {
+		price, rateClass, err := embeddingTieredInputPrice(tiers, "1000", 500)
+		require.NoError(t, err)
+		assert.Equal(t, "1500", price, "500 prompt tokens must hit the unbounded 1.5x tier")
+		assert.NotEqual(t, "", rateClass)
+	})
+
+	t.Run("propagates applyTierMultiplier's error on an unparseable price", func(t *testing.T) {
+		_, _, err := embeddingTieredInputPrice(tiers, "not-a-number", 500)
+		require.Error(t, err)
+	})
+}
+
 // TestHandleEmbeddingResponse_SignsSanitizedBody is the regression guard for a
 // real bug: handleEmbeddingResponse used to sanitize into a separate
 // clientBody variable but sign the original, pre-sanitization body. For a
@@ -137,4 +181,85 @@ func TestHandleEmbeddingResponse_SignsSanitizedBody(t *testing.T) {
 		"the signed response hash must match what the client received (post-sanitization)")
 	assert.NotContains(t, sig.Text, rawHash,
 		"must not sign the pre-sanitization body — its hash must not appear in the routing proof text")
+}
+
+// TestHandleEmbeddingResponse_DecentralizedSignsContent covers the OTHER half
+// of the signing dispatch that TestHandleEmbeddingResponse_SignsSanitizedBody
+// doesn't reach: a decentralized, non-TargetSeparated provider (the model runs
+// in-network) must fall into `case !c.Service.TargetSeparated` and sign via
+// signChatWithKey, not the centralized routing-proof path. video-generation's
+// analogous dispatch (signVideoResponse) has a test for both branches
+// (TestSignVideoResponseCentralizedProducesRoutingProof /
+// TestSignVideoResponseDecentralizedSignsContent); embedding's inline
+// switch had only the centralized half covered.
+func TestHandleEmbeddingResponse_DecentralizedSignsContent(t *testing.T) {
+	c := newChatbotTestCtrl(t, config.Service{ProviderType: constant.ProviderTypeDecentralized})
+	c.reconciliationDB = &mockReconciliationDB{}
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(w)
+	ctx.Request = httptest.NewRequest("POST", "/v1/proxy/embeddings", nil)
+
+	respBody := []byte(`{"object":"list","data":[],"model":"m","usage":{"prompt_tokens":1,"total_tokens":1}}`)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{},
+		Body:       io.NopCloser(bytes.NewReader(respBody)),
+	}
+
+	reqModel := model.Request{IsWhitelisted: true, ServiceName: "embedding", RequestHash: "h"}
+	reqBody := []byte(`{"model":"m","input":"hi"}`)
+	err := c.handleEmbeddingResponse(ctx, resp, model.User{}, "0", reqBody, reqModel)
+	require.NoError(t, err)
+
+	chatKey := w.Header().Get("ZG-Res-Key")
+	require.NotEmpty(t, chatKey, "ZG-Res-Key must be set for a non-TargetSeparated provider")
+
+	sig, err := c.GetChatSignature(chatKey)
+	require.NoError(t, err, "signChatWithKey must have signed the response for the decentralized path")
+	assert.Contains(t, sig.Text, sha256Hex(respBody),
+		"the signed content hash must match the (unsanitized, decentralized) response body")
+}
+
+// TestUpdateEmbeddingWithUsage_ZeroOrNegativePromptTokensFallsBack pins the
+// mutation-tested trigger for handleEmbeddingResponse's usage fallback:
+// `usage == nil || usage.PromptTokens <= 0`, not just `usage == nil`. A
+// provider reporting {"prompt_tokens":0,...} (or a negative value, which would
+// otherwise flow into a negative fee) must still fall back to the request-body
+// estimate rather than billing on the provider's bogus count. Exercised via
+// the whitelisted path (recordWhitelistedUsage only needs reconciliationDB,
+// not the real DB updateEmbeddingWithUsage's non-whitelisted path requires).
+func TestHandleEmbeddingResponse_NonPositivePromptTokensFallsBack(t *testing.T) {
+	for _, promptTokens := range []int{0, -5} {
+		t.Run(fmt.Sprintf("prompt_tokens=%d", promptTokens), func(t *testing.T) {
+			c := newChatbotTestCtrl(t, config.Service{ProviderType: constant.ProviderTypeDecentralized})
+			mockDB := &mockReconciliationDB{}
+			c.reconciliationDB = mockDB
+
+			gin.SetMode(gin.TestMode)
+			w := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(w)
+			ctx.Request = httptest.NewRequest("POST", "/v1/proxy/embeddings", nil)
+
+			respBody := []byte(fmt.Sprintf(`{"object":"list","data":[],"model":"m","usage":{"prompt_tokens":%d,"total_tokens":%d}}`, promptTokens, promptTokens))
+			resp := &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{},
+				Body:       io.NopCloser(bytes.NewReader(respBody)),
+			}
+
+			// Five words -> the word-count fallback estimates 10 tokens (see
+			// TestEstimateEmbeddingUsageFromRequest), which is what recording
+			// must show instead of the provider's bogus prompt_tokens value.
+			reqBody := []byte(`{"model":"m","input":"one two three four five"}`)
+			reqModel := model.Request{IsWhitelisted: true, ServiceName: "embedding", RequestHash: "h"}
+			err := c.handleEmbeddingResponse(ctx, resp, model.User{}, "0", reqBody, reqModel)
+			require.NoError(t, err)
+
+			require.Len(t, mockDB.calls, 1)
+			assert.Equal(t, int64(10), mockDB.calls[0].InputCount,
+				"a non-positive provider-reported prompt_tokens must trigger the request-body fallback estimate, not bill the bogus value")
+		})
+	}
 }

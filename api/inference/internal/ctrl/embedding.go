@@ -11,6 +11,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/middleware"
 	"github.com/0glabs/0g-serving-broker/common/util"
+	"github.com/0glabs/0g-serving-broker/inference/config"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
@@ -145,14 +146,29 @@ func (c *Ctrl) updateEmbeddingWithUsage(ctx *gin.Context, usage *EmbeddingUsage,
 		return errors.Wrap(err, "get billing prices for embedding billing")
 	}
 
-	fee, err := util.Multiply(prices.InputPrice, int64(usage.PromptTokens))
+	// Tiered (input-length-based) pricing applies to every service type per
+	// TieredPricingConfig's contract ("all downstream fee calculations use the
+	// correct tiered price") and is advertised for embedding in GET /v1/models
+	// the same as any other service (models.go's tiered_pricing population
+	// isn't gated by service type) — so it must be applied here too, not just
+	// in chatbot's updateAccountWithUsage. Embedding has no per-model tier
+	// table of its own (multi-model pricing isn't wired for this service
+	// type — see validateModelPricing), so effectiveTiers falls straight to
+	// the service-level config when enabled.
+	tiers := c.effectiveTiers(prices.Tiers)
+	inputPrice, rateClass, err := embeddingTieredInputPrice(tiers, prices.InputPrice, usage.PromptTokens)
+	if err != nil {
+		return errors.Wrap(err, "apply tiered pricing for embedding")
+	}
+
+	fee, err := util.Multiply(inputPrice, int64(usage.PromptTokens))
 	if err != nil {
 		return errors.Wrap(err, "calculate embedding fee")
 	}
 	feeStr := fee.String()
 
 	if err := c.db.UpdateRequestWithAccurateTokens(requestHash, feeStr, "0", feeStr,
-		int64(usage.PromptTokens), 0, constant.BillingUnitTokens, 0, 0, ""); err != nil {
+		int64(usage.PromptTokens), 0, constant.BillingUnitTokens, 0, 0, rateClass); err != nil {
 		return errors.Wrap(err, "update request with embedding usage")
 	}
 
@@ -161,6 +177,27 @@ func (c *Ctrl) updateEmbeddingWithUsage(ctx *gin.Context, usage *EmbeddingUsage,
 
 	c.consumeEmbeddingLimiter(ctx, usage.PromptTokens)
 	return nil
+}
+
+// embeddingTieredInputPrice applies input-length tiered pricing (if any tiers
+// are configured) to the base per-token input price, returning the effective
+// price and the rate_class label to record for reconciliation (matching
+// chatbot's matchedTierRateClass convention; "" when untiered). Pure — no DB,
+// no Ctrl — so the tier-selection wiring updateEmbeddingWithUsage relies on is
+// unit-testable on its own, the same way chatbot.go's matchedTier /
+// applyTierMultiplier are tested independently of updateAccountWithUsage's DB
+// write.
+func embeddingTieredInputPrice(tiers []config.PricingTier, basePrice string, promptTokens int) (price, rateClass string, err error) {
+	if len(tiers) == 0 {
+		return basePrice, "", nil
+	}
+	tier := matchedTier(tiers, promptTokens)
+	num, den := tier.EffectiveInputMultiplier()
+	price, err = applyTierMultiplier(basePrice, num, den)
+	if err != nil {
+		return "", "", err
+	}
+	return price, matchedTierRateClass(tiers, promptTokens), nil
 }
 
 // consumeEmbeddingLimiter feeds the post-consume TPM bucket with the actual
