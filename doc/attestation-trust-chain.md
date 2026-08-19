@@ -197,10 +197,22 @@ you fetch it from does not matter to the result.
 ```bash
 # 2. Hand the quote and the event log to dstack's verifier. Run it yourself — a verifier the
 #    provider hosts decides nothing, since the answer is what is being checked.
-docker run -d -p 8080:8080 dstacktee/dstack-verifier:v0.5.11
+docker run -d -p 8080:8080 dstacktee/dstack-verifier:0.5.11
 curl -s -X POST localhost:8080/verify -H 'Content-Type: application/json' \
-     --data-binary @<(jq '{quote, event_log}' q.json) > v.json
+     --data-binary @<(jq '{quote, event_log, vm_config}' q.json) > v.json
 ```
+
+`vm_config` is in that body because the verifier needs it to know which published guest image
+to measure against. Omit it and the request still returns 200, but `is_valid`,
+`event_log_verified` and `os_image_hash_verified` all come back false, `app_info` is null, and
+the reason names a 404 for `os-images/mr_.tar.gz` — a failure that reads as a finding about the
+provider while being an incomplete request.
+
+Pick the verifier by what it has to recognise, not by what the CVM runs. It fetches images by
+the measurements it knows, so one older than the image it is judging fails to build the
+attestation at all. A newer verifier handles older images, so err newer: `0.5.11` verifies a
+0.5.9 CVM. Matching the CVM's version exactly is the one thing that will not work, because the
+request schema moved between releases — 0.5.9 rejects the body above with 422.
 
 The request schema is the verifier's own, and it moves with its releases — read them rather
 than this file. What does not move is the set of fields whose values you must require, because
@@ -211,30 +223,40 @@ each one is a link that fails silently if you skip it:
 | `quote_verified` | `true` | that the quote is a real TDX quote from genuine Intel hardware — everything else is arithmetic on numbers a provider could have typed |
 | `event_log_verified` | `true` | that the log replays onto the quote's registers. The log arrives over plain HTTP from the party being described; this is the only thing that makes it evidence, and steps 3–5 read records out of **exactly the bytes you sent here** |
 | `tcb_status` | `UpToDate` | a platform with a published unpatched vulnerability. Any other value comes with `advisory_ids` and is a decision to make deliberately, not a pass to wave through |
-| `os_image_is_dev` | `false` | a development guest image, which can carry debug facilities that void the confidentiality the whole chain rests on |
 | `os_image_hash_verified` | `true` | a guest OS the provider built rather than a published dstack image |
-| `acpi_tables_verified` | `true` | firmware configuration that was never measured |
-| `key_provider` | the KMS you expect | a CVM whose keys came from somewhere other than the KMS whose on-chain policy you read |
+| `app_info.key_provider_info` | the KMS you expect | a CVM whose keys came from somewhere other than the KMS whose on-chain policy you read. Hex-encoded JSON; decode it and read `id` |
 
-`tcb_status`, `os_image_is_dev`, `os_image_hash_verified` and `acpi_tables_verified` are four
-checks this project never made when it verified quotes itself. Getting them is the reason the
-recommendation changed.
+Everything above sits under `details` except `is_valid`, and `key_provider_info` is one level
+deeper still, under `details.app_info`.
+
+`tcb_status` and `os_image_hash_verified` are two checks this project never made when it
+verified quotes itself. Getting them is the reason the recommendation changed.
+
+**Two things the verifier does not tell you, so do not write a check that appears to ask.**
+There is no `os_image_is_dev` and no `acpi_tables_verified` in the response — a `.get()` for
+either returns a default and passes, which is worse than not looking. For the first, compare
+`details.app_info.os_image_hash` against the dstack release whose image you expect: a
+development image is a different published hash, not a flag. The second has no substitute
+here; `quote_verified` covers the DCAP chain and nothing in the response speaks to the ACPI
+tables separately.
 
 ```python
 # 3-5. verify.py — the checks the verifier does not make, because they are about our records.
 import hashlib, json
 
 V, Q = json.load(open("v.json")), json.load(open("q.json"))
+D = V["details"]                                           # everything but is_valid lives here
 EVENT_TYPE = 0x08000001
 
-assert V["quote_verified"] and V["event_log_verified"]     # plus the rest of the table above
+assert V["is_valid"], V.get("reason")                      # the verdict, not just its parts
+assert D["quote_verified"] and D["event_log_verified"]     # plus the rest of the table above
 
 # --- 3. Is tcb_info this quote's, and is this the deployment you reviewed? ---
 # The verifier is never handed app_compose — its request carries the quote and the log —
 # so this line is the only thing tying the manifest you are about to read to an attested
 # hash. Skip it and the compose file degrades to an unauthenticated claim by the provider,
 # which is precisely the thing step 1's review was supposed to have settled.
-compose_hash = V["app_info"]["compose_hash"]
+compose_hash = D["app_info"]["compose_hash"]
 app_compose = json.loads(Q["tcb_info"])["app_compose"]
 assert hashlib.sha256(app_compose.encode()).hexdigest() == compose_hash, "tcb_info is not this quote's"
 assert compose_hash == REVIEWED_COMPOSE_HASH, f"unreviewed deployment: {compose_hash}"
@@ -278,7 +300,7 @@ assert digest in ACCEPTED_DIGESTS, f"unreviewed image: {digest}"
 # report_data comes back from the verifier, which read it out of the quote it just verified.
 # These 64 bytes are the one part of the quote's layout this file still has to know, because
 # their contents are ours (0g-pc SPEC 4.2) rather than dstack's.
-rd = bytes.fromhex(V["report_data"].removeprefix("0x"))
+rd = bytes.fromhex(D["report_data"].removeprefix("0x"))
 if int.from_bytes(rd[52:56], "big") == 1:          # the enc_pub-binding layout
     signer = "0x" + rd[32:52].hex()
 else:                                              # the older layout: the ASCII address
