@@ -85,6 +85,18 @@ type TeeService struct {
 	// default, see bindEncPubEnvVar); empty otherwise.
 	QuoteV2 string
 
+	// Signatures over Quote and QuoteV2, computed once here rather than per request.
+	//
+	// GET /v1/quote is unauthenticated and unthrottled — RateLimitMiddleware is a
+	// no-op because an L4 proxy hides the client IP — while the body it returns is
+	// constant between syncs. Signing on demand would let an anonymous loop amplify
+	// 1:1 into controller /Sign calls, each of which inspects a container through the
+	// Docker daemon and derives a key through dstack, competing with the settlement
+	// path for both sockets. remoteSigner's own comment assumes signing runs once per
+	// response, not once per fetch of a cached string.
+	QuoteSig   []byte
+	QuoteV2Sig []byte
+
 	// E2EE (0g-pc SPEC §4) enclave encryption key. Derived inside the TEE from a
 	// path distinct from the signer, optionally bound into the quote's report_data
 	// (§4.2, see reportData), and used as the HPKE recipient to unseal sealed
@@ -168,6 +180,14 @@ func (s *TeeService) SyncQuote(ctx context.Context, nvQuote bool) error {
 	if err != nil {
 		return errors.Wrap(err, "tdx quote (legacy)")
 	}
+	// Signed here, once, because this string is what every later fetch returns. A
+	// failure leaves the signature nil and the quote still served: every field that
+	// carries its own proof keeps verifying, and refusing to attest at all over an
+	// unreachable signer would be strictly worse than serving without the header.
+	if s.QuoteSig, err = s.Sign(crypto.Keccak256([]byte(s.Quote))); err != nil {
+		s.logger.Warnf("quote will be served unsigned: %v", err)
+		s.QuoteSig = nil
+	}
 
 	// When enabled (the default), also build the §4.2 quote that binds enc_pub and
 	// signer_addr, so a client can extract and verify them straight out of a
@@ -183,6 +203,10 @@ func (s *TeeService) SyncQuote(ctx context.Context, nvQuote bool) error {
 		s.QuoteV2, err = client.TdxQuote(ctx, reportData, nvQuote)
 		if err != nil {
 			return errors.Wrap(err, "tdx quote (§4.2)")
+		}
+		if s.QuoteV2Sig, err = s.Sign(crypto.Keccak256([]byte(s.QuoteV2))); err != nil {
+			s.logger.Warnf("§4.2 quote will be served unsigned: %v", err)
+			s.QuoteV2Sig = nil
 		}
 	}
 
@@ -201,6 +225,16 @@ func (s *TeeService) GetQuote(legacy bool) string {
 		return s.Quote
 	}
 	return s.QuoteV2
+}
+
+// GetQuoteSignature returns the signature over exactly the bytes GetQuote returns for
+// the same argument, or nil when signing was unavailable at sync time. The pairing has
+// to hold: a signature served beside the other layout's body recovers to nothing.
+func (s *TeeService) GetQuoteSignature(legacy bool) []byte {
+	if legacy || s.QuoteV2 == "" {
+		return s.QuoteSig
+	}
+	return s.QuoteV2Sig
 }
 
 // legacyReportData is the pre-§4.2 report_data: the ASCII hex of the signer

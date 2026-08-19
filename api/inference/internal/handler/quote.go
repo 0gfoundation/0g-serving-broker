@@ -6,8 +6,14 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/gin-gonic/gin"
 )
+
+// quoteSignatureHeader carries the signature over the quote response body. Must stay in
+// the CORS Access-Control-Expose-Headers list in handler.go: a browser caller that cannot
+// read it is told, by doc/attestation-trust-chain.md, that nvidia_payload says nothing.
+const quoteSignatureHeader = "ZG-Quote-Signature"
 
 // GetQuote
 //
@@ -29,6 +35,15 @@ func (h *Handler) GetQuote(ctx *gin.Context) {
 	if err != nil {
 		handleBrokerError(ctx, err, "read quote")
 		return
+	}
+
+	// Signed with the key report_data binds, over exactly these bytes. See
+	// ctrl.QuoteSignature for why: nvidia_payload rides in this body and has no
+	// self-authentication of its own, so without this a caller cannot tell the measured
+	// image's GPU evidence from evidence substituted in transit. Computed at sync time,
+	// not here — this endpoint is unauthenticated and the body is a cached constant.
+	if sig := h.ctrl.QuoteSignature(legacy); sig != nil {
+		ctx.Header(quoteSignatureHeader, hexutil.Encode(sig))
 	}
 
 	ctx.String(http.StatusOK, quote)
