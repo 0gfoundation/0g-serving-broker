@@ -46,7 +46,7 @@ func (c *Ctrl) handleEmbeddingResponse(ctx *gin.Context, resp *http.Response, _ 
 	defer resp.Body.Close()
 
 	chatKey := uuid.NewString()
-	if !c.Service.TargetSeparated {
+	if !c.Service.TargetSeparated || c.Service.IsCentralized() {
 		ctx.Writer.Header().Set("ZG-Res-Key", chatKey)
 	}
 
@@ -91,7 +91,17 @@ func (c *Ctrl) handleEmbeddingResponse(ctx *gin.Context, resp *http.Response, _ 
 		c.logger.Warnf("failed to parse embedding response for usage extraction: %v", err)
 	}
 
-	if !c.Service.TargetSeparated {
+	// Signing: centralized providers get a routing proof (TLS cert fingerprint
+	// bound at request time); an in-network decentralized provider gets a plain
+	// content signature. Mirrors chatbot/image-editing's identical dispatch —
+	// see handleImageEditingResponse for why these two cases don't overlap.
+	switch {
+	case c.Service.IsCentralized():
+		fingerprint := ctx.GetString(CtxKeyUpstreamCertFingerprint)
+		if err := c.signCentralizedRoutingProof(reqBody, body, chatKey, fingerprint); err != nil {
+			c.logger.Errorf("routing proof not created for embedding %s: %v", chatKey, err)
+		}
+	case !c.Service.TargetSeparated:
 		if err := c.signChatWithKey(reqBody, body, chatKey); err != nil {
 			c.logger.Errorf("could not sign the embedding response for %s: %v", chatKey, err)
 		}
@@ -136,19 +146,37 @@ func (c *Ctrl) updateEmbeddingWithUsage(ctx *gin.Context, usage *EmbeddingUsage,
 	metricModel := c.metricModel(ctx)
 	monitor.RecordTokens(embeddingMetricLabel, metricModel, int64(usage.PromptTokens), 0)
 
-	// Update TPM limiter with actual token consumption, mirroring
-	// speech-to-text's consumeSpeechToTextLimiter.
-	if userAddr, ok := ctx.Get("userAddress"); ok {
-		if userStr, ok := userAddr.(string); ok {
-			if tpmLimiter, exists := ctx.Get("tpmLimiter"); exists {
-				if limiter, ok := tpmLimiter.(*middleware.PerUserTPMLimiter); ok {
-					limiter.ConsumeTokens(userStr, usage.PromptTokens)
-				}
-			}
-		}
-	}
-
+	c.consumeEmbeddingLimiter(ctx, usage.PromptTokens)
 	return nil
+}
+
+// consumeEmbeddingLimiter feeds the post-consume TPM bucket with the actual
+// token count. Mirrors speech-to-text's consumeSpeechToTextLimiter, including
+// its debug-only "missing" logging: these are not errors (some tests / internal
+// calls drive Ctrl without a gin context), but if a production path ever
+// stopped wiring the limiter through, rate limiting would silently disable for
+// embedding — the debug logs let operators discover that by toggling log level.
+func (c *Ctrl) consumeEmbeddingLimiter(ctx *gin.Context, tokens int) {
+	if tokens <= 0 {
+		return
+	}
+	userAddr, ok := ctx.Get("userAddress")
+	userStr, userOk := userAddr.(string)
+	if !ok || !userOk {
+		c.logger.Debugf("consumeEmbeddingLimiter: userAddress missing from gin.Context (tokens=%d), limiter skipped", tokens)
+		return
+	}
+	tpmLimiter, exists := ctx.Get("tpmLimiter")
+	if !exists {
+		c.logger.Debugf("consumeEmbeddingLimiter: tpmLimiter missing from gin.Context user=%s (tokens=%d), limiter skipped", userStr, tokens)
+		return
+	}
+	limiter, ok := tpmLimiter.(*middleware.PerUserTPMLimiter)
+	if !ok {
+		c.logger.Debugf("consumeEmbeddingLimiter: tpmLimiter has unexpected type %T user=%s (tokens=%d), limiter skipped", tpmLimiter, userStr, tokens)
+		return
+	}
+	limiter.ConsumeTokens(userStr, tokens)
 }
 
 // estimateEmbeddingUsageFromRequest is the last-resort fallback when the
