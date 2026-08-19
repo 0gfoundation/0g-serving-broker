@@ -797,8 +797,22 @@ func (c *Ctrl) handleServiceError(ctx *gin.Context, resp *http.Response) {
 
 	// Log the actual service error content for debugging
 	// Skip logging for telemetry endpoints to reduce noise
+	//
+	// Redacted and bounded, at Error, which is to say at the default level. An upstream
+	// error body is the one place a credential reliably comes back — vendors quote the
+	// key they rejected, and some echo the request that carried it — and these logs are
+	// readable with the provider's own key, which is the party the confidentiality
+	// promise is made against. Redaction is by value against the secrets configured
+	// here, so it covers what this deployment can actually leak; see
+	// redactUpstreamSecrets. The vendor's message survives, because it is usually the
+	// only account of why the request failed.
+	//
+	// URI rather than RequestURI: the path without the query string, which is where a
+	// caller's own credential would sit.
 	if !strings.Contains(ctx.Request.RequestURI, "/api/event_logging/batch") {
-		c.logger.Errorf("Service returned error response: %s, Incoming request: method=%s, URI=%s, path=%s, RemoteAddr=%s,", decodedBody, ctx.Request.Method, ctx.Request.RequestURI, ctx.Request.URL.Path, ctx.Request.RemoteAddr)
+		c.logger.Errorf("Service returned error response: %s, Incoming request: method=%s, path=%s, RemoteAddr=%s,",
+			truncateForLog([]byte(c.redactUpstreamSecrets(decodedBody)), maxUpstreamErrorBodyLog),
+			ctx.Request.Method, ctx.Request.URL.Path, ctx.Request.RemoteAddr)
 	}
 
 	// Forwarder providers (centralized/standard) hide their upstream, but an
