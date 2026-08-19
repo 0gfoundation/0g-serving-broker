@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/gin-gonic/gin"
 )
 
@@ -29,6 +30,21 @@ func (h *Handler) GetQuote(ctx *gin.Context) {
 	if err != nil {
 		handleBrokerError(ctx, err, "read quote")
 		return
+	}
+
+	// Signed with the key report_data binds, over the exact bytes below. See
+	// ctrl.SignQuoteResponse for why: nvidia_payload rides in this body and has no
+	// self-authentication of its own, so without this a caller cannot tell the
+	// measured image's GPU evidence from evidence substituted in transit.
+	//
+	// A failure here is not fatal to the response. The fields that authenticate
+	// themselves still do, and refusing to serve a quote because the signer is
+	// briefly unreachable would deny the verification path over a strictly weaker
+	// problem. A caller that requires the header is the one who decides.
+	if sig, err := h.ctrl.SignQuoteResponse([]byte(quote)); err != nil {
+		h.logger.Warnf("serving quote unsigned: %v", err)
+	} else {
+		ctx.Header("ZG-Quote-Signature", hexutil.Encode(sig))
 	}
 
 	ctx.String(http.StatusOK, quote)

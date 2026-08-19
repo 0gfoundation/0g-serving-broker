@@ -185,14 +185,22 @@ address, so a change recorded while you are reusing one goes unnoticed. Re-readi
 the only way to see it, and that is the one thing per-request verification would actually buy.
 
 ```bash
-# 1. Fetch the attestation. Three values arrive together; only the first is trustworthy on
-#    its own, and step 2 is what earns the other two.
-curl -s "$PROVIDER/v1/quote?legacy=true" > q.json     # {quote, event_log, tcb_info}
+# 1. Fetch the attestation, keeping the headers. The body's fields are not equally
+#    trustworthy on arrival: quote and event_log earn their standing in step 2, and
+#    ZG-Quote-Signature is what step 6 uses for the rest.
+curl -s -D h.txt "$PROVIDER/v1/quote?legacy=false" > q.json
 ```
 
 `$PROVIDER` is the broker's own base URL. Through the router, use whichever path the router
 maps to that provider — the router carries the quote and cannot alter it (link 1), so where
 you fetch it from does not matter to the result.
+
+That last sentence is about the quote. It does not extend to every field beside it:
+`nvidia_payload` is appended by this project rather than dstack, and nothing in the quote
+covers it. `ZG-Quote-Signature` is a signature by the key `report_data` binds over the exact
+body bytes, which is what makes the rest of the response as unalterable in transit as the
+quote already was. Step 6 checks it, and a body served without the header is a body whose
+`nvidia_payload` says nothing.
 
 ```bash
 # 2. Hand the quote and the event log to dstack's verifier. Run it yourself — a verifier the
@@ -324,8 +332,39 @@ if bound_signer:
 else:
     seal_to = None
 
+# --- 6. Is the rest of this response the measured image's, and not the path's? ---
+# The quote and the event log needed nothing here: DCAP signs one and step 2 replays the
+# other into it. nvidia_payload has neither. It is appended by this project beside dstack's
+# fields, so a router — the one the trust chain deliberately does not trust — can put a
+# different genuine GPU's evidence in its place.
+#
+# The nonce does not settle that on its own. It is keccak256(report_data), report_data is
+# public, and any owner of a confidential-mode GPU can have theirs sign that nonce. What
+# ties the evidence to this CVM is that the code collecting it runs here and is measured,
+# and this signature is what distinguishes the bytes that code emitted from any others.
+from eth_keys import KeyAPI            # any secp256k1 recovery will do
+from eth_utils import keccak            # keccak, not sha256: this is an eth_personal signature
+
+sig = bytes.fromhex(HEADERS["ZG-Quote-Signature"].removeprefix("0x"))
+signed = keccak(b"\x19Ethereum Signed Message:\n32" + keccak(RAW_BODY))
+recovered = KeyAPI().ecdsa_recover(signed, KeyAPI.Signature(sig[:64] + bytes([sig[64] - 27])))
+assert recovered.to_address() == signer, "response body is not this signer's"
+
+# Only now does the GPU evidence describe this deployment's GPU. Verifying the evidence
+# itself is separate and needs NVIDIA's tools; what this establishes is whose evidence it is.
+gpu_nonce = Q["nvidia_payload"]["nonce"] if Q.get("nvidia_payload") else None
+if gpu_nonce:
+    assert gpu_nonce == keccak(rd).hex(), "GPU evidence was raised for another quote"
+
 print(f"image {digest} (from the {source}), responses signed by {signer}, seal to {seal_to}")
 ```
+
+`RAW_BODY` is the bytes of `q.json` as received, not a re-serialisation of the parsed object:
+the signature is over what was sent. `HEADERS` is `h.txt` from step 1.
+
+A response with no `ZG-Quote-Signature` is not a failure of the platform half — the quote,
+the event log, the compose hash and both keys all still verify, because each of those carries
+its own proof. What is lost is `nvidia_payload`, and with it any statement about the GPU.
 
 Step 5 is the one that makes the digest a statement about the running process rather than
 about an installation, and the two halves fail in different directions. The signer check is

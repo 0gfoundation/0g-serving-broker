@@ -6,6 +6,7 @@ import (
 
 	"github.com/0gfoundation/0g-pc-e2ee/protocol/wire"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 )
 
 // GetQuote returns the attestation quote. When legacy is false the §4.2 quote
@@ -14,6 +15,32 @@ import (
 // returned for clients that predate the §4.2 layout.
 func (c *Ctrl) GetQuote(ctx context.Context, legacy bool) (string, error) {
 	return c.teeService.GetQuote(legacy), nil
+}
+
+// SignQuoteResponse signs the bytes GET /v1/quote is about to return, so that the
+// parts of that response which cannot authenticate themselves still can.
+//
+// The quote authenticates itself through DCAP, and event_log through the replay the
+// verifier performs against the quote's registers. nvidia_payload has neither: this
+// project appends it beside dstack's fields (common/tee.QuoteResponseWithNvidia) and
+// nothing signs it, so anything on the path — including the router the trust chain
+// deliberately does not trust — can replace the GPU evidence with evidence from a
+// different genuine GPU. Binding it by nonce does not close that: the nonce is
+// keccak256(report_data), report_data is public, and any owner of a confidential-mode
+// GPU can have theirs sign that nonce.
+//
+// What makes the evidence describe *this* CVM's GPU is that the code collecting it
+// runs here and is measured. That argument covers the bytes this process emitted, and
+// this signature is what lets a caller tell those from any others: the key is the one
+// report_data binds, so recovering this signature to it says the measured image
+// produced this body.
+//
+// Signs the whole body rather than the payload alone. It costs the same, needs no
+// canonical form for a sub-object, and promotes tcb_info from being anchored
+// indirectly (by the app_compose hash comparison in doc/attestation-trust-chain.md)
+// to being signed outright.
+func (c *Ctrl) SignQuoteResponse(body []byte) ([]byte, error) {
+	return c.teeService.Sign(crypto.Keccak256(body))
 }
 
 func (c *Ctrl) GetProviderSignerAddress(ctx context.Context) common.Address {
