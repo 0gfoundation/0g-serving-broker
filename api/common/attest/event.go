@@ -16,8 +16,11 @@
 //	details.quote_verified            the DCAP chain
 //	details.event_log_verified        the log replays into the quote's registers
 //	details.tcb_status == "UpToDate"  and details.advisory_ids empty
-//	details.os_image_is_dev == false  and os_image_hash_verified
-//	details.key_provider.id           equals the KMS root key you trust
+//	details.os_image_hash_verified    a published dstack guest image, not one the provider built
+//	details.app_info.key_provider_info the KMS root key you trust (hex-encoded JSON; read id)
+//
+// There is no details.os_image_is_dev: a development guest image is a different published
+// os_image_hash, not a flag, so compare that field against the release you expect.
 //
 // Run your own instance rather than someone else's: calling a verifier you do not control
 // moves the trust root onto it, which is the one thing every rule below exists to avoid.
