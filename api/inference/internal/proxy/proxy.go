@@ -861,7 +861,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 
 	var expectedInputFee string
 	switch svcType {
-	case "zgStorage", "chatbot", "speech-to-text":
+	case "zgStorage", "chatbot", "speech-to-text", "embedding":
 		expectedInputFee = "0"
 	case "text-to-image":
 		_, imageNum, err := p.ctrl.GetTextToImageInputFeeAndImageNum(reqBody)

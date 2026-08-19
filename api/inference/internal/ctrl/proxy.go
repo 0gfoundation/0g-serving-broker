@@ -492,6 +492,8 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 		return c.handleSpeechToTextResponse(ctx, resp, account, outputPrice, body, reqModel)
 	case "image-editing":
 		return c.handleImageEditingResponse(ctx, resp, account, outputPrice, body, reqModel)
+	case "embedding":
+		return c.handleEmbeddingResponse(ctx, resp, account, outputPrice, body, reqModel)
 	case "video-generation":
 		return c.handleVideoGenerationResponse(ctx, resp, account, outputPrice, body, reqModel)
 	default:
