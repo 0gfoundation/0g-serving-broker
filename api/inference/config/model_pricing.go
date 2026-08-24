@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -12,6 +13,20 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/videospec"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 )
+
+// UpstreamIdentityHeader is the request header the router sets to name the
+// per-model upstream (providerIdentity) it selected, disambiguating two pricing
+// entries that share one canonical model id at different upstreams. Absent →
+// empty identity → today's single-entry resolution.
+const UpstreamIdentityHeader = "X-0G-Upstream"
+
+// ErrAmbiguousUpstream is returned by ResolveRequestedModel when a model has
+// more than one upstream entry and the request supplied no identity to pick one.
+var ErrAmbiguousUpstream = errors.New("ambiguous upstream: this model is served by multiple upstreams; set the X-0G-Upstream identity header")
+
+// ErrModelNotFound is returned by ResolveRequestedModel when the requested
+// model (optionally with identity) is not in the allowlist.
+var ErrModelNotFound = errors.New("model not found")
 
 // ModelWildcard is the catch-all model id in service.modelPricing. When an
 // entry uses this id, the broker serves ANY requested model (the allowlist
@@ -842,12 +857,34 @@ func (s *Service) GetModelPricing(model string) *ModelPricingEntry {
 // so the slice must not be reallocated after this call.
 func (s *Service) BuildModelPricingMap() error {
 	m := make(map[string]*ModelPricingEntry, len(s.ModelPricing))
+	byIdentity := make(map[string]*ModelPricingEntry, len(s.ModelPricing))
+	counts := make(map[string]int, len(s.ModelPricing))
 	for i := range s.ModelPricing {
 		entry := &s.ModelPricing[i]
-		if _, ok := m[entry.Model]; ok {
-			return fmt.Errorf("duplicate model %q in modelPricing", entry.Model)
+		// Effective identity: per-model providerIdentity, else service-level (same
+		// rule as EffectiveProviderIdentity, inlined to avoid reading the half-built
+		// map). Reject only a TRUE duplicate of the same (model, identity) pair, so
+		// existing unique-model configs still reject same-id dups byte-identically,
+		// while two same-model entries at distinct upstreams are allowed.
+		eff := entry.ProviderIdentity
+		if eff == "" {
+			eff = s.ProviderIdentity
 		}
-		m[entry.Model] = entry
+		key := entry.Model + "\x00" + eff
+		if _, ok := byIdentity[key]; ok {
+			if eff == "" {
+				return fmt.Errorf("duplicate model %q in modelPricing", entry.Model)
+			}
+			return fmt.Errorf("duplicate model %q with providerIdentity %q in modelPricing", entry.Model, eff)
+		}
+		byIdentity[key] = entry
+		counts[entry.Model]++
+		// Keep the first entry as the model-only lookup (GetModelPricing, allowlist,
+		// wildcard checks): identical to today for single-entry models; deterministic
+		// first-wins for the identity-agnostic callers on a multi-entry model.
+		if _, ok := m[entry.Model]; !ok {
+			m[entry.Model] = entry
+		}
 	}
 	// Build the alias index after every model id is known, so an alias can be
 	// checked against the full model-id set. An alias colliding with a model id
@@ -870,6 +907,8 @@ func (s *Service) BuildModelPricingMap() error {
 		}
 	}
 	s.modelPricingMap = m
+	s.modelPricingByIdentity = byIdentity
+	s.modelEntryCount = counts
 	s.modelAliasMap = aliases
 	return nil
 }
@@ -883,25 +922,52 @@ func (s *Service) BuildModelPricingMap() error {
 //
 // When multi-model pricing is not configured the service serves a single model;
 // the request id is allowed as-is and returned unchanged (entry nil).
-func (s *Service) ResolveRequestedModel(requested string) (entry *ModelPricingEntry, resolved string, ok bool) {
+//
+// identity disambiguates two entries sharing one canonical model id at different
+// upstreams (the router sends it via UpstreamIdentityHeader): non-empty selects
+// the (model, identity) entry (miss → ErrModelNotFound); empty keeps today's
+// behavior for a single-entry model, but returns ErrAmbiguousUpstream when the
+// model has more than one entry. err is nil on success.
+func (s *Service) ResolveRequestedModel(requested, identity string) (entry *ModelPricingEntry, resolved string, err error) {
 	if !s.HasMultiModelPricing() {
-		return nil, requested, true
+		return nil, requested, nil
 	}
 	// "*" is a pricing sentinel, never a selectable model — a literal request for
 	// it would hit the wildcard entry and be forwarded verbatim upstream.
 	if requested == ModelWildcard {
-		return nil, requested, false
+		return nil, requested, ErrModelNotFound
 	}
+	// Non-empty identity: resolve the alias to its canonical id first, then the
+	// composite (model, identity) entry. A miss is not-found — no alias/wildcard
+	// fallback, because the caller named a specific upstream.
+	if identity != "" {
+		canonical := requested
+		if a, hit := s.modelAliasMap[requested]; hit {
+			canonical = a.Model
+		}
+		if e, hit := s.modelPricingByIdentity[canonical+"\x00"+identity]; hit {
+			return e, e.Model, nil
+		}
+		return nil, requested, ErrModelNotFound
+	}
+	// Empty identity: today's path. An exact model with several upstreams is
+	// ambiguous without an identity.
 	if e, hit := s.modelPricingMap[requested]; hit {
-		return e, e.Model, true
+		if s.modelEntryCount[requested] > 1 {
+			return nil, requested, ErrAmbiguousUpstream
+		}
+		return e, e.Model, nil
 	}
 	if e, hit := s.modelAliasMap[requested]; hit {
-		return e, e.Model, true
+		if s.modelEntryCount[e.Model] > 1 {
+			return nil, requested, ErrAmbiguousUpstream
+		}
+		return e, e.Model, nil
 	}
 	if e, hit := s.modelPricingMap[ModelWildcard]; hit {
-		return e, requested, true
+		return e, requested, nil
 	}
-	return nil, requested, false
+	return nil, requested, ErrModelNotFound
 }
 
 // UpstreamModelFor returns the model id to forward upstream for an already

@@ -300,8 +300,10 @@ func (s *Service) ModelExpiration(model string) (time.Time, bool) {
 		// alias, then wildcard) so a request using a legacy alias is subject to the
 		// SAME expiration gate as the canonical id — GetModelPricing alone would
 		// miss aliases and let an alias bypass a model's 410-expiry.
-		entry, _, ok := s.ResolveRequestedModel(model)
-		if !ok || entry == nil {
+		// Model-only metadata lookup: no upstream identity, so a model with several
+		// upstreams resolves ambiguous → treated as "no per-model metadata".
+		entry, _, err := s.ResolveRequestedModel(model, "")
+		if err != nil || entry == nil {
 			return time.Time{}, false
 		}
 		if entry.ModelInfo != nil {
@@ -325,8 +327,10 @@ func (s *Service) ModelExpiration(model string) (time.Time, bool) {
 func (s *Service) EffectiveModelInfo(model string) *ModelInfo {
 	mi := s.ModelInfo
 	if s.HasMultiModelPricing() {
-		entry, _, ok := s.ResolveRequestedModel(model)
-		if !ok || entry == nil {
+		// Model-only metadata lookup: no upstream identity, so a model with several
+		// upstreams resolves ambiguous → treated as "no per-model metadata".
+		entry, _, err := s.ResolveRequestedModel(model, "")
+		if err != nil || entry == nil {
 			return nil
 		}
 		if entry.ModelInfo != nil {
@@ -494,6 +498,14 @@ type Service struct {
 	// entry, built alongside modelPricingMap. Lets the multi-model request path
 	// accept a legacy model id and resolve it to its canonical pricing entry.
 	modelAliasMap map[string]*ModelPricingEntry `yaml:"-"`
+	// modelPricingByIdentity keys entries by (canonical model id, effective
+	// providerIdentity), so one broker can hold several entries for the SAME model
+	// at different upstreams. Effective identity is the per-model providerIdentity
+	// or, when empty, the service-level one (see EffectiveProviderIdentity).
+	modelPricingByIdentity map[string]*ModelPricingEntry `yaml:"-"`
+	// modelEntryCount counts entries per canonical model id, so resolution can tell
+	// a single-upstream model (resolve with no identity) from an ambiguous one.
+	modelEntryCount map[string]int `yaml:"-"`
 
 	// InjectBodyFields, when set, are top-level key/value pairs merged into the
 	// JSON request body forwarded to a chatbot targetUrl. It lets an operator set

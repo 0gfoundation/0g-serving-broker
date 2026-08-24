@@ -3271,12 +3271,12 @@ service:
 		{ModelWildcard, ModelWildcard, "", false},
 	}
 	for _, tc := range cases {
-		entry, resolved, ok := svc.ResolveRequestedModel(tc.requested)
-		if ok != tc.wantOK {
-			t.Errorf("ResolveRequestedModel(%q) ok=%v, want %v", tc.requested, ok, tc.wantOK)
+		entry, resolved, err := svc.ResolveRequestedModel(tc.requested, "")
+		if (err == nil) != tc.wantOK {
+			t.Errorf("ResolveRequestedModel(%q) err=%v, wantOK %v", tc.requested, err, tc.wantOK)
 			continue
 		}
-		if !ok {
+		if err != nil {
 			continue
 		}
 		if resolved != tc.wantResolved {

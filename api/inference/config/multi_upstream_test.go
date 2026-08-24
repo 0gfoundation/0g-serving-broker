@@ -213,3 +213,38 @@ func TestValidateModelUpstream(t *testing.T) {
 		})
 	}
 }
+
+// TestResolveSameModelUpstreamByIdentity covers one broker holding two entries
+// for the SAME canonical model at different upstreams, disambiguated by the
+// per-model providerIdentity the router sends via X-0G-Upstream. Also asserts
+// the backward-compat path: a single-entry model still resolves with no identity.
+func TestResolveSameModelUpstreamByIdentity(t *testing.T) {
+	s := &Service{
+		ModelPricing: []ModelPricingEntry{
+			{Model: "glm-5.2", ProviderIdentity: "aliyun", InputPrice: "1", OutputPrice: "2", TargetURL: "https://aliyun.example.com/v1"},
+			{Model: "glm-5.2", ProviderIdentity: "zhipu", InputPrice: "3", OutputPrice: "4", TargetURL: "https://zhipu.example.com/v1"},
+			{Model: "solo-x", InputPrice: "1", OutputPrice: "2"},
+		},
+	}
+	// Two same-model entries at distinct upstreams build without the dup error.
+	if err := s.BuildModelPricingMap(); err != nil {
+		t.Fatalf("BuildModelPricingMap: unexpected error: %v", err)
+	}
+
+	// Identity picks the matching upstream entry.
+	e, resolved, err := s.ResolveRequestedModel("glm-5.2", "zhipu")
+	if err != nil || e == nil || resolved != "glm-5.2" || e.TargetURL != "https://zhipu.example.com/v1" {
+		t.Fatalf("resolve(glm-5.2, zhipu) = %+v, %q, %v; want zhipu entry", e, resolved, err)
+	}
+
+	// No identity on a multi-upstream model is ambiguous.
+	if _, _, err := s.ResolveRequestedModel("glm-5.2", ""); err != ErrAmbiguousUpstream {
+		t.Fatalf("resolve(glm-5.2, \"\") err = %v; want ErrAmbiguousUpstream", err)
+	}
+
+	// Backward compat: a single-entry model resolves with no identity, as before.
+	e, resolved, err = s.ResolveRequestedModel("solo-x", "")
+	if err != nil || e == nil || resolved != "solo-x" {
+		t.Fatalf("resolve(solo-x, \"\") = %+v, %q, %v; want solo-x entry", e, resolved, err)
+	}
+}

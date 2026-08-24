@@ -339,7 +339,7 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 // identity. Alias/wildcard aware via ResolveRequestedModel, matching how the
 // forward path picks the per-model targetUrl, so accounting and routing agree.
 func (c *Ctrl) UpstreamForModel(requestedModel string) string {
-	_, resolved, _ := c.Service.ResolveRequestedModel(requestedModel)
+	_, resolved, _ := c.Service.ResolveRequestedModel(requestedModel, "")
 	upstream := c.Service.EffectiveProviderIdentity(resolved)
 	if upstream == "" {
 		return constant.UpstreamSelf
@@ -1420,6 +1420,17 @@ func (c *Ctrl) ImageCacheTTL() time.Duration {
 // passes through the user's requested model, injecting the default model when
 // the request omits one. Stores the resolved model name in the gin.Context under
 // CtxKeyResolvedModel. Used by the chatbot path, which sends JSON.
+// upstreamIdentity reads the router-supplied per-model upstream identity from the
+// incoming request (config.UpstreamIdentityHeader). Normalized to match the
+// lowercased providerIdentity stored at config load; absent → "" (today's
+// single-entry resolution).
+func upstreamIdentity(ctx *gin.Context) string {
+	if ctx == nil || ctx.Request == nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(ctx.GetHeader(config.UpstreamIdentityHeader)))
+}
+
 func (c *Ctrl) ValidateModelAllowlist(ctx *gin.Context, body []byte, userAddr string) ([]byte, error) {
 	if len(body) == 0 {
 		// No body to inspect — bill at the configured default model (guaranteed to
@@ -1439,8 +1450,11 @@ func (c *Ctrl) ValidateModelAllowlist(ctx *gin.Context, body []byte, userAddr st
 		requestModel = c.Service.ModelType
 	}
 
-	entry, resolved, ok := c.Service.ResolveRequestedModel(requestModel)
-	if !ok {
+	entry, resolved, err := c.Service.ResolveRequestedModel(requestModel, upstreamIdentity(ctx))
+	if err != nil {
+		if errors.Is(err, config.ErrAmbiguousUpstream) {
+			return nil, err
+		}
 		c.recordModelMismatch(userAddr, requestModel)
 		return nil, fmt.Errorf("model not supported: '%s' is not available for this service", requestModel)
 	}
@@ -1534,8 +1548,11 @@ func (c *Ctrl) ResolveModelForBilling(ctx *gin.Context, body []byte, contentType
 	if requestModel == "" {
 		requestModel = c.Service.ModelType
 	}
-	_, resolved, ok := c.Service.ResolveRequestedModel(requestModel)
-	if !ok {
+	_, resolved, err := c.Service.ResolveRequestedModel(requestModel, upstreamIdentity(ctx))
+	if err != nil {
+		if errors.Is(err, config.ErrAmbiguousUpstream) {
+			return err
+		}
 		c.recordModelMismatch(userAddr, requestModel)
 		return fmt.Errorf("model not supported: '%s' is not available for this service", requestModel)
 	}
