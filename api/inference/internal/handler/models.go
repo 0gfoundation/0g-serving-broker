@@ -603,14 +603,27 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 			// per entry. Centralized-only (a standard provider hides its upstream).
 			var providerIdentity, servingDomain string
 			if cfg.IsCentralized() {
-				providerIdentity = cfg.EffectiveProviderIdentity(mp.Model)
+				// Resolve from THIS entry, not Effective*(mp.Model): a model-keyed lookup
+				// returns the first entry, so two same-model entries at different upstreams
+				// would both advertise the first's identity/domain and the router would dedup
+				// them — losing every upstream but one. The entry's own field wins, falling
+				// back to the service-level value (same rule as EffectiveProviderIdentity/
+				// EffectiveTargetURL, applied to the entry in hand).
+				providerIdentity = mp.ProviderIdentity
+				if providerIdentity == "" {
+					providerIdentity = cfg.ProviderIdentity
+				}
 				// Under targetTLSProxy the per-model targetUrl is an in-CVM container
 				// name; publish the operator-declared UpstreamDomain instead (same
 				// carve-out as upstreamServingDomain for the single-model path).
 				if cfg.TargetTLSProxy {
 					servingDomain = cfg.UpstreamDomain
 				} else {
-					servingDomain = parseServingDomain(cfg.EffectiveTargetURL(mp.Model))
+					target := mp.TargetURL
+					if target == "" {
+						target = cfg.TargetURL
+					}
+					servingDomain = parseServingDomain(target)
 				}
 			}
 			obj := ModelObject{

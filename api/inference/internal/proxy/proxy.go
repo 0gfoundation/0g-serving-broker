@@ -793,7 +793,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 			// persisted or settled) can still be counted into the hourly rollup.
 			// Upstream is resolved per-model (alias/wildcard aware) so a multi-upstream
 			// provider attributes whitelisted traffic to the upstream it actually hit.
-			Upstream: p.ctrl.UpstreamForModel(modelName),
+			Upstream: p.ctrl.UpstreamForModel(modelName, ctrl.UpstreamIdentity(ctx)),
 			Unit:     constant.DefaultBillingUnitForService(svcType),
 		}
 		// Stamp the receive time so the reconciliation rollup buckets whitelisted traffic
@@ -917,7 +917,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	// centralized upstream it is providerIdentity, and "self" for decentralized. A
 	// multi-upstream provider attributes each request to the upstream it actually
 	// hit (alias/wildcard aware, matching how the forward path resolves it).
-	req.Upstream = p.ctrl.UpstreamForModel(req.ModelName)
+	req.Upstream = p.ctrl.UpstreamForModel(req.ModelName, ctrl.UpstreamIdentity(ctx))
 	// model is a user-controlled, unbounded request field; cap it to the
 	// requests.model_name column width (varchar(255)) so an oversized value can't
 	// error the insert (strict mode) or be silently truncated by the driver.

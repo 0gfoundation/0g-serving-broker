@@ -248,3 +248,73 @@ func TestResolveSameModelUpstreamByIdentity(t *testing.T) {
 		t.Fatalf("resolve(solo-x, \"\") = %+v, %q, %v; want solo-x entry", e, resolved, err)
 	}
 }
+
+// TestSameModelUpstreamEndToEndSelection proves the FULL selection an X-0G-Upstream
+// request drives — route URL, upstream secret, billing price, and proof identity —
+// resolves to the entry the identity names, via the SAME identity-aware accessors
+// the request path calls (not the raw map). Two entries share canonical "glm-5.2"
+// at different upstreams; identity "zhipu" must select zhipu's values throughout.
+// It also pins the single-entry (empty-identity) path to the pre-multi-upstream
+// behavior, so existing configs are byte-identical.
+func TestSameModelUpstreamEndToEndSelection(t *testing.T) {
+	s := &Service{
+		TargetURL:        "https://svc.example.com/v1",
+		ProviderIdentity: "aliyun",
+		AdditionalSecret: map[string]string{"Authorization": "Bearer svc-key"},
+		ModelPricing: []ModelPricingEntry{
+			// aliyun is FIRST — the pre-fix model-keyed lookup would return this for
+			// every glm-5.2 request regardless of identity.
+			{Model: "glm-5.2", ProviderIdentity: "aliyun", InputPrice: "1", OutputPrice: "2",
+				TargetURL: "https://aliyun.example.com/v1", AdditionalSecret: map[string]string{"Authorization": "Bearer aliyun-key"}},
+			{Model: "glm-5.2", ProviderIdentity: "zhipu", InputPrice: "3", OutputPrice: "4",
+				TargetURL: "https://zhipu.example.com/v1", AdditionalSecret: map[string]string{"Authorization": "Bearer zhipu-key"}},
+			{Model: "solo-x", InputPrice: "5", OutputPrice: "6"},
+		},
+	}
+	if err := s.BuildModelPricingMap(); err != nil {
+		t.Fatalf("BuildModelPricingMap: %v", err)
+	}
+
+	// Resolve the request the same way the request path does, then read every
+	// per-model accessor with (resolved, identity) — exactly the call shape the
+	// forward/secret/billing/proof sites now use.
+	entry, resolved, err := s.ResolveRequestedModel("glm-5.2", "zhipu")
+	if err != nil || entry == nil {
+		t.Fatalf("resolve(glm-5.2, zhipu) err=%v entry=%v", err, entry)
+	}
+
+	// Route URL (proxy.go forward site).
+	if got := s.EffectiveTargetURLFor(resolved, "zhipu"); got != "https://zhipu.example.com/v1" {
+		t.Errorf("EffectiveTargetURLFor = %q; want zhipu upstream", got)
+	}
+	// Upstream secret (proxy.go secret site).
+	if got := s.EffectiveAdditionalSecretFor(resolved, "zhipu")["Authorization"]; got != "Bearer zhipu-key" {
+		t.Errorf("EffectiveAdditionalSecretFor = %q; want zhipu key", got)
+	}
+	// Billing price (service.go resolveModelPricing site).
+	if got := s.GetModelPricingFor(resolved, "zhipu"); got == nil || got.OutputPrice != "4" {
+		t.Errorf("GetModelPricingFor price = %v; want zhipu OutputPrice 4", got)
+	}
+	// Proof identity (proxy.go UpstreamForModel → signCentralizedRoutingProof).
+	if got := s.EffectiveProviderIdentityFor(resolved, "zhipu"); got != "zhipu" {
+		t.Errorf("EffectiveProviderIdentityFor = %q; want zhipu", got)
+	}
+
+	// Sanity: identity "aliyun" selects aliyun's values through the same accessors.
+	if got := s.EffectiveTargetURLFor("glm-5.2", "aliyun"); got != "https://aliyun.example.com/v1" {
+		t.Errorf("aliyun EffectiveTargetURLFor = %q; want aliyun upstream", got)
+	}
+	if got := s.GetModelPricingFor("glm-5.2", "aliyun"); got == nil || got.OutputPrice != "2" {
+		t.Errorf("aliyun GetModelPricingFor price = %v; want aliyun OutputPrice 2", got)
+	}
+
+	// Backward compat: empty identity resolves EXACTLY like the model-only accessors
+	// (the pre-multi-upstream behavior). For a single-entry model the two agree.
+	if s.EffectiveTargetURLFor("solo-x", "") != s.EffectiveTargetURL("solo-x") ||
+		s.EffectiveProviderIdentityFor("solo-x", "") != s.EffectiveProviderIdentity("solo-x") {
+		t.Errorf("empty-identity accessors diverged from the model-only accessors for a single-entry model")
+	}
+	if got := s.GetModelPricingFor("solo-x", ""); got == nil || got.OutputPrice != "6" {
+		t.Errorf("solo-x GetModelPricingFor(\"\") price = %v; want OutputPrice 6", got)
+	}
+}

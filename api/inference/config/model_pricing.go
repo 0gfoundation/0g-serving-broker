@@ -845,6 +845,26 @@ func (s *Service) GetModelPricing(model string) *ModelPricingEntry {
 	return nil
 }
 
+// getModelPricingFor resolves a request's pricing entry using the upstream
+// identity that selected it, so a canonical model served by several upstreams
+// picks the EXACT entry the router named (via config.UpstreamIdentityHeader).
+// A non-empty identity keys the (model, identity) composite index; an empty
+// identity — single-entry models, decentralized/single-upstream providers, and
+// every path predating multi-upstream — falls through to GetModelPricing, so its
+// behavior is byte-identical to before. A non-empty identity that matches no
+// entry also falls back to GetModelPricing (first-entry/wildcard): the request
+// path only reaches here after ResolveRequestedModel already admitted the
+// (model, identity) pair, so a miss is an invariant break, and the first-entry
+// fallback is overcharge-safe (same as the pre-identity behavior).
+func (s *Service) GetModelPricingFor(model, identity string) *ModelPricingEntry {
+	if identity != "" && s.modelPricingByIdentity != nil {
+		if e, ok := s.modelPricingByIdentity[model+"\x00"+identity]; ok {
+			return e
+		}
+	}
+	return s.GetModelPricing(model)
+}
+
 // BuildModelPricingMap rebuilds the derived per-model lookup map from the
 // ModelPricing slice and stores it on the Service, returning an error on
 // duplicate model ids. It is the single source of truth for the lookup map:

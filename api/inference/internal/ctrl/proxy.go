@@ -197,7 +197,7 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 	{
 		resolvedModelVal, _ := ctx.Get(CtxKeyResolvedModel)
 		resolvedModelStr, _ := resolvedModelVal.(string)
-		if base := c.Service.EffectiveTargetURL(resolvedModelStr); base != c.Service.TargetURL {
+		if base := c.Service.EffectiveTargetURLFor(resolvedModelStr, resolvedIdentity(ctx)); base != c.Service.TargetURL {
 			if rest, ok := strings.CutPrefix(targetURL, c.Service.TargetURL); ok {
 				targetURL = base + rest
 			} else {
@@ -315,7 +315,7 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 	// resolves to the service-level map unchanged.
 	resolvedModel, _ := ctx.Get(CtxKeyResolvedModel)
 	resolvedModelStr, _ := resolvedModel.(string)
-	if additionalSecret := c.Service.EffectiveAdditionalSecret(resolvedModelStr); additionalSecret != nil {
+	if additionalSecret := c.Service.EffectiveAdditionalSecretFor(resolvedModelStr, resolvedIdentity(ctx)); additionalSecret != nil {
 		for k, v := range additionalSecret {
 			req.Header.Set(k, v)
 		}
@@ -333,14 +333,30 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 	return req, nil
 }
 
-// UpstreamForModel resolves the reconciliation "upstream" label for a requested
-// model: the per-model (or service-level) providerIdentity of the upstream that
-// served it, falling back to "self" for a decentralized provider with no
-// identity. Alias/wildcard aware via ResolveRequestedModel, matching how the
-// forward path picks the per-model targetUrl, so accounting and routing agree.
-func (c *Ctrl) UpstreamForModel(requestedModel string) string {
-	_, resolved, _ := c.Service.ResolveRequestedModel(requestedModel, "")
-	upstream := c.Service.EffectiveProviderIdentity(resolved)
+// resolvedIdentity reads the effective upstream identity stashed under
+// CtxKeyResolvedIdentity by ValidateModelAllowlist / ResolveModelForBilling.
+// Returns "" when unset (single-entry models, non-multi-model paths), which
+// keeps every per-model accessor on its pre-multi-upstream branch.
+func resolvedIdentity(ctx *gin.Context) string {
+	if v, ok := ctx.Get(CtxKeyResolvedIdentity); ok {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
+// UpstreamForModel resolves the reconciliation "upstream" label — and the TeeTLS
+// routing proof's providerIdentity — for a requested model: the per-model (or
+// service-level) providerIdentity of the upstream that served it, falling back to
+// "self" for a decentralized provider with no identity. identity is the
+// router-supplied X-0G-Upstream (config.UpstreamIdentityHeader) that disambiguates
+// a canonical model served by several upstreams; it MUST match the identity the
+// forward path used so the proof binds the upstream actually hit. Empty identity
+// keeps today's behavior. Alias/wildcard aware via ResolveRequestedModel.
+func (c *Ctrl) UpstreamForModel(requestedModel, identity string) string {
+	_, resolved, _ := c.Service.ResolveRequestedModel(requestedModel, identity)
+	upstream := c.Service.EffectiveProviderIdentityFor(resolved, identity)
 	if upstream == "" {
 		return constant.UpstreamSelf
 	}
@@ -1420,11 +1436,11 @@ func (c *Ctrl) ImageCacheTTL() time.Duration {
 // passes through the user's requested model, injecting the default model when
 // the request omits one. Stores the resolved model name in the gin.Context under
 // CtxKeyResolvedModel. Used by the chatbot path, which sends JSON.
-// upstreamIdentity reads the router-supplied per-model upstream identity from the
+// UpstreamIdentity reads the router-supplied per-model upstream identity from the
 // incoming request (config.UpstreamIdentityHeader). Normalized to match the
 // lowercased providerIdentity stored at config load; absent → "" (today's
 // single-entry resolution).
-func upstreamIdentity(ctx *gin.Context) string {
+func UpstreamIdentity(ctx *gin.Context) string {
 	if ctx == nil || ctx.Request == nil {
 		return ""
 	}
@@ -1450,7 +1466,7 @@ func (c *Ctrl) ValidateModelAllowlist(ctx *gin.Context, body []byte, userAddr st
 		requestModel = c.Service.ModelType
 	}
 
-	entry, resolved, err := c.Service.ResolveRequestedModel(requestModel, upstreamIdentity(ctx))
+	entry, resolved, err := c.Service.ResolveRequestedModel(requestModel, UpstreamIdentity(ctx))
 	if err != nil {
 		if errors.Is(err, config.ErrAmbiguousUpstream) {
 			return nil, err
@@ -1480,6 +1496,11 @@ func (c *Ctrl) ValidateModelAllowlist(ctx *gin.Context, body []byte, userAddr st
 	}
 
 	ctx.Set(CtxKeyResolvedModel, resolved)
+	// Stash the identity that picked this entry so the forward URL, upstream
+	// secret, and billing price all re-resolve the SAME (model, identity) entry
+	// downstream — the resolved model string alone is ambiguous when one model is
+	// served by several upstreams. Empty on a single-entry model (unchanged path).
+	ctx.Set(CtxKeyResolvedIdentity, UpstreamIdentity(ctx))
 	c.logger.Debugf("Model allowlist passed: requested=%s resolved=%s forwarded=%s", requestModel, resolved, forwardModel)
 	return body, nil
 }
@@ -1548,7 +1569,7 @@ func (c *Ctrl) ResolveModelForBilling(ctx *gin.Context, body []byte, contentType
 	if requestModel == "" {
 		requestModel = c.Service.ModelType
 	}
-	_, resolved, err := c.Service.ResolveRequestedModel(requestModel, upstreamIdentity(ctx))
+	_, resolved, err := c.Service.ResolveRequestedModel(requestModel, UpstreamIdentity(ctx))
 	if err != nil {
 		if errors.Is(err, config.ErrAmbiguousUpstream) {
 			return err
@@ -1557,6 +1578,9 @@ func (c *Ctrl) ResolveModelForBilling(ctx *gin.Context, body []byte, contentType
 		return fmt.Errorf("model not supported: '%s' is not available for this service", requestModel)
 	}
 	ctx.Set(CtxKeyResolvedModel, resolved)
+	// Same identity stash as the JSON path (see ValidateModelAllowlist) so the
+	// STT/video billing price re-resolves the exact (model, identity) entry.
+	ctx.Set(CtxKeyResolvedIdentity, UpstreamIdentity(ctx))
 	c.logger.Debugf("Model allowlist passed (billing-only): requested=%s resolved=%s", requestModel, resolved)
 	return nil
 }

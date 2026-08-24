@@ -1538,8 +1538,16 @@ func (s *Service) EffectiveInjectBodyFields(model string) map[string]interface{}
 // entry's secret (or the service-level map if the wildcard sets none) —
 // per-model keys are only possible for explicitly enumerated entries.
 func (s *Service) EffectiveAdditionalSecret(model string) map[string]string {
+	return s.EffectiveAdditionalSecretFor(model, "")
+}
+
+// EffectiveAdditionalSecretFor is EffectiveAdditionalSecret keyed by the upstream
+// identity that selected the entry, so a canonical model served by several
+// upstreams gets ITS upstream's credential, not the first entry's. identity=="" is
+// identical to EffectiveAdditionalSecret (single-entry / pre-multi-upstream paths).
+func (s *Service) EffectiveAdditionalSecretFor(model, identity string) map[string]string {
 	if model != "" {
-		if e := s.GetModelPricing(model); e != nil {
+		if e := s.GetModelPricingFor(model, identity); e != nil {
 			if len(e.AdditionalSecret) > 0 {
 				return e.AdditionalSecret
 			}
@@ -1573,8 +1581,16 @@ func (s *Service) EffectiveAdditionalSecret(model string) map[string]string {
 // resolved model id (GetModelPricing folds unenumerated models onto the wildcard
 // entry, matching EffectiveAdditionalSecret's resolution).
 func (s *Service) EffectiveTargetURL(model string) string {
+	return s.EffectiveTargetURLFor(model, "")
+}
+
+// EffectiveTargetURLFor is EffectiveTargetURL keyed by the upstream identity that
+// selected the entry, so a canonical model served by several upstreams routes to
+// ITS upstream, not the first entry's. identity=="" is identical to
+// EffectiveTargetURL (single-entry / pre-multi-upstream paths).
+func (s *Service) EffectiveTargetURLFor(model, identity string) string {
 	if model != "" {
-		if e := s.GetModelPricing(model); e != nil && e.TargetURL != "" {
+		if e := s.GetModelPricingFor(model, identity); e != nil && e.TargetURL != "" {
 			return e.TargetURL
 		}
 	}
@@ -1588,8 +1604,17 @@ func (s *Service) EffectiveTargetURL(model string) string {
 // providers (and any model without an override) keep the provider-level identity
 // unchanged. A "" model yields the service-level identity.
 func (s *Service) EffectiveProviderIdentity(model string) string {
+	return s.EffectiveProviderIdentityFor(model, "")
+}
+
+// EffectiveProviderIdentityFor is EffectiveProviderIdentity keyed by the upstream
+// identity that selected the entry, so the routing proof and reconciliation rollup
+// bind the upstream a request TRULY hit when a canonical model has several
+// upstreams — not the first entry's. identity=="" is identical to
+// EffectiveProviderIdentity (single-entry / pre-multi-upstream paths).
+func (s *Service) EffectiveProviderIdentityFor(model, identity string) string {
 	if model != "" {
-		if e := s.GetModelPricing(model); e != nil && e.ProviderIdentity != "" {
+		if e := s.GetModelPricingFor(model, identity); e != nil && e.ProviderIdentity != "" {
 			return e.ProviderIdentity
 		}
 	}

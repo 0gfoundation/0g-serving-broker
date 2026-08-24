@@ -816,6 +816,58 @@ func TestGetModels_MultiModelStandardHidesProviderFields(t *testing.T) {
 	}
 }
 
+// TestGetModels_SameModelMultiUpstreamDistinctRows pins the feed fix: two entries
+// for ONE canonical model at different upstreams must each advertise their OWN
+// providerIdentity and serving_domain. Before the fix both rows resolved via
+// Effective*(mp.Model) — a model-keyed lookup that returns the FIRST entry — so
+// both carried "aliyun"/aliyun's domain and the router deduped them, never
+// learning the zhipu candidate.
+func TestGetModels_SameModelMultiUpstreamDistinctRows(t *testing.T) {
+	svcCfg := config.Service{
+		ProviderType:     "centralized",
+		ProviderIdentity: "aliyun", // service-level default (aliyun entry inherits it)
+		TargetURL:        "https://svc.example.com/v1",
+		ModelType:        "glm-5.2",
+		Type:             "chatbot",
+		ModelPricing: []config.ModelPricingEntry{
+			{Model: "glm-5.2", ProviderIdentity: "aliyun", InputPrice: "1", OutputPrice: "2", TargetURL: "https://aliyun.example.com/v1"},
+			{Model: "glm-5.2", ProviderIdentity: "zhipu", InputPrice: "3", OutputPrice: "4", TargetURL: "https://zhipu.example.com/v1"},
+		},
+	}
+	if err := svcCfg.BuildModelPricingMap(); err != nil {
+		t.Fatalf("BuildModelPricingMap: %v", err)
+	}
+	mock := &mockModelsCtrl{
+		service:       model.Service{ModelType: "glm-5.2", Type: "chatbot"},
+		serviceConfig: svcCfg,
+	}
+	h := newModelsTestHandler(mock)
+	w := performRequest(h.GetModels, "GET", "/v1/models", "", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp ModelListResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+	if len(resp.Data) != 2 {
+		t.Fatalf("expected 2 rows for the same-model multi-upstream config, got %d", len(resp.Data))
+	}
+	got := map[string]string{} // identity -> serving_domain
+	for _, m := range resp.Data {
+		if m.ID != "glm-5.2" {
+			t.Errorf("expected model id glm-5.2, got %q", m.ID)
+		}
+		got[m.ProviderIdentity] = m.ServingDomain
+	}
+	if got["aliyun"] != "aliyun.example.com" {
+		t.Errorf("aliyun row serving_domain = %q; want aliyun.example.com", got["aliyun"])
+	}
+	if got["zhipu"] != "zhipu.example.com" {
+		t.Errorf("zhipu row serving_domain = %q; want zhipu.example.com (feed dedup would drop this)", got["zhipu"])
+	}
+}
+
 func TestGetModels_DecentralizedOmitsProviderFields(t *testing.T) {
 	mock := &mockModelsCtrl{
 		service: model.Service{
