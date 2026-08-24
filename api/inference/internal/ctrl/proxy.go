@@ -131,13 +131,13 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 		// key can be re-set by injection. No-op unless service- or per-model
 		// stripBodyFields is configured. A marshal failure here is a broker-side
 		// fault (same reasoning as InjectBodyFields below) — leave it unflagged.
-		modifiedBody, err = c.StripBodyFields(reqBody, resolvedModelStr)
+		modifiedBody, err = c.StripBodyFieldsFor(reqBody, resolvedModelStr, resolvedIdentity(ctx))
 		if err != nil {
 			return nil, errors.Wrap(err, "strip body fields")
 		}
 		reqBody = modifiedBody
 
-		modifiedBody, err = c.InjectBodyFields(reqBody, resolvedModelStr)
+		modifiedBody, err = c.InjectBodyFieldsFor(reqBody, resolvedModelStr, resolvedIdentity(ctx))
 		if err != nil {
 			// A marshal failure here is a broker-side fault (the injected fields
 			// are server config, already verified JSON-serializable at load, and
@@ -1039,7 +1039,16 @@ func (c *Ctrl) EnsureStreamOptions(body []byte) ([]byte, error) {
 // 2^53+1, or big integers inside tool-call arguments) survive the round-trip
 // without being mangled into float64 — matching forceB64ResponseFormat.
 func (c *Ctrl) InjectBodyFields(body []byte, resolvedModel string) ([]byte, error) {
-	fields := c.Service.EffectiveInjectBodyFields(resolvedModel)
+	return c.InjectBodyFieldsFor(body, resolvedModel, "")
+}
+
+// InjectBodyFieldsFor is InjectBodyFields keyed by the upstream identity that
+// selected the entry (config.UpstreamIdentityHeader), so a canonical model served
+// by several upstreams injects ITS upstream's per-entry fields, not the first
+// entry's. identity=="" is byte-identical to InjectBodyFields (single-entry /
+// legacy paths).
+func (c *Ctrl) InjectBodyFieldsFor(body []byte, resolvedModel, identity string) ([]byte, error) {
+	fields := c.Service.EffectiveInjectBodyFieldsFor(resolvedModel, identity)
 	if len(fields) == 0 || len(body) == 0 {
 		return body, nil
 	}
@@ -1095,7 +1104,16 @@ func (c *Ctrl) InjectBodyFields(body []byte, resolvedModel string) ([]byte, erro
 // is forwarded unchanged and logged, matching InjectBodyFields. Decoding uses
 // json.Number so large integer fields survive the round-trip unmangled.
 func (c *Ctrl) StripBodyFields(body []byte, resolvedModel string) ([]byte, error) {
-	fields := c.Service.EffectiveStripBodyFields(resolvedModel)
+	return c.StripBodyFieldsFor(body, resolvedModel, "")
+}
+
+// StripBodyFieldsFor is StripBodyFields keyed by the upstream identity that
+// selected the entry (config.UpstreamIdentityHeader), so a canonical model served
+// by several upstreams strips ITS upstream's per-entry fields, not the first
+// entry's. identity=="" is byte-identical to StripBodyFields (single-entry /
+// legacy paths).
+func (c *Ctrl) StripBodyFieldsFor(body []byte, resolvedModel, identity string) ([]byte, error) {
+	fields := c.Service.EffectiveStripBodyFieldsFor(resolvedModel, identity)
 	if len(fields) == 0 || len(body) == 0 {
 		return body, nil
 	}
@@ -1551,7 +1569,7 @@ func (c *Ctrl) enforceRequestFormat(ctx *gin.Context, resolvedModel string) erro
 	if model == "" {
 		model = c.Service.ModelType
 	}
-	formats := c.Service.SupportedFormatsFor(model)
+	formats := c.Service.SupportedFormatsFor(model, resolvedIdentity(ctx))
 	if formatAllowed(formats, surface) {
 		return nil
 	}

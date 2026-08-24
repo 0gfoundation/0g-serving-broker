@@ -320,6 +320,75 @@ func TestSameModelUpstreamEndToEndSelection(t *testing.T) {
 	}
 }
 
+// TestSameModelUpstreamRequestRewritersSelectByIdentity proves the per-entry
+// request-path rewriters resolve by the SELECTED upstream, not the first entry:
+// supportedFormats (enforceRequestFormat), injectBodyFields, and stripBodyFields.
+// aliyun is FIRST and openai-only; zhipu also serves the anthropic surface and
+// carries different inject/strip fields. The pre-fix model-keyed lookup returned
+// aliyun for every glm-5.2 request, wrongly rejecting an anthropic request routed
+// to zhipu and mis-applying aliyun's inject/strip on it.
+func TestSameModelUpstreamRequestRewritersSelectByIdentity(t *testing.T) {
+	s := &Service{
+		TargetURL:        "https://svc.example.com/v1",
+		ProviderIdentity: "aliyun",
+		ModelPricing: []ModelPricingEntry{
+			{Model: "glm-5.2", ProviderIdentity: "aliyun", InputPrice: "1", OutputPrice: "2",
+				ModelInfo:        &ModelInfo{SupportedFormats: []string{"openai"}},
+				InjectBodyFields: map[string]interface{}{"provider": "aliyun"},
+				StripBodyFields:  []string{"logprobs"}},
+			{Model: "glm-5.2", ProviderIdentity: "zhipu", InputPrice: "3", OutputPrice: "4",
+				ModelInfo:        &ModelInfo{SupportedFormats: []string{"openai", "anthropic"}},
+				InjectBodyFields: map[string]interface{}{"provider": "zhipu"},
+				StripBodyFields:  []string{"top_logprobs"}},
+			{Model: "solo-x", InputPrice: "5", OutputPrice: "6",
+				ModelInfo:        &ModelInfo{SupportedFormats: []string{"openai"}},
+				InjectBodyFields: map[string]interface{}{"provider": "solo"},
+				StripBodyFields:  []string{"seed"}},
+		},
+	}
+	if err := s.BuildModelPricingMap(); err != nil {
+		t.Fatalf("BuildModelPricingMap: %v", err)
+	}
+
+	// supportedFormats: zhipu declares anthropic; the bug rejected it by reading
+	// aliyun's openai-only set.
+	if got := s.SupportedFormatsFor("glm-5.2", "zhipu"); len(got) != 2 || got[1] != "anthropic" {
+		t.Errorf("SupportedFormatsFor(glm-5.2, zhipu) = %v; want zhipu's [openai anthropic]", got)
+	}
+	if got := s.SupportedFormatsFor("glm-5.2", "aliyun"); len(got) != 1 || got[0] != "openai" {
+		t.Errorf("SupportedFormatsFor(glm-5.2, aliyun) = %v; want aliyun's [openai]", got)
+	}
+
+	// injectBodyFields: each upstream injects ITS provider tag.
+	if got := s.EffectiveInjectBodyFieldsFor("glm-5.2", "zhipu")["provider"]; got != "zhipu" {
+		t.Errorf("EffectiveInjectBodyFieldsFor(glm-5.2, zhipu)[provider] = %v; want zhipu", got)
+	}
+	if got := s.EffectiveInjectBodyFieldsFor("glm-5.2", "aliyun")["provider"]; got != "aliyun" {
+		t.Errorf("EffectiveInjectBodyFieldsFor(glm-5.2, aliyun)[provider] = %v; want aliyun", got)
+	}
+
+	// stripBodyFields: each upstream strips ITS own field.
+	if got := s.EffectiveStripBodyFieldsFor("glm-5.2", "zhipu"); len(got) != 1 || got[0] != "top_logprobs" {
+		t.Errorf("EffectiveStripBodyFieldsFor(glm-5.2, zhipu) = %v; want [top_logprobs]", got)
+	}
+	if got := s.EffectiveStripBodyFieldsFor("glm-5.2", "aliyun"); len(got) != 1 || got[0] != "logprobs" {
+		t.Errorf("EffectiveStripBodyFieldsFor(glm-5.2, aliyun) = %v; want [logprobs]", got)
+	}
+
+	// Backward compat: empty identity on a single-entry model is byte-identical to
+	// the bare accessors (the pre-multi-upstream behavior).
+	if got := s.SupportedFormatsFor("solo-x", ""); len(got) != 1 || got[0] != "openai" {
+		t.Errorf("SupportedFormatsFor(solo-x, \"\") = %v; want [openai]", got)
+	}
+	if s.EffectiveInjectBodyFieldsFor("solo-x", "")["provider"] != s.EffectiveInjectBodyFields("solo-x")["provider"] {
+		t.Error("EffectiveInjectBodyFieldsFor(solo-x, \"\") diverged from the bare accessor")
+	}
+	strip := s.EffectiveStripBodyFieldsFor("solo-x", "")
+	if len(strip) != 1 || strip[0] != "seed" {
+		t.Errorf("EffectiveStripBodyFieldsFor(solo-x, \"\") = %v; want [seed]", strip)
+	}
+}
+
 // TestModelExpirationForGatesMultiUpstream proves Fix 1: an EXPIRED same-model
 // entry is correctly gated when the request's upstream identity selects it,
 // while per-entry metadata (ModelInfo) resolves to that same selected entry.

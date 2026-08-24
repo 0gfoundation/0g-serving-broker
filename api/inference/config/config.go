@@ -362,11 +362,18 @@ func (s *Service) EffectiveModelInfoFor(model, identity string) *ModelInfo {
 
 // SupportedFormatsFor returns the explicitly-configured API surface formats
 // (APIFormatOpenAI / APIFormatAnthropic) for the resolved model, resolving the
-// per-model ModelInfo the same way EffectiveModelInfo does. It returns nil when
+// per-model ModelInfo the same way EffectiveModelInfoFor does. It returns nil when
 // none is configured — callers treat nil as "unconstrained" so services written
 // before format enforcement keep accepting every surface (backward compatible).
-func (s *Service) SupportedFormatsFor(model string) []string {
-	mi := s.EffectiveModelInfo(model)
+//
+// identity is the upstream that selected the entry (config.UpstreamIdentityHeader):
+// when a canonical model is served by several upstreams with DIFFERENT
+// supportedFormats, it picks the surface set of the upstream the router named,
+// instead of the ambiguous-resolve "no metadata" nil. identity=="" reproduces the
+// original single-entry behavior byte-for-byte (EffectiveModelInfoFor delegates to
+// the same nil-on-ambiguous resolution).
+func (s *Service) SupportedFormatsFor(model, identity string) []string {
+	mi := s.EffectiveModelInfoFor(model, identity)
 	if mi == nil {
 		return nil
 	}
@@ -1482,10 +1489,20 @@ func normalizeStripBodyFields(fieldPath string, fields []string) ([]string, erro
 // configured. The result is order-stable (service entries first, then any
 // model-only entries) and de-duplicated.
 func (s *Service) EffectiveStripBodyFields(model string) []string {
+	return s.EffectiveStripBodyFieldsFor(model, "")
+}
+
+// EffectiveStripBodyFieldsFor is EffectiveStripBodyFields keyed by the upstream
+// identity that selected the entry, so a canonical model served by several
+// upstreams strips ITS upstream's per-entry fields, not the first entry's.
+// identity=="" is identical to EffectiveStripBodyFields (single-entry / legacy
+// paths): GetModelPricingFor with an empty identity resolves exactly as
+// GetModelPricing.
+func (s *Service) EffectiveStripBodyFieldsFor(model, identity string) []string {
 	svc := s.StripBodyFields
 	var entry []string
 	if model != "" {
-		if e := s.GetModelPricing(model); e != nil {
+		if e := s.GetModelPricingFor(model, identity); e != nil {
 			entry = e.StripBodyFields
 		}
 	}
@@ -1519,10 +1536,20 @@ func (s *Service) EffectiveStripBodyFields(model string) []string {
 // corrupt the config maps that are reused across concurrent requests. When only
 // one level is set, its (read-only) map is returned directly.
 func (s *Service) EffectiveInjectBodyFields(model string) map[string]interface{} {
+	return s.EffectiveInjectBodyFieldsFor(model, "")
+}
+
+// EffectiveInjectBodyFieldsFor is EffectiveInjectBodyFields keyed by the upstream
+// identity that selected the entry, so a canonical model served by several
+// upstreams deep-merges ITS upstream's per-entry fields on top of the service
+// level, not the first entry's. identity=="" is identical to
+// EffectiveInjectBodyFields (single-entry / legacy paths): GetModelPricingFor with
+// an empty identity resolves exactly as GetModelPricing.
+func (s *Service) EffectiveInjectBodyFieldsFor(model, identity string) map[string]interface{} {
 	svc := s.InjectBodyFields
 	var entry map[string]interface{}
 	if model != "" {
-		if e := s.GetModelPricing(model); e != nil {
+		if e := s.GetModelPricingFor(model, identity); e != nil {
 			entry = e.InjectBodyFields
 		}
 	}
