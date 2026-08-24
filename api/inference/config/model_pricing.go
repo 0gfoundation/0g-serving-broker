@@ -1376,7 +1376,7 @@ func validateModelPricingEntry(i int, entry *ModelPricingEntry, serviceType stri
 	}
 	// Optional per-model upstream override (the multi-upstream feature): forward
 	// this model to its own targetUrl / attribute it to its own providerIdentity.
-	if err := validateModelUpstream(i, entry, isCentralized); err != nil {
+	if err := validateModelUpstream(i, entry, serviceType, isCentralized); err != nil {
 		return err
 	}
 	return nil
@@ -1391,7 +1391,25 @@ func validateModelPricingEntry(i int, entry *ModelPricingEntry, serviceType stri
 // normalized to a lowercase machine key in place, exactly like the service-level
 // field (modelPricing is forwarder-only, so this is never reached for a
 // decentralized provider). Both empty is the common case and a no-op.
-func validateModelUpstream(i int, entry *ModelPricingEntry, isCentralized bool) error {
+func validateModelUpstream(i int, entry *ModelPricingEntry, serviceType string, isCentralized bool) error {
+	// Per-model upstream overrides are a chatbot-only feature. The video path
+	// (video.go / video_poll.go) builds its poll/content URLs from the SERVICE
+	// targetUrl and never threads the resolved model's EffectiveTargetURL /
+	// EffectiveProviderIdentity — so a per-model targetUrl here would poll the
+	// wrong host while sending the per-model secret to it (an API-key leak to a
+	// foreign host, and a job that never completes/bills), and a per-model
+	// providerIdentity would be silently dropped, mislabeling the routing proof
+	// and reconciliation (both use the service-level Service.ProviderIdentity).
+	// Reject the leaky/mislabeling combination at load rather than fail silently
+	// at runtime. Service-LEVEL targetUrl/providerIdentity for video is untouched.
+	if serviceType == constant.ServiceTypeVideoGeneration {
+		if entry.TargetURL != "" {
+			return fmt.Errorf("invalid config: service.modelPricing[%d].targetUrl (per-model upstream) is not supported for service type '%s' (model %q)", i, constant.ServiceTypeVideoGeneration, entry.Model)
+		}
+		if entry.ProviderIdentity != "" {
+			return fmt.Errorf("invalid config: service.modelPricing[%d].providerIdentity (per-model upstream) is not supported for service type '%s' (model %q)", i, constant.ServiceTypeVideoGeneration, entry.Model)
+		}
+	}
 	if entry.TargetURL != "" {
 		if strings.TrimSpace(entry.TargetURL) != entry.TargetURL {
 			return fmt.Errorf("invalid config: service.modelPricing[%d].targetUrl %q must not have leading/trailing whitespace (model %q)", i, entry.TargetURL, entry.Model)

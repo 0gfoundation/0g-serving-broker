@@ -2998,6 +2998,33 @@ priceFeed:
 `,
 			wantErr: "billing.mode must be",
 		},
+		{
+			// Per-model upstream (targetUrl) is a chatbot-only feature. The video
+			// poll/content paths route by the SERVICE targetUrl, so a per-model one
+			// leaks the per-model secret to the wrong host and never bills — reject.
+			name: "video rejects per-model targetUrl",
+			extra: `  modelPricing:
+    - model: "wan2.7"
+      outputPrice: "1000"
+      targetUrl: "https://other-host:8000"
+      billing:
+        mode: "per_video_second"
+`,
+			wantErr: "targetUrl (per-model upstream) is not supported for service type 'video-generation'",
+		},
+		{
+			// Per-model providerIdentity is silently dropped on the video proof/
+			// reconciliation path (service-level identity only) — reject the mislabel.
+			name: "video rejects per-model providerIdentity",
+			extra: `  modelPricing:
+    - model: "wan2.7"
+      outputPrice: "1000"
+      providerIdentity: "someone-else"
+      billing:
+        mode: "per_video_second"
+`,
+			wantErr: "providerIdentity (per-model upstream) is not supported for service type 'video-generation'",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

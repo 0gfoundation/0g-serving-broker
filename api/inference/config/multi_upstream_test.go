@@ -125,6 +125,7 @@ func TestValidateModelUpstream(t *testing.T) {
 	tests := []struct {
 		name          string
 		entry         ModelPricingEntry
+		serviceType   string // "" defaults to chatbot
 		isCentralized bool
 		wantErr       string // substring; "" means expect success
 		wantIdentity  string // expected normalized ProviderIdentity after validate
@@ -171,11 +172,32 @@ func TestValidateModelUpstream(t *testing.T) {
 			name:  "both empty is a no-op",
 			entry: ModelPricingEntry{Model: "m"},
 		},
+		{
+			// Per-model targetUrl is unsupported for video: the poll/content paths
+			// use the SERVICE targetUrl, so this would leak the per-model secret to
+			// the wrong host and never bill. Reject at load.
+			name:        "per-model targetUrl rejected for video",
+			entry:       ModelPricingEntry{Model: "m", TargetURL: "https://up.example.com/v1"},
+			serviceType: "video-generation",
+			wantErr:     "not supported for service type 'video-generation'",
+		},
+		{
+			// Per-model providerIdentity is silently dropped on the video proof/
+			// reconciliation path (service-level identity only). Reject to avoid mislabel.
+			name:        "per-model providerIdentity rejected for video",
+			entry:       ModelPricingEntry{Model: "m", ProviderIdentity: "minimax"},
+			serviceType: "video-generation",
+			wantErr:     "not supported for service type 'video-generation'",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			e := tt.entry
-			err := validateModelUpstream(0, &e, tt.isCentralized)
+			st := tt.serviceType
+			if st == "" {
+				st = "chatbot"
+			}
+			err := validateModelUpstream(0, &e, st, tt.isCentralized)
 			if tt.wantErr == "" {
 				if err != nil {
 					t.Fatalf("unexpected error: %v", err)
