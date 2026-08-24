@@ -1784,6 +1784,11 @@ func migrateDeprecated(cfg *Config, raw map[string]interface{}) error {
 // place a user can read it from an attested source. See loadConfig for why it wins.
 const targetURLEnvVar = "TARGET_URL"
 
+// databaseDSNEnvVar overrides the database connection string from the compose file, for
+// the same reason TARGET_URL exists: it decides where unsealed request and response
+// bodies are written, so a verifier has to be able to read it from an attested source.
+const databaseDSNEnvVar = "DATABASE_DSN"
+
 func loadConfig(cfg *Config) error {
 	configPath := "/etc/config/config.yaml"
 	if envPath := os.Getenv("CONFIG_FILE"); envPath != "" {
@@ -1843,6 +1848,32 @@ func loadConfig(cfg *Config) error {
 				targetURLEnvVar, envTarget, cfg.Service.TargetURL)
 		}
 		cfg.Service.TargetURL = envTarget
+	}
+
+	// DATABASE_DSN, for the same reason and with the same precedence.
+	//
+	// async_job persists RequestBody and ResponseBody as mediumblobs, so this string
+	// decides where unsealed plaintext is written. compose_hash covers the config file
+	// only as a reference (BROKER_CONFIG=${BROKER_CONFIG:-}), so with the DSN left there
+	// a verifier can confirm the compose declares an in-CVM mysql service and still not
+	// confirm the broker connects to it — point it at an external host and the plaintext
+	// leaves the enclave while every attestation artifact stays identical.
+	//
+	// As with TARGET_URL, only a literal in the compose is measured: `- DATABASE_DSN=...`
+	// is covered, `- DATABASE_DSN=${DATABASE_DSN}` puts the value back in the same
+	// unmeasured channel. This process cannot tell the two apart, so nothing here claims
+	// the value is attested; that check belongs to the reader, against app_compose.
+	if envDSN := strings.TrimSpace(os.Getenv(databaseDSNEnvVar)); envDSN != "" {
+		if prior := cfg.Database.DSN; prior != "" && prior != envDSN {
+			log.Printf("[CONFIG] %s takes precedence over database.dsn from the config file", databaseDSNEnvVar)
+		} else if cfg.Database.Provider != "" {
+			log.Printf("[CONFIG] %s takes precedence over the legacy database.provider from the config file", databaseDSNEnvVar)
+		}
+		cfg.Database.DSN = envDSN
+		// Cleared so the deprecation migration cannot copy the file's value back over
+		// the attested one; migrateDeprecated runs before this and prefers DSN, but a
+		// stale Provider left behind reads like a second answer.
+		cfg.Database.Provider = ""
 	}
 
 	if cfg.Service.ModelInfo != nil {
