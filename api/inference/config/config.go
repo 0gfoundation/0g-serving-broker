@@ -294,15 +294,25 @@ func (m *ModelInfo) Validate(serviceType string) error {
 // the allowlist to reject as "not supported" instead of being mislabeled
 // "expired".
 func (s *Service) ModelExpiration(model string) (time.Time, bool) {
+	return s.ModelExpirationFor(model, "")
+}
+
+// ModelExpirationFor is ModelExpiration keyed to a specific upstream identity
+// (config.UpstreamIdentityHeader). When identity is non-empty it selects the
+// EXACT same-model entry the router named, so an expired multi-upstream model is
+// still gated (the bare, identity-less lookup resolves ambiguous and would
+// otherwise fail OPEN). identity="" reproduces the original single-entry
+// behavior byte-for-byte.
+func (s *Service) ModelExpirationFor(model, identity string) (time.Time, bool) {
 	mi := s.ModelInfo
 	if s.HasMultiModelPricing() {
 		// Resolve through the same path as the request allowlist (exact id, then
 		// alias, then wildcard) so a request using a legacy alias is subject to the
 		// SAME expiration gate as the canonical id — GetModelPricing alone would
 		// miss aliases and let an alias bypass a model's 410-expiry.
-		// Model-only metadata lookup: no upstream identity, so a model with several
-		// upstreams resolves ambiguous → treated as "no per-model metadata".
-		entry, _, err := s.ResolveRequestedModel(model, "")
+		// With identity present the selected entry is authoritative; without it a
+		// model with several upstreams resolves ambiguous → "no per-model metadata".
+		entry, _, err := s.ResolveRequestedModel(model, identity)
 		if err != nil || entry == nil {
 			return time.Time{}, false
 		}
@@ -325,11 +335,21 @@ func (s *Service) ModelExpiration(model string) (time.Time, bool) {
 // resolves to nil — it is not a model this service serves. In single-model mode the
 // service-level ModelInfo is returned regardless of the requested name.
 func (s *Service) EffectiveModelInfo(model string) *ModelInfo {
+	return s.EffectiveModelInfoFor(model, "")
+}
+
+// EffectiveModelInfoFor is EffectiveModelInfo keyed to a specific upstream
+// identity (config.UpstreamIdentityHeader). When identity is non-empty it
+// selects the EXACT same-model entry the router named, so per-model ModelInfo
+// (max_tokens capping, reasoning translation) applies to the selected upstream
+// instead of being silently dropped on an ambiguous multi-upstream resolve.
+// identity="" reproduces the original single-entry behavior byte-for-byte.
+func (s *Service) EffectiveModelInfoFor(model, identity string) *ModelInfo {
 	mi := s.ModelInfo
 	if s.HasMultiModelPricing() {
-		// Model-only metadata lookup: no upstream identity, so a model with several
-		// upstreams resolves ambiguous → treated as "no per-model metadata".
-		entry, _, err := s.ResolveRequestedModel(model, "")
+		// With identity present the selected entry is authoritative; without it a
+		// model with several upstreams resolves ambiguous → "no per-model metadata".
+		entry, _, err := s.ResolveRequestedModel(model, identity)
 		if err != nil || entry == nil {
 			return nil
 		}

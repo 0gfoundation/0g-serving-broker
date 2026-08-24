@@ -3,6 +3,7 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestEffectiveTargetURL covers the per-model upstream base URL resolution that
@@ -316,5 +317,52 @@ func TestSameModelUpstreamEndToEndSelection(t *testing.T) {
 	}
 	if got := s.GetModelPricingFor("solo-x", ""); got == nil || got.OutputPrice != "6" {
 		t.Errorf("solo-x GetModelPricingFor(\"\") price = %v; want OutputPrice 6", got)
+	}
+}
+
+// TestModelExpirationForGatesMultiUpstream proves Fix 1: an EXPIRED same-model
+// entry is correctly gated when the request's upstream identity selects it,
+// while per-entry metadata (ModelInfo) resolves to that same selected entry.
+// The bare, identity-less ModelExpiration resolves ambiguous on a multi-upstream
+// model and returns ok=false — the pre-fix fail-OPEN that let an expired
+// multi-upstream model keep serving.
+func TestModelExpirationForGatesMultiUpstream(t *testing.T) {
+	past := "2000-01-01T00:00:00Z"
+	wantExp, _ := time.Parse(time.RFC3339, past)
+
+	zhipuMI := validModelInfo()
+	zhipuMI.ExpirationDate = past
+	if err := zhipuMI.Validate("chatbot"); err != nil {
+		t.Fatalf("zhipu ModelInfo.Validate: %v", err)
+	}
+	s := &Service{
+		ModelPricing: []ModelPricingEntry{
+			{Model: "glm-5.2", ProviderIdentity: "aliyun", InputPrice: "1", OutputPrice: "2"},
+			{Model: "glm-5.2", ProviderIdentity: "zhipu", InputPrice: "3", OutputPrice: "4", ModelInfo: zhipuMI},
+		},
+	}
+	if err := s.BuildModelPricingMap(); err != nil {
+		t.Fatalf("BuildModelPricingMap: %v", err)
+	}
+
+	// Fix 1: identity selects the expired zhipu entry, so the 410 gate fires.
+	got, ok := s.ModelExpirationFor("glm-5.2", "zhipu")
+	if !ok || !got.Equal(wantExp) {
+		t.Errorf("ModelExpirationFor(glm-5.2, zhipu) = %v, ok=%v; want %v, true", got, ok, wantExp)
+	}
+	// EffectiveModelInfoFor resolves to the SAME selected entry — this is what keeps
+	// per-model max_tokens capping / reasoning translation applying (the other half
+	// of Fix 1), instead of being dropped on an ambiguous resolve.
+	if mi := s.EffectiveModelInfoFor("glm-5.2", "zhipu"); mi != zhipuMI {
+		t.Errorf("EffectiveModelInfoFor(glm-5.2, zhipu) = %v; want the zhipu entry's ModelInfo", mi)
+	}
+	// The aliyun entry has no expiry — identity keeps the two entries' metadata distinct.
+	if _, ok := s.ModelExpirationFor("glm-5.2", "aliyun"); ok {
+		t.Error("ModelExpirationFor(glm-5.2, aliyun) ok=true; want false (no expiry on that entry)")
+	}
+	// Pre-fix fail-OPEN guard: without identity the multi-upstream model resolves
+	// ambiguous, so the bare accessor reports no expiry and the gate is skipped.
+	if _, ok := s.ModelExpiration("glm-5.2"); ok {
+		t.Error("ModelExpiration(glm-5.2) ok=true; want false (ambiguous without identity)")
 	}
 }

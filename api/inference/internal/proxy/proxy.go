@@ -747,7 +747,11 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	if modelForExpiry == "" {
 		modelForExpiry = p.ctrl.Service.ModelType
 	}
-	if exp, ok := p.ctrl.Service.ModelExpiration(modelForExpiry); ok && time.Now().After(exp) {
+	// Identity-aware: a same-model entry carries its own expiry, so gate against
+	// the upstream the router named (X-0G-Upstream, read at admission — this runs
+	// before PrepareHTTPRequest sets CtxKeyResolvedIdentity). Without it a
+	// multi-upstream model resolves ambiguous and an EXPIRED one would fail OPEN.
+	if exp, ok := p.ctrl.Service.ModelExpirationFor(modelForExpiry, ctrl.UpstreamIdentity(ctx)); ok && time.Now().After(exp) {
 		ctx.Set("ignoreError", true)
 		// record stamps CtxKeyRejectionReason for the unified failure metric.
 		p.rejections.record(ctx, monitor.RejectionModelExpired, userAddress)

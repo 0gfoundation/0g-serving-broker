@@ -107,7 +107,7 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 		// max_completion_tokens an OpenAI-compatible client sends. No-op unless the
 		// model advertises exactly one of the two and the client sent the other. The
 		// two fields are semantically identical, so billing is unaffected.
-		modifiedBody, err = c.TranslateMaxTokens(reqBody, resolvedModelStr)
+		modifiedBody, err = c.TranslateMaxTokensFor(reqBody, resolvedModelStr, resolvedIdentity(ctx))
 		if err != nil {
 			return nil, errors.Wrap(err, "translate max tokens")
 		}
@@ -120,7 +120,7 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 		// the body's "model" — ValidateModelAllowlist may have rewritten the body to
 		// the upstream id, but per-model supportedParameters are keyed by canonical
 		// id. See docs/design/reasoning-translation.md.
-		modifiedBody, err = c.TranslateReasoning(reqBody, resolvedModelStr)
+		modifiedBody, err = c.TranslateReasoningFor(reqBody, resolvedModelStr, resolvedIdentity(ctx))
 		if err != nil {
 			return nil, errors.Wrap(err, "translate reasoning")
 		}
