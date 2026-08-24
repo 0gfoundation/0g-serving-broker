@@ -124,7 +124,7 @@ func TestSignCentralizedRoutingProof_NilTLSState(t *testing.T) {
 
 	// Without TLS state, signing must refuse — a proof with an empty
 	// fingerprint would give verifiers false security.
-	err := ctrl.signCentralizedRoutingProof(reqBody, respData, chatKey, "")
+	err := ctrl.signCentralizedRoutingProof(reqBody, respData, chatKey, "", "")
 	if err == nil {
 		t.Fatal("expected error when TLS state is nil")
 	}
@@ -156,7 +156,7 @@ func TestSignCentralizedRoutingProof_WithTLSState(t *testing.T) {
 		ServerName:       "api.openai.com",
 	}
 
-	err := ctrl.signCentralizedRoutingProof(reqBody, respData, chatKey, fingerprintOf(tlsState))
+	err := ctrl.signCentralizedRoutingProof(reqBody, respData, chatKey, fingerprintOf(tlsState), "")
 	if err != nil {
 		t.Fatalf("signCentralizedRoutingProof returned error: %v", err)
 	}
@@ -232,7 +232,7 @@ func TestSignCentralizedRoutingProof_DifferentProviders(t *testing.T) {
 				ServerName:       tt.certCN,
 			}
 
-			err := ctrl.signCentralizedRoutingProof(reqBody, respData, "key-"+tt.name, fingerprintOf(tlsState))
+			err := ctrl.signCentralizedRoutingProof(reqBody, respData, "key-"+tt.name, fingerprintOf(tlsState), "")
 			if err != nil {
 				t.Fatalf("error: %v", err)
 			}
@@ -253,6 +253,50 @@ func TestSignCentralizedRoutingProof_DifferentProviders(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSignCentralizedRoutingProof_PerModelIdentity verifies the multi-upstream
+// behaviour: an explicit per-model providerIdentity overrides the service-level
+// one in both the signed text and the ProviderIdentity field, while an empty
+// argument falls back to the service-level identity (single-upstream providers
+// and callers with no resolved model keep the previous behaviour).
+func TestSignCentralizedRoutingProof_PerModelIdentity(t *testing.T) {
+	reqBody := []byte(`{"model":"minimax-abab","messages":[]}`)
+	respData := []byte(`{"choices":[{"message":{"content":"hi"}}]}`)
+
+	svc := config.Service{ProviderType: "centralized", ProviderIdentity: "aliyun"}
+	ctrl := newChatbotTestCtrl(t, svc)
+	cert := generateTestCert(t, "api.minimax.chat")
+	tlsState := &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}, ServerName: "api.minimax.chat"}
+
+	// Explicit per-model identity wins over the service-level "aliyun".
+	if err := ctrl.signCentralizedRoutingProof(reqBody, respData, "k-override", fingerprintOf(tlsState), "minimax"); err != nil {
+		t.Fatalf("error: %v", err)
+	}
+	cs := mustCachedSig(t, ctrl, "k-override")
+	if cs.ProviderIdentity != "minimax" {
+		t.Errorf("ProviderIdentity = %q, want per-model %q", cs.ProviderIdentity, "minimax")
+	}
+	if parts := strings.Split(cs.Text, ":"); len(parts) != 5 || parts[3] != "minimax" {
+		t.Errorf("proof text identity part = %v, want %q", parts, "minimax")
+	}
+
+	// Empty argument falls back to the service-level identity.
+	if err := ctrl.signCentralizedRoutingProof(reqBody, respData, "k-fallback", fingerprintOf(tlsState), ""); err != nil {
+		t.Fatalf("error: %v", err)
+	}
+	if cs := mustCachedSig(t, ctrl, "k-fallback"); cs.ProviderIdentity != "aliyun" {
+		t.Errorf("fallback ProviderIdentity = %q, want service-level %q", cs.ProviderIdentity, "aliyun")
+	}
+}
+
+func mustCachedSig(t *testing.T, ctrl *Ctrl, chatKey string) ChatSignature {
+	t.Helper()
+	val, found := ctrl.svcCache.Get(ctrl.chatCacheKey(chatKey))
+	if !found {
+		t.Fatalf("signature for %q not cached", chatKey)
+	}
+	return val.(ChatSignature)
 }
 
 // ==========================================================================
@@ -329,7 +373,7 @@ func TestSignatureVValueAdjustment(t *testing.T) {
 		reqBody := []byte(`{"i":` + hex.EncodeToString([]byte{byte(i)}) + `}`)
 		respData := []byte(`{"r":` + hex.EncodeToString([]byte{byte(i)}) + `}`)
 
-		err := ctrl.signCentralizedRoutingProof(reqBody, respData, chatKey, fingerprintOf(tlsState))
+		err := ctrl.signCentralizedRoutingProof(reqBody, respData, chatKey, fingerprintOf(tlsState), "")
 		if err != nil {
 			t.Fatalf("iteration %d: %v", i, err)
 		}

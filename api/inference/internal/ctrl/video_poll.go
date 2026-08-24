@@ -154,16 +154,16 @@ func (c *Ctrl) runVideoPollCleanup(ctx context.Context) {
 // recordWhitelistedUsage needs from the job row itself: ModelName from ResolvedModel (empty is
 // fine — recordWhitelistedUsage falls back to c.Service.ModelType) and CreatedAt from the job's
 // own creation time (its bucket hour IS the original request's, since the job is created in
-// the same call that received the request). Upstream/Unit are deliberately left for
-// recordWhitelistedUsage's own fallback (c.Service.ProviderIdentity / DefaultBillingUnitForService)
-// rather than threaded through here — they are broker-config-level values, not per-request, so
-// recomputing them fresh is exactly what the original whitelistReq would have resolved to
-// anyway.
+// the same call that received the request). Upstream is resolved per-model from ResolvedModel
+// (matching the synchronous proxy.go path) so a multi-upstream provider attributes a whitelisted
+// video to the upstream it actually hit, not the service-level identity; Unit is deliberately
+// left for recordWhitelistedUsage's own DefaultBillingUnitForService fallback.
 func (c *Ctrl) recordWhitelistedVideoPollUsage(job model.VideoPollJob, seconds int64, rateClass string) {
 	c.recordWhitelistedUsage(model.Request{
 		Model:       model.Model{CreatedAt: job.CreatedAt},
 		ServiceName: "video-generation",
 		ModelName:   job.ResolvedModel,
+		Upstream:    c.UpstreamForModel(job.ResolvedModel),
 	}, 0, seconds, 0, 0, rateClass)
 }
 
@@ -476,7 +476,9 @@ func (c *Ctrl) dropStaleVideoSignature(job model.VideoPollJob, cause error) {
 // proof over the real content.
 func (c *Ctrl) signVideoPollResult(job model.VideoPollJob, body []byte, upstreamCertFingerprint string) error {
 	if c.Service.IsCentralized() {
-		return c.signCentralizedRoutingProof(job.RequestBody, body, job.ChatKey, upstreamCertFingerprint)
+		// Video-generation rejects per-model providerIdentity at config load, so ""
+		// falls back to the service-level identity inside the signer.
+		return c.signCentralizedRoutingProof(job.RequestBody, body, job.ChatKey, upstreamCertFingerprint, "")
 	}
 	return c.signChatWithKey(job.RequestBody, body, job.ChatKey)
 }

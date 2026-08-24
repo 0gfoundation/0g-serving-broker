@@ -791,11 +791,10 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 			ServiceName:   svcType,
 			// Stamp reconciliation dimensions so whitelisted traffic (which is never
 			// persisted or settled) can still be counted into the hourly rollup.
-			Upstream: p.ctrl.Service.ProviderIdentity,
+			// Upstream is resolved per-model (alias/wildcard aware) so a multi-upstream
+			// provider attributes whitelisted traffic to the upstream it actually hit.
+			Upstream: p.ctrl.UpstreamForModel(modelName),
 			Unit:     constant.DefaultBillingUnitForService(svcType),
-		}
-		if whitelistReq.Upstream == "" {
-			whitelistReq.Upstream = constant.UpstreamSelf
 		}
 		// Stamp the receive time so the reconciliation rollup buckets whitelisted traffic
 		// by request-start hour (matching billable rows' created_at), not by response
@@ -907,19 +906,18 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	req.RequestHash = req.Nonce
 	req.ServiceName = svcType
 	// Reconciliation dimensions (see docs/design/provider-reconciliation.md).
-	// Upstream is the billing counterparty that served this request; for a single
-	// centralized upstream it is providerIdentity, and "self" for decentralized.
 	// Unit is the default billing unit for the service type; the STT token-billed
 	// path corrects it to tokens where counts are finalized.
-	req.Upstream = p.ctrl.Service.ProviderIdentity
-	if req.Upstream == "" {
-		req.Upstream = constant.UpstreamSelf
-	}
 	req.Unit = constant.DefaultBillingUnitForService(svcType)
 	req.ModelName = ctrl.ExtractModelName(reqBody, ctx.Request.Header.Get("Content-Type"))
 	if req.ModelName == "" {
 		req.ModelName = p.ctrl.Service.ModelType
 	}
+	// Upstream is the billing counterparty that served this request; for a single
+	// centralized upstream it is providerIdentity, and "self" for decentralized. A
+	// multi-upstream provider attributes each request to the upstream it actually
+	// hit (alias/wildcard aware, matching how the forward path resolves it).
+	req.Upstream = p.ctrl.UpstreamForModel(req.ModelName)
 	// model is a user-controlled, unbounded request field; cap it to the
 	// requests.model_name column width (varchar(255)) so an oversized value can't
 	// error the insert (strict mode) or be silently truncated by the driver.

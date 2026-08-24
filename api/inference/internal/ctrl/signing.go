@@ -181,7 +181,17 @@ func (c *Ctrl) signImageResponse(reqBody []byte, images [][]byte, chatKey string
 // it from either the broker's own resp.TLS or an in-enclave shim's report — this
 // function is deliberately indifferent to which, so the proof format and every
 // verifier stay unchanged whether or not a protocol translator sits in the path.
-func (c *Ctrl) signCentralizedRoutingProof(reqBody, respData []byte, chatKey, tlsFingerprint string) error {
+//
+// providerIdentity is the identity of the upstream that ACTUALLY served this
+// request — the per-model identity for a multi-upstream provider (Bailian vs
+// Minimax under one provider), so the proof names the real upstream alongside its
+// TLS fingerprint instead of a single provider-level label. An empty string falls
+// back to the service-level ProviderIdentity, so callers with no resolved model
+// (and single-upstream providers) get the previous behaviour unchanged.
+func (c *Ctrl) signCentralizedRoutingProof(reqBody, respData []byte, chatKey, tlsFingerprint string, providerIdentity string) error {
+	if providerIdentity == "" {
+		providerIdentity = c.Service.ProviderIdentity
+	}
 	requestSha256 := sha256Hex(reqBody)
 	responseSha256 := sha256Hex(respData)
 
@@ -209,7 +219,7 @@ func (c *Ctrl) signCentralizedRoutingProof(reqBody, respData []byte, chatKey, tl
 
 	text := teeutil.FormatRoutingProofText(
 		requestSha256, responseSha256,
-		c.Service.ProviderType, c.Service.ProviderIdentity,
+		c.Service.ProviderType, providerIdentity,
 		tlsFingerprint,
 	)
 
@@ -231,7 +241,7 @@ func (c *Ctrl) signCentralizedRoutingProof(reqBody, respData []byte, chatKey, tl
 		SigningAddressEcdsa: c.teeService.Address,
 		SigningAlgo:         ECDSA.String(),
 		ProviderType:        c.Service.ProviderType,
-		ProviderIdentity:    c.Service.ProviderIdentity,
+		ProviderIdentity:    providerIdentity,
 		TLSCertFingerprint:  tlsFingerprint,
 	}
 

@@ -244,7 +244,7 @@ func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, acc
 	if len(signData) == 0 {
 		signData = respBody
 	}
-	if err := c.signChatResponse(ctx, reqBody, signData, chatKey, e2eeSignedText); err != nil {
+	if err := c.signChatResponse(ctx, reqBody, signData, chatKey, e2eeSignedText, reqModel.Upstream); err != nil {
 		// A signing failure here is a broker fault (signChatE2EE/signChatWithKey
 		// only fail when crypto.Sign does, i.e. a bad ProviderSigner), so surface
 		// it as 500, not the errors.Response default of 400.
@@ -434,7 +434,7 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 		if len(signData) == 0 {
 			signData = rawBody.Bytes()
 		}
-		if signErr := c.signChatResponse(ctx, reqBody, signData, chatKey, e2eeSignedText); signErr != nil {
+		if signErr := c.signChatResponse(ctx, reqBody, signData, chatKey, e2eeSignedText, reqModel.Upstream); signErr != nil {
 			c.logger.Errorf("sign streaming response: %v", signErr)
 		}
 
@@ -557,7 +557,7 @@ func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType s
 // learns the chatID via ZG-Res-Key, GET /v1/proxy/signature/{chatID} already
 // resolves (issue #619). The streaming path cannot sign until every frame has
 // been emitted, so it calls this the moment the stream completes.
-func (c *Ctrl) signChatResponse(ctx context.Context, reqBody, signData []byte, chatKey, e2eeSignedText string) error {
+func (c *Ctrl) signChatResponse(ctx context.Context, reqBody, signData []byte, chatKey, e2eeSignedText, providerIdentity string) error {
 	e2eeActive := false
 	if ginCtx, ok := ctx.(*gin.Context); ok {
 		if _, sealed := e2eeSealedRequest(ginCtx); sealed {
@@ -591,7 +591,7 @@ func (c *Ctrl) signChatResponse(ctx context.Context, reqBody, signData []byte, c
 		// Signing failure is non-fatal: without a cached signature the SDK gets a
 		// 404 on /v1/proxy/signature/{chatID}, which is more honest than a
 		// TEE-signed proof that lacks TLS evidence — don't block the response on it.
-		if err := c.signCentralizedRoutingProof(reqBody, signData, chatKey, fingerprint); err != nil {
+		if err := c.signCentralizedRoutingProof(reqBody, signData, chatKey, fingerprint, providerIdentity); err != nil {
 			c.logger.Errorf("routing proof not created: %v", err)
 		}
 		return nil

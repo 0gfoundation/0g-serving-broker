@@ -134,7 +134,7 @@ func TestSignVideoPollResultRebindsFinalBody(t *testing.T) {
 func TestSignCentralizedRoutingProofRejectsNonFingerprint(t *testing.T) {
 	ctrl := newChatbotTestCtrl(t, config.Service{ProviderType: "centralized", ProviderIdentity: "minimax"})
 	for _, bad := range []string{"", "not-hex", "a-uuid-shaped-value-4f2c9d1e8b7a6350f1e2d3c4b5a69788", strings.Repeat("ab", 32) + ":extra"} {
-		if err := ctrl.signCentralizedRoutingProof([]byte(`{}`), []byte(`{}`), "key", bad); err == nil {
+		if err := ctrl.signCentralizedRoutingProof([]byte(`{}`), []byte(`{}`), "key", bad, ""); err == nil {
 			t.Errorf("signed a routing proof with fingerprint %q", bad)
 		}
 	}

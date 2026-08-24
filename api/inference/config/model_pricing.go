@@ -5,6 +5,7 @@ import (
 	"log"
 	"math"
 	"math/big"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -163,6 +164,29 @@ type ModelPricingEntry struct {
 	// service-level key can no longer be shared. json:"-" keeps the secret out of
 	// any accidental struct marshal (defense-in-depth; nothing marshals it today).
 	AdditionalSecret map[string]string `yaml:"additionalSecret" json:"-"`
+
+	// TargetURL is the per-model counterpart of service.targetUrl: the upstream
+	// base URL requests resolved to THIS model are forwarded to. Empty means the
+	// service-level service.targetUrl applies. It lets ONE provider (one on-chain
+	// service / one serving domain) front MULTIPLE distinct upstream hosts — e.g.
+	// Alibaba Bailian and Minimax under the same broker — by pointing each model at
+	// its own upstream, while per-model AdditionalSecret supplies that upstream's
+	// API key. Only the base is swapped; the request path/query the broker appends
+	// is preserved. Must be an absolute http(s) URL (see validateModelPricingEntry).
+	TargetURL string `yaml:"targetUrl"`
+
+	// ProviderIdentity is the per-model counterpart of service.providerIdentity: the
+	// machine key of the upstream actually serving THIS model (e.g. "aliyun",
+	// "minimax"). Empty means the service-level service.providerIdentity applies.
+	// It exists so that when TargetURL fans one provider out to several upstreams,
+	// the TEE routing proof and the usage-reconciliation rollup name the upstream a
+	// request truly hit (see Service.EffectiveProviderIdentity), instead of tagging
+	// every upstream with one provider-level identity. Normalized to a lowercase
+	// machine key at load, exactly like the service-level field. For a centralized
+	// provider it flows into the signed routing proof and GET /v1/models; for a
+	// standard provider it feeds only the internal reconciliation rollup and stays
+	// hidden from every external surface (same gating as the service-level field).
+	ProviderIdentity string `yaml:"providerIdentity"`
 }
 
 // BillingMode selects how a model's per-request fee is computed. Empty defaults
@@ -1119,7 +1143,7 @@ func validateModelPricing(cfg *Config) error {
 	hasWildcard := false
 	for i := range svc.ModelPricing {
 		entry := &svc.ModelPricing[i]
-		if err := validateModelPricingEntry(i, entry, svc.Type, isUSD); err != nil {
+		if err := validateModelPricingEntry(i, entry, svc.Type, isUSD, svc.IsCentralized()); err != nil {
 			return err
 		}
 		if entry.Model == ModelWildcard {
@@ -1159,6 +1183,25 @@ func validateModelPricing(cfg *Config) error {
 				continue
 			}
 			log.Printf("[CONFIG] service.modelPricing model %q has no additionalSecret while other models do; it will use the service-level additionalSecret (or none) upstream — confirm this is intended, not a missing per-model key.", entry.Model)
+		}
+	}
+
+	// Per-model upstream overrides (targetUrl / providerIdentity) describe the SAME
+	// upstream and are meant to move together; setting one without the other, or a
+	// targetUrl to a different host without that host's own additionalSecret, is a
+	// silent-mislabel / no-credential footgun. Warn loudly at load (mirroring the
+	// additionalSecret warning above) rather than surface it as a runtime proof
+	// mislabel or an upstream 401.
+	for i := range svc.ModelPricing {
+		entry := &svc.ModelPricing[i]
+		if entry.TargetURL == "" && entry.ProviderIdentity == "" {
+			continue
+		}
+		if (entry.TargetURL == "") != (entry.ProviderIdentity == "") {
+			log.Printf("[CONFIG] service.modelPricing model %q sets only one of {targetUrl, providerIdentity}; the TEE routing proof and reconciliation will use the service-level value for the other — set both for a genuine per-model upstream.", entry.Model)
+		}
+		if entry.TargetURL != "" && strings.TrimRight(entry.TargetURL, "/") != strings.TrimRight(svc.TargetURL, "/") && len(entry.AdditionalSecret) == 0 {
+			log.Printf("[CONFIG] service.modelPricing model %q sets targetUrl %q (a different upstream) but no additionalSecret; the broker will NOT forward the service-level credential to another host — set this model's own additionalSecret or it calls the upstream unauthenticated.", entry.Model, entry.TargetURL)
 		}
 	}
 
@@ -1220,7 +1263,7 @@ func validateModelPricing(cfg *Config) error {
 // validateModelPricingEntry validates one modelPricing entry: identity + the
 // per-modality price rules, then the modality-agnostic tail (canonical id,
 // billing block, modelInfo).
-func validateModelPricingEntry(i int, entry *ModelPricingEntry, serviceType string, isUSD bool) error {
+func validateModelPricingEntry(i int, entry *ModelPricingEntry, serviceType string, isUSD, isCentralized bool) error {
 	if entry.Model == "" {
 		return fmt.Errorf("invalid config: service.modelPricing[%d].model is required", i)
 	}
@@ -1328,6 +1371,64 @@ func validateModelPricingEntry(i int, entry *ModelPricingEntry, serviceType stri
 	// panic at billing).
 	if entry.CacheTokenBilling != nil {
 		if err := validateCacheTokenBilling(fmt.Sprintf("service.modelPricing[%d].cacheTokenBilling", i), entry.CacheTokenBilling); err != nil {
+			return err
+		}
+	}
+	// Optional per-model upstream override (the multi-upstream feature): forward
+	// this model to its own targetUrl / attribute it to its own providerIdentity.
+	if err := validateModelUpstream(i, entry, serviceType, isCentralized); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateModelUpstream validates the per-model upstream overrides (TargetURL and
+// ProviderIdentity). TargetURL must be an absolute http(s) URL with a host and no
+// surrounding whitespace (it is prefix-swapped into the forward URL, so a relative
+// or malformed value would forward to a nonsense target); for a centralized
+// provider it must be HTTPS, mirroring the service-level rule, because the routing
+// proof binds resp.TLS which is only populated over TLS. ProviderIdentity is
+// normalized to a lowercase machine key in place, exactly like the service-level
+// field (modelPricing is forwarder-only, so this is never reached for a
+// decentralized provider). Both empty is the common case and a no-op.
+func validateModelUpstream(i int, entry *ModelPricingEntry, serviceType string, isCentralized bool) error {
+	// Per-model upstream overrides are a chatbot-only feature. The video path
+	// (video.go / video_poll.go) builds its poll/content URLs from the SERVICE
+	// targetUrl and never threads the resolved model's EffectiveTargetURL /
+	// EffectiveProviderIdentity — so a per-model targetUrl here would poll the
+	// wrong host while sending the per-model secret to it (an API-key leak to a
+	// foreign host, and a job that never completes/bills), and a per-model
+	// providerIdentity would be silently dropped, mislabeling the routing proof
+	// and reconciliation (both use the service-level Service.ProviderIdentity).
+	// Reject the leaky/mislabeling combination at load rather than fail silently
+	// at runtime. Service-LEVEL targetUrl/providerIdentity for video is untouched.
+	if serviceType == constant.ServiceTypeVideoGeneration {
+		if entry.TargetURL != "" {
+			return fmt.Errorf("invalid config: service.modelPricing[%d].targetUrl (per-model upstream) is not supported for service type '%s' (model %q)", i, constant.ServiceTypeVideoGeneration, entry.Model)
+		}
+		if entry.ProviderIdentity != "" {
+			return fmt.Errorf("invalid config: service.modelPricing[%d].providerIdentity (per-model upstream) is not supported for service type '%s' (model %q)", i, constant.ServiceTypeVideoGeneration, entry.Model)
+		}
+	}
+	if entry.TargetURL != "" {
+		if strings.TrimSpace(entry.TargetURL) != entry.TargetURL {
+			return fmt.Errorf("invalid config: service.modelPricing[%d].targetUrl %q must not have leading/trailing whitespace (model %q)", i, entry.TargetURL, entry.Model)
+		}
+		u, err := url.Parse(entry.TargetURL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return fmt.Errorf("invalid config: service.modelPricing[%d].targetUrl %q must be an absolute http(s) URL (model %q)", i, entry.TargetURL, entry.Model)
+		}
+		if isCentralized && u.Scheme != "https" {
+			return fmt.Errorf("invalid config: service.modelPricing[%d].targetUrl %q must use HTTPS for a centralized provider (routing proof requires TLS) (model %q)", i, entry.TargetURL, entry.Model)
+		}
+		// Normalize away a trailing slash: the forward URL is base + route and the
+		// route always starts with "/", so a base ending in "/" would produce a
+		// double slash ("https://host/v1//chat/completions"). Trim it here (this
+		// validator is stricter than the service-level targetUrl check by design).
+		entry.TargetURL = strings.TrimRight(entry.TargetURL, "/")
+	}
+	if entry.ProviderIdentity != "" {
+		if err := normalizeProviderIdentity(&entry.ProviderIdentity); err != nil {
 			return err
 		}
 	}

@@ -1527,11 +1527,61 @@ func (s *Service) EffectiveInjectBodyFields(model string) map[string]interface{}
 // per-model keys are only possible for explicitly enumerated entries.
 func (s *Service) EffectiveAdditionalSecret(model string) map[string]string {
 	if model != "" {
-		if e := s.GetModelPricing(model); e != nil && len(e.AdditionalSecret) > 0 {
-			return e.AdditionalSecret
+		if e := s.GetModelPricing(model); e != nil {
+			if len(e.AdditionalSecret) > 0 {
+				return e.AdditionalSecret
+			}
+			// A model routed to its OWN upstream (a per-model targetUrl that differs
+			// from the service upstream) must NOT inherit the service-level credential:
+			// that key belongs to the service upstream, and forwarding it elsewhere
+			// would leak it. Send no auth header instead — the operator must set this
+			// model's own additionalSecret (loadConfig warns when this override is set
+			// without one). A same-target or no targetUrl override keeps the
+			// service-level key (shared upstream). The comparison is on the full base
+			// URL (trailing-slash-insensitive, since per-model targetUrl is trimmed at
+			// load but the service-level one is not): it drops the key on ANY difference
+			// — a different host OR a different path on the same host. That is
+			// deliberately conservative (it can only over-drop, never leak); a same-host
+			// different-path upstream that legitimately shares the key must set its own
+			// additionalSecret, which the load-time warning prompts.
+			if e.TargetURL != "" && strings.TrimRight(e.TargetURL, "/") != strings.TrimRight(s.TargetURL, "/") {
+				return nil
+			}
 		}
 	}
 	return s.AdditionalSecret
+}
+
+// EffectiveTargetURL returns the upstream base URL a request resolved to the given
+// model must be forwarded to: the resolved model's per-entry targetUrl when set,
+// otherwise the service-level service.targetUrl. This is what lets one provider
+// (one serving URL) front several upstream hosts — see ModelPricingEntry.TargetURL.
+// A "" model (single-model providers, or paths with no resolved model) yields the
+// service-level URL, so single-upstream deployments are unaffected. `model` is the
+// resolved model id (GetModelPricing folds unenumerated models onto the wildcard
+// entry, matching EffectiveAdditionalSecret's resolution).
+func (s *Service) EffectiveTargetURL(model string) string {
+	if model != "" {
+		if e := s.GetModelPricing(model); e != nil && e.TargetURL != "" {
+			return e.TargetURL
+		}
+	}
+	return s.TargetURL
+}
+
+// EffectiveProviderIdentity returns the upstream machine-key identity to attribute
+// a request resolved to the given model to — used for the TEE routing proof and the
+// usage-reconciliation rollup. It is the resolved model's per-entry providerIdentity
+// when set, otherwise the service-level service.providerIdentity, so single-upstream
+// providers (and any model without an override) keep the provider-level identity
+// unchanged. A "" model yields the service-level identity.
+func (s *Service) EffectiveProviderIdentity(model string) string {
+	if model != "" {
+		if e := s.GetModelPricing(model); e != nil && e.ProviderIdentity != "" {
+			return e.ProviderIdentity
+		}
+	}
+	return s.ProviderIdentity
 }
 
 // deepMergeInjectFields returns a new map equal to base with override applied on
