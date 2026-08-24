@@ -160,7 +160,14 @@ func AdvertisedSupportedParameters(params []string, formats []string) []string {
 // advertises none the broker can translate to. A "thinking" advertisement on the
 // Anthropic surface is skipped — see requiresAnthropicBudgetTokens.
 func (c *Ctrl) nativeReasoningParam(model string) string {
-	mi := c.Service.EffectiveModelInfo(model)
+	return c.nativeReasoningParamFor(model, "")
+}
+
+// nativeReasoningParamFor is nativeReasoningParam keyed to the router-named
+// upstream identity (config.UpstreamIdentityHeader), so a multi-upstream model
+// reads the selected entry's supportedParameters instead of resolving ambiguous.
+func (c *Ctrl) nativeReasoningParamFor(model, identity string) string {
+	mi := c.Service.EffectiveModelInfoFor(model, identity)
 	if mi == nil {
 		return ""
 	}
@@ -276,6 +283,14 @@ func applyNativeReasoning(bodyMap map[string]interface{}, nativeParam string, on
 // it has been consumed and re-expressed natively, and a Qwen/vLLM upstream that
 // needs enable_thinking may reject the unknown OpenAI field.
 func (c *Ctrl) TranslateReasoning(body []byte, model string) ([]byte, error) {
+	return c.TranslateReasoningFor(body, model, "")
+}
+
+// TranslateReasoningFor is TranslateReasoning keyed to the router-named upstream
+// identity (config.UpstreamIdentityHeader), so a multi-upstream model's per-entry
+// supportedParameters drive the translation for the selected upstream rather than
+// being dropped on an ambiguous resolve. identity="" is identical to the bare call.
+func (c *Ctrl) TranslateReasoningFor(body []byte, model, identity string) ([]byte, error) {
 	if len(body) == 0 {
 		return body, nil
 	}
@@ -284,7 +299,7 @@ func (c *Ctrl) TranslateReasoning(body []byte, model string) ([]byte, error) {
 	// in a deployment advertise no native thinking toggle, so bail out before the
 	// decode/allocate to keep this a cheap no-op on the bulk of chatbot traffic
 	// (mirrors TranslateMaxTokens's supportsMax==supportsCompletion early return).
-	nativeParam := c.nativeReasoningParam(model)
+	nativeParam := c.nativeReasoningParamFor(model, identity)
 	if nativeParam == "" {
 		return body, nil
 	}

@@ -163,7 +163,11 @@ func (c *Ctrl) recordWhitelistedVideoPollUsage(job model.VideoPollJob, seconds i
 		Model:       model.Model{CreatedAt: job.CreatedAt},
 		ServiceName: "video-generation",
 		ModelName:   job.ResolvedModel,
-		Upstream:    c.UpstreamForModel(job.ResolvedModel),
+		// ponytail: no identity — the async poll has no request/header and the job
+		// persists only ResolvedModel (PollURL already bakes in the upstream). A
+		// same-model multi-upstream VIDEO config would attribute to the first entry
+		// here; persist the identity on VideoPollJob if that config is ever supported.
+		Upstream: c.UpstreamForModel(job.ResolvedModel, ""),
 	}, 0, seconds, 0, 0, rateClass)
 }
 

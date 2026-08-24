@@ -348,6 +348,13 @@ type BillingPrices struct {
 // across files. The definition lives in monitor (the lowest common package).
 const CtxKeyResolvedModel = monitor.CtxKeyResolvedModel
 
+// CtxKeyResolvedIdentity re-exports monitor.CtxKeyResolvedIdentity: the effective
+// upstream identity (config.UpstreamIdentityHeader) that, together with
+// CtxKeyResolvedModel, pins the exact per-model pricing entry when one canonical
+// model is served by several upstreams. Empty/unset ⇒ today's identity-agnostic
+// resolution.
+const CtxKeyResolvedIdentity = monitor.CtxKeyResolvedIdentity
+
 // boundedModelLabel folds a model id into the bounded metric-label set —
 // {enumerated pricing ids} ∪ {configured ModelType, "*"} — the SINGLE place
 // the bound is defined; metricModel and WhitelistMetricModel both delegate
@@ -484,7 +491,11 @@ func (c *Ctrl) resolveModelPricing(ctx context.Context) *config.ModelPricingEntr
 		c.logger.Errorf("GetBillingPrices: resolvedModel has unexpected type %T; billing at on-chain max price", modelVal)
 		return nil
 	}
-	entry := c.Service.GetModelPricing(modelStr)
+	// Bill the EXACT entry the router selected: when one canonical model is served
+	// by several upstreams, the resolved model string alone is ambiguous — pair it
+	// with the stashed identity. Empty identity (single-entry / non-multi-upstream)
+	// resolves identically to GetModelPricing (first-entry/wildcard).
+	entry := c.Service.GetModelPricingFor(modelStr, resolvedIdentity(ginCtx))
 	if entry == nil {
 		c.logger.Errorf("GetBillingPrices: resolvedModel %q passed the allowlist but has no pricing entry; billing at on-chain max price", modelStr)
 	}

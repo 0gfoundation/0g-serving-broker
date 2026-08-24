@@ -81,13 +81,13 @@ func TestSupportedFormatsFor(t *testing.T) {
 		t.Fatalf("BuildModelPricingMap: %v", err)
 	}
 
-	if got := svc.SupportedFormatsFor("claude"); len(got) != 1 || got[0] != "anthropic" {
+	if got := svc.SupportedFormatsFor("claude", ""); len(got) != 1 || got[0] != "anthropic" {
 		t.Errorf("per-model override: got %v, want [anthropic]", got)
 	}
-	if got := svc.SupportedFormatsFor("base"); len(got) != 1 || got[0] != "openai" {
+	if got := svc.SupportedFormatsFor("base", ""); len(got) != 1 || got[0] != "openai" {
 		t.Errorf("service-level fallback: got %v, want [openai]", got)
 	}
-	if got := svc.SupportedFormatsFor("unknown-no-wildcard"); got != nil {
+	if got := svc.SupportedFormatsFor("unknown-no-wildcard", ""); got != nil {
 		t.Errorf("unknown model: got %v, want nil", got)
 	}
 }
@@ -3271,12 +3271,12 @@ service:
 		{ModelWildcard, ModelWildcard, "", false},
 	}
 	for _, tc := range cases {
-		entry, resolved, ok := svc.ResolveRequestedModel(tc.requested)
-		if ok != tc.wantOK {
-			t.Errorf("ResolveRequestedModel(%q) ok=%v, want %v", tc.requested, ok, tc.wantOK)
+		entry, resolved, err := svc.ResolveRequestedModel(tc.requested, "")
+		if (err == nil) != tc.wantOK {
+			t.Errorf("ResolveRequestedModel(%q) err=%v, wantOK %v", tc.requested, err, tc.wantOK)
 			continue
 		}
-		if !ok {
+		if err != nil {
 			continue
 		}
 		if resolved != tc.wantResolved {

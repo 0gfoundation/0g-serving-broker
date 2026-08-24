@@ -568,6 +568,17 @@ const RequestStartTimeKey = "requestStartTime"
 // metrics read CtxKeyMetricModel instead.
 const CtxKeyResolvedModel = "resolvedModel"
 
+// CtxKeyResolvedIdentity is the gin context key under which the request path
+// stores the effective upstream identity (config.UpstreamIdentityHeader, empty
+// on a single-entry model) that selected the resolved pricing entry. It travels
+// alongside CtxKeyResolvedModel so downstream per-model lookups (route URL,
+// upstream secret, billing price) re-resolve the EXACT entry the router picked
+// when a model is served by several upstreams — the resolved model string alone
+// is ambiguous. Lives here so the ctrl setter and readers share one definition
+// without an import cycle; ctrl re-exports it. Empty (or unset) preserves
+// today's single-entry, identity-agnostic resolution.
+const CtxKeyResolvedIdentity = "resolvedIdentity"
+
 // CtxKeyMetricModel carries the BOUNDED metric label value for the request:
 // ctrl computes it (enumerated pricing id / configured model / "*" wildcard
 // sentinel — see ctrl.metricModel) and stores it in PrepareHTTPRequest, so

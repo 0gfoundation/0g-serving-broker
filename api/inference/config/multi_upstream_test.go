@@ -3,6 +3,7 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestEffectiveTargetURL covers the per-model upstream base URL resolution that
@@ -211,5 +212,226 @@ func TestValidateModelUpstream(t *testing.T) {
 				t.Fatalf("err = %v; want substring %q", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+// TestResolveSameModelUpstreamByIdentity covers one broker holding two entries
+// for the SAME canonical model at different upstreams, disambiguated by the
+// per-model providerIdentity the router sends via X-0G-Upstream. Also asserts
+// the backward-compat path: a single-entry model still resolves with no identity.
+func TestResolveSameModelUpstreamByIdentity(t *testing.T) {
+	s := &Service{
+		ModelPricing: []ModelPricingEntry{
+			{Model: "glm-5.2", ProviderIdentity: "aliyun", InputPrice: "1", OutputPrice: "2", TargetURL: "https://aliyun.example.com/v1"},
+			{Model: "glm-5.2", ProviderIdentity: "zhipu", InputPrice: "3", OutputPrice: "4", TargetURL: "https://zhipu.example.com/v1"},
+			{Model: "solo-x", InputPrice: "1", OutputPrice: "2"},
+		},
+	}
+	// Two same-model entries at distinct upstreams build without the dup error.
+	if err := s.BuildModelPricingMap(); err != nil {
+		t.Fatalf("BuildModelPricingMap: unexpected error: %v", err)
+	}
+
+	// Identity picks the matching upstream entry.
+	e, resolved, err := s.ResolveRequestedModel("glm-5.2", "zhipu")
+	if err != nil || e == nil || resolved != "glm-5.2" || e.TargetURL != "https://zhipu.example.com/v1" {
+		t.Fatalf("resolve(glm-5.2, zhipu) = %+v, %q, %v; want zhipu entry", e, resolved, err)
+	}
+
+	// No identity on a multi-upstream model is ambiguous.
+	if _, _, err := s.ResolveRequestedModel("glm-5.2", ""); err != ErrAmbiguousUpstream {
+		t.Fatalf("resolve(glm-5.2, \"\") err = %v; want ErrAmbiguousUpstream", err)
+	}
+
+	// Backward compat: a single-entry model resolves with no identity, as before.
+	e, resolved, err = s.ResolveRequestedModel("solo-x", "")
+	if err != nil || e == nil || resolved != "solo-x" {
+		t.Fatalf("resolve(solo-x, \"\") = %+v, %q, %v; want solo-x entry", e, resolved, err)
+	}
+}
+
+// TestSameModelUpstreamEndToEndSelection proves the FULL selection an X-0G-Upstream
+// request drives — route URL, upstream secret, billing price, and proof identity —
+// resolves to the entry the identity names, via the SAME identity-aware accessors
+// the request path calls (not the raw map). Two entries share canonical "glm-5.2"
+// at different upstreams; identity "zhipu" must select zhipu's values throughout.
+// It also pins the single-entry (empty-identity) path to the pre-multi-upstream
+// behavior, so existing configs are byte-identical.
+func TestSameModelUpstreamEndToEndSelection(t *testing.T) {
+	s := &Service{
+		TargetURL:        "https://svc.example.com/v1",
+		ProviderIdentity: "aliyun",
+		AdditionalSecret: map[string]string{"Authorization": "Bearer svc-key"},
+		ModelPricing: []ModelPricingEntry{
+			// aliyun is FIRST — the pre-fix model-keyed lookup would return this for
+			// every glm-5.2 request regardless of identity.
+			{Model: "glm-5.2", ProviderIdentity: "aliyun", InputPrice: "1", OutputPrice: "2",
+				TargetURL: "https://aliyun.example.com/v1", AdditionalSecret: map[string]string{"Authorization": "Bearer aliyun-key"}},
+			{Model: "glm-5.2", ProviderIdentity: "zhipu", InputPrice: "3", OutputPrice: "4",
+				TargetURL: "https://zhipu.example.com/v1", AdditionalSecret: map[string]string{"Authorization": "Bearer zhipu-key"}},
+			{Model: "solo-x", InputPrice: "5", OutputPrice: "6"},
+		},
+	}
+	if err := s.BuildModelPricingMap(); err != nil {
+		t.Fatalf("BuildModelPricingMap: %v", err)
+	}
+
+	// Resolve the request the same way the request path does, then read every
+	// per-model accessor with (resolved, identity) — exactly the call shape the
+	// forward/secret/billing/proof sites now use.
+	entry, resolved, err := s.ResolveRequestedModel("glm-5.2", "zhipu")
+	if err != nil || entry == nil {
+		t.Fatalf("resolve(glm-5.2, zhipu) err=%v entry=%v", err, entry)
+	}
+
+	// Route URL (proxy.go forward site).
+	if got := s.EffectiveTargetURLFor(resolved, "zhipu"); got != "https://zhipu.example.com/v1" {
+		t.Errorf("EffectiveTargetURLFor = %q; want zhipu upstream", got)
+	}
+	// Upstream secret (proxy.go secret site).
+	if got := s.EffectiveAdditionalSecretFor(resolved, "zhipu")["Authorization"]; got != "Bearer zhipu-key" {
+		t.Errorf("EffectiveAdditionalSecretFor = %q; want zhipu key", got)
+	}
+	// Billing price (service.go resolveModelPricing site).
+	if got := s.GetModelPricingFor(resolved, "zhipu"); got == nil || got.OutputPrice != "4" {
+		t.Errorf("GetModelPricingFor price = %v; want zhipu OutputPrice 4", got)
+	}
+	// Proof identity (proxy.go UpstreamForModel → signCentralizedRoutingProof).
+	if got := s.EffectiveProviderIdentityFor(resolved, "zhipu"); got != "zhipu" {
+		t.Errorf("EffectiveProviderIdentityFor = %q; want zhipu", got)
+	}
+
+	// Sanity: identity "aliyun" selects aliyun's values through the same accessors.
+	if got := s.EffectiveTargetURLFor("glm-5.2", "aliyun"); got != "https://aliyun.example.com/v1" {
+		t.Errorf("aliyun EffectiveTargetURLFor = %q; want aliyun upstream", got)
+	}
+	if got := s.GetModelPricingFor("glm-5.2", "aliyun"); got == nil || got.OutputPrice != "2" {
+		t.Errorf("aliyun GetModelPricingFor price = %v; want aliyun OutputPrice 2", got)
+	}
+
+	// Backward compat: empty identity resolves EXACTLY like the model-only accessors
+	// (the pre-multi-upstream behavior). For a single-entry model the two agree.
+	if s.EffectiveTargetURLFor("solo-x", "") != s.EffectiveTargetURL("solo-x") ||
+		s.EffectiveProviderIdentityFor("solo-x", "") != s.EffectiveProviderIdentity("solo-x") {
+		t.Errorf("empty-identity accessors diverged from the model-only accessors for a single-entry model")
+	}
+	if got := s.GetModelPricingFor("solo-x", ""); got == nil || got.OutputPrice != "6" {
+		t.Errorf("solo-x GetModelPricingFor(\"\") price = %v; want OutputPrice 6", got)
+	}
+}
+
+// TestSameModelUpstreamRequestRewritersSelectByIdentity proves the per-entry
+// request-path rewriters resolve by the SELECTED upstream, not the first entry:
+// supportedFormats (enforceRequestFormat), injectBodyFields, and stripBodyFields.
+// aliyun is FIRST and openai-only; zhipu also serves the anthropic surface and
+// carries different inject/strip fields. The pre-fix model-keyed lookup returned
+// aliyun for every glm-5.2 request, wrongly rejecting an anthropic request routed
+// to zhipu and mis-applying aliyun's inject/strip on it.
+func TestSameModelUpstreamRequestRewritersSelectByIdentity(t *testing.T) {
+	s := &Service{
+		TargetURL:        "https://svc.example.com/v1",
+		ProviderIdentity: "aliyun",
+		ModelPricing: []ModelPricingEntry{
+			{Model: "glm-5.2", ProviderIdentity: "aliyun", InputPrice: "1", OutputPrice: "2",
+				ModelInfo:        &ModelInfo{SupportedFormats: []string{"openai"}},
+				InjectBodyFields: map[string]interface{}{"provider": "aliyun"},
+				StripBodyFields:  []string{"logprobs"}},
+			{Model: "glm-5.2", ProviderIdentity: "zhipu", InputPrice: "3", OutputPrice: "4",
+				ModelInfo:        &ModelInfo{SupportedFormats: []string{"openai", "anthropic"}},
+				InjectBodyFields: map[string]interface{}{"provider": "zhipu"},
+				StripBodyFields:  []string{"top_logprobs"}},
+			{Model: "solo-x", InputPrice: "5", OutputPrice: "6",
+				ModelInfo:        &ModelInfo{SupportedFormats: []string{"openai"}},
+				InjectBodyFields: map[string]interface{}{"provider": "solo"},
+				StripBodyFields:  []string{"seed"}},
+		},
+	}
+	if err := s.BuildModelPricingMap(); err != nil {
+		t.Fatalf("BuildModelPricingMap: %v", err)
+	}
+
+	// supportedFormats: zhipu declares anthropic; the bug rejected it by reading
+	// aliyun's openai-only set.
+	if got := s.SupportedFormatsFor("glm-5.2", "zhipu"); len(got) != 2 || got[1] != "anthropic" {
+		t.Errorf("SupportedFormatsFor(glm-5.2, zhipu) = %v; want zhipu's [openai anthropic]", got)
+	}
+	if got := s.SupportedFormatsFor("glm-5.2", "aliyun"); len(got) != 1 || got[0] != "openai" {
+		t.Errorf("SupportedFormatsFor(glm-5.2, aliyun) = %v; want aliyun's [openai]", got)
+	}
+
+	// injectBodyFields: each upstream injects ITS provider tag.
+	if got := s.EffectiveInjectBodyFieldsFor("glm-5.2", "zhipu")["provider"]; got != "zhipu" {
+		t.Errorf("EffectiveInjectBodyFieldsFor(glm-5.2, zhipu)[provider] = %v; want zhipu", got)
+	}
+	if got := s.EffectiveInjectBodyFieldsFor("glm-5.2", "aliyun")["provider"]; got != "aliyun" {
+		t.Errorf("EffectiveInjectBodyFieldsFor(glm-5.2, aliyun)[provider] = %v; want aliyun", got)
+	}
+
+	// stripBodyFields: each upstream strips ITS own field.
+	if got := s.EffectiveStripBodyFieldsFor("glm-5.2", "zhipu"); len(got) != 1 || got[0] != "top_logprobs" {
+		t.Errorf("EffectiveStripBodyFieldsFor(glm-5.2, zhipu) = %v; want [top_logprobs]", got)
+	}
+	if got := s.EffectiveStripBodyFieldsFor("glm-5.2", "aliyun"); len(got) != 1 || got[0] != "logprobs" {
+		t.Errorf("EffectiveStripBodyFieldsFor(glm-5.2, aliyun) = %v; want [logprobs]", got)
+	}
+
+	// Backward compat: empty identity on a single-entry model is byte-identical to
+	// the bare accessors (the pre-multi-upstream behavior).
+	if got := s.SupportedFormatsFor("solo-x", ""); len(got) != 1 || got[0] != "openai" {
+		t.Errorf("SupportedFormatsFor(solo-x, \"\") = %v; want [openai]", got)
+	}
+	if s.EffectiveInjectBodyFieldsFor("solo-x", "")["provider"] != s.EffectiveInjectBodyFields("solo-x")["provider"] {
+		t.Error("EffectiveInjectBodyFieldsFor(solo-x, \"\") diverged from the bare accessor")
+	}
+	strip := s.EffectiveStripBodyFieldsFor("solo-x", "")
+	if len(strip) != 1 || strip[0] != "seed" {
+		t.Errorf("EffectiveStripBodyFieldsFor(solo-x, \"\") = %v; want [seed]", strip)
+	}
+}
+
+// TestModelExpirationForGatesMultiUpstream proves Fix 1: an EXPIRED same-model
+// entry is correctly gated when the request's upstream identity selects it,
+// while per-entry metadata (ModelInfo) resolves to that same selected entry.
+// The bare, identity-less ModelExpiration resolves ambiguous on a multi-upstream
+// model and returns ok=false — the pre-fix fail-OPEN that let an expired
+// multi-upstream model keep serving.
+func TestModelExpirationForGatesMultiUpstream(t *testing.T) {
+	past := "2000-01-01T00:00:00Z"
+	wantExp, _ := time.Parse(time.RFC3339, past)
+
+	zhipuMI := validModelInfo()
+	zhipuMI.ExpirationDate = past
+	if err := zhipuMI.Validate("chatbot"); err != nil {
+		t.Fatalf("zhipu ModelInfo.Validate: %v", err)
+	}
+	s := &Service{
+		ModelPricing: []ModelPricingEntry{
+			{Model: "glm-5.2", ProviderIdentity: "aliyun", InputPrice: "1", OutputPrice: "2"},
+			{Model: "glm-5.2", ProviderIdentity: "zhipu", InputPrice: "3", OutputPrice: "4", ModelInfo: zhipuMI},
+		},
+	}
+	if err := s.BuildModelPricingMap(); err != nil {
+		t.Fatalf("BuildModelPricingMap: %v", err)
+	}
+
+	// Fix 1: identity selects the expired zhipu entry, so the 410 gate fires.
+	got, ok := s.ModelExpirationFor("glm-5.2", "zhipu")
+	if !ok || !got.Equal(wantExp) {
+		t.Errorf("ModelExpirationFor(glm-5.2, zhipu) = %v, ok=%v; want %v, true", got, ok, wantExp)
+	}
+	// EffectiveModelInfoFor resolves to the SAME selected entry — this is what keeps
+	// per-model max_tokens capping / reasoning translation applying (the other half
+	// of Fix 1), instead of being dropped on an ambiguous resolve.
+	if mi := s.EffectiveModelInfoFor("glm-5.2", "zhipu"); mi != zhipuMI {
+		t.Errorf("EffectiveModelInfoFor(glm-5.2, zhipu) = %v; want the zhipu entry's ModelInfo", mi)
+	}
+	// The aliyun entry has no expiry — identity keeps the two entries' metadata distinct.
+	if _, ok := s.ModelExpirationFor("glm-5.2", "aliyun"); ok {
+		t.Error("ModelExpirationFor(glm-5.2, aliyun) ok=true; want false (no expiry on that entry)")
+	}
+	// Pre-fix fail-OPEN guard: without identity the multi-upstream model resolves
+	// ambiguous, so the bare accessor reports no expiry and the gate is skipped.
+	if _, ok := s.ModelExpiration("glm-5.2"); ok {
+		t.Error("ModelExpiration(glm-5.2) ok=true; want false (ambiguous without identity)")
 	}
 }

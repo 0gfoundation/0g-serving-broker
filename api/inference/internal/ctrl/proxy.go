@@ -107,7 +107,7 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 		// max_completion_tokens an OpenAI-compatible client sends. No-op unless the
 		// model advertises exactly one of the two and the client sent the other. The
 		// two fields are semantically identical, so billing is unaffected.
-		modifiedBody, err = c.TranslateMaxTokens(reqBody, resolvedModelStr)
+		modifiedBody, err = c.TranslateMaxTokensFor(reqBody, resolvedModelStr, resolvedIdentity(ctx))
 		if err != nil {
 			return nil, errors.Wrap(err, "translate max tokens")
 		}
@@ -120,7 +120,7 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 		// the body's "model" — ValidateModelAllowlist may have rewritten the body to
 		// the upstream id, but per-model supportedParameters are keyed by canonical
 		// id. See docs/design/reasoning-translation.md.
-		modifiedBody, err = c.TranslateReasoning(reqBody, resolvedModelStr)
+		modifiedBody, err = c.TranslateReasoningFor(reqBody, resolvedModelStr, resolvedIdentity(ctx))
 		if err != nil {
 			return nil, errors.Wrap(err, "translate reasoning")
 		}
@@ -131,13 +131,13 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 		// key can be re-set by injection. No-op unless service- or per-model
 		// stripBodyFields is configured. A marshal failure here is a broker-side
 		// fault (same reasoning as InjectBodyFields below) — leave it unflagged.
-		modifiedBody, err = c.StripBodyFields(reqBody, resolvedModelStr)
+		modifiedBody, err = c.StripBodyFieldsFor(reqBody, resolvedModelStr, resolvedIdentity(ctx))
 		if err != nil {
 			return nil, errors.Wrap(err, "strip body fields")
 		}
 		reqBody = modifiedBody
 
-		modifiedBody, err = c.InjectBodyFields(reqBody, resolvedModelStr)
+		modifiedBody, err = c.InjectBodyFieldsFor(reqBody, resolvedModelStr, resolvedIdentity(ctx))
 		if err != nil {
 			// A marshal failure here is a broker-side fault (the injected fields
 			// are server config, already verified JSON-serializable at load, and
@@ -197,7 +197,7 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 	{
 		resolvedModelVal, _ := ctx.Get(CtxKeyResolvedModel)
 		resolvedModelStr, _ := resolvedModelVal.(string)
-		if base := c.Service.EffectiveTargetURL(resolvedModelStr); base != c.Service.TargetURL {
+		if base := c.Service.EffectiveTargetURLFor(resolvedModelStr, resolvedIdentity(ctx)); base != c.Service.TargetURL {
 			if rest, ok := strings.CutPrefix(targetURL, c.Service.TargetURL); ok {
 				targetURL = base + rest
 			} else {
@@ -315,7 +315,7 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 	// resolves to the service-level map unchanged.
 	resolvedModel, _ := ctx.Get(CtxKeyResolvedModel)
 	resolvedModelStr, _ := resolvedModel.(string)
-	if additionalSecret := c.Service.EffectiveAdditionalSecret(resolvedModelStr); additionalSecret != nil {
+	if additionalSecret := c.Service.EffectiveAdditionalSecretFor(resolvedModelStr, resolvedIdentity(ctx)); additionalSecret != nil {
 		for k, v := range additionalSecret {
 			req.Header.Set(k, v)
 		}
@@ -333,14 +333,30 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 	return req, nil
 }
 
-// UpstreamForModel resolves the reconciliation "upstream" label for a requested
-// model: the per-model (or service-level) providerIdentity of the upstream that
-// served it, falling back to "self" for a decentralized provider with no
-// identity. Alias/wildcard aware via ResolveRequestedModel, matching how the
-// forward path picks the per-model targetUrl, so accounting and routing agree.
-func (c *Ctrl) UpstreamForModel(requestedModel string) string {
-	_, resolved, _ := c.Service.ResolveRequestedModel(requestedModel)
-	upstream := c.Service.EffectiveProviderIdentity(resolved)
+// resolvedIdentity reads the effective upstream identity stashed under
+// CtxKeyResolvedIdentity by ValidateModelAllowlist / ResolveModelForBilling.
+// Returns "" when unset (single-entry models, non-multi-model paths), which
+// keeps every per-model accessor on its pre-multi-upstream branch.
+func resolvedIdentity(ctx *gin.Context) string {
+	if v, ok := ctx.Get(CtxKeyResolvedIdentity); ok {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
+// UpstreamForModel resolves the reconciliation "upstream" label — and the TeeTLS
+// routing proof's providerIdentity — for a requested model: the per-model (or
+// service-level) providerIdentity of the upstream that served it, falling back to
+// "self" for a decentralized provider with no identity. identity is the
+// router-supplied X-0G-Upstream (config.UpstreamIdentityHeader) that disambiguates
+// a canonical model served by several upstreams; it MUST match the identity the
+// forward path used so the proof binds the upstream actually hit. Empty identity
+// keeps today's behavior. Alias/wildcard aware via ResolveRequestedModel.
+func (c *Ctrl) UpstreamForModel(requestedModel, identity string) string {
+	_, resolved, _ := c.Service.ResolveRequestedModel(requestedModel, identity)
+	upstream := c.Service.EffectiveProviderIdentityFor(resolved, identity)
 	if upstream == "" {
 		return constant.UpstreamSelf
 	}
@@ -1023,7 +1039,16 @@ func (c *Ctrl) EnsureStreamOptions(body []byte) ([]byte, error) {
 // 2^53+1, or big integers inside tool-call arguments) survive the round-trip
 // without being mangled into float64 — matching forceB64ResponseFormat.
 func (c *Ctrl) InjectBodyFields(body []byte, resolvedModel string) ([]byte, error) {
-	fields := c.Service.EffectiveInjectBodyFields(resolvedModel)
+	return c.InjectBodyFieldsFor(body, resolvedModel, "")
+}
+
+// InjectBodyFieldsFor is InjectBodyFields keyed by the upstream identity that
+// selected the entry (config.UpstreamIdentityHeader), so a canonical model served
+// by several upstreams injects ITS upstream's per-entry fields, not the first
+// entry's. identity=="" is byte-identical to InjectBodyFields (single-entry /
+// legacy paths).
+func (c *Ctrl) InjectBodyFieldsFor(body []byte, resolvedModel, identity string) ([]byte, error) {
+	fields := c.Service.EffectiveInjectBodyFieldsFor(resolvedModel, identity)
 	if len(fields) == 0 || len(body) == 0 {
 		return body, nil
 	}
@@ -1079,7 +1104,16 @@ func (c *Ctrl) InjectBodyFields(body []byte, resolvedModel string) ([]byte, erro
 // is forwarded unchanged and logged, matching InjectBodyFields. Decoding uses
 // json.Number so large integer fields survive the round-trip unmangled.
 func (c *Ctrl) StripBodyFields(body []byte, resolvedModel string) ([]byte, error) {
-	fields := c.Service.EffectiveStripBodyFields(resolvedModel)
+	return c.StripBodyFieldsFor(body, resolvedModel, "")
+}
+
+// StripBodyFieldsFor is StripBodyFields keyed by the upstream identity that
+// selected the entry (config.UpstreamIdentityHeader), so a canonical model served
+// by several upstreams strips ITS upstream's per-entry fields, not the first
+// entry's. identity=="" is byte-identical to StripBodyFields (single-entry /
+// legacy paths).
+func (c *Ctrl) StripBodyFieldsFor(body []byte, resolvedModel, identity string) ([]byte, error) {
+	fields := c.Service.EffectiveStripBodyFieldsFor(resolvedModel, identity)
 	if len(fields) == 0 || len(body) == 0 {
 		return body, nil
 	}
@@ -1420,6 +1454,17 @@ func (c *Ctrl) ImageCacheTTL() time.Duration {
 // passes through the user's requested model, injecting the default model when
 // the request omits one. Stores the resolved model name in the gin.Context under
 // CtxKeyResolvedModel. Used by the chatbot path, which sends JSON.
+// UpstreamIdentity reads the router-supplied per-model upstream identity from the
+// incoming request (config.UpstreamIdentityHeader). Normalized to match the
+// lowercased providerIdentity stored at config load; absent → "" (today's
+// single-entry resolution).
+func UpstreamIdentity(ctx *gin.Context) string {
+	if ctx == nil || ctx.Request == nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(ctx.GetHeader(config.UpstreamIdentityHeader)))
+}
+
 func (c *Ctrl) ValidateModelAllowlist(ctx *gin.Context, body []byte, userAddr string) ([]byte, error) {
 	if len(body) == 0 {
 		// No body to inspect — bill at the configured default model (guaranteed to
@@ -1439,8 +1484,11 @@ func (c *Ctrl) ValidateModelAllowlist(ctx *gin.Context, body []byte, userAddr st
 		requestModel = c.Service.ModelType
 	}
 
-	entry, resolved, ok := c.Service.ResolveRequestedModel(requestModel)
-	if !ok {
+	entry, resolved, err := c.Service.ResolveRequestedModel(requestModel, UpstreamIdentity(ctx))
+	if err != nil {
+		if errors.Is(err, config.ErrAmbiguousUpstream) {
+			return nil, err
+		}
 		c.recordModelMismatch(userAddr, requestModel)
 		return nil, fmt.Errorf("model not supported: '%s' is not available for this service", requestModel)
 	}
@@ -1466,6 +1514,11 @@ func (c *Ctrl) ValidateModelAllowlist(ctx *gin.Context, body []byte, userAddr st
 	}
 
 	ctx.Set(CtxKeyResolvedModel, resolved)
+	// Stash the identity that picked this entry so the forward URL, upstream
+	// secret, and billing price all re-resolve the SAME (model, identity) entry
+	// downstream — the resolved model string alone is ambiguous when one model is
+	// served by several upstreams. Empty on a single-entry model (unchanged path).
+	ctx.Set(CtxKeyResolvedIdentity, UpstreamIdentity(ctx))
 	c.logger.Debugf("Model allowlist passed: requested=%s resolved=%s forwarded=%s", requestModel, resolved, forwardModel)
 	return body, nil
 }
@@ -1516,7 +1569,7 @@ func (c *Ctrl) enforceRequestFormat(ctx *gin.Context, resolvedModel string) erro
 	if model == "" {
 		model = c.Service.ModelType
 	}
-	formats := c.Service.SupportedFormatsFor(model)
+	formats := c.Service.SupportedFormatsFor(model, resolvedIdentity(ctx))
 	if formatAllowed(formats, surface) {
 		return nil
 	}
@@ -1534,12 +1587,18 @@ func (c *Ctrl) ResolveModelForBilling(ctx *gin.Context, body []byte, contentType
 	if requestModel == "" {
 		requestModel = c.Service.ModelType
 	}
-	_, resolved, ok := c.Service.ResolveRequestedModel(requestModel)
-	if !ok {
+	_, resolved, err := c.Service.ResolveRequestedModel(requestModel, UpstreamIdentity(ctx))
+	if err != nil {
+		if errors.Is(err, config.ErrAmbiguousUpstream) {
+			return err
+		}
 		c.recordModelMismatch(userAddr, requestModel)
 		return fmt.Errorf("model not supported: '%s' is not available for this service", requestModel)
 	}
 	ctx.Set(CtxKeyResolvedModel, resolved)
+	// Same identity stash as the JSON path (see ValidateModelAllowlist) so the
+	// STT/video billing price re-resolves the exact (model, identity) entry.
+	ctx.Set(CtxKeyResolvedIdentity, UpstreamIdentity(ctx))
 	c.logger.Debugf("Model allowlist passed (billing-only): requested=%s resolved=%s", requestModel, resolved)
 	return nil
 }

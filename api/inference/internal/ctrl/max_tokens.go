@@ -52,11 +52,20 @@ const (
 // Decoding uses json.Number so large integer fields elsewhere in the body (e.g. a
 // seed) survive the round-trip unmangled, matching Inject/StripBodyFields.
 func (c *Ctrl) TranslateMaxTokens(body []byte, resolvedModel string) ([]byte, error) {
+	return c.TranslateMaxTokensFor(body, resolvedModel, "")
+}
+
+// TranslateMaxTokensFor is TranslateMaxTokens keyed to the router-named upstream
+// identity (config.UpstreamIdentityHeader), so a multi-upstream model's
+// per-entry supportedParameters drive the translation for the selected upstream
+// rather than being dropped on an ambiguous resolve. identity="" is identical to
+// the bare call.
+func (c *Ctrl) TranslateMaxTokensFor(body []byte, resolvedModel, identity string) ([]byte, error) {
 	if len(body) == 0 {
 		return body, nil
 	}
 
-	mi := c.Service.EffectiveModelInfo(resolvedModel)
+	mi := c.Service.EffectiveModelInfoFor(resolvedModel, identity)
 	if mi == nil {
 		return body, nil
 	}
