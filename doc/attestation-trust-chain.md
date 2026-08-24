@@ -158,8 +158,9 @@ rather than from the provider:
    not mount, the controller being the only holder of `dstack.sock`, the controller's own
    image digest, and the exact set of services mounting the attestation-socket volume — and
    one more that is about where your plaintext goes rather than who can write the ledger:
-   **`TARGET_URL` in the broker's environment.** The broker unseals a request and forwards it
-   there, so it is a value to read rather than merely to pin.
+   **`TARGET_URL` and `DATABASE_DSN` in the broker's environment.** The broker unseals a
+   request, forwards it to the first and persists async request and response bodies to the
+   second, so both are values to read rather than merely to pin.
 
    Read it as a **literal** in `docker_compose_file`. `compose_hash` is
    `sha256(app_compose)`, and that manifest carries the compose text as submitted — so
