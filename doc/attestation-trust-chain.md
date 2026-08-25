@@ -82,11 +82,17 @@ provider under examination is not a check; it is a restatement.
 
 The provider can hand you two things: an assertion, and a string of numbers.
 
-**Before anything else, be clear about one thing: you are not going to implement Intel's
-certificate-chain verification yourself** — that is thousands of lines of cryptography. You
-will use an existing program to make the judgement. **So the first premise is about that
-program: it must be run by you, and it must check enough** (`N0`). Leave this unstated and
-every step below has a hidden dependency.
+**Before anything else, be clear about one thing: every conclusion below is computed by some
+program.** So the first premise is about that program — **it must be run by you, and it must
+cover enough checks** (`N0`). Leave this unstated and every step below has a hidden
+dependency.
+
+**One thing here is easy to get backwards:** the reason you need that program is **not** that
+"Intel's signature chain cannot be verified independently". Quite the opposite — that part is
+**the least dependent on any particular program** in the whole set: Intel publishes the
+collateral the check needs, and there are several independent implementations, including
+on-chain ones. **What actually requires a verifier are the other things, none of which are
+about Intel** — see `N0`.
 
 **Step one turns those numbers into testimony.** Intel's certificate chain signed the
 attestation, the signing key is Intel's, and the provider cannot forge it. That is `N1`.
@@ -355,27 +361,41 @@ them. The other twelve are broken down below.
 
 **Derivation —**
 
-There is an unavoidable fact: **you are not going to implement Intel's certificate-chain
-verification yourself.** That is thousands of lines of cryptography, involving revocation,
-Intel's TCB database, and a table of known measurements. You will hand the report to an
-existing program and read its judgement.
+**First, clear away a common misreading: you do not need this program because Intel's
+signature chain cannot be verified independently.**
 
-**So "this report is genuine" is, strictly, something that program told you.** This layer has
-to be written down, or the chain has a hidden premise.
+That part — `N1` — is **the segment of the whole check that depends least on trusting
+anyone**: Intel publishes the certificates and revocation collateral the check needs, and
+there are several independent implementations of it, including ones that run on-chain. **So
+for DCAP specifically, you need not rely on any single party's verdict at all.**
+
+**What actually requires a verifier are three other things, none of which are about Intel:**
+
+| The task | Why hand-rolling it is a bad idea |
+|---|---|
+| replaying the boot log into the measurement registers | the mechanism is not hard, but it has to be implemented entry by entry, and **missing a step raises no error** |
+| **deciding which dstack release a measurement corresponds to** | this needs a **reference table of known measurements**, and that table lives in dstack's tool — this is the main reason |
+| Intel's TCB status and advisory list | requires querying Intel's firmware-rating database, and keeping up with its updates |
+
+**So what this layer states is not "I do not trust my own implementation" but: the verdict on
+those three things comes from some program, and whose program it is and how much it covers
+determines how solid your conclusion is.**
 
 **The first requirement is hard: that program must be run by you.** If it is the provider's
 and you merely call their endpoint, the chain is circular — you are asking the party under
-examination whether to believe them. That is `N0.1`.
+examination whether to believe them. That is `N0.1`. **Note this holds regardless of which
+implementation you pick** — even if you take DCAP to an on-chain verifier, the verdict on the
+other three must not come from the provider.
 
-**The second is whether its checks are enough.** There is a ready answer: **dstack's own KMS
-runs the same flow before releasing a CVM's keys.** So using it applies exactly the standard
-that decides whether this machine gets keys at all. And it is open source, so you can confirm
-that by reading it — `N0.2`.
+**The second is how much it covers.** There is a ready answer: **dstack's own KMS runs the same
+flow before releasing a CVM's keys.** Using it applies exactly the standard that decides
+whether this machine gets keys at all — it cannot be more lenient toward this machine than the
+KMS is. And it is open source, so you can confirm that by reading it. That is `N0.2`.
 
 **Do not assemble a simplified version yourself.** Checking fewer things feels more
-independent and is in fact weaker: the OS image hash, the TCB status, the advisory list — a
-hand-rolled implementation will almost certainly miss those, **and missing them produces no
-warning.** You will just see a "pass".
+independent and is in fact weaker — the second and third rows above are what a hand-rolled
+implementation will almost certainly miss, **and missing them produces no warning:** you will
+just see a "pass".
 
 ## N2 the machine's OS is a publicly released build
 
@@ -849,6 +869,12 @@ on your machine.
 **Why this matters:** you might ask whether a tool from the provider's own ecosystem counts as
 independent. What matters is not who wrote it, **but what it checks and whether you can verify
 that.**
+
+**And be clear about which part actually depends on it:** the DCAP signature chain has several
+independent implementations to choose from, including on-chain ones — you are not confined to
+this one. **What does depend on it is "which dstack release does this measurement correspond
+to"** — that reference table of known measurements is inside it, and any other tool means
+maintaining a copy yourself.
 
 This verifier satisfies both:
 
