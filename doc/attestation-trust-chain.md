@@ -87,12 +87,10 @@ program.** So the first premise is about that program — **it must be run by yo
 cover enough checks** (`N0`). Leave this unstated and every step below has a hidden
 dependency.
 
-**One thing here is easy to get backwards:** the reason you need that program is **not** that
-"Intel's signature chain cannot be verified independently". Quite the opposite — that part is
-**the least dependent on any particular program** in the whole set: Intel publishes the
-collateral the check needs, and there are several independent implementations, including
-on-chain ones. **What actually requires a verifier are the other things, none of which are
-about Intel** — see `N0`.
+What that program is needed for is **interpreting the measurements**: replaying the boot log
+into the registers, and deciding which dstack release a given measurement corresponds to.
+**Intel's signature chain is not among them** — that check has several independent
+implementations to choose from, including on-chain ones. See `N0`.
 
 **Step one turns those numbers into testimony.** Intel's certificate chain signed the
 attestation, the signing key is Intel's, and the provider cannot forge it. That is `N1`.
@@ -186,7 +184,7 @@ Hence `N8`: every response carries a signature, under a key **only that program 
 derive** — change the program and the key changes, so the signature stops verifying
 immediately.
 
-**One thing to state precisely:** the signature covers `sha256(request):sha256(response)` —
+The signature covers `sha256(request):sha256(response)` —
 **the request's hash is inside the signature** — so an old response replayed at you will not
 match the request you actually sent. **But that requires you to compare the request hash as
 well**; verifying only that the signature is valid is not enough. See `N8.1`.
@@ -361,15 +359,13 @@ them. The other twelve are broken down below.
 
 **Derivation —**
 
-**First, clear away a common misreading: you do not need this program because Intel's
-signature chain cannot be verified independently.**
+**First, separate out which part actually needs a program to render a verdict.**
 
-That part — `N1` — is **the segment of the whole check that depends least on trusting
-anyone**: Intel publishes the certificates and revocation collateral the check needs, and
-there are several independent implementations of it, including ones that run on-chain. **So
-for DCAP specifically, you need not rely on any single party's verdict at all.**
+Intel's signature chain — `N1` — **does not**: Intel publishes the certificates and revocation
+collateral the check needs, and there are several independent implementations of it, including
+ones that run on-chain. **For DCAP you need not rely on any single party's verdict at all.**
 
-**What actually requires a verifier are three other things, none of which are about Intel:**
+**What does require a verifier are three other things, none of which are about Intel:**
 
 | The task | Why hand-rolling it is a bad idea |
 |---|---|
@@ -377,9 +373,9 @@ for DCAP specifically, you need not rely on any single party's verdict at all.**
 | **deciding which dstack release a measurement corresponds to** | this needs a **reference table of known measurements**, and that table lives in dstack's tool — this is the main reason |
 | Intel's TCB status and advisory list | requires querying Intel's firmware-rating database, and keeping up with its updates |
 
-**So what this layer states is not "I do not trust my own implementation" but: the verdict on
-those three things comes from some program, and whose program it is and how much it covers
-determines how solid your conclusion is.**
+**The verdict on those three comes from some program, and whose program it is and how much it
+covers determines how solid your conclusion is.** So it has to be a stated premise rather than
+an assumption.
 
 **The first requirement is hard: that program must be run by you.** If it is the provider's
 and you merely call their endpoint, the chain is circular — you are asking the party under
@@ -1273,8 +1269,8 @@ requirement blocks two things: writing false records, and taking keys that are n
 only then do the records carry real weight: each one binds the addresses of **two keys derived
 from the program version it names** (see `N8.2` below).
 
-**The causality here is easy to invert, so state it plainly:** that binding is trustworthy only
-if **the main program cannot derive keys itself**. If the main program could reach the socket, it
+**The direction of causality runs this way:** that binding is trustworthy only if **the main
+program cannot derive keys itself**. If the main program could reach the socket, it
 could write a record saying "I am version X" while filling in its own key addresses — the
 binding would be internally consistent and the content false. **So it is the isolation that
 makes the binding meaningful, not the binding on its own.**
