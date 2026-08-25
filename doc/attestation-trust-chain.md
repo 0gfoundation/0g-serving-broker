@@ -258,42 +258,6 @@ answered in `N13`.
 
 ---
 
-## Who, in the end, do I have to trust
-
-**This is the question worth asking after Layer 1.** The point of the scheme is not "trust
-nothing" — it is to **shrink the set of parties you must trust to a minimum, and make each
-one something you can check yourself**.
-
-| Party | Must be honest? |
-|---|---|
-| Intel's TDX hardware and its certificate chain | **Yes** — the cryptographic root; without it none of this exists |
-| dstack's published OS image and the KMS release policy | **Yes** — but both are measured and the policy is on-chain, so you can check them |
-| **The one component inside the CVM that can derive keys and can change which program runs** | **Yes** — but pinned by content hash in the manifest, and **it cannot change itself** |
-| **The program that handles your request** | **No** ← this is the objective |
-| **The router** | **No** |
-| The provider's host, network, DNS | **No** |
-| Whatever you compare against (your own list of hashes) | **Yes** — but it is a place you chose; **this is where the trust root lives** |
-
-**How to read that table:** only three parties must be honest — **Intel, dstack, and the
-component on the third row**. And **the party you most need to defend against (the program
-handling your request) sits in the "No" column** — what code it runs is governed by the ledger
-and by key derivation, not by its own word.
-
-**Why the third row has to be trusted:** some component in a CVM has to be able to derive keys
-and to change which program runs — otherwise neither upgrades nor signing could happen. And
-that capability means: if the component itself has been swapped, it can run any program and
-then write a record internally consistent with it, and **the whole chain looks perfectly
-normal**.
-
-**And its own image is covered by no measurement — the manifest is the only thing pinning
-it.**
-
-**Which container this row corresponds to is something you determine when you read the
-manifest** (`N5.3`). Different deployments can place this role differently, so Layer 1 names
-only the role: **while reading the manifest, find who holds that capability, then confirm it is
-pinned by content hash and that the capability is not also held by the program handling your
-request.**
-
 ## The order to verify in
 
 The fourteen premises are not parallel; later ones use earlier results. Do them in this
@@ -337,6 +301,42 @@ Last     N13  what an old deployment left on disk does not affect this conclusio
 GPU evidence needs a key to prove it came from this machine, and that key's identity is
 settled by step 2's `N8`. **So even a reader who only cares about the hardware has to read
 step 2.**
+
+## Who, in the end, do I have to trust
+
+**This is the question worth asking after Layer 1.** The point of the scheme is not "trust
+nothing" — it is to **shrink the set of parties you must trust to a minimum, and make each
+one something you can check yourself**.
+
+| Party | Must be honest? |
+|---|---|
+| Intel's TDX hardware and its certificate chain | **Yes** — the cryptographic root; without it none of this exists |
+| dstack's published OS image and the KMS release policy | **Yes** — but both are measured and the policy is on-chain, so you can check them |
+| **The one component inside the CVM that can derive keys and can change which program runs** | **Yes** — but pinned by content hash in the manifest, and **it cannot change itself** |
+| **The program that handles your request** | **No** ← this is the objective |
+| **The router** | **No** |
+| The provider's host, network, DNS | **No** |
+| Whatever you compare against (your own list of hashes) | **Yes** — but it is a place you chose; **this is where the trust root lives** |
+
+**How to read that table:** only three parties must be honest — **Intel, dstack, and the
+component on the third row**. And **the party you most need to defend against (the program
+handling your request) sits in the "No" column** — what code it runs is governed by the ledger
+and by key derivation, not by its own word.
+
+**Why the third row has to be trusted:** some component in a CVM has to be able to derive keys
+and to change which program runs — otherwise neither upgrades nor signing could happen. And
+that capability means: if the component itself has been swapped, it can run any program and
+then write a record internally consistent with it, and **the whole chain looks perfectly
+normal**.
+
+**And its own image is covered by no measurement — the manifest is the only thing pinning
+it.**
+
+**Which container this row corresponds to is something you determine when you read the
+manifest** (`N5.3`). Different deployments can place this role differently, so Layer 1 names
+only the role: **while reading the manifest, find who holds that capability, then confirm it is
+pinned by content hash and that the capability is not also held by the program handling your
+request.**
 
 ## Which premises are shared between questions
 
@@ -2061,15 +2061,25 @@ function addComposeHash(bytes32) external onlyOwner
 function removeComposeHash(bytes32) external onlyOwner
 ```
 
-Both are `onlyOwner`, so the current mapping holds only the presently-allowed set. **Entries that
-were removed are invisible in it — and they really did run.** The complete historical set is only
-available from the event log.
+**`removeComposeHash` exists.** So the current allow-list on-chain is **not** the historical
+set — an owner can permit a manifest, run it once, and remove it again. Getting the complete
+history means enumerating the `addComposeHash` **event log** (append-only); querying the mapping
+misses exactly those.
+
+**This is what decides whether the audit is feasible at all:** via the event log it is; via
+current state it is not.
 
 **② Two more things in the manifest are load-bearing, beyond `services:`**
 
-The pre-launch script and `allowed_envs` are both covered by `compose_hash`, so they are inside
-the "read the history" scope — but **a reviewer has to know to look at them**, not only at
-`services:`.
+```
+allowed_envs contains DSTACK_AUTHORIZED_KEYS / DSTACK_ROOT_PUBLIC_KEY  -> SSH was once allowed
+the OS image name contains -dev- (e.g. dstack-nvidia-dev-0.5.9)        -> that image ships sshd
+```
+
+Both are covered by `compose_hash`, so they are inside the "read the history" scope — but **a
+reviewer has to know to look at them**, not only at `services:`. Either line being true for
+some historical manifest means somebody could have logged into that deployment, and from there
+written anything to the disk.
 
 **③ What you are looking for is narrow**
 
@@ -2096,7 +2106,7 @@ weight row back to constant; that is not in place today.
 
 ---
 
-# Residual assumptions, stated plainly
+## Residual assumptions, stated plainly
 
 - **One step must be done by a person and cannot be automated.** Judging "does this deployment
   restrict who may write the ledger" requires a human reading the manifest — the reason a program
