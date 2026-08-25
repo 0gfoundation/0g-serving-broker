@@ -8,11 +8,11 @@ What a user is told, and why they can believe it, when
 ## How to read this
 
 Organised by **proposition**, in three layers. Every proposition states the same kind of
-thing: *if the premises listed under me hold, I hold.*
+thing: *given the premises listed beneath it, it holds.*
 
 Once you finish a layer you never have to revisit its reasoning — you only have to check
 that the next layer discharges every premise the previous one listed. **Stopping at any
-layer leaves you with a complete conclusion, not half a sentence:**
+layer leaves you with a complete conclusion rather than half an argument:**
 
 - **Layer 1** — the three questions a user actually asks, and what each one needs
 - **Layer 2** — 14 premises, and which concrete checks each one needs
@@ -23,7 +23,7 @@ them** — several are used by two or three questions at once, so grouping them 
 question would mean writing them twice.
 
 There is one rule for choosing premises: **drop any one of them and the rest still hold
-while the conclusion does not.**
+while the conclusion no longer does.**
 
 **One discipline runs through the whole document.** Some checks compare a value against
 "the value I expect" — the OS version I accept, the image version I accept. Every one of
@@ -41,8 +41,8 @@ provider under examination is not a check; it is a restatement.
 - **CVM (confidential virtual machine)** — a VM whose memory is encrypted by the CPU. **The
   physical server it boots on, and the cloud operator's staff, cannot read what is inside.**
   Your request is processed in there.
-- **attestation, also called a quote** — a health report the CVM produces: what hardware I
-  am, what was loaded at boot. The report is **signed by Intel's private key**, so its
+- **attestation, also called a quote** — a health report the CVM produces, stating what hardware it
+  is and what was loaded at boot. The report is **signed by Intel's private key**, so its
   contents cannot be altered by the provider, who does not hold that key.
 - **measurement** — every step of boot is hashed and folded into a few registers in the CPU;
   the report carries those hashes. **Change any step and the hash changes.**
@@ -50,15 +50,16 @@ provider under examination is not a check; it is a restatement.
   cannot conjure keys itself; the KMS issues them, and the release policy is on-chain and
   publicly readable.
 - **provider** — the party operating this machine. **This document trusts that party for
-  nothing.** Anywhere a claim would need their word for it, that counts as no proof at all.
+  nothing.** Wherever a claim would rest on their word, it counts as no proof at all.
 
-**Three more terms stay in English below, because they are also field names in the API:**
+**Three names below are field names you will see in the API response, so they are used as-is
+rather than paraphrased:**
 
-| Term | What it is |
+| Field | What it holds |
 |---|---|
-| `quote` | the attestation report above; the API and the code both call it this |
-| `event_log` | the **boot log** — a list of what was loaded at boot, which is what explains the hashes in the report |
-| `signer` | the **signing address** — the address of the key the program uses to sign responses |
+| `quote` | the attestation report above — the API and the code both call it this |
+| `event_log` | the **boot log**: a list of what was loaded at boot, which is what explains the hashes in the report |
+| `signer` | the **signing address**: the address of the key the program uses to sign responses |
 
 ---
 
@@ -89,7 +90,7 @@ dependency.
 
 What that program is needed for is **interpreting the measurements**: replaying the boot log
 into the registers, and deciding which dstack release a given measurement corresponds to.
-**Intel's signature chain is not among them** — that check has several independent
+**Intel's signature chain is not on that list** — that check has several independent
 implementations to choose from, including on-chain ones. See `N0`.
 
 **Step one turns those numbers into testimony.** Intel's certificate chain signed the
@@ -102,25 +103,24 @@ this CVM stack) publishes every OS image release together with its hash, so you 
 the value in the report against that public list. That is `N2`. After this step, "this
 machine" stops being the provider's word and becomes an object you can look up.
 
-**Step three requires thinking about something else first: you do not merely want to read a
-report, you want to interact with this machine.** You want to encrypt a request to it, and
+**Step three starts from a different place: you do not merely want to read a report, you want
+to interact with this machine.** You want to encrypt a request to it, and
 verify that what comes back really came from it. Both need keys — a public key to encrypt
 to, a private key to sign with.
 
-And **those keys must be obtainable only by this protected machine**. Otherwise whoever else
-holds a copy can decrypt what you send in and impersonate its signature — and the
-"protected" that steps one and two established is worth nothing.
+And **only this protected machine may be able to obtain those keys**. Otherwise anyone else
+holding a copy can decrypt what you send in and forge its signature — and the protection that
+steps one and two established is worth nothing.
 
 The keys are issued by the KMS. **So the question to ask is: whose KMS is it, and what is
 its release policy?** If the provider controls the KMS, it can issue itself a copy of the
 same keys at any time. That is `N3`.
 
-**Step four closes a hard gap:** everything so far is testimony from the CPU, while the
+**Step four closes a gap nothing above reaches:** everything so far is testimony from the CPU, while the
 model runs on the GPU. **A CPU report cannot speak for a GPU** — it has no visibility into
 what happens on the card. So the card has to produce its own evidence. That is `N4`.
 
-One check inside that step reaches forward: **"this GPU evidence really came from this
-machine"** — and "this machine" is represented by a key, whose identity is not established
+One check inside that step points ahead: **"this GPU evidence really came from this machine"** — and "this machine" is represented by a key, whose identity is not established
 until Q2 (`N8`).
 
 ---
@@ -565,8 +565,8 @@ The library that loads them **only checks the file name on a cache hit; it does 
 the content hash.** So a file with the right name and replaced content would be read into VRAM
 while the manifest, every signature, and the ledger **all stay unchanged**.
 
-**But very few parties can do this:** that disk is encrypted whole, with the key only inside
-the CVM — the host, the cloud operator, and anyone on the network cannot touch it. **The only
+**But very few parties are in a position to do it:** that disk is encrypted whole, with the key
+only inside the CVM — the host, the cloud operator, and anyone on the network cannot touch it. **The only
 party that can write there is some deployment that was approved in the past.** That history is
 fully queryable on-chain, so this caveat **can be closed**; it just costs reading more
 manifests. See `N13`.
@@ -1219,6 +1219,18 @@ quote's `mr_config_id[1:33]`.
 | On what grounds | 👤 compare against the hash you kept yourself |
 | How to check | `assert compose_hash == REVIEWED_COMPOSE_HASH` |
 
+**First, connect the roles to actual container names.** Layer 1 named two roles without naming
+containers, because a deployment may place them anywhere. Reading the manifest is where you find
+out which is which, and in this deployment they are:
+
+| Role from Layer 1 | The container here |
+|---|---|
+| the program that handles your request | `0g-serving-provider-broker` — called **the broker** below |
+| the one component that can derive keys and change which program runs | `0g-controller` — called **the controller** below |
+
+**Do not take those names on faith: the point of the review is to work out which container holds
+which capability**, by looking at what each one mounts. A deployment could name them anything.
+
 **Every row below is followed by what happens if you skip it** — because skipping any row
 silently removes the evidence under the corresponding premise.
 
@@ -1236,10 +1248,9 @@ silently removes the evidence under the corresponding premise.
 
 **This review has to be done by a person; it cannot be handed to a program.** To judge "does
 this deployment restrict who may write the ledger", you have to see whether each container in
-the manifest can reach that socket — and there are many ways for a container to reach one
-(mounting it directly, mounting a parent directory, sharing another container's namespace…),
-**an open set**. And there is no reliable predicate for "which container is the main program"
-either.
+the manifest can reach that socket. There are many ways for it to do so — mounting it directly,
+mounting a parent directory, sharing another container's namespace — and **that list has no
+end**. Nor is there any reliable test for "which container is the main program".
 
 The result is that a program can only ever answer "doesn't look like it". **And a check that
 can only answer "probably not" is more dangerous than no check, because it reads like a
@@ -1263,22 +1274,23 @@ approved** — see `N13`.
 | On what grounds | 👤 read out of the reviewed manifest: the broker mounts no `dstack.sock`; ⚙ changing that changes `compose_hash`, which `N5.3` catches |
 | How to check | it is the conclusion of the `N5.3` review |
 
-**Why this premise decides whether all of `N6` holds:** dstack puts `EmitEvent` and `GetQuote`
+**Everything in `N6` rests on this one, for a concrete reason:** dstack puts `EmitEvent` and `GetQuote`
 behind the same unauthenticated handler, with socket permissions 0777. So any container holding
 that socket can append arbitrary records to the ledger — **including one describing the image it
-is itself running** — and then take a genuine quote over it: the replay matches, the manifest
+is itself running** — and then obtain a genuine quote covering it: the replay matches, the manifest
 hash matches, the signature verifies. **The whole chain looks entirely normal while the content
 is self-authored.**
 
 **And that socket does more than write records — it also hands out keys.** `GetKey` sits behind
 the same socket: **whoever holds it can derive the signing key of any image version.** So this
-requirement blocks two things: writing false records, and taking keys that are not its own.
+requirement blocks two things: writing false records, and obtaining keys that belong to a
+different image.
 
 **A deployment that gives the socket only to the controller does not have this problem**, and
 only then do the records carry real weight: each one binds the addresses of **two keys derived
 from the program version it names** (see `N8.2` below).
 
-**The direction of causality runs this way:** that binding is trustworthy only if **the main
+**Which way the causality runs matters here:** that binding is trustworthy only if **the main
 program cannot derive keys itself**. If the main program could reach the socket, it
 could write a record saying "I am version X" while filling in its own key addresses — the
 binding would be internally consistent and the content false. **So it is the isolation that
@@ -1915,7 +1927,7 @@ confirm the program connects to it.** Point the address at an external host and 
 leaves the boundary while the manifest hash, `report_data`, every signature and the ledger **all
 stay unchanged.**
 
-**That kind of "changed but invisible from outside" is exactly why it had to be fixed** — it
+**Changed, and invisible from outside: that is precisely why it had to be fixed** — it
 overturns `N10`: you seal your request to a proven key precisely so the plaintext stays inside the
 boundary.
 
@@ -2014,8 +2026,8 @@ ever approved to run could have left something on the disk.**
 | the database's data directory | alter historical request records, settlement state | billing; not confidentiality |
 | image layers under `/var/lib/docker` | leave a layer for some tag to resolve to | `N11.4` (this is why content-hash pinning is required) |
 
-**The config-file row needs its own explanation, because it is the one that used to be most
-dangerous and no longer is.**
+**The config-file row needs its own explanation. It used to be the most dangerous of the five,
+and it no longer is.**
 
 The config file also lives on this disk. So by the logic above, an old deployment could leave a
 config file of its own for this deployment to read as-is — and the config file happens to hold
