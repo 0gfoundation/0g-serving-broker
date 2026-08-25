@@ -268,22 +268,31 @@ one something you can check yourself**.
 |---|---|
 | Intel's TDX hardware and its certificate chain | **Yes** — the cryptographic root; without it none of this exists |
 | dstack's published OS image and the KMS release policy | **Yes** — but both are measured and the policy is on-chain, so you can check them |
-| **The controller image** | **Yes** — but pinned by content hash in the manifest, reviewed by you, and **it cannot upgrade itself** |
-| **The broker image** | **No** ← this is the objective |
+| **The one component inside the CVM that can derive keys and can change which program runs** | **Yes** — but pinned by content hash in the manifest, and **it cannot change itself** |
+| **The program that handles your request** | **No** ← this is the objective |
 | **The router** | **No** |
 | The provider's host, network, DNS | **No** |
 | Whatever you compare against (your own list of hashes) | **Yes** — but it is a place you chose; **this is where the trust root lives** |
 
 **How to read that table:** only three parties must be honest — **Intel, dstack, and the
-controller you reviewed and pinned yourself**. And **the party you most need to defend
-against (the broker) sits in the "No" column** — because what code it runs is governed by
-the ledger and by key derivation, not by its own word.
+component on the third row**. And **the party you most need to defend against (the program
+handling your request) sits in the "No" column** — what code it runs is governed by the ledger
+and by key derivation, not by its own word.
 
-**Why the controller has to be trusted, stated plainly:** it derives the keys and holds the
-docker socket, so an unreviewed controller could run any broker image and then write a record
-that is internally consistent with it — the whole chain would look perfectly normal. **And
-nothing measures the controller's own image; the manifest is the only thing pinning it.**
-That is the weight behind the checklist item "the controller's own image is pinned by digest".
+**Why the third row has to be trusted:** some component in a CVM has to be able to derive keys
+and to change which program runs — otherwise neither upgrades nor signing could happen. And
+that capability means: if the component itself has been swapped, it can run any program and
+then write a record internally consistent with it, and **the whole chain looks perfectly
+normal**.
+
+**And its own image is covered by no measurement — the manifest is the only thing pinning
+it.**
+
+**Which container this row corresponds to is something you determine when you read the
+manifest** (`N5.3`). Different deployments can place this role differently, so Layer 1 names
+only the role: **while reading the manifest, find who holds that capability, then confirm it is
+pinned by content hash and that the capability is not also held by the program handling your
+request.**
 
 ## The order to verify in
 
