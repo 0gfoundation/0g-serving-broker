@@ -435,12 +435,20 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 	// line came to render a whole model.Request — user address, signature, fees —
 	// into an INFO log; request_hash is the join key for the rest.
 	//
-	// model_name is quoted, not bare. It is the client's own string, forwarded
-	// verbatim on the whitelist path (ExtractModelName returns the request body's
-	// `model` as-is, and unlike the billed path it is not length-clamped), so a
-	// newline in it would forge whole lines in the one log an incident is
-	// reconstructed from. %q escapes that and keeps the line splittable on
-	// spaces, which this file's own test asserts.
+	// model_name is quoted AND truncated, per the convention logsafe.go names.
+	// That file assumes a model name is "the operator's own configuration"; on the
+	// whitelist path it is not — ExtractModelName returns the request body's
+	// `model` verbatim, and unlike the billed path it is not length-clamped. So it
+	// is the caller's string: %q stops a newline in it from forging whole records
+	// in the one log an incident is reconstructed from (and keeps the line
+	// splittable on spaces, which this file's own test asserts), and
+	// truncateForLog stops a caller from writing an arbitrarily long value into
+	// every line. upstream gets the same treatment for consistency, though it is
+	// genuinely server-set.
+	//
+	// upstream is here because #604 made one provider address serve several
+	// upstreams for the same model, so model_name alone no longer says WHICH one
+	// stalled — and saying which is this instrument's entire purpose.
 	//
 	// disconnected is only observable from a failed write, so it would read false
 	// for a client that left BEFORE the first write: gin's Stream checks
@@ -452,8 +460,11 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 	// cancelled context on a stream that DID deliver is a normal finish, and
 	// flagging it would invert the very distinction the field exists to draw.
 	timing.finish()
-	c.logger.Infof("stream timing: %s chat_key=%s model_name=%q request_hash=%s disconnected=%t",
-		timing, chatKey, reqModel.ModelName, reqModel.RequestHash,
+	c.logger.Infof("stream timing: %s chat_key=%s model_name=%q upstream=%q request_hash=%s disconnected=%t",
+		timing, chatKey,
+		truncateForLog([]byte(reqModel.ModelName), 80),
+		truncateForLog([]byte(reqModel.Upstream), 80),
+		reqModel.RequestHash,
 		clientDisconnected || (timing.lines == 0 && ctx.Request.Context().Err() != nil))
 
 	// Process billing regardless of stream error
