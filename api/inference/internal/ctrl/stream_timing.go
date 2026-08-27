@@ -28,10 +28,20 @@ import (
 // The router measures the same quantities on its own hop (0g-router #723), from
 // the same start point and with the same arithmetic, so the two are comparable:
 // if the broker already saw the gap it came from upstream, if only the router
-// did it was introduced between here and there. The NAMES differ by logger
-// convention — this one writes printf text, so `first_line_after_headers_ms`
-// here is `firstLineAfterHeadersMs` there, and both byte counters are named for
-// being post-decompression. A query has to spell each side's own field name.
+// did it was introduced between here and there. Two exceptions, both of which
+// make a healthy stream look like "the router introduced it" if applied blind:
+//
+//   - Compare client_max_gap_ms, not max_gap_ms, whenever the upstream emits SSE
+//     comments. This broker drops them (sanitizeStreamLine), so they advance
+//     max_gap_ms here and reach nobody there.
+//   - The router's tailGapMs is largely ITS OWN on a verify_tee / sealed request
+//     — the TEE round-trip runs up to 30s and this hop does none — and it is
+//     folded into its maxGapMs. Its own file documents this; a sealed stream will
+//     read as "broker small, router large" every single time.
+//
+// The NAMES differ by logger convention — this one writes printf text, so
+// `first_line_after_headers_ms` here is `firstLineAfterHeadersMs` there. A query
+// has to spell each side's own field name.
 //
 // What it does NOT measure, so the numbers are not over-read: it samples the
 // interval between ReadString RETURNS, and the loop between them sanitizes,
@@ -41,8 +51,8 @@ import (
 // upstream stall under the rule above; a stream whose gaps are all small is
 // definitely healthy, one with a large gap needs more than the subtraction.
 //
-// Cost is two time.Now() calls and a prefix test per line, on a path that
-// already sanitizes and JSON-parses each line.
+// Cost is one time.Now() call and a prefix test per line, plus one per write,
+// on a path that already sanitizes and JSON-parses each line.
 type streamTiming struct {
 	start  time.Time
 	first  time.Time
@@ -57,6 +67,21 @@ type streamTiming struct {
 	frames  int
 	lines   int
 	bytes   int64
+
+	// The client-visible half. maxGap measures ARRIVALS from upstream, and in
+	// this broker those are not the same thing as bytes reaching the client:
+	// sanitizeStreamLine drops every SSE comment, so a `: OPENROUTER PROCESSING`
+	// keepalive advances maxGap while the client still sees nothing. An upstream
+	// that pings every 15s through a 140s think would log max_gap_ms=15000 —
+	// healthy — against the router's 140000, and the cross-hop rule below would
+	// read that as "the router introduced it". These fields are timestamped at
+	// the WRITE instead, which is cheap here because this loop has one write
+	// site (plus the E2EE final frame); the router deliberately did not add the
+	// equivalent because it has many, and a missed one undercounts silently.
+	firstWrite   time.Time
+	lastWrite    time.Time
+	maxClientGap time.Duration
+	writes       int
 
 	// now exists so the gap arithmetic can be tested against exact durations
 	// instead of against the scheduler.
@@ -102,6 +127,24 @@ func (t *streamTiming) mark(line string) {
 	}
 }
 
+// markWrite records one line actually written to the client. Call it after the
+// write succeeds and is flushed — not when the line is read, and not when it is
+// merely forwardable: a line held back by a disconnect or dropped by
+// sanitization is one the client never saw.
+func (t *streamTiming) markWrite() {
+	now := t.now()
+	from := t.lastWrite
+	if t.writes == 0 {
+		t.firstWrite = now
+		from = t.start
+	}
+	if gap := now.Sub(from); gap > t.maxClientGap {
+		t.maxClientGap = gap
+	}
+	t.lastWrite = now
+	t.writes++
+}
+
 // finish closes the measurement once the stream is over, folding the trailing
 // silence into maxGap. Call it before logging.
 //
@@ -112,9 +155,18 @@ func (t *streamTiming) finish() {
 	if t.lines == 0 {
 		from = t.start
 	}
-	t.tailGap = t.now().Sub(from)
+	now := t.now()
+	t.tailGap = now.Sub(from)
 	if t.tailGap > t.maxGap {
 		t.maxGap = t.tailGap
+	}
+
+	clientFrom := t.lastWrite
+	if t.writes == 0 {
+		clientFrom = t.start
+	}
+	if gap := now.Sub(clientFrom); gap > t.maxClientGap {
+		t.maxClientGap = gap
 	}
 }
 
@@ -122,13 +174,17 @@ func (t *streamTiming) finish() {
 // Every value is a bare number so the whole line stays splittable on spaces and
 // greppable as key=value.
 func (t *streamTiming) String() string {
-	// -1, not 0, when the upstream never produced a line. Zero is the healthiest
-	// possible value for this field, so reporting it for "nothing ever arrived"
-	// would disguise the worst outcome as the best one, and any threshold built
-	// on the field would skip straight over it.
-	firstLineMs := int64(-1)
+	// first_line_after_headers_ms is OMITTED, not zeroed and not -1, when the
+	// upstream never produced a line. Zero dresses the worst outcome as the best;
+	// -1 was the first attempt and is no better, since a `> threshold` filter
+	// skips it just the same and, being a number, it drags avg/p50/min DOWN — a
+	// total upstream outage would surface as the fastest first line on record.
+	// Absent, it leaves those aggregates alone and lines=0 still identifies the
+	// stream. The router's paired field does the same, so a cross-hop query does
+	// not have to special-case one side (0g-router #723).
+	head := ""
 	if !t.first.IsZero() {
-		firstLineMs = t.first.Sub(t.start).Milliseconds()
+		head = fmt.Sprintf("first_line_after_headers_ms=%d ", t.first.Sub(t.start).Milliseconds())
 	}
 	// Two field names carry their own caveat, which is why they are spelled the
 	// long way:
@@ -142,7 +198,8 @@ func (t *streamTiming) String() string {
 	//     upstream puts far fewer bytes on the wire than this reports.
 	//     Subtracting it from an edge log's compressed response size does not
 	//     give zero.
-	return fmt.Sprintf(
-		"first_line_after_headers_ms=%d max_gap_ms=%d tail_gap_ms=%d frames=%d lines=%d decompressed_bytes=%d",
-		firstLineMs, t.maxGap.Milliseconds(), t.tailGap.Milliseconds(), t.frames, t.lines, t.bytes)
+	return head + fmt.Sprintf(
+		"max_gap_ms=%d client_max_gap_ms=%d tail_gap_ms=%d frames=%d lines=%d writes=%d decompressed_bytes=%d",
+		t.maxGap.Milliseconds(), t.maxClientGap.Milliseconds(), t.tailGap.Milliseconds(),
+		t.frames, t.lines, t.writes, t.bytes)
 }

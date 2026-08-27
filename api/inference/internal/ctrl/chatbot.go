@@ -347,6 +347,7 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 						if fin, ferr := frameSealer.finalFrameLine(); ferr == nil && fin != "" {
 							if _, werr := w.Write([]byte(fin)); werr == nil {
 								ctx.Writer.Flush()
+								timing.markWrite()
 							}
 						}
 					}
@@ -402,6 +403,7 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 					}
 				} else {
 					ctx.Writer.Flush()
+					timing.markWrite()
 				}
 			}
 
@@ -421,9 +423,13 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 	// arrives about.
 	//
 	// chat_key is the correlation handle: this logger has no per-request fields,
-	// so concurrent streams would otherwise be indistinguishable, and it is the
-	// value the router records as chatID (it reaches the client as ZG-Res-Key /
-	// "chatcmpl-"+chatKey), which is what makes the two hops comparable at all.
+	// so concurrent streams would otherwise be indistinguishable. It is also what
+	// the router records as chatID — but only where ZG-Res-Key is actually set
+	// (!TargetSeparated || IsCentralized || e2eeSealed, above). On a
+	// TargetSeparated non-centralized deployment neither the client nor the router
+	// ever sees it, so there chat_key separates concurrent streams in THIS log and
+	// nothing more; the cross-hop comparison has to fall back to time and
+	// model_name.
 	//
 	// model_name is printed rather than left to a join, because for the traffic
 	// this instrument exists for the join does not exist: a whitelisted request's
@@ -436,6 +442,11 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 	// into an INFO log; request_hash is the join key for the rest.
 	//
 	// model_name is quoted AND truncated, per the convention logsafe.go names.
+	// %q escapes newlines and control characters but NOT spaces, so a caller
+	// sending {"model": "glm 5"} still splits this line in two for a naive
+	// space-splitter — the quoted fields need a quote-aware (logfmt) parse, and
+	// only the bare numeric fields from streamTiming.String() are safe to split
+	// blind. Forging a whole record, which is the part that matters, is blocked.
 	// That file assumes a model name is "the operator's own configuration"; on the
 	// whitelist path it is not — ExtractModelName returns the request body's
 	// `model` verbatim, and unlike the billed path it is not length-clamped. So it
