@@ -78,10 +78,23 @@ type streamTiming struct {
 	// the WRITE instead, which is cheap here because this loop has one write
 	// site (plus the E2EE final frame); the router deliberately did not add the
 	// equivalent because it has many, and a missed one undercounts silently.
-	firstWrite   time.Time
-	lastWrite    time.Time
-	maxClientGap time.Duration
-	writes       int
+	firstWrite time.Time
+	lastWrite  time.Time
+	// clientTailGap is the client-side counterpart of tailGap, and it exists for
+	// the same discrimination: without it, client_max_gap_ms=30000 could be a
+	// mid-stream silence or a final frame held back at the end, and those have
+	// different causes. maxGap == tailGap already means "the whole of it was the
+	// tail"; the client half needs its own pair to say the same thing.
+	clientTailGap time.Duration
+	maxClientGap  time.Duration
+	writes        int
+	// clientGone freezes the client-side numbers. Once the client has hung up
+	// there is nobody to experience silence, and the loop keeps draining upstream
+	// for billing — so extending the gap to the end of that drain would make
+	// every ordinary client abort log a large client_max_gap_ms and fire any
+	// threshold built on it. The upstream-side numbers keep running: the drain is
+	// still a real measurement of the provider.
+	clientGone bool
 
 	// now exists so the gap arithmetic can be tested against exact durations
 	// instead of against the scheduler.
@@ -131,7 +144,16 @@ func (t *streamTiming) mark(line string) {
 // write succeeds and is flushed — not when the line is read, and not when it is
 // merely forwardable: a line held back by a disconnect or dropped by
 // sanitization is one the client never saw.
+// markClientGone stops the client-side measurement. Call it when a write has
+// told us the client is no longer there.
+func (t *streamTiming) markClientGone() {
+	t.clientGone = true
+}
+
 func (t *streamTiming) markWrite() {
+	if t.clientGone {
+		return
+	}
 	now := t.now()
 	from := t.lastWrite
 	if t.writes == 0 {
@@ -161,12 +183,15 @@ func (t *streamTiming) finish() {
 		t.maxGap = t.tailGap
 	}
 
-	clientFrom := t.lastWrite
-	if t.writes == 0 {
-		clientFrom = t.start
-	}
-	if gap := now.Sub(clientFrom); gap > t.maxClientGap {
-		t.maxClientGap = gap
+	if !t.clientGone {
+		clientFrom := t.lastWrite
+		if t.writes == 0 {
+			clientFrom = t.start
+		}
+		t.clientTailGap = now.Sub(clientFrom)
+		if t.clientTailGap > t.maxClientGap {
+			t.maxClientGap = t.clientTailGap
+		}
 	}
 }
 
@@ -199,7 +224,8 @@ func (t *streamTiming) String() string {
 	//     Subtracting it from an edge log's compressed response size does not
 	//     give zero.
 	return head + fmt.Sprintf(
-		"max_gap_ms=%d client_max_gap_ms=%d tail_gap_ms=%d frames=%d lines=%d writes=%d decompressed_bytes=%d",
-		t.maxGap.Milliseconds(), t.maxClientGap.Milliseconds(), t.tailGap.Milliseconds(),
+		"max_gap_ms=%d client_max_gap_ms=%d tail_gap_ms=%d client_tail_gap_ms=%d frames=%d lines=%d writes=%d decompressed_bytes=%d",
+		t.maxGap.Milliseconds(), t.maxClientGap.Milliseconds(),
+		t.tailGap.Milliseconds(), t.clientTailGap.Milliseconds(),
 		t.frames, t.lines, t.writes, t.bytes)
 }

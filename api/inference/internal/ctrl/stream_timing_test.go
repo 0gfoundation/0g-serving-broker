@@ -58,7 +58,7 @@ func TestStreamTimingMeasuresLongestSilence(t *testing.T) {
 	assert.Equal(t, int64(wantBytes), timing.bytes)
 
 	assert.Equal(t,
-		fmt.Sprintf("first_line_after_headers_ms=2000 max_gap_ms=167000 client_max_gap_ms=172000 tail_gap_ms=1000 frames=2 lines=4 writes=0 decompressed_bytes=%d", wantBytes),
+		fmt.Sprintf("first_line_after_headers_ms=2000 max_gap_ms=167000 client_max_gap_ms=172000 tail_gap_ms=1000 client_tail_gap_ms=172000 frames=2 lines=4 writes=0 decompressed_bytes=%d", wantBytes),
 		timing.String())
 }
 
@@ -118,7 +118,7 @@ func TestStreamTimingEmptyStreamIsNotReportedAsHealthy(t *testing.T) {
 	assert.NotContains(t, rendered, "first_line_after_headers_ms",
 		"omitted, not 0 and not -1: either is a number that drags avg/p50/min toward 'fastest ever' for a stream that produced nothing")
 	assert.Equal(t,
-		"max_gap_ms=90000 client_max_gap_ms=90000 tail_gap_ms=90000 frames=0 lines=0 writes=0 decompressed_bytes=0",
+		"max_gap_ms=90000 client_max_gap_ms=90000 tail_gap_ms=90000 client_tail_gap_ms=90000 frames=0 lines=0 writes=0 decompressed_bytes=0",
 		rendered,
 		"with no lines at all, the whole stream is the silence — on both the upstream and the client side")
 }
@@ -159,7 +159,7 @@ func TestStreamTimingRendersOnlyBareNumbers(t *testing.T) {
 
 	rendered := timing.String()
 	fields := strings.Fields(rendered)
-	assert.Len(t, fields, 8, "space-splitting must yield exactly the eight fields: %q", rendered)
+	assert.Len(t, fields, 9, "space-splitting must yield exactly the nine fields: %q", rendered)
 	for _, pair := range fields {
 		parts := strings.SplitN(pair, "=", 2)
 		assert.Len(t, parts, 2, "every field must be key=value: %q", pair)
@@ -201,4 +201,35 @@ func TestStreamTimingSeparatesDroppedCommentsFromClientSilence(t *testing.T) {
 		"but the client got nothing for 140s, and only this number says so")
 	assert.Equal(t, 1, timing.writes)
 	assert.Contains(t, timing.String(), "client_max_gap_ms=140000")
+}
+
+// A client that hangs up mid-stream is not experiencing silence afterwards —
+// there is no client. The loop keeps draining upstream for billing, and letting
+// that drain extend client_max_gap_ms would make every ordinary abort look like
+// a stall and fire any threshold built on the field.
+func TestStreamTimingFreezesClientMetricsAfterHangup(t *testing.T) {
+	base := time.Unix(0, 0)
+	timing := &streamTiming{
+		start: base,
+		now: fakeClock(base,
+			time.Second,     // line 1 arrives
+			time.Second,     // written to the client
+			2*time.Second,   // line 2 arrives
+			300*time.Second, // finish, after a long silent drain
+		),
+	}
+	timing.mark("data: a\n")
+	timing.markWrite()
+	timing.markClientGone()
+
+	timing.mark("data: b\n") // still drained for billing
+	timing.markWrite()       // no-op: the client is gone
+	timing.finish()
+
+	assert.Equal(t, 1, timing.writes, "a write after the hangup must not count")
+	assert.Equal(t, time.Second, timing.maxClientGap,
+		"the client's view stops at the hangup, not at the end of the drain")
+	assert.Equal(t, time.Duration(0), timing.clientTailGap)
+	assert.Equal(t, 298*time.Second, timing.tailGap,
+		"the upstream view keeps running — the drain is a real measurement of the provider")
 }

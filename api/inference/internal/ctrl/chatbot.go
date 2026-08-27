@@ -353,7 +353,12 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 					}
 					return false
 				}
+				// handleBrokerError renders an error body into the already-open
+				// stream, so these bytes reach the client and count as a write.
+				// The doc comment argues this counter is trustworthy BECAUSE the
+				// loop has few write sites; that only holds if none is skipped.
 				c.handleBrokerError(ctx, err, "read from body")
+				timing.markWrite()
 				streamErr = err
 				return false
 			}
@@ -379,6 +384,7 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 					// Fail-closed: a sealed request whose frame cannot be sealed must
 					// not receive plaintext. Stop the stream.
 					c.handleBrokerError(ctx, sErr, "seal stream frame")
+					timing.markWrite()
 					streamErr = sErr
 					return false
 				}
@@ -394,6 +400,11 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 						// Mark as ignorable and continue reading silently for complete billing
 						ctx.Set("ignoreError", true)
 						clientDisconnected = true
+						// Stop the client-side clock here. The drain below is a real
+						// measurement of the PROVIDER, but nobody is left to
+						// experience it as silence — counting it would make every
+						// ordinary abort log a large client_max_gap_ms.
+						timing.markClientGone()
 						c.logger.Warnf("Client disconnected, continuing to read from backend for accurate billing")
 						// Don't return false, continue reading
 					} else {
@@ -441,21 +452,23 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 	// line came to render a whole model.Request — user address, signature, fees —
 	// into an INFO log; request_hash is the join key for the rest.
 	//
-	// model_name is quoted AND truncated, per the convention logsafe.go names.
-	// %q escapes newlines and control characters but NOT spaces, so a caller
-	// sending {"model": "glm 5"} still splits this line in two for a naive
-	// space-splitter — the quoted fields need a quote-aware (logfmt) parse, and
-	// only the bare numeric fields from streamTiming.String() are safe to split
-	// blind. Forging a whole record, which is the part that matters, is blocked.
-	// That file assumes a model name is "the operator's own configuration"; on the
-	// whitelist path it is not — ExtractModelName returns the request body's
-	// `model` verbatim, and unlike the billed path it is not length-clamped. So it
-	// is the caller's string: %q stops a newline in it from forging whole records
-	// in the one log an incident is reconstructed from (and keeps the line
-	// splittable on spaces, which this file's own test asserts), and
-	// truncateForLog stops a caller from writing an arbitrarily long value into
-	// every line. upstream gets the same treatment for consistency, though it is
-	// genuinely server-set.
+	// model_name and upstream are quoted AND truncated, per the convention
+	// logsafe.go names. That file assumes a model name is "the operator's own
+	// configuration"; on the whitelist path it is not — ExtractModelName returns
+	// the request body's `model` verbatim and, unlike the billed path, does not
+	// length-clamp it. So model_name is the CALLER's string: %q stops a newline in
+	// it from forging whole records in the one log an incident is reconstructed
+	// from, and truncateForLog stops a caller writing an arbitrarily long value
+	// into every line. upstream gets the same treatment for consistency, though it
+	// is genuinely server-set (EffectiveProviderIdentityFor, not the client's
+	// X-0G-Upstream header).
+	//
+	// PARSE THIS LINE AS LOGFMT, NOT BY SPLITTING ON SPACES. %q escapes newlines
+	// and control characters but not spaces, so a caller sending
+	// {"model": "glm 5"} yields model_name="glm 5" and a naive splitter shifts
+	// every field after it. Only streamTiming.String()'s bare numbers are safe to
+	// split blind, and only its own test asserts that. Forging a whole record —
+	// the part that matters — is blocked either way.
 	//
 	// upstream is here because #604 made one provider address serve several
 	// upstreams for the same model, so model_name alone no longer says WHICH one
