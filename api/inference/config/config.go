@@ -352,6 +352,70 @@ type LoRAConfig struct {
 	EciesPrivateKey        string `yaml:"-"`                      // Override ECIES private key for adapter decryption (2-CVM setup). Set via env var LORA_ECIES_PRIVATE_KEY.
 }
 
+// AssayAttestation configures the Phase-2 verify-app loop. See the Assay
+// struct's Attestation field for semantics.
+type AssayAttestation struct {
+	Enabled bool `yaml:"enabled"`
+	// CliPath is the tapp-cli binary (default "tapp-cli" on $PATH) for
+	// exec mode. ⚠️ tapp-cli needs glibc >= 2.32; the broker image is
+	// buster (2.28), so in this deployment use OutputFile instead.
+	CliPath string `yaml:"cliPath"`
+	// OutputFile switches to file mode: a sidecar (bookworm + tapp-cli)
+	// runs verify-app on a loop and atomically writes its raw output here;
+	// the broker parses the file, taking its mtime as the verification
+	// time (staleness then falls out of maxAgeSeconds naturally — a dead
+	// sidecar looks exactly like a failed verification). In file mode the
+	// appId/registry/asPubkeyPin/policyIds fields live in the SIDECAR's
+	// command line.
+	OutputFile string `yaml:"outputFile"`
+	// AppID / Registry / RpcURL locate the app on the TappRegistry.
+	AppID    string `yaml:"appId"`
+	Registry string `yaml:"registry"`
+	RpcURL   string `yaml:"rpcUrl"`
+	// AsPubkeyPin authenticates the connection to the attestation service —
+	// verify-app has NO default for it; omitting it silently downgrades the
+	// AS channel to encrypted-but-unauthenticated. ⚠️ The AS derives its TLS
+	// key with tls_key_source=local, so THIS PIN CHANGES when the AS
+	// restarts — it must be operator-updatable.
+	AsPubkeyPin string `yaml:"asPubkeyPin"`
+	// PolicyIDs select the AS reference-value policy. ⚠️ Without (or with a
+	// wrong) policy id the AS answers ear.status="-" and the quote is
+	// UNTRUSTED — while the CLI still exits 0 and prints ALL PASS.
+	PolicyIDs []string `yaml:"policyIds"`
+	// RequireTcb is the allowed tcb_status set (e.g. ["UpToDate"]). Widen it
+	// deliberately, listing each accepted advisory state.
+	RequireTcb []string `yaml:"requireTcb"`
+	// MaxAgeSeconds: how long the last successful verification stays valid
+	// (default 3600). Interval: re-check period (default 10m).
+	MaxAgeSeconds int           `yaml:"maxAgeSeconds"`
+	Interval      time.Duration `yaml:"interval"`
+	// OnFail: "block-settlement" (default — gate settlement + invoicing;
+	// inference keeps flowing, verdicts already carry the async settlement
+	// gate) or "warn-only" (log, gate nothing).
+	OnFail string `yaml:"onFail"`
+}
+
+func (a AssayAttestation) MaxAge() time.Duration {
+	if a.MaxAgeSeconds <= 0 {
+		return time.Hour
+	}
+	return time.Duration(a.MaxAgeSeconds) * time.Second
+}
+
+func (a AssayAttestation) IntervalOrDefault() time.Duration {
+	if a.Interval <= 0 {
+		return 10 * time.Minute
+	}
+	return a.Interval
+}
+
+func (a AssayAttestation) CliPathOrDefault() string {
+	if a.CliPath == "" {
+		return "tapp-cli"
+	}
+	return a.CliPath
+}
+
 type Config struct {
 	AllowOrigins    []string `yaml:"allowOrigins"`
 	ContractAddress string   `yaml:"contractAddress"`
@@ -426,6 +490,15 @@ type Config struct {
 		// default (fail-open Tier-1: unauthenticated verdicts are ignored but
 		// the request still settles).
 		StrictVerdict bool `yaml:"strictVerdict"`
+		// VerifierKeyPin authenticates the TLS connection to the verifier
+		// (docs/spml-broker-assay-tls.md Phase 1): 0x-hex sha256 of the
+		// verifier endpoint's SubjectPublicKeyInfo, whose authoritative
+		// source is `tapp-cli verify-app`. When set, every TLS connection
+		// the shared provider client makes checks the presented leaf
+		// certificate against this pin INSTEAD of CA+hostname validation —
+		// the key is attested via the tapp KMS derivation, not a CA. Empty =
+		// default CA validation; plain http URLs are unaffected either way.
+		VerifierKeyPin string `yaml:"verifierKeyPin"`
 		// Payout drives the SPML voucher flow (docs/spml-design §4 C): after
 		// each successful settlement the broker accumulates every settled
 		// request's fee onto its serving node's cumulative and invoices the
@@ -437,6 +510,13 @@ type Config struct {
 			// settled amount (also enforced on-chain via the cut cap).
 			VerifierCutBps int64 `yaml:"verifierCutBps"`
 		} `yaml:"payout"`
+		// Attestation (docs/spml-broker-assay-tls.md Phase 2): periodically
+		// re-attest the verifier by exec'ing `tapp-cli verify-app` and
+		// PARSING ITS OUTPUT (its exit code lies). While the latest verified
+		// snapshot is fresh, its attested "tls key" replaces VerifierKeyPin
+		// as the TLS pin; when it is not, settlement and invoicing are gated
+		// per OnFail. Requires the tapp-cli binary in the broker image.
+		Attestation AssayAttestation `yaml:"attestation"`
 	} `yaml:"assay"`
 	RevenueTransfer struct {
 		TargetAddress string        `yaml:"targetAddress"`

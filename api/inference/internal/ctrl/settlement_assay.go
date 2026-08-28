@@ -126,6 +126,7 @@ func (c *Ctrl) fetchAssayVerdicts(ctx context.Context, hashes []string) (map[str
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	c.signAssayBody(req, body)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {

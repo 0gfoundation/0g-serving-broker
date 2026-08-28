@@ -155,6 +155,17 @@ func (c *Ctrl) IsTeeSignerAcknowledged(ctx context.Context) bool {
 
 // SettleFeesWithTEE implements the optimized settlement logic.
 func (c *Ctrl) SettleFeesWithTEE(ctx context.Context) error {
+	// Phase-2 gate 1 (the critical one): with the assay's attestation not
+	// current, its verdicts have no authority — money must not move on them.
+	// Skipping keeps every request row; the round is retried on the next
+	// cycle once attestation recovers. Loss ceiling = what is already in
+	// the pool, nothing new enters it.
+	if c.assayAttestor != nil {
+		if blocked, why := c.assayAttestor.blockSettlement(); blocked {
+			c.logger.Errorf("Settlement SKIPPED this round: %s", why)
+			return nil
+		}
+	}
 	// Clear expired skipUntil flags for both requests and users
 	if err := c.db.ClearExpiredSkipUntil(); err != nil {
 		c.logger.Warnf("Failed to clear expired skipUntil for requests: %v", err)
