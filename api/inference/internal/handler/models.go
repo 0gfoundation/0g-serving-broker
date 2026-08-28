@@ -531,9 +531,12 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 		}
 		// providerIdentity and servingDomain are resolved PER-MODEL in the loop below
 		// (a multi-upstream provider can point each model at its own targetUrl /
-		// identity — see EffectiveTargetURL/EffectiveProviderIdentity). Both stay
-		// centralized-only: a standard provider hides its upstream, so it must not
-		// surface a per-model identity or serving domain either.
+		// identity — see EffectiveTargetURL/EffectiveProviderIdentity). providerIdentity
+		// is published for every forwarder (centralized and standard): for standard it
+		// is a neutral operator-chosen label, not the upstream vendor, so it does not
+		// reveal which upstream serves the model. servingDomain (the upstream hostname)
+		// WOULD reveal the vendor, so it stays centralized-only — a standard provider
+		// keeps its upstream domain hidden.
 		// A standard provider performs no response attestation; its settlement TEE
 		// signer being acknowledged must not surface as tee_attested (that marker
 		// reflects response verifiability, which standard deliberately omits).
@@ -599,20 +602,25 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 			}
 			modelCacheBilling := newModelCacheTokenBilling(effCache)
 			// Per-model upstream: a multi-upstream provider points each model at its
-			// own targetUrl / identity, so the serving domain and identity are resolved
-			// per entry. Centralized-only (a standard provider hides its upstream).
+			// own targetUrl / identity, so identity (and, for centralized, the serving
+			// domain) is resolved per entry.
 			var providerIdentity, servingDomain string
-			if cfg.IsCentralized() {
+			if cfg.IsForwarder() {
 				// Resolve from THIS entry, not Effective*(mp.Model): a model-keyed lookup
 				// returns the first entry, so two same-model entries at different upstreams
-				// would both advertise the first's identity/domain and the router would dedup
+				// would both advertise the first's identity and the router would dedup
 				// them — losing every upstream but one. The entry's own field wins, falling
-				// back to the service-level value (same rule as EffectiveProviderIdentity/
-				// EffectiveTargetURL, applied to the entry in hand).
+				// back to the service-level value (same rule as EffectiveProviderIdentity,
+				// applied to the entry in hand). Published for standard too: its identity
+				// is a neutral label, not the upstream vendor, so it leaks nothing.
 				providerIdentity = mp.ProviderIdentity
 				if providerIdentity == "" {
 					providerIdentity = cfg.ProviderIdentity
 				}
+			}
+			if cfg.IsCentralized() {
+				// servingDomain is the upstream hostname and reveals the vendor, so it is
+				// centralized-only; a standard provider keeps its upstream domain hidden.
 				// Under targetTLSProxy the per-model targetUrl is an in-CVM container
 				// name; publish the operator-declared UpstreamDomain instead (same
 				// carve-out as upstreamServingDomain for the single-model path).
@@ -876,14 +884,16 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 		obj.RateLimits = rl
 	}
 
-	// Surface the provider class for every forwarder (centralized and standard) so
-	// clients can identify the provider type. A standard provider still hides its
-	// upstream: provider_identity and serving_domain remain centralized-only.
+	// Surface the provider class and identity for every forwarder (centralized and
+	// standard). A standard provider's identity is a neutral operator-chosen label,
+	// not the upstream vendor, so it leaks nothing; only serving_domain (the vendor
+	// hostname) would, so that stays centralized-only — a standard provider keeps its
+	// upstream domain hidden.
 	if cfg.IsForwarder() {
 		obj.ProviderType = cfg.ProviderType
+		obj.ProviderIdentity = cfg.ProviderIdentity
 	}
 	if cfg.IsCentralized() {
-		obj.ProviderIdentity = cfg.ProviderIdentity
 		obj.ServingDomain = upstreamServingDomain(cfg)
 	}
 

@@ -768,11 +768,12 @@ func TestGetModels_ProviderNameCountryDecentralized(t *testing.T) {
 	}
 }
 
-func TestGetModels_StandardHidesUpstreamAndTeeMarker(t *testing.T) {
-	// A standard provider surfaces its provider_type (so clients can identify the
-	// provider class) but hides its upstream and is non-verifiable: even with an
-	// acknowledged settlement TEE signer it must report tee_attested=false and
-	// expose no provider_identity / serving_domain.
+func TestGetModels_StandardPublishesIdentityButHidesUpstreamDomainAndTeeMarker(t *testing.T) {
+	// A standard provider surfaces its provider_type AND its provider_identity — a
+	// neutral operator-chosen label (not the upstream vendor), so clients can pin it
+	// via X-0G-Provider-Identity like any other provider. It still hides the real
+	// upstream: serving_domain (the vendor hostname) must not leak, and even with an
+	// acknowledged settlement TEE signer it reports tee_attested=false (non-verifiable).
 	mock := &mockModelsCtrl{
 		service: model.Service{
 			ModelType:             "gpt-4o",
@@ -785,13 +786,10 @@ func TestGetModels_StandardHidesUpstreamAndTeeMarker(t *testing.T) {
 		},
 		serviceConfig: config.Service{
 			ProviderType: "standard",
-			// Set even though standard providers hide it externally: this
-			// confirms the hiding is gated on IsCentralized() (provider class),
-			// not on ProviderIdentity being empty — a standard provider may now
-			// set it for internal reconciliation tagging (see config.go's
-			// providerType=='standard' validation block) without it leaking here.
-			ProviderIdentity: "openai",
-			// Upstream URL must never leak as serving_domain.
+			// A neutral label, not the upstream vendor — published so clients can
+			// pin it, without revealing which upstream serves the model.
+			ProviderIdentity: "anonymous1",
+			// Upstream URL (the vendor hostname) must never leak as serving_domain.
 			TargetURL: "https://secret-upstream:8000",
 		},
 	}
@@ -816,23 +814,25 @@ func TestGetModels_StandardHidesUpstreamAndTeeMarker(t *testing.T) {
 	if m.ProviderType != "standard" {
 		t.Errorf("expected provider_type=standard, got %q", m.ProviderType)
 	}
-	if m.ProviderIdentity != "" {
-		t.Errorf("expected empty provider_identity for standard, got %q", m.ProviderIdentity)
+	if m.ProviderIdentity != "anonymous1" {
+		t.Errorf("expected provider_identity=anonymous1 for standard, got %q", m.ProviderIdentity)
 	}
 	if m.ServingDomain != "" {
-		t.Errorf("expected empty serving_domain for standard, got %q", m.ServingDomain)
+		t.Errorf("expected empty serving_domain for standard (upstream hidden), got %q", m.ServingDomain)
 	}
 }
 
-func TestGetModels_MultiModelStandardHidesProviderFields(t *testing.T) {
+func TestGetModels_MultiModelStandardPublishesIdentityHidesDomain(t *testing.T) {
 	// The multi-model path builds ModelObject inline; verify standard surfaces
-	// provider_type, hides identity/serving_domain, and reports tee_attested=false
-	// there too (parity with the single-model path).
+	// provider_type and its neutral service-level provider_identity on every model,
+	// still hides serving_domain, and reports tee_attested=false there too (parity
+	// with the single-model path).
 	svcCfg := config.Service{
-		ProviderType: "standard",
-		TargetURL:    "https://secret-upstream:8000",
-		ModelType:    "gpt-4o",
-		Type:         "chatbot",
+		ProviderType:     "standard",
+		ProviderIdentity: "anonymous1", // neutral label; each model inherits it
+		TargetURL:        "https://secret-upstream:8000",
+		ModelType:        "gpt-4o",
+		Type:             "chatbot",
 		ModelPricing: []config.ModelPricingEntry{
 			{Model: "gpt-4o", InputPrice: "10", OutputPrice: "30"},
 			{Model: "gpt-4o-mini", InputPrice: "1", OutputPrice: "3"},
@@ -866,11 +866,11 @@ func TestGetModels_MultiModelStandardHidesProviderFields(t *testing.T) {
 		if m.ProviderType != "standard" {
 			t.Errorf("model %s: expected provider_type=standard, got %q", m.ID, m.ProviderType)
 		}
-		if m.ProviderIdentity != "" {
-			t.Errorf("model %s: expected empty provider_identity, got %q", m.ID, m.ProviderIdentity)
+		if m.ProviderIdentity != "anonymous1" {
+			t.Errorf("model %s: expected provider_identity=anonymous1, got %q", m.ID, m.ProviderIdentity)
 		}
 		if m.ServingDomain != "" {
-			t.Errorf("model %s: expected empty serving_domain, got %q", m.ID, m.ServingDomain)
+			t.Errorf("model %s: expected empty serving_domain (upstream hidden), got %q", m.ID, m.ServingDomain)
 		}
 		if m.TeeAttested {
 			t.Errorf("model %s: expected tee_attested=false for standard", m.ID)
