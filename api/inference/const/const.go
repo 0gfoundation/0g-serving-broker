@@ -150,7 +150,9 @@ var (
 
 	// MinimumLockedBalance is the fixed minimum locked balance required for all service types (1 0G in neuron).
 	// This replaces the dynamic per-service-type calculation in balance adequacy validation.
-	MinimumLockedBalance = "1000000000000000000"
+	// zgTestnetAssay payout run: lowered from 1 0G to 0.005 0G to match the
+	// faucet-funded test ledger floors (:payout-lowmin image); never merge.
+	MinimumLockedBalance = "5000000000000000"
 
 	// TEE settlement batch size to avoid gas limit issues
 	TEESettlementBatchSize = 50
