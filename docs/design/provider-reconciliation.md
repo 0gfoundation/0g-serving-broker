@@ -117,8 +117,9 @@ of the backend that served the request. Immutable once set. Population by scenar
 | TeeTLS, single upstream (today) | seeded from `service.providerIdentity` (e.g. `minimax`) — required and validated for centralized providers (`config.go`) |
 | Multi-upstream (planned) | a per-target vendor label from the routing config, stamped at dispatch |
 
-`providerIdentity` exists only for centralized providers and is empty for decentralized
-ones, so it is **not** used as the reconciliation key directly — it merely *seeds*
+`providerIdentity` exists for forwarders — centralized (the real vendor, e.g. `minimax`)
+and standard (a neutral operator label; the upstream itself stays hidden) — and is empty
+for decentralized ones, so it is **not** used as the reconciliation key directly — it merely *seeds*
 `upstream` in the single-centralized-upstream case. The reconciliation schema and logic are
 identical across all three scenarios; only the field's population source changes when
 multi-upstream routing lands. **No schema or query change is needed when that happens.**
