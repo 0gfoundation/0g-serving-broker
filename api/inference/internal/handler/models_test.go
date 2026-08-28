@@ -613,6 +613,68 @@ func TestGetModels_ServingDomainUnderTargetTLSProxy(t *testing.T) {
 	}
 }
 
+// TestGetModels_PerModelProviderName: a multi-upstream provider labels each
+// model's provider_name from the entry's own providerName, falling back to the
+// service-level name when the entry omits it — so an OpenRouter-served model is
+// not stamped with the service anchor "Aliyun".
+func TestGetModels_PerModelProviderName(t *testing.T) {
+	cfg := config.Service{
+		ProviderType:     "centralized",
+		ProviderIdentity: "aliyun",
+		ProviderName:     "Aliyun",
+		ProviderCountry:  "CN",
+		TargetURL:        "https://dashscope.example/compatible-mode/v1",
+		ModelPricing: []config.ModelPricingEntry{
+			// Anchor (aliyun) entry: no per-model providerName -> falls back to "Aliyun".
+			{Model: "glm-5", InputPrice: "100", OutputPrice: "200"},
+			// OpenRouter upstream of the same canonical: its own providerName wins.
+			{
+				Model:            "zai-org/GLM-5-FP8",
+				CanonicalID:      "glm-5",
+				InputPrice:       "100",
+				OutputPrice:      "200",
+				TargetURL:        "https://openrouter.ai/api/v1",
+				ProviderIdentity: "openrouter",
+				ProviderName:     "OpenRouter",
+			},
+		},
+	}
+	if err := cfg.BuildModelPricingMap(); err != nil {
+		t.Fatalf("build pricing map: %v", err)
+	}
+	mock := &mockModelsCtrl{
+		service: model.Service{
+			ModelType:             "glm-5",
+			Type:                  "chatbot",
+			InputPrice:            "100",
+			OutputPrice:           "200",
+			Verifiability:         "TeeTLS",
+			TeeSignerAcknowledged: true,
+			AdditionalInfo:        `{"TargetSeparated":true}`,
+		},
+		serviceConfig: cfg,
+	}
+	h := newModelsTestHandler(mock)
+	w := performRequest(h.GetModels, "GET", "/v1/models", "", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp ModelListResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+	got := map[string]string{}
+	for _, m := range resp.Data {
+		got[m.ID] = m.ProviderName
+	}
+	if got["glm-5"] != "Aliyun" {
+		t.Errorf("glm-5 provider_name = %q, want service-level fallback %q", got["glm-5"], "Aliyun")
+	}
+	if got["zai-org/GLM-5-FP8"] != "OpenRouter" {
+		t.Errorf("zai-org/GLM-5-FP8 provider_name = %q, want per-model %q", got["zai-org/GLM-5-FP8"], "OpenRouter")
+	}
+}
+
 func TestGetModels_CentralizedProviderInfo(t *testing.T) {
 	mock := &mockModelsCtrl{
 		service: model.Service{

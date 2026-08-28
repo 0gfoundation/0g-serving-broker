@@ -626,6 +626,14 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 					servingDomain = parseServingDomain(target)
 				}
 			}
+			// Per-model display name: the entry's own providerName wins, falling
+			// back to the service-level value (same rule as providerIdentity above),
+			// so a multi-upstream provider labels each upstream correctly instead of
+			// stamping one service-level name onto every model.
+			providerName := mp.ProviderName
+			if providerName == "" {
+				providerName = cfg.ProviderName
+			}
 			obj := ModelObject{
 				ID:               mp.Model,
 				CanonicalID:      canonicalID,
@@ -639,7 +647,7 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 				Pricing:          &ModelPricing{CacheTokenBilling: modelCacheBilling},
 				ProviderType:     providerType,
 				ProviderIdentity: providerIdentity,
-				ProviderName:     cfg.ProviderName,
+				ProviderName:     providerName,
 				ProviderCountry:  cfg.ProviderCountry,
 				ServingDomain:    servingDomain,
 				RateLimits:       sharedLimits,
