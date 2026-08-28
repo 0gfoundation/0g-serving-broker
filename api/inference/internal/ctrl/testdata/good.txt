@@ -1,0 +1,23 @@
+Verifying app: assay-verifier  (1 node(s))
+
+  node 0xe4bbf6bfae12b2a048e5c0555af03146721f2470
+    teeUrl     : http://35.225.160.143:50051
+    AS         : ear.status=affirming tcb_status=UpToDate advisories=0
+    reconcile  : signer✓ compose✓ volumes✓ image✓ owner✓
+    tls key    : 0xb914d74752fcd1b9bfa85f63b769ae9610f75e26230b766539814ed5b84a7aea  (sha256 of the public key, attested)
+                 compare against the endpoint with:
+                 openssl s_client -connect HOST:PORT </dev/null 2>/dev/null \
+                   | openssl x509 -pubkey -noout | openssl pkey -pubin -outform der \
+                   | openssl dgst -sha256
+    owner      : ✓ 0x02bbd74966d40d0c96e4c7a0a086d7d5c6ef8c40
+    verifier   : https://35.253.66.70
+                 pinned 0x7b13d1320e7ebc93a6edf809d06cf9b44704677461c6feb2c4204e92e5587e9b
+    kms        : https://104.197.68.77:9443
+                 https://34.148.132.90:9443
+                 https://34.11.104.41:9443
+                 https://136.66.159.190:9443
+                 https://136.83.14.240:9443
+    boot-chain : ✓ (executables=3, matches policy reference)
+    => reconcile PASS ; quote trusted
+
+Result: reconciliation ALL PASS ✅

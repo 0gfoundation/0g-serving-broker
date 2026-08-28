@@ -150,6 +150,15 @@ func (c *Ctrl) invoiceAssay(ctx context.Context, states map[string]model.AssayPa
 		c.logger.Warnf("Payout: assay.verifierUrl not set; vouchers cannot be requested")
 		return
 	}
+	// Phase-2 gate 2: an unattested assay gets no cumulative disclosure and
+	// no basis to issue vouchers. State is already persisted (fault model
+	// above) — the invoice retries next cycle.
+	if c.assayAttestor != nil {
+		if blocked, why := c.assayAttestor.blockSettlement(); blocked {
+			c.logger.Errorf("Payout: invoice SKIPPED: %s", why)
+			return
+		}
+	}
 
 	req := invoiceRequest{Provider: c.ProviderAddress()}
 	var cutState model.AssayPayout
@@ -249,7 +258,11 @@ func (c *Ctrl) postInvoice(ctx context.Context, req invoiceRequest) (*invoiceRes
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpResp, err := http.DefaultClient.Do(httpReq)
+	c.signAssayBody(httpReq, body)
+	// The shared client, NOT http.DefaultClient: it carries the verifier's
+	// TLS key pin — through the default client the invoice would bypass the
+	// pin check entirely (settlement would work but invoicing would not).
+	httpResp, err := c.httpClient.Do(httpReq)
 	if err != nil {
 		return nil, err
 	}
