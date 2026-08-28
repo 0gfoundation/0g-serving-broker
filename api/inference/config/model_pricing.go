@@ -202,6 +202,15 @@ type ModelPricingEntry struct {
 	// standard provider it feeds only the internal reconciliation rollup and stays
 	// hidden from every external surface (same gating as the service-level field).
 	ProviderIdentity string `yaml:"providerIdentity"`
+
+	// ProviderName is the per-model, human-readable display companion to
+	// ProviderIdentity (e.g. "OpenRouter", "Tencent"): the name shown for THIS
+	// model's upstream in GET /v1/models and GET /v1/providers. Empty falls back
+	// to the service-level service.providerName. It exists so a multi-upstream
+	// provider can label each upstream correctly instead of stamping one
+	// service-level name (e.g. "Aliyun") onto a model actually served by a
+	// different upstream. Presentation only — not a trust signal, not normalized.
+	ProviderName string `yaml:"providerName"`
 }
 
 // BillingMode selects how a model's per-request fee is computed. Empty defaults
