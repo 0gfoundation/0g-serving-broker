@@ -106,7 +106,7 @@ func (c *Ctrl) handleEmbeddingResponse(ctx *gin.Context, resp *http.Response, _ 
 	switch {
 	case c.Service.IsCentralized():
 		fingerprint := ctx.GetString(CtxKeyUpstreamCertFingerprint)
-		if err := c.signCentralizedRoutingProof(reqBody, body, chatKey, fingerprint); err != nil {
+		if err := c.signCentralizedRoutingProof(reqBody, body, chatKey, fingerprint, ""); err != nil {
 			c.logger.Errorf("routing proof not created for embedding %s: %v", chatKey, err)
 		}
 	case !c.Service.TargetSeparated:
