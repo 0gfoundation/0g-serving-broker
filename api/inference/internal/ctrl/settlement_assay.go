@@ -84,20 +84,48 @@ func (c *Ctrl) gateSettlementWithAssay(ctx context.Context, reqs []model.Request
 		}
 	}
 
-	settleable, pendingHashes, cheatHashes := partitionAssayRequests(reqs)
+	settleable, rejected, pendingHashes, invalidSigHashes := partitionAssayRequests(reqs)
+	rejectHashes := requestHashes(rejected)
 
-	if len(cheatHashes) > 0 {
-		// Cheating detected → the whole batch is void: charge nothing this
-		// cycle, for anyone. The deleted rows are the audit trail's job now
-		// (verifier keeps per-request and per-node records); log the evidence.
-		c.logger.Warnf("Assay: CHEAT DETECTED — %d REJECT'd/INVALID_SIG request(s) %v; voiding the entire settlement batch (%d requests, nothing charged)",
-			len(cheatHashes), cheatHashes, len(reqs))
-		if err := c.db.DeleteRequestsByHashes(requestHashes(reqs)); err != nil {
-			// Deletion failed: the rows survive and will be re-gated next
-			// cycle. Still refuse to settle a batch containing cheating.
-			c.logger.Errorf("Assay: failed to void batch: %v", err)
+	// Void exactly the implicated requests, not the batch they arrived in.
+	//
+	// This used to delete every unsettled row on any cheat — across all users
+	// and all nodes, and the unsettled list is not even the settlement batch,
+	// so one REJECT could void an arbitrarily large backlog. That handed any
+	// single node a way to zero the provider's revenue indefinitely at no cost
+	// to itself: cheat once per cycle. spml-design.en.md §4 step 9 always
+	// specified "non-cheat requests only".
+	void := append([]string{}, invalidSigHashes...)
+
+	// A REJECT is a threshold judgement and the thresholds are uncalibrated,
+	// so by default it is recorded and surfaced but does not withhold money
+	// (config assay.rejectGatesSettlement). INVALID_SIG is a signature
+	// failure — no calibration involved — and always withholds.
+	if len(rejectHashes) > 0 {
+		if c.assayRejectGates {
+			void = append(void, rejectHashes...)
+			c.logger.Warnf("Assay: CHEAT — voiding %d REJECT'd request(s) %v (the remaining %d in this batch still settle)",
+				len(rejectHashes), rejectHashes, len(reqs)-len(rejectHashes))
+		} else {
+			// Advisory: they settle like any other request. Leaving them out
+			// of both `void` and `settleable` would park them forever.
+			settleable = append(settleable, rejected...)
+			c.logger.Warnf("Assay: %d REJECT'd request(s) %v — ADVISORY ONLY, still settling: the LDD thresholds are uncalibrated (set assay.rejectGatesSettlement once the calibration ceremony has been run)",
+				len(rejectHashes), rejectHashes)
 		}
-		return nil
+	}
+	if len(invalidSigHashes) > 0 {
+		c.logger.Warnf("Assay: %d request(s) with missing/bad verdict signature %v; voiding those",
+			len(invalidSigHashes), invalidSigHashes)
+	}
+
+	if len(void) > 0 {
+		if err := c.db.DeleteRequestsByHashes(void); err != nil {
+			// Deletion failed: the rows survive and are re-gated next cycle.
+			// They are not in `settleable` either way, so nothing is charged
+			// for them now.
+			c.logger.Errorf("Assay: failed to void %d request(s): %v", len(void), err)
+		}
 	}
 
 	if len(pendingHashes) > 0 {
@@ -231,18 +259,22 @@ func requestHashes(reqs []model.Request) []string {
 
 // partitionAssayRequests splits reqs by their effective verdict, preserving
 // order: settleable (PASS, UNVERIFIED, or no verdict), pending (audit still
-// running), and cheating (REJECT, or INVALID_SIG from strict-mode signature
-// failures). Pure (no DB); the side effects live in gateSettlementWithAssay.
-func partitionAssayRequests(reqs []model.Request) (settleable []model.Request, pendingHashes, cheatHashes []string) {
+// running), rejected (the LDD threshold verdict), and invalid-sig (strict-mode
+// signature failures). The last two are kept apart because only one of them is
+// a calibration judgement — see gateSettlementWithAssay. Pure (no DB); the
+// side effects live in gateSettlementWithAssay.
+func partitionAssayRequests(reqs []model.Request) (settleable, rejected []model.Request, pendingHashes, invalidSigHashes []string) {
 	for _, req := range reqs {
 		switch req.Verdict {
-		case constant.AssayVerdictReject, constant.AssayVerdictInvalidSig:
-			cheatHashes = append(cheatHashes, req.RequestHash)
+		case constant.AssayVerdictReject:
+			rejected = append(rejected, req)
+		case constant.AssayVerdictInvalidSig:
+			invalidSigHashes = append(invalidSigHashes, req.RequestHash)
 		case constant.AssayVerdictPending:
 			pendingHashes = append(pendingHashes, req.RequestHash)
 		default:
 			settleable = append(settleable, req)
 		}
 	}
-	return settleable, pendingHashes, cheatHashes
+	return settleable, rejected, pendingHashes, invalidSigHashes
 }
