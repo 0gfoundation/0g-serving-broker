@@ -412,7 +412,11 @@ const dockerComposeTemplate = `services:
   mysql:
     image: mysql:8.0
     ports:
-      - "{{.Ports.MySQL}}:3306"
+      # Loopback-bound: a bare "PORT:3306" publishes MySQL on every interface of
+      # the host, reachable by anything that can route to it with the credentials
+      # below. Services on this compose network reach the database by service
+      # name, so nothing needs it published beyond local debugging.
+      - "127.0.0.1:{{.Ports.MySQL}}:3306"
     restart: unless-stopped
     environment:
       - MYSQL_ROOT_PASSWORD=123456
