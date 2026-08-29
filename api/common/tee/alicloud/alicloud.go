@@ -4,10 +4,6 @@ package alicloud
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -18,6 +14,7 @@ import (
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	pb "github.com/0glabs/0g-serving-broker/common/tee/alicloud/proto"
+	"github.com/0glabs/0g-serving-broker/common/util"
 )
 
 type AliCloudClient struct{}
@@ -107,19 +104,23 @@ func (c *AliCloudClient) TdxQuote(ctx context.Context, reportData []byte, nvQuot
 	return string(jsonBytes), nil
 }
 
+// DeriveKey returns key material for path.
+//
+// AliCloud exposes no key-derivation service, so the material comes from
+// util.DeriveKeyMaterialForPath: one persistent root secret, HKDF-SHA256 per
+// path. The path argument used to be ignored entirely and one cached secret was
+// returned for every path, which made the secp256k1 provider signer and the
+// X25519 HPKE recipient key the SAME secret — disclosing either disclosed the
+// other, and every prompt ever sealed to this enclave, contradicting the
+// independence SPEC §4.1 requires and enckey.go documents as a MUST.
+//
+// The root secret is still a file rather than measurement-sealed material; see
+// util/keyderive.go for what that does and does not buy, and tee.NewTeeService
+// for the startup warning.
 func (c *AliCloudClient) DeriveKey(ctx context.Context, path string) (string, error) {
-	keyFilePath := "/data/tee_key"
-	if data, err := os.ReadFile(keyFilePath); err == nil && len(data) > 0 {
-		return string(data), nil
-	}
-
-	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	material, err := util.DeriveKeyMaterialForPath(path)
 	if err != nil {
-		return "", errors.Wrap(err, "failed to generate ECDSA private key")
+		return "", errors.Wrap(err, "deriving AliCloud TEE key material")
 	}
-	dHex := hex.EncodeToString(privateKey.D.Bytes())
-
-	_ = os.WriteFile(keyFilePath, []byte(dHex), 0600)
-
-	return dHex, nil
+	return material, nil
 }

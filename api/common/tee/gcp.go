@@ -2,16 +2,13 @@ package tee
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 
 	"github.com/google/go-tdx-guest/client"
 	pb "github.com/google/go-tdx-guest/proto/tdx"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/common/util"
 )
 
 type GcpTappdClient struct{}
@@ -52,12 +49,23 @@ func (c *GcpTappdClient) TdxQuote(ctx context.Context, reportData []byte, nvQuot
 	return string(jsonData), nil
 }
 
+// DeriveKey returns key material for path.
+//
+// GCP exposes no key-derivation service, so the material comes from
+// util.DeriveKeyMaterialForPath: one persistent root secret, HKDF-SHA256 per
+// path. This replaces a fresh ecdsa.GenerateKey on every call, which had two
+// consequences: the path argument was ignored (so nothing tied a derived key to
+// its purpose), and nothing was reproducible — a restart changed both the signer
+// address and enc_pub, so the identity published on chain and the enc_pub
+// clients had already fetched were both stale, with no error to say so.
+//
+// The root secret is still a file rather than measurement-sealed material; see
+// util/keyderive.go for what that does and does not buy, and NewTeeService for
+// the startup warning.
 func (c *GcpTappdClient) DeriveKey(ctx context.Context, path string) (string, error) {
-	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	material, err := util.DeriveKeyMaterialForPath(path)
 	if err != nil {
-		return "", errors.Wrap(err, "Failed to generate ECDSA private key")
+		return "", errors.Wrap(err, "deriving GCP TEE key material")
 	}
-
-	dHex := hex.EncodeToString(privateKey.D.Bytes())
-	return dHex, nil
+	return material, nil
 }

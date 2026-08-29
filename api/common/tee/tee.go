@@ -14,6 +14,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/common/tee/alicloud"
+	"github.com/0glabs/0g-serving-broker/common/util"
 )
 
 // bindEncPubEnvVar toggles generating the §4.2 report_data quote that binds
@@ -133,10 +134,22 @@ func (s *TeeService) SyncQuote(ctx context.Context, nvQuote bool) error {
 		if socket != "" {
 			s.remote = newRemoteSigner(socket)
 		}
-	case GCP:
-		client = &GcpTappdClient{}
-	case AliCloud:
-		client = &alicloud.AliCloudClient{}
+	case GCP, AliCloud:
+		if s.clientType == GCP {
+			client = &GcpTappdClient{}
+		} else {
+			client = &alicloud.AliCloudClient{}
+		}
+		// Neither backend has a key-derivation service, so both fall back to
+		// util.DeriveKeyMaterialForPath: HKDF per path over a root secret held in a
+		// plain file. That restores the signer/enc-key independence SPEC §4.1
+		// requires, but it does NOT make the keys measurement-tied — anyone who can
+		// read the file reproduces every derived key on an unattested machine, and
+		// the keys do not rotate with the measurement. Warn on every startup so this
+		// is visible in operations, not only in the source.
+		s.logger.Warnf(
+			"TEE backend %v has no key-derivation service: keys are derived from %s, a plain file, so they are NOT bound to the enclave measurement and do not rotate with it. Use the Phala/dstack backend for deployments that rely on measurement binding.",
+			s.clientType, util.TEEKeyMaterialRootPath)
 	default:
 		return errors.New("unsupported client type")
 	}
