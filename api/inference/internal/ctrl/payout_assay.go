@@ -8,6 +8,7 @@ import (
 	"io"
 	"math/big"
 	"net/http"
+	"strings"
 	"time"
 
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
@@ -207,9 +208,37 @@ func (c *Ctrl) invoiceAssay(ctx context.Context, states map[string]model.AssayPa
 				continue
 			}
 			c.logger.Infof("Payout: voucher issued for node %s cumulative=%s epoch=%d", r.NodeID, st.Cumulative, req.Epoch)
+		} else if landed := alreadyCoveredHashes(r.Failures); len(landed) > 0 {
+			// The assay says some of these hashes are already covered by a
+			// voucher it issued: our previous invoice DID land, we just never
+			// saw the response. Re-sending them forever would deadlock this
+			// node's payouts — every later cycle appends new hashes to the
+			// same pending set and is refused for the old ones.
+			//
+			// Drop exactly what it says it already has and keep the rest. The
+			// cumulative is untouched, so the next invoice asks for
+			// (our cumulative) covering only the genuinely new hashes, and the
+			// assay's amount check reconciles: its delta against our
+			// cumulative is precisely those new hashes' fees.
+			remaining := removeHashes(decodeCovered(st.PendingCovered), landed)
+			st.PendingCovered = encodeCovered(remaining)
+			if len(remaining) == 0 {
+				// Every hash we were invoicing is already covered, and fees
+				// only ever arrive together with new hashes — so our
+				// cumulative is exactly what landed. Nothing left to ask for.
+				st.Invoiced = true
+				c.logger.Warnf("Payout: node %s was already fully invoiced at cumulative=%s (lost response); reconciled",
+					r.NodeID, st.Cumulative)
+			} else {
+				c.logger.Warnf("Payout: node %s had %d hash(es) already covered by an earlier voucher (lost response); dropping them, %d still to invoice",
+					r.NodeID, len(landed), len(remaining))
+			}
+			if err := c.db.UpsertAssayPayout(st); err != nil {
+				c.logger.Errorf("Payout: failed to reconcile node %s: %v", r.NodeID, err)
+			}
 		} else {
-			// The assay refused: its ledger disagrees with ours. This needs an
-			// operator — the covered hashes stay pending so nothing is lost.
+			// A disagreement we cannot explain: leave everything pending so
+			// nothing is lost, and let an operator look.
 			c.logger.Errorf("Payout: assay REFUSED invoice for node %s: %v", r.NodeID, r.Failures)
 		}
 	}
@@ -219,6 +248,39 @@ func (c *Ctrl) invoiceAssay(ctx context.Context, states map[string]model.AssayPa
 			c.logger.Errorf("Payout: failed to mark verifier cut invoiced: %v", err)
 		}
 	}
+}
+
+// alreadyCoveredHashes picks out the request hashes the assay says it has
+// already issued a voucher for. Its failures are formatted
+// "<hash>: already covered by an earlier voucher" (payout.py validate), so the
+// refusal itself carries the reconciliation data — no second round trip.
+func alreadyCoveredHashes(failures []string) []string {
+	var out []string
+	for _, f := range failures {
+		hash, rest, found := strings.Cut(f, ": ")
+		if found && strings.HasPrefix(rest, "already covered") && hash != "" {
+			out = append(out, hash)
+		}
+	}
+	return out
+}
+
+// removeHashes returns `all` without any element of `drop`, preserving order.
+func removeHashes(all, drop []string) []string {
+	if len(drop) == 0 {
+		return all
+	}
+	gone := make(map[string]struct{}, len(drop))
+	for _, h := range drop {
+		gone[h] = struct{}{}
+	}
+	out := make([]string, 0, len(all))
+	for _, h := range all {
+		if _, ok := gone[h]; !ok {
+			out = append(out, h)
+		}
+	}
+	return out
 }
 
 // RetryAssayInvoices re-sends any cumulative the assay has not acknowledged
