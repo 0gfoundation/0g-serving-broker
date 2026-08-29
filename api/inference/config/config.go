@@ -490,6 +490,22 @@ type Config struct {
 		// default (fail-open Tier-1: unauthenticated verdicts are ignored but
 		// the request still settles).
 		StrictVerdict bool `yaml:"strictVerdict"`
+		// RejectGatesSettlement decides whether a REJECT verdict actually
+		// withholds money, or is only recorded and surfaced.
+		//
+		// Off by default, deliberately. A REJECT is a threshold judgement, and
+		// the LDD thresholds are not calibrated: 0.15/0.04 are grid points
+		// from the paper's calibration SEARCH SPACE, not results of running
+		// the ceremony, and the two expert thresholds have no published
+		// provenance at all. ldd.py says as much in its own comment ("never
+		// gate penalties on uncalibrated thresholds"), and an honest node has
+		// already been observed false-REJECTing at tail_frac=0.0417 (1 token
+		// in 24) against a 0.04 budget. Until the ceremony is run against
+		// benign traffic, a false positive must not cost anyone money.
+		//
+		// This does NOT cover INVALID_SIG: that is a signature failure, not a
+		// threshold judgement, so it withholds settlement regardless.
+		RejectGatesSettlement bool `yaml:"rejectGatesSettlement"`
 		// VerifierKeyPin authenticates the TLS connection to the verifier
 		// (docs/spml-broker-assay-tls.md Phase 1): 0x-hex sha256 of the
 		// verifier endpoint's SubjectPublicKeyInfo, whose authoritative

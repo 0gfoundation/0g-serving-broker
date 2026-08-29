@@ -15,9 +15,12 @@ import (
 )
 
 // TestPartitionAssayRequests locks the partition rule the Assay settlement
-// gate relies on: REJECT and INVALID_SIG (strict-mode signature failure) mark
-// cheating; PENDING marks an audit still in flight; PASS, UNVERIFIED, and
-// unrecorded (empty) verdicts are settleable, in their original order.
+// gate relies on: REJECT (the LDD threshold verdict) and INVALID_SIG
+// (strict-mode signature failure) are kept in SEPARATE buckets, because only
+// the first is a calibration judgement and only it is subject to
+// assay.rejectGatesSettlement; PENDING marks an audit still in flight; PASS,
+// UNVERIFIED, and unrecorded (empty) verdicts are settleable, in their
+// original order.
 func TestPartitionAssayRequests(t *testing.T) {
 	reqs := []model.Request{
 		{RequestHash: "a", Verdict: constant.AssayVerdictPass},
@@ -28,7 +31,7 @@ func TestPartitionAssayRequests(t *testing.T) {
 		{RequestHash: "f", Verdict: constant.AssayVerdictInvalidSig}, // strict-mode sig failure -> cheat
 	}
 
-	settleable, pending, cheat := partitionAssayRequests(reqs)
+	settleable, rejected, pending, invalidSig := partitionAssayRequests(reqs)
 
 	wantSettleable := []string{"a", "c", "d"}
 	if len(settleable) != len(wantSettleable) {
@@ -44,14 +47,12 @@ func TestPartitionAssayRequests(t *testing.T) {
 		t.Errorf("pending = %v, want [e]", pending)
 	}
 
-	wantCheat := []string{"b", "f"}
-	if len(cheat) != len(wantCheat) {
-		t.Fatalf("cheat = %v, want %v", cheat, wantCheat)
+	if len(rejected) != 1 || rejected[0].RequestHash != "b" {
+		t.Errorf("rejected = %v, want [b]", requestHashes(rejected))
 	}
-	for i, want := range wantCheat {
-		if cheat[i] != want {
-			t.Errorf("cheat[%d] = %q, want %q", i, cheat[i], want)
-		}
+
+	if len(invalidSig) != 1 || invalidSig[0] != "f" {
+		t.Errorf("invalidSig = %v, want [f]", invalidSig)
 	}
 }
 
@@ -341,5 +342,62 @@ func TestResolveAssayVerdictsStillResolvesPending(t *testing.T) {
 	}
 	if changed["h"] != constant.AssayVerdictReject {
 		t.Errorf("changed = %v, want h -> REJECT", changed)
+	}
+}
+
+// A REJECT must not take the rest of the batch down with it.
+//
+// The gate used to delete every unsettled row on any cheat — all users, all
+// nodes, and the unsettled list is not even the settlement batch — which let
+// one node zero the provider's revenue by cheating once per cycle.
+//
+// With assay.rejectGatesSettlement off (the default while the LDD thresholds
+// are uncalibrated) a REJECT is advisory: recorded and logged, but it settles
+// like any other request. c.db is nil here, so any void would panic — proving
+// nothing was deleted.
+func TestGateSettlementRejectIsAdvisoryByDefault(t *testing.T) {
+	c := &Ctrl{logger: testLogger(), assayVerdictFilter: true} // assayRejectGates false
+	reqs := []model.Request{
+		{RequestHash: "a", Verdict: constant.AssayVerdictPass},
+		{RequestHash: "b", Verdict: constant.AssayVerdictReject},
+		{RequestHash: "c", Verdict: constant.AssayVerdictPass},
+	}
+
+	got := c.gateSettlementWithAssay(context.Background(), reqs)
+
+	if len(got) != 3 {
+		t.Fatalf("settleable = %d, want 3 (advisory REJECT still settles)", len(got))
+	}
+	// The honest requests must be there; parking them forever is the bug this
+	// guards against just as much as voiding them.
+	seen := map[string]bool{}
+	for _, r := range got {
+		seen[r.RequestHash] = true
+	}
+	for _, h := range []string{"a", "b", "c"} {
+		if !seen[h] {
+			t.Errorf("request %q was neither settled nor voided — leaked", h)
+		}
+	}
+}
+
+// The honest requests in a batch containing a REJECT survive the partition
+// step, whether or not the REJECT goes on to be voided. This is the property
+// the whole-batch void destroyed.
+func TestPartitionKeepsHonestRequestsAwayFromACheat(t *testing.T) {
+	reqs := []model.Request{
+		{RequestHash: "honest-1", Verdict: constant.AssayVerdictPass, Node: "node_0"},
+		{RequestHash: "cheat", Verdict: constant.AssayVerdictReject, Node: "node_1"},
+		{RequestHash: "honest-2", Verdict: constant.AssayVerdictUnverified, Node: "node_2"},
+	}
+
+	settleable, rejected, _, _ := partitionAssayRequests(reqs)
+
+	if len(settleable) != 2 {
+		t.Fatalf("settleable = %v, want the two honest requests",
+			requestHashes(settleable))
+	}
+	if len(rejected) != 1 || rejected[0].RequestHash != "cheat" {
+		t.Errorf("rejected = %v, want [cheat]", requestHashes(rejected))
 	}
 }

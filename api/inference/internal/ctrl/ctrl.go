@@ -73,6 +73,10 @@ type Ctrl struct {
 	// responses whose verdict is missing/unverifiable, so header stripping
 	// can't launder a REJECT. Only meaningful with assayVerifierAddress set.
 	assayStrictVerdict bool
+	// assayRejectGates decides whether a REJECT withholds settlement or is
+	// only recorded (see config.Assay.RejectGatesSettlement — off while the
+	// LDD thresholds are uncalibrated). INVALID_SIG withholds either way.
+	assayRejectGates bool
 	// assayVerifierURL, when non-empty, is where settlement fetches the
 	// batch's final verdicts (POST {url}/v1/settlement/check) before
 	// deciding to settle — required to resolve PENDING verdicts from the
@@ -317,6 +321,7 @@ func New(
 		assayAttestor:        attestor,
 		assayVerifierAddress: assayVerifierAddr,
 		assayStrictVerdict:   cfg.Assay.StrictVerdict,
+		assayRejectGates:     cfg.Assay.RejectGatesSettlement,
 		assayVerifierURL:     strings.TrimSuffix(cfg.Assay.VerifierURL, "/"),
 		assayCheckWaitMs:     cfg.Assay.SettlementCheckWaitMs,
 		assayPayoutEnabled:   cfg.Assay.Payout.Enabled,
