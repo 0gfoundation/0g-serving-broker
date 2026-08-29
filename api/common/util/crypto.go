@@ -169,9 +169,22 @@ const tagSigSize = 65
 // Ethereum-facing path carries 27/28. Subtracting 27 unconditionally underflows a
 // raw 0 to 229 and makes SigToPub reject a signature that is perfectly valid.
 func RecoverSigner(hash, sig []byte) (common.Address, error) {
-	if len(sig) != tagSigSize {
-		return common.Address{}, fmt.Errorf("signature must be %d bytes, got %d", tagSigSize, len(sig))
+	pub, err := RecoverPubkey(hash, sig)
+	if err != nil {
+		return common.Address{}, err
 	}
+	return crypto.PubkeyToAddress(*pub), nil
+}
+
+// RecoverPubkey is RecoverSigner returning the public key itself, for the one
+// caller that persists it (fine-tuning stores the user's pubkey to encrypt the
+// model's AES key to). It owns the recovery-id normalisation both share.
+func RecoverPubkey(hash, sig []byte) (*ecdsa.PublicKey, error) {
+	if len(sig) != tagSigSize {
+		return nil, fmt.Errorf("signature must be %d bytes, got %d", tagSigSize, len(sig))
+	}
+	// Copy: normalising in place would mutate a caller's buffer, and several
+	// callers reuse theirs after the recovery.
 	normalized := make([]byte, tagSigSize)
 	copy(normalized, sig)
 	switch normalized[64] {
@@ -180,13 +193,13 @@ func RecoverSigner(hash, sig []byte) (common.Address, error) {
 	case 0, 1:
 		// already a raw recovery id
 	default:
-		return common.Address{}, fmt.Errorf("invalid signature recovery id %d", normalized[64])
+		return nil, fmt.Errorf("invalid signature recovery id %d", normalized[64])
 	}
 	pub, err := crypto.SigToPub(hash, normalized)
 	if err != nil {
-		return common.Address{}, fmt.Errorf("recover public key: %w", err)
+		return nil, fmt.Errorf("recover public key: %w", err)
 	}
-	return crypto.PubkeyToAddress(*pub), nil
+	return pub, nil
 }
 
 // AesDecryptLargeFile decrypts a file produced by AesEncryptLargeFile and

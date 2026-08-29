@@ -20,6 +20,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/common/util"
 	constant "github.com/0glabs/0g-serving-broker/fine-tuning/const"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/db"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/utils"
@@ -137,17 +138,13 @@ func (*Ctrl) validateSignature(task *schema.Task) error {
 		return fmt.Errorf("invalid signature length %d, expected 65", len(sigBytes))
 	}
 
-	if sigBytes[64] != 27 && sigBytes[64] != 28 {
-		return fmt.Errorf("invalid recovery ID (V): got %d", sigBytes[64])
-	}
-
-	sigBytes[64] -= 27
-	pubKey, err := crypto.SigToPub(hash, sigBytes)
+	// Accepts a raw 0/1 as well as 27/28. Requiring 27/28 rejected signatures
+	// produced by go-ethereum's crypto.Sign, which emits the raw form — a client
+	// signing with the standard Go library was refused for a valid signature.
+	recoveredAddress, err := util.RecoverSigner(hash, sigBytes)
 	if err != nil {
 		return err
 	}
-
-	recoveredAddress := crypto.PubkeyToAddress(*pubKey)
 	if recoveredAddress.Hex() != task.UserAddress {
 		return errors.New("signature verification failed: address mismatch")
 	}
@@ -269,11 +266,11 @@ func (c *Ctrl) validateTrainingParams(task *schema.Task) error {
 
 	// Define required parameters and their constraints
 	requiredParams := map[string]bool{
-		"neftune_noise_alpha":           true,
-		"num_train_epochs":              true,
-		"per_device_train_batch_size":   true,
-		"learning_rate":                 true,
-		"max_steps":                     true,
+		"neftune_noise_alpha":         true,
+		"num_train_epochs":            true,
+		"per_device_train_batch_size": true,
+		"learning_rate":               true,
+		"max_steps":                   true,
 	}
 
 	// Define forbidden parameters that users often add by mistake
@@ -422,17 +419,11 @@ func (c *Ctrl) VerifyDownloadSignature(id *uuid.UUID, userAddress string, signat
 		return fmt.Errorf("invalid signature length %d, expected 65", len(sigBytes))
 	}
 
-	if sigBytes[64] != 27 && sigBytes[64] != 28 {
-		return fmt.Errorf("invalid recovery ID (V): got %d", sigBytes[64])
-	}
-
-	sigBytes[64] -= 27
-	pubKey, err := crypto.SigToPub(hash, sigBytes)
+	// Raw 0/1 accepted as well as 27/28; see the note on the first recovery above.
+	recoveredAddr, err := util.RecoverSigner(hash, sigBytes)
 	if err != nil {
 		return errors.Wrap(err, "recover public key from signature")
 	}
-
-	recoveredAddr := crypto.PubkeyToAddress(*pubKey)
 	expectedAddr := common.HexToAddress(userAddress)
 
 	if recoveredAddr != expectedAddr {
@@ -480,17 +471,11 @@ func (c *Ctrl) VerifyUploadSignature(userAddress string, signature string, times
 		return fmt.Errorf("invalid signature length %d, expected 65", len(sigBytes))
 	}
 
-	if sigBytes[64] != 27 && sigBytes[64] != 28 {
-		return fmt.Errorf("invalid recovery ID (V): got %d", sigBytes[64])
-	}
-
-	sigBytes[64] -= 27
-	pubKey, err := crypto.SigToPub(hash, sigBytes)
+	// Raw 0/1 accepted as well as 27/28; see the note on the first recovery above.
+	recoveredAddr, err := util.RecoverSigner(hash, sigBytes)
 	if err != nil {
 		return errors.Wrap(err, "recover public key from signature")
 	}
-
-	recoveredAddr := crypto.PubkeyToAddress(*pubKey)
 	expectedAddr := common.HexToAddress(userAddress)
 
 	if recoveredAddr != expectedAddr {
@@ -796,4 +781,3 @@ func validateJSONLFormat(content []byte) error {
 
 	return nil
 }
-

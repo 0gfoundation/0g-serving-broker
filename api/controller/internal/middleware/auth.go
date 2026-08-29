@@ -11,6 +11,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/gin-gonic/gin"
 
+	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/0glabs/0g-serving-broker/controller/internal/ctrl"
 )
 
@@ -114,25 +115,16 @@ func recoverAddress(message string, signature string) (string, error) {
 		return "", err
 	}
 
-	// Ethereum signatures are 65 bytes: R (32) + S (32) + V (1)
-	if len(sigBytes) != 65 {
-		return "", err
-	}
-
-	// Adjust V value for Ethereum signature recovery
-	v := sigBytes[64]
-	if v >= 27 {
-		v -= 27
-	}
-
-	// Recover public key from signature
-	pubKey, err := crypto.SigToPub(prefixedMsg.Bytes(), append(sigBytes[:64], v))
+	// This site already normalised the recovery id correctly ("if v >= 27"). It is
+	// routed through the shared helper anyway so there is exactly one
+	// implementation of recovery-id handling to audit, and so the length check
+	// stops returning a nil error on a wrong-length signature (`return "", err`
+	// with err already nil returned an empty address and NO error, which the
+	// caller would read as a successful recovery of the zero address).
+	recoveredAddr, err := util.RecoverSigner(prefixedMsg.Bytes(), sigBytes)
 	if err != nil {
 		return "", err
 	}
-
-	// Get address from public key
-	recoveredAddr := crypto.PubkeyToAddress(*pubKey)
 
 	return recoveredAddr.Hex(), nil
 }
