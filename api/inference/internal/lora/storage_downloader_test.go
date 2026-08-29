@@ -9,8 +9,14 @@ import (
 
 	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/0glabs/0g-serving-broker/inference/config"
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 )
+
+// testExpectedSigner is any non-zero address: every case below fails before
+// decryption is reached, and AesDecryptLargeFile rejects the zero address so a
+// caller cannot opt out of TEE tag-signature verification.
+var testExpectedSigner = common.HexToAddress("0x71562b71999873DB5b286dF957af199Ec94617F7")
 
 func TestNewStorageDownloader_EmptyIndexerUrl(t *testing.T) {
 	cfg := config.LoRAConfig{StorageIndexerUrl: ""}
@@ -45,7 +51,7 @@ func TestDownloadAndDecrypt_ECIESDecryptFailure(t *testing.T) {
 	}
 
 	outputDir := filepath.Join(t.TempDir(), "output")
-	_, err = d.DownloadAndDecrypt(context.Background(), "0xdeadbeef", []byte("fake-encrypted-data"), outputDir)
+	_, err = d.DownloadAndDecrypt(context.Background(), "0xdeadbeef", []byte("fake-encrypted-data"), outputDir, testExpectedSigner)
 	if err == nil {
 		t.Fatal("expected error when ECIES decryption fails with invalid key")
 	}
@@ -68,7 +74,7 @@ func TestDownloadAndDecrypt_ECIESDecryptBadCiphertext(t *testing.T) {
 	}
 
 	outputDir := filepath.Join(t.TempDir(), "output")
-	_, err = d.DownloadAndDecrypt(context.Background(), "0xdeadbeef", []byte("garbage-ciphertext"), outputDir)
+	_, err = d.DownloadAndDecrypt(context.Background(), "0xdeadbeef", []byte("garbage-ciphertext"), outputDir, testExpectedSigner)
 	if err == nil {
 		t.Fatal("expected error for invalid ECIES ciphertext")
 	}
@@ -94,7 +100,7 @@ func TestDownloadAndDecrypt_CreatesParentDirectory(t *testing.T) {
 	}
 
 	deepOutputDir := filepath.Join(t.TempDir(), "a", "b", "c", "output")
-	_, err = d.DownloadAndDecrypt(context.Background(), "0xdeadbeef", []byte("fake"), deepOutputDir)
+	_, err = d.DownloadAndDecrypt(context.Background(), "0xdeadbeef", []byte("fake"), deepOutputDir, testExpectedSigner)
 	// Expect ECIES error since the ciphertext is garbage
 	if err == nil {
 		t.Fatal("expected error")
@@ -133,7 +139,7 @@ func TestDownloadAndDecrypt_EndToEnd_WithRealCrypto(t *testing.T) {
 	}
 
 	outputDir := filepath.Join(t.TempDir(), "output")
-	_, err = d.DownloadAndDecrypt(context.Background(), "0xdeadbeef", encryptedAESKey, outputDir)
+	_, err = d.DownloadAndDecrypt(context.Background(), "0xdeadbeef", encryptedAESKey, outputDir, testExpectedSigner)
 	// Should fail at the 0G Storage download step (no real storage server),
 	// not at the ECIES decrypt step (which should succeed).
 	if err == nil {
@@ -152,8 +158,8 @@ func TestDownloadAndDecrypt_EndToEnd_WithRealCrypto(t *testing.T) {
 
 func TestStorageHashPrefixNormalization(t *testing.T) {
 	tests := []struct {
-		name     string
-		input    string
+		name      string
+		input     string
 		wantHas0x bool
 	}{
 		{"already has 0x prefix", "0xdeadbeef", true},
@@ -208,7 +214,7 @@ func TestDownloadAndDecrypt_EmptyProviderEncKey(t *testing.T) {
 	}
 
 	outputDir := filepath.Join(t.TempDir(), "output")
-	_, err = d.DownloadAndDecrypt(context.Background(), "0xhash", []byte{}, outputDir)
+	_, err = d.DownloadAndDecrypt(context.Background(), "0xhash", []byte{}, outputDir, testExpectedSigner)
 	if err == nil {
 		t.Fatal("expected error for empty encrypted key")
 	}
@@ -239,7 +245,7 @@ func TestDownloadAndDecrypt_LongProviderKey(t *testing.T) {
 
 	outputDir := filepath.Join(t.TempDir(), "output")
 	// ECIES decryption succeeds but 0G Storage download fails (no server)
-	_, err = d.DownloadAndDecrypt(context.Background(), "deadbeef", encryptedAESKey, outputDir)
+	_, err = d.DownloadAndDecrypt(context.Background(), "deadbeef", encryptedAESKey, outputDir, testExpectedSigner)
 	if err == nil {
 		t.Fatal("expected error (no 0G Storage server)")
 	}
@@ -250,10 +256,10 @@ func TestDownloadAndDecrypt_LongProviderKey(t *testing.T) {
 
 func TestDownloaderTempFilePaths(t *testing.T) {
 	tests := []struct {
-		name           string
-		outputDir      string
-		wantEncrypted  string
-		wantDecrypted  string
+		name          string
+		outputDir     string
+		wantEncrypted string
+		wantDecrypted string
 	}{
 		{
 			name:          "simple path",
@@ -284,4 +290,3 @@ func TestDownloaderTempFilePaths(t *testing.T) {
 		})
 	}
 }
-

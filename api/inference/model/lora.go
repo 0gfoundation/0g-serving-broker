@@ -36,4 +36,12 @@ type AdapterKey struct {
 	TaskID         string `json:"taskId" gorm:"type:varchar(255);not null;uniqueIndex"`
 	StorageHash    string `json:"storageHash" gorm:"type:varchar(255);not null"`
 	ProviderEncKey string `json:"providerEncKey" gorm:"type:text;not null"`
+	// TeeSignerAddress is the address the producing enclave signed the artifact's
+	// chunk-tag stream with. AesDecryptLargeFile verifies the 65-byte signature at
+	// the head of the downloaded artifact against it; without it the signature is
+	// unverifiable and the adapter must not be deployed. Nullable so rows pushed
+	// before this column existed are distinguishable from an explicit zero
+	// address, and fail with a clear "re-push required" error rather than silently
+	// verifying against 0x0.
+	TeeSignerAddress string `json:"teeSignerAddress" gorm:"type:varchar(42)"`
 }

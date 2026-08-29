@@ -209,9 +209,10 @@ func TestReceiveAdapterKey_InvalidStorageHashFormat(t *testing.T) {
 	c, _ := gin.CreateTestContext(w)
 
 	body, _ := json.Marshal(map[string]string{
-		"taskId":         "task-001",
-		"storageHash":    "not-a-valid-hash",
-		"providerEncKey": "0xabcdef",
+		"taskId":           "task-001",
+		"storageHash":      "not-a-valid-hash",
+		"providerEncKey":   "0xabcdef",
+		"teeSignerAddress": "0x71562b71999873DB5b286dF957af199Ec94617F7",
 	})
 	c.Request = httptest.NewRequest("POST", "/internal/v1/adapter-keys", bytes.NewReader(body))
 	c.Request.Header.Set("Content-Type", "application/json")
@@ -230,9 +231,10 @@ func TestReceiveAdapterKey_StorageHashTooShort(t *testing.T) {
 	c, _ := gin.CreateTestContext(w)
 
 	body, _ := json.Marshal(map[string]string{
-		"taskId":         "task-001",
-		"storageHash":    "0xabcdef",
-		"providerEncKey": "0xabcdef",
+		"taskId":           "task-001",
+		"storageHash":      "0xabcdef",
+		"providerEncKey":   "0xabcdef",
+		"teeSignerAddress": "0x71562b71999873DB5b286dF957af199Ec94617F7",
 	})
 	c.Request = httptest.NewRequest("POST", "/internal/v1/adapter-keys", bytes.NewReader(body))
 	c.Request.Header.Set("Content-Type", "application/json")
@@ -251,9 +253,10 @@ func TestReceiveAdapterKey_InvalidStorageHashHex(t *testing.T) {
 	c, _ := gin.CreateTestContext(w)
 
 	body, _ := json.Marshal(map[string]string{
-		"taskId":         "task-001",
-		"storageHash":    "0xZZZZ012345670123456789abcdef0123456789abcdef0123456789abcdef0123",
-		"providerEncKey": "0xabcdef",
+		"taskId":           "task-001",
+		"storageHash":      "0xZZZZ012345670123456789abcdef0123456789abcdef0123456789abcdef0123",
+		"providerEncKey":   "0xabcdef",
+		"teeSignerAddress": "0x71562b71999873DB5b286dF957af199Ec94617F7",
 	})
 	c.Request = httptest.NewRequest("POST", "/internal/v1/adapter-keys", bytes.NewReader(body))
 	c.Request.Header.Set("Content-Type", "application/json")
@@ -272,9 +275,10 @@ func TestReceiveAdapterKey_InvalidProviderEncKeyHex(t *testing.T) {
 	c, _ := gin.CreateTestContext(w)
 
 	body, _ := json.Marshal(map[string]string{
-		"taskId":         "task-001",
-		"storageHash":    "0xabcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
-		"providerEncKey": "not-hex-data!@#$",
+		"taskId":           "task-001",
+		"storageHash":      "0xabcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+		"providerEncKey":   "not-hex-data!@#$",
+		"teeSignerAddress": "0x71562b71999873DB5b286dF957af199Ec94617F7",
 	})
 	c.Request = httptest.NewRequest("POST", "/internal/v1/adapter-keys", bytes.NewReader(body))
 	c.Request.Header.Set("Content-Type", "application/json")
@@ -319,5 +323,66 @@ func assertErrorCode(t *testing.T, body []byte, want string) {
 	}
 	if got.Code != want {
 		t.Errorf("error code = %q, want %q (body=%s)", got.Code, want, body)
+	}
+}
+
+// teeSignerAddress gates TEE tag-signature verification on the consumption path
+// (util.AesDecryptLargeFile), so the push must carry it and it must be a
+// well-formed address. Without it the signature the fine-tuning broker writes
+// into every artifact cannot be checked and the adapter must not be deployed.
+
+func TestReceiveAdapterKey_MissingTeeSignerAddress(t *testing.T) {
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+
+	body, _ := json.Marshal(map[string]string{
+		"taskId":         "task-001",
+		"storageHash":    "0xabcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+		"providerEncKey": "0xabcdef",
+	})
+	c.Request = httptest.NewRequest("POST", "/internal/v1/adapter-keys", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h := &Handler{}
+	h.ReceiveAdapterKey(c)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d; body = %s", w.Code, http.StatusBadRequest, w.Body.String())
+	}
+	assertErrorCode(t, w.Body.Bytes(), adapterKeyErrInvalidPayload)
+}
+
+func TestReceiveAdapterKey_MalformedTeeSignerAddress(t *testing.T) {
+	for _, bad := range []string{
+		"not-an-address",
+		"0x71562b71999873DB5b286dF957af199Ec94617",     // too short
+		"0x71562b71999873DB5b286dF957af199Ec94617F7ff", // too long
+		"0xZZ562b71999873DB5b286dF957af199Ec94617F7",   // non-hex
+		// A bare 40-hex string with no 0x prefix is deliberately NOT rejected:
+		// common.IsHexAddress accepts it and it parses to the same address
+		// unambiguously, so rejecting it would be gratuitous strictness. Our own
+		// sender always emits Address.Hex(), which is prefixed.
+	} {
+		t.Run(bad, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+
+			body, _ := json.Marshal(map[string]string{
+				"taskId":           "task-001",
+				"storageHash":      "0xabcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+				"providerEncKey":   "0xabcdef",
+				"teeSignerAddress": bad,
+			})
+			c.Request = httptest.NewRequest("POST", "/internal/v1/adapter-keys", bytes.NewReader(body))
+			c.Request.Header.Set("Content-Type", "application/json")
+
+			h := &Handler{}
+			h.ReceiveAdapterKey(c)
+
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want %d; body = %s", w.Code, http.StatusBadRequest, w.Body.String())
+			}
+			assertErrorCode(t, w.Body.Bytes(), adapterKeyErrInvalidSigner)
+		})
 	}
 }

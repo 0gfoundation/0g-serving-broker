@@ -141,7 +141,9 @@ func (f *Finalizer) Execute(ctx context.Context, task *db.Task, paths *utils.Tas
 	// This MUST succeed before proceeding — if the key is not stored in the inference
 	// broker, downloadFromStorage will fail permanently after the user acknowledges.
 	if providerEncKey != nil && f.config.Service.InferenceServiceUrl != "" {
-		if pushErr := f.pushAdapterKey(ctx, task.ID.String(), hexutil.Encode(settlementMetadata.ModelRootHash), hexutil.Encode(providerEncKey)); pushErr != nil {
+		// The enclave that signed the artifact's tag stream above is this one, so
+		// its signer address is what the inference broker must verify against.
+		if pushErr := f.pushAdapterKey(ctx, task.ID.String(), hexutil.Encode(settlementMetadata.ModelRootHash), hexutil.Encode(providerEncKey), f.teeService.Address.Hex()); pushErr != nil {
 			return fmt.Errorf("push adapter key to inference broker: %w", pushErr)
 		}
 	}
@@ -179,12 +181,13 @@ var adapterKeyHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
 const pushAdapterKeyMaxRetries = 3
 
-func (f *Finalizer) pushAdapterKey(parentCtx context.Context, taskID, storageHash, providerEncKey string) error {
+func (f *Finalizer) pushAdapterKey(parentCtx context.Context, taskID, storageHash, providerEncKey, teeSignerAddress string) error {
 	url := fmt.Sprintf("%s/internal/v1/adapter-keys", f.config.Service.InferenceServiceUrl)
 	payload := map[string]string{
-		"taskId":         taskID,
-		"storageHash":    storageHash,
-		"providerEncKey": providerEncKey,
+		"taskId":           taskID,
+		"storageHash":      storageHash,
+		"providerEncKey":   providerEncKey,
+		"teeSignerAddress": teeSignerAddress,
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {

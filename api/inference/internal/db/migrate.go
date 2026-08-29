@@ -410,6 +410,26 @@ func (d *DB) Migrate() error {
 				return tx.Exec("ALTER TABLE `video_job_owner` MODIFY `provider_job_id` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL;").Error
 			},
 		},
+		{
+			ID: "adapter-key-tee-signer-address",
+			Migrate: func(tx *gorm.DB) error {
+				// The fine-tuning broker signs Keccak256(chunk-tag stream) into the head of
+				// every encrypted LoRA artifact, but the inference broker used to skip those
+				// 65 bytes without verifying them — dead security metadata. Verifying needs
+				// the producing enclave's address, which nothing carried, so the adapter key
+				// push now includes it and this column stores it.
+				//
+				// Nullable on purpose: a row written before this column existed has no signer
+				// and must be distinguishable from an explicit zero address. lora.Manager
+				// refuses to deploy such a row (with a "re-push required" error) rather than
+				// verifying against 0x0, so pre-existing adapters fail closed instead of
+				// silently keeping the old unverified behaviour.
+				type AdapterKey struct {
+					TeeSignerAddress string `gorm:"type:varchar(42)"`
+				}
+				return tx.AutoMigrate(&AdapterKey{})
+			},
+		},
 	})
 
 	return errors.Wrap(m.Migrate(), "migrate database")

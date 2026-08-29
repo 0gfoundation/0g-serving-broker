@@ -17,6 +17,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	"github.com/0glabs/0g-serving-broker/inference/internal/db"
 	"github.com/0glabs/0g-serving-broker/inference/model"
+	"github.com/ethereum/go-ethereum/common"
 )
 
 // AdapterInfo is the in-memory representation of a LoRA adapter.
@@ -38,11 +39,11 @@ type Manager struct {
 	adapters map[string]*AdapterInfo // adapterName → info
 	ctx      context.Context         // application-scoped context for graceful shutdown
 
-	config             config.LoRAConfig
-	db                 *db.DB
-	sllmClient         *SLLMClient
-	storageDownloader  *StorageDownloader
-	logger             log.Logger
+	config            config.LoRAConfig
+	db                *db.DB
+	sllmClient        *SLLMClient
+	storageDownloader *StorageDownloader
+	logger            log.Logger
 }
 
 // NewManager creates a LoRA adapter manager with the given config, 0G Storage downloader,
@@ -380,7 +381,19 @@ func (m *Manager) downloadFromStorage(ctx context.Context, info *AdapterInfo) er
 	}
 	m.logger.Infof("adapter key found: storage=%s, encrypted key=%d bytes", storageHashHex, len(providerEncKey))
 
-	actualPath, err := m.storageDownloader.DownloadAndDecrypt(ctx, storageHashHex, providerEncKey, info.AdapterPath)
+	// The artifact carries a TEE signature over its chunk-tag stream, and the
+	// producing enclave's address arrives with the adapter key. Without it the
+	// signature cannot be verified, so refuse to deploy rather than decrypt an
+	// artifact whose origin we cannot check — a row this old predates the
+	// teeSignerAddress column and needs the fine-tuning broker to re-push.
+	if !common.IsHexAddress(adapterKey.TeeSignerAddress) {
+		return fmt.Errorf(
+			"adapter key for task %s has no TEE signer address (got %q); the fine-tuning broker must re-push it before this adapter can be verified and deployed",
+			info.TaskID, adapterKey.TeeSignerAddress)
+	}
+	expectedSigner := common.HexToAddress(adapterKey.TeeSignerAddress)
+
+	actualPath, err := m.storageDownloader.DownloadAndDecrypt(ctx, storageHashHex, providerEncKey, info.AdapterPath, expectedSigner)
 	if err != nil {
 		return err
 	}

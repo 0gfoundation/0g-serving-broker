@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
 
 	"github.com/0glabs/0g-serving-broker/inference/model"
@@ -14,6 +15,10 @@ type adapterKeyRequest struct {
 	TaskID         string `json:"taskId" binding:"required"`
 	StorageHash    string `json:"storageHash" binding:"required"`
 	ProviderEncKey string `json:"providerEncKey" binding:"required"`
+	// TeeSignerAddress is the producing enclave's signer address, required so the
+	// inference broker can verify the artifact's TEE tag signature before it
+	// decrypts and deploys the adapter.
+	TeeSignerAddress string `json:"teeSignerAddress" binding:"required"`
 }
 
 // adapterKeyErrorCode is a machine-readable identifier sent alongside the
@@ -29,6 +34,7 @@ const (
 	adapterKeyErrInvalidHashSize = "invalid_hash_size" // storageHash length wrong → caller bug, never retry
 	adapterKeyErrInvalidHashHex  = "invalid_hash_hex"  // storageHash not hex → caller bug, never retry
 	adapterKeyErrInvalidEncKey   = "invalid_enc_key"   // providerEncKey not hex → caller bug, never retry
+	adapterKeyErrInvalidSigner   = "invalid_signer"    // teeSignerAddress not a 20-byte hex address → caller bug, never retry
 	adapterKeyErrPersist         = "persist_failed"    // db error during upsert → caller MAY retry with backoff
 )
 
@@ -97,10 +103,23 @@ func (h *Handler) ReceiveAdapterKey(c *gin.Context) {
 		return
 	}
 
+	// The signer address gates TEE tag-signature verification on the consumption
+	// path, so reject anything that is not a well-formed address rather than
+	// storing a value that would later fail verification for the wrong reason.
+	if !common.IsHexAddress(req.TeeSignerAddress) {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "teeSignerAddress must be a 20-byte hex address",
+			"code":  adapterKeyErrInvalidSigner,
+		})
+		return
+	}
+
 	key := &model.AdapterKey{
 		TaskID:         req.TaskID,
 		StorageHash:    req.StorageHash,
 		ProviderEncKey: req.ProviderEncKey,
+		// Checksummed so a later string comparison is not tripped by case drift.
+		TeeSignerAddress: common.HexToAddress(req.TeeSignerAddress).Hex(),
 	}
 
 	if err := h.ctrl.CreateAdapterKey(key); err != nil {

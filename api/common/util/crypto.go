@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	ecies "github.com/ecies/go/v2"
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
 )
@@ -160,10 +161,56 @@ func AesDecrypt(key, ciphertext []byte) ([]byte, error) {
 // encrypted files by AesEncryptLargeFile for integrity verification.
 const tagSigSize = 65
 
-// AesDecryptLargeFile decrypts a file produced by AesEncryptLargeFile.
+// RecoverSigner recovers the Ethereum address that produced sig over hash.
+//
+// It accepts both recovery-id conventions in sig[64]: go-ethereum's crypto.Sign
+// emits a raw 0/1 (this is what tee.TeeService.SignHash returns, since it calls
+// crypto.Sign directly), while a signature that has been through an
+// Ethereum-facing path carries 27/28. Subtracting 27 unconditionally underflows a
+// raw 0 to 229 and makes SigToPub reject a signature that is perfectly valid.
+func RecoverSigner(hash, sig []byte) (common.Address, error) {
+	if len(sig) != tagSigSize {
+		return common.Address{}, fmt.Errorf("signature must be %d bytes, got %d", tagSigSize, len(sig))
+	}
+	normalized := make([]byte, tagSigSize)
+	copy(normalized, sig)
+	switch normalized[64] {
+	case 27, 28:
+		normalized[64] -= 27
+	case 0, 1:
+		// already a raw recovery id
+	default:
+		return common.Address{}, fmt.Errorf("invalid signature recovery id %d", normalized[64])
+	}
+	pub, err := crypto.SigToPub(hash, normalized)
+	if err != nil {
+		return common.Address{}, fmt.Errorf("recover public key: %w", err)
+	}
+	return crypto.PubkeyToAddress(*pub), nil
+}
+
+// AesDecryptLargeFile decrypts a file produced by AesEncryptLargeFile and
+// verifies the TEE signature over its chunk-tag stream.
+//
 // File format: [65-byte tagSig][12-byte nonce][chunk1 ciphertext+tag][chunk2 ciphertext+tag]...
 // Each chunk's ciphertext size = defaultBufferSize + gcm.Overhead() (16 bytes GCM tag).
-func AesDecryptLargeFile(key []byte, inputFile, outputFile string) error {
+//
+// expectedSigner is the address the artifact's producer signed with. It is
+// REQUIRED: AesEncryptLargeFile reserves the leading 65 bytes and the finalizer
+// signs Keccak256(tag stream) into them, but every consumer used to skip those
+// bytes without looking at them, which made the signature dead metadata — a
+// forged or corrupted prefix was indistinguishable from a genuine one as long as
+// AES-GCM decryption succeeded. Passing the zero address is rejected rather than
+// treated as "skip", so a caller cannot opt out of the check by accident.
+//
+// Verification happens after the whole tag stream is known, i.e. after the last
+// chunk is decrypted, so outputFile is fully written before the signature is
+// checked. It is removed on failure (the deferred cleanup below), so a caller
+// never sees plaintext from an artifact that failed verification.
+func AesDecryptLargeFile(key []byte, inputFile, outputFile string, expectedSigner common.Address) error {
+	if expectedSigner == (common.Address{}) {
+		return fmt.Errorf("expected TEE signer address is required to verify %s", inputFile)
+	}
 	inFile, err := os.Open(inputFile)
 	if err != nil {
 		return fmt.Errorf("failed to open encrypted file: %w", err)
@@ -193,8 +240,10 @@ func AesDecryptLargeFile(key []byte, inputFile, outputFile string) error {
 		return fmt.Errorf("failed to create GCM cipher: %w", err)
 	}
 
-	// Skip 65-byte tagSig
-	if _, err := io.ReadFull(inFile, make([]byte, tagSigSize)); err != nil {
+	// Read (not skip) the 65-byte tagSig; it is verified against the recomputed
+	// tag stream once the last chunk has been decrypted.
+	tagSig := make([]byte, tagSigSize)
+	if _, err := io.ReadFull(inFile, tagSig); err != nil {
 		return fmt.Errorf("failed to read tag signature: %w", err)
 	}
 
@@ -216,6 +265,10 @@ func AesDecryptLargeFile(key []byte, inputFile, outputFile string) error {
 	chunkSize := defaultBufferSize + gcm.Overhead()
 	buf := make([]byte, chunkSize)
 
+	// Rebuild the same stream AesEncryptLargeFile signed: the trailing
+	// gcm.Overhead() bytes of every chunk's ciphertext, concatenated in order.
+	tagBuf := new(bytes.Buffer)
+
 	for {
 		n, readErr := io.ReadFull(inFile, buf)
 		if n == 0 {
@@ -226,6 +279,7 @@ func AesDecryptLargeFile(key []byte, inputFile, outputFile string) error {
 		if decErr != nil {
 			return fmt.Errorf("failed to decrypt chunk: %w", decErr)
 		}
+		tagBuf.Write(buf[n-gcm.Overhead() : n])
 
 		if _, err := outFile.Write(plaintext); err != nil {
 			return fmt.Errorf("failed to write plaintext: %w", err)
@@ -236,6 +290,21 @@ func AesDecryptLargeFile(key []byte, inputFile, outputFile string) error {
 		if readErr != nil {
 			break
 		}
+	}
+
+	// An empty tag stream means no chunk was decrypted, so there is nothing the
+	// signature could attest to. Refuse rather than "verify" sha3 of nothing.
+	if tagBuf.Len() == 0 {
+		return fmt.Errorf("no ciphertext chunks in %s; nothing to verify", inputFile)
+	}
+
+	signer, err := RecoverSigner(crypto.Keccak256(tagBuf.Bytes()), tagSig)
+	if err != nil {
+		return fmt.Errorf("verify TEE tag signature for %s: %w", inputFile, err)
+	}
+	if signer != expectedSigner {
+		return fmt.Errorf("TEE tag signature signer mismatch for %s: recovered %s, want %s",
+			inputFile, signer.Hex(), expectedSigner.Hex())
 	}
 
 	success = true
