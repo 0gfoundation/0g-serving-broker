@@ -79,6 +79,50 @@ const (
 //   - "x_0g_trace": observability metadata the router injects downstream.
 var e2eeResponseUnboundFields = []string{"model", "x_0g_trace"}
 
+// e2eeSensitiveResponseFields lists every top-level response field that can carry
+// model output on a surface this broker serves. The wire v1 default sealed set is
+// ["choices"], which covers only the OpenAI shape; the broker also serves the
+// Anthropic Messages surface as a first-class path (service.supportedFormats
+// accepts "anthropic", IsAnthropicEndpoint matches /messages and /v1/messages),
+// and an Anthropic response carries its output in "content" — or, per streaming
+// event, in "message" / "content_block" / "delta" — and has no "choices" at all.
+// Sealing the v1 default against such a frame therefore sealed nothing and
+// forwarded the completion in the clear inside an envelope that reported itself
+// sealed.
+//
+// The set is deliberately a union across surfaces rather than a per-format table:
+// the sealed set is computed per frame from the fields actually present
+// (e2eeSealedFieldsFor), so one list stays correct for a response that mixes
+// shapes and needs no format detection on the sealing path.
+//
+// Anything added here MUST be a field whose value is model output or output
+// metadata, never a routing/billing field — a sealed field is removed from the
+// cleartext frame, so sealing "model" or "usage" would hide what the router and
+// the billing path read.
+var e2eeSensitiveResponseFields = []string{
+	"choices",       // OpenAI /v1/chat/completions
+	"content",       // Anthropic /v1/messages, non-streaming
+	"message",       // Anthropic streaming: message_start
+	"content_block", // Anthropic streaming: content_block_start
+	"delta",         // Anthropic streaming: content_block_delta, message_delta
+}
+
+// e2eeSealedFieldsFor returns the sensitive fields actually present in frame, in
+// the fixed order of e2eeSensitiveResponseFields so the sealed_fields list a
+// client sees is deterministic. An empty result means the frame carries no model
+// output at all — legitimate for a streaming keepalive, a usage-only trailer or
+// an Anthropic content_block_stop / message_stop, and a fail-closed condition on
+// the non-streaming path where a completion always carries output.
+func e2eeSealedFieldsFor(frame wire.Response) []string {
+	fields := make([]string, 0, len(e2eeSensitiveResponseFields))
+	for _, f := range e2eeSensitiveResponseFields {
+		if _, ok := frame[f]; ok {
+			fields = append(fields, f)
+		}
+	}
+	return fields
+}
+
 // hasE2EEMarker is a cheap substring pre-check to skip the JSON parse on the vast
 // majority of (non-sealed) requests. A match is not proof of a sealed request —
 // the substring could appear inside message content — so MaybeUnsealRequest
@@ -261,10 +305,20 @@ func (c *Ctrl) maybeSealNonStreamResponse(ctx *gin.Context, body []byte) (out []
 	if uerr := json.Unmarshal(body, &resp); uerr != nil || resp == nil {
 		return nil, true, respBindHash, fmt.Errorf("seal response: body is not a JSON object")
 	}
-	ensureChoices(resp)
-	// nil sealedFields → v1 default ["choices"]; declare model + x_0g_trace unbound
-	// so the router may rewrite/inject them downstream (SPEC §5.2).
-	frame, err := wire.SealResponse(ephPub, resp, nil, e2eeResponseUnboundFields...)
+	// Seal whatever output fields this response actually carries rather than the
+	// wire v1 default ["choices"], which is empty on the Anthropic surface. A
+	// non-streaming completion always carries output, so an empty set means we do
+	// not recognise the shape — fail closed instead of forwarding a body whose
+	// payload we could not identify (and which the old code shipped in cleartext
+	// beside an injected "choices":[]).
+	sealedFields := e2eeSealedFieldsFor(resp)
+	if len(sealedFields) == 0 {
+		return nil, true, respBindHash, fmt.Errorf(
+			"seal response: no sealable output field in response (looked for %v)", e2eeSensitiveResponseFields)
+	}
+	// model + x_0g_trace stay unbound so the router may rewrite/inject them
+	// downstream (SPEC §5.2).
+	frame, err := wire.SealResponse(ephPub, resp, sealedFields, e2eeResponseUnboundFields...)
 	if err != nil {
 		return nil, true, respBindHash, fmt.Errorf("seal response: %w", err)
 	}
@@ -346,7 +400,6 @@ func (rs *responseFrameSealer) sealSSELine(line string) (string, error) {
 	if err := json.Unmarshal([]byte(payload), &frame); err != nil {
 		return "", fmt.Errorf("seal stream frame: %w", err)
 	}
-	ensureChoices(frame)
 	return rs.sealFrame(frame, false)
 }
 
@@ -370,7 +423,19 @@ func (rs *responseFrameSealer) finalFrameLine() (string, error) {
 // an abrupt EOF may omit); an extra blank line the upstream also sends is
 // harmless (ignored by SSE parsers).
 func (rs *responseFrameSealer) sealFrame(frame wire.Response, final bool) (string, error) {
-	out, err := rs.sealer.SealFrame(frame, nil, final)
+	// Per-frame sealed set, because a streaming frame's payload field depends on
+	// the event: "choices" on the OpenAI surface, "message" / "content_block" /
+	// "delta" across the Anthropic event sequence. A frame that carries no output
+	// at all (content_block_stop, message_stop, a usage-only trailer, the
+	// synthetic final frame) has nothing to seal, and SealFrame rejects both an
+	// empty set and a named field that is absent — so give it the placeholder
+	// ensureChoices used to inject, which merges to nothing on the client.
+	sealedFields := e2eeSealedFieldsFor(frame)
+	if len(sealedFields) == 0 {
+		ensureChoices(frame)
+		sealedFields = []string{"choices"}
+	}
+	out, err := rs.sealer.SealFrame(frame, sealedFields, final)
 	if err != nil {
 		return "", fmt.Errorf("seal frame: %w", err)
 	}
@@ -403,10 +468,16 @@ func (rs *responseFrameSealer) signedText() (text string, ok bool, err error) {
 	return text, err == nil, err
 }
 
-// ensureChoices guarantees a "choices" field is present so SealFrame (whose v1
-// default seals "choices") never fails on a frame that legitimately omits it
-// (e.g. a trailing usage-only chunk). An injected empty array merges to nothing
-// on the client.
+// ensureChoices injects an empty "choices" so a frame that carries no model
+// output at all still has one field to seal (SealFrame rejects an empty sealed
+// set, and a named field that is absent from the frame). Called only from
+// sealFrame's no-output branch — a usage-only trailer, an Anthropic
+// content_block_stop / message_stop, the synthetic final frame. An injected empty
+// array merges to nothing on the client.
+//
+// It must NOT be called before computing the sealed set: doing so made every
+// frame look sealable under the v1 default and was how an Anthropic response's
+// cleartext "content" came to ride alongside a sealed-looking empty array.
 func ensureChoices(frame wire.Response) {
 	if _, ok := frame["choices"]; !ok {
 		frame["choices"] = json.RawMessage("[]")

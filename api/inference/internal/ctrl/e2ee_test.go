@@ -1070,3 +1070,214 @@ func TestVerifyEncKeyID(t *testing.T) {
 		t.Error("verifyEncKeyID(wrong) should error")
 	}
 }
+
+// --- Anthropic Messages surface (#C-2) ---
+//
+// The broker serves /v1/messages as a first-class path, and an Anthropic response
+// carries its output in "content" with no "choices" at all. Sealing the wire v1
+// default therefore sealed nothing and forwarded the completion in cleartext
+// inside a frame that reported itself sealed, with a valid §8 binding, so the
+// client saw no error. These tests pin the payload out of the cleartext.
+
+func TestSealNonStreamResponse_AnthropicContentSealed(t *testing.T) {
+	f := newE2EEFixture(t)
+	ctx := newGinCtx()
+	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
+
+	// Shape as LiteLLM/Anthropic returns it: type + content, no choices.
+	respBody := []byte(`{"id":"msg-1","type":"message","role":"assistant","model":"qwen-chat",` +
+		`"content":[{"type":"text","text":"My private seed phrase is canyon velvet"}],` +
+		`"stop_reason":"end_turn","usage":{"input_tokens":41,"output_tokens":3}}`)
+
+	sealed, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, respBody)
+	if err != nil {
+		t.Fatalf("maybeSealNonStreamResponse: %v", err)
+	}
+	if !isSealed {
+		t.Fatal("response not sealed")
+	}
+
+	if strings.Contains(string(sealed), "canyon velvet") {
+		t.Errorf("sealed Anthropic response leaked content plaintext: %s", sealed)
+	}
+	// Nothing should be sealed under a name the response never had.
+	if strings.Contains(string(sealed), `"choices"`) {
+		t.Errorf("injected choices into an Anthropic response: %s", sealed)
+	}
+	// usage stays cleartext for billing.
+	if !strings.Contains(string(sealed), "input_tokens") {
+		t.Error("usage should remain cleartext for billing")
+	}
+
+	var frame wire.Response
+	if err := json.Unmarshal(sealed, &frame); err != nil {
+		t.Fatalf("unmarshal sealed: %v", err)
+	}
+	var meta struct {
+		SealedFields []string `json:"sealed_fields"`
+	}
+	if err := json.Unmarshal(frame["_e2ee"], &meta); err != nil {
+		t.Fatalf("unmarshal _e2ee: %v", err)
+	}
+	if !equalStringSet(meta.SealedFields, []string{"content"}) {
+		t.Errorf("sealed_fields = %v, want [content]", meta.SealedFields)
+	}
+
+	opened, err := wire.OpenResponse(f.clientEphSk, frame)
+	if err != nil {
+		t.Fatalf("client OpenResponse: %v", err)
+	}
+	if !strings.Contains(string(opened["content"]), "canyon velvet") {
+		t.Errorf("opened content missing payload: %s", opened["content"])
+	}
+}
+
+// A non-streaming completion always carries output, so a body with no field we
+// recognise means we cannot identify the payload — fail closed rather than
+// forward it beside an injected empty array.
+func TestSealNonStreamResponse_UnknownShapeFailsClosed(t *testing.T) {
+	f := newE2EEFixture(t)
+	ctx := newGinCtx()
+	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
+
+	respBody := []byte(`{"id":"x","model":"m","output_text":"secret payload in an unknown field"}`)
+
+	_, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, respBody)
+	if !isSealed {
+		t.Fatal("want isSealed=true so the caller refuses to forward plaintext")
+	}
+	if err == nil {
+		t.Fatal("want an error for an unrecognised response shape, got nil")
+	}
+	if !strings.Contains(err.Error(), "no sealable output field") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// Every frame of an Anthropic SSE stream carries its payload under a different
+// key. All of them must end up sealed; none may ride in the clear.
+func TestStreamFrameSealer_AnthropicFramesSealed(t *testing.T) {
+	f := newE2EEFixture(t)
+	ctx := newGinCtx()
+	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
+
+	rs, err := f.c.newResponseFrameSealer(ctx)
+	if err != nil {
+		t.Fatalf("newResponseFrameSealer: %v", err)
+	}
+
+	cases := []struct {
+		name   string
+		line   string
+		secret string   // must not appear in the sealed line
+		want   []string // expected sealed_fields
+	}{
+		{
+			name:   "message_start",
+			line:   `data: {"type":"message_start","message":{"id":"msg-1","model":"qwen2.5:0.5b","role":"assistant","usage":{"input_tokens":41}}}`,
+			secret: "qwen2.5:0.5b", // upstream model identity, nested in message
+			want:   []string{"message"},
+		},
+		{
+			name:   "content_block_start",
+			line:   `data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":"SECRET-A"}}`,
+			secret: "SECRET-A",
+			want:   []string{"content_block"},
+		},
+		{
+			name:   "content_block_delta",
+			line:   `data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"SECRET-B"}}`,
+			secret: "SECRET-B",
+			want:   []string{"delta"},
+		},
+		{
+			name:   "message_delta",
+			line:   `data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}`,
+			secret: "end_turn",
+			want:   []string{"delta"},
+		},
+		{
+			name:   "content_block_stop carries no output",
+			line:   `data: {"type":"content_block_stop","index":0}`,
+			secret: "",
+			want:   []string{"choices"}, // placeholder; merges to nothing on the client
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := rs.sealSSELine(tc.line)
+			if err != nil {
+				t.Fatalf("sealSSELine: %v", err)
+			}
+			if tc.secret != "" && strings.Contains(out, tc.secret) {
+				t.Errorf("sealed frame leaked %q in cleartext: %s", tc.secret, out)
+			}
+			payload := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(out), "data:"))
+			var frame wire.Response
+			if err := json.Unmarshal([]byte(payload), &frame); err != nil {
+				t.Fatalf("unmarshal sealed frame: %v", err)
+			}
+			var meta struct {
+				SealedFields []string `json:"sealed_fields"`
+			}
+			if err := json.Unmarshal(frame["_e2ee"], &meta); err != nil {
+				t.Fatalf("unmarshal _e2ee: %v", err)
+			}
+			if !equalStringSet(meta.SealedFields, tc.want) {
+				t.Errorf("sealed_fields = %v, want %v", meta.SealedFields, tc.want)
+			}
+		})
+	}
+}
+
+// usage must stay cleartext on every surface: the billing path and the router read
+// it off the forwarded frame, so sealing it would break settlement.
+func TestSealedFieldsFor_NeverSealsRoutingOrBillingFields(t *testing.T) {
+	for _, f := range e2eeSensitiveResponseFields {
+		switch f {
+		case "usage", "model", "id", "x_0g_trace", "object", "created":
+			t.Errorf("%q is a routing/billing field and must not be sealed", f)
+		}
+	}
+
+	frame := wire.Response{
+		"usage":   json.RawMessage(`{"total_tokens":9}`),
+		"model":   json.RawMessage(`"m"`),
+		"choices": json.RawMessage(`[]`),
+	}
+	got := e2eeSealedFieldsFor(frame)
+	if !equalStringSet(got, []string{"choices"}) {
+		t.Errorf("e2eeSealedFieldsFor = %v, want [choices]", got)
+	}
+}
+
+// Order is fixed by e2eeSensitiveResponseFields, not by Go map iteration, so the
+// sealed_fields a client sees is stable across runs.
+func TestSealedFieldsFor_DeterministicOrder(t *testing.T) {
+	frame := wire.Response{
+		"delta":         json.RawMessage(`{}`),
+		"content":       json.RawMessage(`[]`),
+		"choices":       json.RawMessage(`[]`),
+		"content_block": json.RawMessage(`{}`),
+		"message":       json.RawMessage(`{}`),
+	}
+	want := []string{"choices", "content", "message", "content_block", "delta"}
+	for i := 0; i < 20; i++ {
+		got := e2eeSealedFieldsFor(frame)
+		if len(got) != len(want) {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+		for j := range want {
+			if got[j] != want[j] {
+				t.Fatalf("iteration %d: got %v, want %v", i, got, want)
+			}
+		}
+	}
+}
