@@ -289,3 +289,57 @@ func TestVerifyAssayVerdictSig(t *testing.T) {
 		})
 	}
 }
+
+// A final verdict must survive a later non-final one. Without this, a REJECT
+// could be laundered into a settled request: the check response's PENDING is
+// unsigned and unauthenticated, so REJECT -> PENDING parks the request, and on
+// a later cycle the verifier answers UNKNOWN (restart, or its in-memory store
+// evicted the entry) which downgrades PENDING -> UNVERIFIED -> settles.
+func TestResolveAssayVerdictsKeepsFinalVerdicts(t *testing.T) {
+	final := []string{
+		constant.AssayVerdictReject,
+		constant.AssayVerdictPass,
+		constant.AssayVerdictUnverified,
+		constant.AssayVerdictInvalidSig,
+	}
+	nonFinal := []string{
+		constant.AssayVerdictPending,
+		constant.AssayVerdictUnknown,
+	}
+
+	for _, was := range final {
+		for _, now := range nonFinal {
+			t.Run(was+"/"+now, func(t *testing.T) {
+				reqs := []model.Request{{RequestHash: "h", Verdict: was}}
+				results := map[string]assayVerdictResult{"h": {Verdict: now}}
+
+				changed := resolveAssayVerdicts(reqs, results, nil, false)
+
+				if len(changed) != 0 {
+					t.Errorf("%s was overwritten by %s: %v", was, now, changed)
+				}
+				if reqs[0].Verdict != was {
+					t.Errorf("verdict = %q, want %q", reqs[0].Verdict, was)
+				}
+			})
+		}
+	}
+}
+
+// The guard must not freeze a request that has not been decided yet: PENDING
+// still has to reach its final verdict.
+func TestResolveAssayVerdictsStillResolvesPending(t *testing.T) {
+	reqs := []model.Request{{RequestHash: "h", Verdict: constant.AssayVerdictPending}}
+	results := map[string]assayVerdictResult{
+		"h": {Verdict: constant.AssayVerdictReject},
+	}
+
+	changed := resolveAssayVerdicts(reqs, results, nil, false)
+
+	if reqs[0].Verdict != constant.AssayVerdictReject {
+		t.Errorf("verdict = %q, want REJECT", reqs[0].Verdict)
+	}
+	if changed["h"] != constant.AssayVerdictReject {
+		t.Errorf("changed = %v, want h -> REJECT", changed)
+	}
+}

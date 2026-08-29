@@ -144,6 +144,19 @@ func (c *Ctrl) fetchAssayVerdicts(ctx context.Context, hashes []string) (map[str
 	return parsed.Results, nil
 }
 
+// isFinalAssayVerdict reports whether a verdict is a decision rather than a
+// placeholder. PENDING (audit still running) and UNKNOWN (verifier has no
+// record) are placeholders; INVALID_SIG is final, recorded locally when strict
+// mode rejects a response's verdict.
+func isFinalAssayVerdict(v string) bool {
+	switch v {
+	case constant.AssayVerdictPass, constant.AssayVerdictReject,
+		constant.AssayVerdictUnverified, constant.AssayVerdictInvalidSig:
+		return true
+	}
+	return false
+}
+
 // resolveAssayVerdicts merges the verifier's settlement-check results into the
 // requests' verdicts (in place) and returns the {hash: verdict} changes to
 // persist. Pure over its inputs so the merge rules are unit-testable:
@@ -164,6 +177,16 @@ func resolveAssayVerdicts(reqs []model.Request, results map[string]assayVerdictR
 		req := &reqs[i]
 		r, ok := results[req.RequestHash]
 		if !ok || r.Verdict == "" {
+			continue
+		}
+
+		// A final verdict is a decision already made and authenticated; a
+		// non-final one carries no information that can undo it. Letting
+		// PENDING or UNKNOWN land on top of a REJECT laundered it into a
+		// payable request: REJECT -> PENDING (parked, unsigned, unauthenticated)
+		// -> on a later cycle the verifier answers UNKNOWN (restart, or its
+		// in-memory store evicted the entry) -> UNVERIFIED -> settles.
+		if isFinalAssayVerdict(req.Verdict) && !isFinalAssayVerdict(r.Verdict) {
 			continue
 		}
 
