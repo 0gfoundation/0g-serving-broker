@@ -1,6 +1,7 @@
 package event
 
 import (
+	"fmt"
 	"os"
 	"time"
 
@@ -69,10 +70,15 @@ func Main() {
 	switch os.Getenv("NETWORK") {
 	case "hardhat":
 		teeClientType = tee.Mock
-	case "gcp":
-		teeClientType = tee.GCP
-	case "alicloud":
-		teeClientType = tee.AliCloud
+	// gcp and alicloud selected TEE backends that have been REMOVED (see
+	// tee.ClientType). Rejected by name rather than left to the Phala default: a
+	// deployment still carrying one of these values asked for a backend that no
+	// longer exists, and silently running it on a different one is how a config
+	// mistake becomes an attestation nobody notices is wrong.
+	case "gcp", "alicloud":
+		panic(fmt.Sprintf(
+			"NETWORK=%s is no longer supported: the GCP and AliCloud TEE backends were removed because they could not bind a key to the enclave measurement. Use NETWORK=phala (or hardhat for local development).",
+			os.Getenv("NETWORK")))
 	default:
 		teeClientType = tee.Phala
 	}
