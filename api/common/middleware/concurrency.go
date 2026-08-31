@@ -66,7 +66,7 @@ func (cl *ConcurrencyLimiter) GetActive() int64 {
 // and periodically summarises every other admission gate. onReject may be nil.
 //
 // The callback runs with no lock held, so it may safely read the limiter
-// (GetActive, Cap) and a slow logger inside it cannot stall the Acquire/Release
+// (GetActive) and a slow logger inside it cannot stall the Acquire/Release
 // of in-flight traffic. It must NOT call Release: the rejected request holds no
 // slot, so releasing would consume an in-flight request's token and leave that
 // request's own deferred Release blocked on the semaphore forever.

@@ -785,7 +785,9 @@ func TestTrackMetricsFailureSource(t *testing.T) {
 		// A client-caused 4xx the handler flagged with ignoreError -> client.
 		{"client 4xx (flagged) -> client", http.StatusUnauthorized, "", "", true, FailureSourceClient, "Unauthorized"},
 		{"client rejection 4xx (flagged) -> client", http.StatusTooManyRequests, "", RejectionRateLimit, true, FailureSourceClient, "Too Many Requests"},
-		// concurrency is a 503: 5xx never derives to client even if flagged.
+		// Not the per-user cap's production shape — that returns 429 with
+		// ignoreError, so it lands in the client bucket. Kept as the table's
+		// unflagged-5xx case; the flagged-5xx one is the row below.
 		{"concurrency 503 -> broker", http.StatusServiceUnavailable, "", RejectionConcurrency, false, FailureSourceBroker, "Service Unavailable"},
 		// The global cap's actual production shape, which the case above does
 		// NOT cover: it sets ignoreError so the 503 is not counted as a service
