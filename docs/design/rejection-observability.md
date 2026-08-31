@@ -44,7 +44,8 @@ A single counter, labeled only by a **bounded** `reason`:
 broker_requests_rejected_total{reason="rate_limit"}
 broker_requests_rejected_total{reason="tpm_limit"}
 broker_requests_rejected_total{reason="ipm_limit"}
-broker_requests_rejected_total{reason="concurrency"}
+broker_requests_rejected_total{reason="concurrency"}        # per-user concurrency cap
+broker_requests_rejected_total{reason="global_concurrency"} # broker-wide maxGlobalConcurrent cap
 broker_requests_rejected_total{reason="model_mismatch"}
 broker_requests_rejected_total{reason="insufficient_balance"}
 broker_requests_rejected_total{reason="not_acknowledged"}

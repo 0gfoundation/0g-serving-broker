@@ -218,7 +218,18 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 	// Apply global concurrency limiting to all service types.
 	// This caps total in-flight requests to match backend GPU capacity,
 	// preventing queue buildup that degrades throughput.
-	p.serviceGroup.Use(middleware.ConcurrencyLimitMiddleware(p.concurrencyLimiter, logger.Warnf))
+	// The rejection recorder does all three things this gate needs — stamps the
+	// reason on the context, counts broker_requests_rejected_total, and emits a
+	// bounded periodic summary instead of one line per shed request (#542) — and
+	// is what every sibling admission gate already uses, so the global cap now
+	// appears on the same operator panel as the rest.
+	//
+	// The user address is empty: the cap aborts before ValidateSession resolves
+	// one, and record() treats "" as "count the total, track no per-user top".
+	p.serviceGroup.Use(middleware.ConcurrencyLimitMiddleware(p.concurrencyLimiter,
+		func(c *gin.Context) {
+			p.rejections.record(c, monitor.RejectionGlobalConcurrency, "")
+		}))
 
 	// Apply request size limit middleware (32MB)
 	p.serviceGroup.Use(middleware.RequestSizeLimitMiddleware(middleware.MaxRequestSize))

@@ -775,6 +775,13 @@ func TestTrackMetricsFailureSource(t *testing.T) {
 		{"client rejection 4xx (flagged) -> client", http.StatusTooManyRequests, "", RejectionRateLimit, true, FailureSourceClient, "Too Many Requests"},
 		// concurrency is a 503: 5xx never derives to client even if flagged.
 		{"concurrency 503 -> broker", http.StatusServiceUnavailable, "", RejectionConcurrency, false, FailureSourceBroker, "Service Unavailable"},
+		// The global cap's actual production shape, which the case above does
+		// NOT cover: it sets ignoreError so the 503 is not counted as a service
+		// error, and the "5xx never derives to client even if flagged" claim is
+		// only asserted here. Regressing the status guard in
+		// resolveFailureSource would silently move every capacity rejection into
+		// the client bucket, hiding broker saturation from the broker-fault alert.
+		{"global concurrency 503 (flagged) -> broker", http.StatusServiceUnavailable, "", RejectionGlobalConcurrency, true, FailureSourceBroker, "Service Unavailable"},
 		// upstream_error fallback stays broker even on a flagged 4xx.
 		{"upstream_error 4xx -> broker", http.StatusBadRequest, "", RejectionUpstreamError, true, FailureSourceBroker, "Bad Request"},
 		// Explicit overrides always win, regardless of ignoreError/status.

@@ -219,15 +219,9 @@ const (
 	RejectionUpstreamError   = "upstream_error"
 	RejectionModelExpired    = "model_expired"
 
-	// RejectionGlobalConcurrency is stamped by the global concurrency cap in
-	// common/middleware, which repeats the literal because common must not
-	// import this package; inference/internal/proxy's
-	// TestGlobalConcurrencyRejectionUsesMonitorLabels drives the real
-	// middleware and asserts the two have not drifted apart.
-	//
-	// Unlike its siblings it reaches only RecordFailure, via
-	// failureCodeFromGinContext: the cap aborts before the proxy's rejection
-	// recorder runs, so it never appears in RequestRejectedTotal.
+	// RejectionGlobalConcurrency is the global maxGlobalConcurrent cap, as
+	// distinct from RejectionConcurrency above, which is the PER-USER one. Both
+	// shed for capacity; only this one is broker-wide.
 	RejectionGlobalConcurrency = "global_concurrency"
 )
 
