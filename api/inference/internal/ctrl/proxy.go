@@ -868,8 +868,17 @@ func (c *Ctrl) handleServiceError(ctx *gin.Context, resp *http.Response) {
 	//
 	// URI rather than RequestURI: the path without the query string, which is where a
 	// caller's own credential would sit.
+	//
+	// model is the per-request label, not the service's registered model. A
+	// provider serves many models behind one service, and neither this line's
+	// request fields nor a vendor's error body names which one a failure
+	// belongs to — leaving an upstream incident attributable only by matching
+	// error text against each model's configured quota. metricModel is the
+	// same bounded value TrackMetrics labels with, so a log line and its
+	// broker_request_failures_total series name the same model.
 	if !strings.Contains(ctx.Request.RequestURI, "/api/event_logging/batch") {
-		c.logger.Errorf("Service returned error response: %s, Incoming request: method=%s, path=%s, RemoteAddr=%s,",
+		c.logger.Errorf("Service returned error response: model=%s, %s, Incoming request: method=%s, path=%s, RemoteAddr=%s,",
+			c.metricModel(ctx),
 			truncateForLog([]byte(c.redactUpstreamSecrets(decodedBody)), maxUpstreamErrorBodyLog),
 			ctx.Request.Method, ctx.Request.URL.Path, ctx.Request.RemoteAddr)
 	}
