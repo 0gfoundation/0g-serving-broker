@@ -347,14 +347,25 @@ func TestReceiveAdapterKey_OmittedTeeSignerAddressIsAccepted(t *testing.T) {
 	c.Request = httptest.NewRequest("POST", "/internal/v1/adapter-keys", bytes.NewReader(body))
 	c.Request.Header.Set("Content-Type", "application/json")
 
-	// Reaches the persistence step, which needs a ctrl this unit test has not wired
-	// up; the point is that validation did NOT reject it as a bad payload.
+	// Handler.ctrl is a concrete *ctrl.Ctrl, so this unit test cannot supply one and
+	// a payload that PASSES validation necessarily panics on the nil controller at
+	// the persistence step. That panic is therefore the evidence we want, and it is
+	// asserted rather than swallowed: a deferred bare recover() would run only at
+	// the end of the test function, after which the checks below never execute and
+	// the test passes vacuously.
 	h := &Handler{}
-	defer func() { _ = recover() }()
-	h.ReceiveAdapterKey(c)
+	reachedPersistence := func() (reached bool) {
+		defer func() { reached = recover() != nil }()
+		h.ReceiveAdapterKey(c)
+		return false
+	}()
 
 	if w.Code == http.StatusBadRequest {
-		t.Errorf("an omitted teeSignerAddress was rejected: %s", w.Body.String())
+		t.Fatalf("an omitted teeSignerAddress was rejected: %s", w.Body.String())
+	}
+	if !reachedPersistence {
+		t.Errorf("expected the request to pass validation and reach the controller; status = %d, body = %s",
+			w.Code, w.Body.String())
 	}
 }
 
