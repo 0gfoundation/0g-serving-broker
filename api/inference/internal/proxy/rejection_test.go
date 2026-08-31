@@ -40,6 +40,34 @@ func newTestAggregator(logger *captureLogger) *rejectionAggregator {
 	}
 }
 
+// A gate that rejects before a user address is resolved records "" — the global
+// concurrency cap aborts ahead of ValidateSession. The summary must still report
+// the total, and must not claim "across 0 user(s)", which reads as an aggregator
+// fault rather than as a gate that cannot attribute.
+func TestRejectionAggregator_FlushWithoutUserAttribution(t *testing.T) {
+	logger := &captureLogger{}
+	a := newTestAggregator(logger)
+
+	for i := 0; i < 7; i++ {
+		a.record(nil, monitor.RejectionGlobalConcurrency, "")
+	}
+	a.flush()
+
+	out := logger.all()
+	if len(logger.lines) != 1 {
+		t.Fatalf("expected 1 summary line, got %d: %q", len(logger.lines), out)
+	}
+	if !strings.Contains(out, monitor.RejectionGlobalConcurrency) {
+		t.Errorf("summary does not name the reason: %q", out)
+	}
+	if !strings.Contains(out, "7 in last") {
+		t.Errorf("summary lost the total: %q", out)
+	}
+	if strings.Contains(out, "user(s)") || strings.Contains(out, "top:") {
+		t.Errorf("summary still claims per-user attribution it does not have: %q", out)
+	}
+}
+
 func TestRejectionAggregator_FlushSummarizesPerReason(t *testing.T) {
 	logger := &captureLogger{}
 	a := newTestAggregator(logger)
