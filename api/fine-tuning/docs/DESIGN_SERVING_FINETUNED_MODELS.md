@@ -513,11 +513,17 @@ Fine-tuning broker (finalizer):
   2. Encrypt AES key with user's ECIES public key → EncryptedSecret (for user CLI download)
   3. Encrypt AES key with provider wallet's ECIES public key → providerEncKey (~81 bytes)
   4. HTTP POST to inference broker: POST /internal/v1/adapter-keys
-     { taskId, storageHash, providerEncKey }
+     { taskId, storageHash, providerEncKey, teeSignerAddress }
+     teeSignerAddress is this enclave's TEE signer — the inference broker verifies
+     the artifact's TEE tag signature against it before decrypting. It is optional
+     on the wire so a fine-tuning broker that predates the field does not have its
+     push rejected (which would strand a paid-for deliverable), but an adapter
+     whose key row has no signer will NOT deploy: the signature cannot be checked.
   5. Store in contract: addDeliverable(taskID, storageHash)  — pure 32 bytes, backward compatible
 
 Inference broker:
-  1. Receives HTTP POST → stores (taskId, storageHash, providerEncKey) in local adapter_keys table
+  1. Receives HTTP POST → stores (taskId, storageHash, providerEncKey, teeSignerAddress)
+     in local adapter_keys table
   2. Event watcher detects DeliverableAcknowledged → gets storageHash from contract (pure 32 bytes)
   3. Looks up providerEncKey from adapter_keys table by taskId
   4. Decrypt providerEncKey with provider wallet's ECIES private key → AES key

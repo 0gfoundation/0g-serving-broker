@@ -115,9 +115,12 @@ func (d *DB) CreateAdapterKey(key *model.AdapterKey) error {
 	// zero values, so it would apply the new storageHash and providerEncKey while
 	// silently keeping the old signer.
 	//
-	// storageHash is keccak of the ENCRYPTED file, so it changes whenever the
-	// artifact is re-encrypted — and re-encryption changes the chunk-tag stream that
-	// the signature covers. That makes it the right discriminator:
+	// storageHash identifies the uploaded encrypted artifact: normally 0G Storage's
+	// root hash, or keccak of the encrypted file when the upload failed and the
+	// finalizer fell back to the local copy (finalizer.go:112-118). Either way it is
+	// derived from the encrypted bytes, so it changes whenever the artifact is
+	// re-encrypted — and re-encryption changes the chunk-tag stream the signature
+	// covers. That is what makes it the right discriminator:
 	//
 	//   - same storageHash, no signer supplied → the stored signer still describes
 	//     these exact bytes, so preserve it. This is the version-skew retry case; a

@@ -347,12 +347,18 @@ func TestReceiveAdapterKey_OmittedTeeSignerAddressIsAccepted(t *testing.T) {
 	c.Request = httptest.NewRequest("POST", "/internal/v1/adapter-keys", bytes.NewReader(body))
 	c.Request.Header.Set("Content-Type", "application/json")
 
-	// Handler.ctrl is a concrete *ctrl.Ctrl, so this unit test cannot supply one and
-	// a payload that PASSES validation necessarily panics on the nil controller at
-	// the persistence step. That panic is therefore the evidence we want, and it is
-	// asserted rather than swallowed: a deferred bare recover() would run only at
-	// the end of the test function, after which the checks below never execute and
-	// the test passes vacuously.
+	// Handler.ctrl and Handler.logger are concrete types this unit test cannot
+	// supply, so a payload that PASSES validation necessarily panics once it is past
+	// the checks — on the nil logger in the signer-less Warn, before it would reach
+	// the nil controller. Either way the panic means validation accepted the
+	// payload, which is what is being pinned, and it is asserted rather than
+	// swallowed: a deferred bare recover() would run only when the test function
+	// returns, after which the checks below never execute and the test passes
+	// vacuously.
+	//
+	// Because the panic site is an implementation detail, the 400 check below is the
+	// load-bearing assertion; reachedPersistence only guards against the handler
+	// silently returning success without doing anything.
 	h := &Handler{}
 	reachedPersistence := func() (reached bool) {
 		defer func() { reached = recover() != nil }()

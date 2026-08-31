@@ -772,3 +772,68 @@ func TestDownloadFromStorage_RefusesUnusableTeeSigner(t *testing.T) {
 		})
 	}
 }
+
+// A refused adapter is left in Failed, and downloadFromStorage has removed its
+// files — so the remediation the refusal names is only real if a Failed adapter
+// can re-enter the DOWNLOAD path, not just the deploy step. UserDeployAdapter used
+// to send Failed straight to deployToVLLM, which could never succeed against a
+// removed directory, making every refusal terminal and recoverable only by hand.
+func TestUserDeployAdapter_FailedAdapterReEntersDownload(t *testing.T) {
+	database := setupTestDB(t)
+
+	const taskID = "task-failed-recovers"
+	const adapterName = "ft-failed-recovers"
+	// No signer: the first attempt is refused, exactly as an upgraded broker would
+	// refuse a key row that predates the column.
+	if err := database.CreateAdapterKey(&model.AdapterKey{
+		TaskID:         taskID,
+		StorageHash:    "0x9999999999999999999999999999999999999999999999999999999999999999",
+		ProviderEncKey: "0xabcdef",
+	}); err != nil {
+		t.Fatalf("seed adapter key: %v", err)
+	}
+
+	m := &Manager{
+		adapters:          make(map[string]*AdapterInfo),
+		storageDownloader: &StorageDownloader{logger: getTestLogger()},
+		db:                database,
+		logger:            getTestLogger(),
+		ctx:               context.Background(),
+	}
+	// A path that does not exist, i.e. the state downloadFromStorage leaves behind.
+	m.adapters[adapterName] = &AdapterInfo{
+		TaskID:      taskID,
+		AdapterName: adapterName,
+		AdapterPath: filepath.Join(t.TempDir(), "not-downloaded"),
+		State:       model.AdapterStateFailed,
+	}
+
+	if err := m.UserDeployAdapter(context.Background(), adapterName); err != nil {
+		t.Fatalf("UserDeployAdapter on a Failed adapter: %v", err)
+	}
+
+	// The worker runs in a goroutine. UserDeployAdapter set the state to Loading
+	// synchronously, so wait for it to settle back to Failed: the key still has no
+	// signer, so the re-download is refused again.
+	//
+	// That it settles at all is the discriminator. sllmClient is nil here, so if the
+	// state machine had gone straight to deployToVLLM — what it did before this
+	// change — the goroutine would have panicked on the nil client and taken the
+	// test binary with it. Reaching Failed cleanly means downloadFromStorage ran and
+	// refused first, i.e. the download path was re-entered.
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		if got := m.GetAdapter(adapterName); got != nil && got.State == model.AdapterStateFailed {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	got := m.GetAdapter(adapterName)
+	if got == nil {
+		t.Fatal("adapter vanished")
+	}
+	if got.State != model.AdapterStateFailed {
+		t.Errorf("state = %s, want failed after a refused re-download", got.State)
+	}
+}
