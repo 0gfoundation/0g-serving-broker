@@ -29,13 +29,16 @@ const (
 
 	// absentAccountTTL is how long an absent account is remembered.
 	// Deliberately far shorter than accountCacheTTL: it delays a caller who has
-	// just funded their account by at most this long, while still collapsing a
-	// flood from a never-funded address into one chain call per interval rather
-	// than one per request. Nothing invalidates this entry on deposit.
+	// just funded their account by at most this long, while still reducing a
+	// never-funded address's steady-state cost from one chain call per request to
+	// one per interval. There is no single-flight, so a CONCURRENT burst from one
+	// such address still issues one call each — they all miss the cache before
+	// any of them writes it. Nothing invalidates this entry on deposit.
 	absentAccountTTL = 30 * time.Second
 
-	// absentAccountCleanupInterval is the cache's janitor period, deliberately
-	// NOT derived from accountCacheTTL.
+	// accountCacheCleanupInterval is the janitor period for the WHOLE cache —
+	// positive 10-minute entries included — deliberately not derived from
+	// accountCacheTTL.
 	//
 	// go-cache's Get reports an expired item as absent but does not delete it,
 	// so memory is reclaimed only by the janitor. Tying the janitor to the
@@ -45,7 +48,7 @@ const (
 	// runs ahead of it), so an unauthenticated caller cycling distinct addresses
 	// controls how many get written; each one should actually be gone when its
 	// TTL says it is.
-	absentAccountCleanupInterval = time.Minute
+	accountCacheCleanupInterval = time.Minute
 )
 
 // contractAccount returns the user's on-chain account via contractAccountCache,

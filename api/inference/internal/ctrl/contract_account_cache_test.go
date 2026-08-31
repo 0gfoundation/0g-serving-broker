@@ -21,8 +21,10 @@ const testAddr = "0x89fe68881A6CB850B42bd6Dcc0c255B9d8588e9a"
 // c.db are left nil deliberately: every case below must be answered from the
 // cache alone, so reaching the chain or the database would panic — surviving
 // the call is part of the assertion.
+// Constructed exactly as production does in ctrl.go, so the janitor period is
+// not silently a different number here than in the code under test.
 func newCacheOnlyCtrl() *Ctrl {
-	return &Ctrl{contractAccountCache: cache.New(accountCacheTTL, 2*accountCacheTTL)}
+	return &Ctrl{contractAccountCache: cache.New(accountCacheTTL, accountCacheCleanupInterval)}
 }
 
 func testGinCtx() *gin.Context {
