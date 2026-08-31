@@ -303,9 +303,11 @@ func (m *Manager) downloadAdapter(ctx context.Context, info *AdapterInfo) {
 // The download step is what makes a Failed adapter recoverable, and that matters
 // because of the TEE-signer refusal in downloadFromStorage: an adapter that
 // worked yesterday can be offloaded, refused on restore because its key row
-// predates the teeSignerAddress column, and left Failed. downloadFromStorage
-// removes the adapter directory on failure, so deployToVLLM alone could never
-// succeed afterwards, and no other path re-enters the download —
+// predates the teeSignerAddress column, and left Failed. Every path that marks an
+// adapter Failed after a download attempt also removes its directory (here,
+// downloadAdapter and RestoreAdapter), so a Failed adapter has no files and
+// deployToVLLM alone could never succeed afterwards — and no other path
+// re-enters the download —
 // redeployExistingAdapters skips Failed, and ctrl/lora.go only restores
 // Offloaded/Archived. Without this the remediation the refusal names would be a
 // dead end and only manual DB surgery could recover the adapter.
@@ -443,7 +445,7 @@ func (m *Manager) downloadFromStorage(ctx context.Context, info *AdapterInfo) er
 			"adapter key for task %s has no usable TEE signer address (got %q), so the artifact's TEE tag signature cannot be verified and the adapter will not be deployed. "+
 				"To fix: POST to the inference broker's /internal/v1/adapter-keys with this task's taskId, its existing storageHash and providerEncKey, and teeSignerAddress set to the address of the enclave that PRODUCED this adapter "+
 				"(the fine-tuning broker's TEE signer — stable across restarts, so its current address is correct unless the enclave image changed since this adapter was built). "+
-				"The endpoint upserts, so re-pushing an existing task is safe. Then POST to the broker's /lora/adapters/deploy for this adapter to retry — a refused adapter is left in the failed state, and that call is what re-enters the download",
+				"The endpoint upserts, so re-pushing an existing task is safe. That alone does not redeploy: a refused adapter stays in the failed state, and the only path back into the download is POST /v1/lora/adapters/deploy — which is session-authenticated and owner-gated (handler/lora.go ValidateSession + IsModelOwner), so it has to be issued by the adapter's OWNING USER, not by the provider operator who completed the key",
 			info.TaskID, adapterKey.TeeSignerAddress)
 	}
 
@@ -499,6 +501,13 @@ func (m *Manager) RestoreAdapter(adapterName string) error {
 		if _, err := os.Stat(infoCopy.AdapterPath); os.IsNotExist(err) {
 			if dlErr := m.downloadFromStorage(m.ctx, &infoCopy); dlErr != nil {
 				m.logger.Errorf("restore: failed to download adapter %s from 0G Storage: %v", infoCopy.AdapterName, dlErr)
+				// Remove whatever landed before the failure, as downloadAdapter and
+				// redownloadAndDeploy do. Without it a partial unzip leaves the
+				// directory in place, and the recovery path — which uses os.Stat to
+				// decide whether a download is needed — would skip the re-download and
+				// hand deployToVLLM a half-extracted adapter, failing forever. The
+				// invariant the recovery path depends on is: Failed implies no files.
+				os.RemoveAll(infoCopy.AdapterPath)
 				m.setAdapterState(infoCopy.AdapterName, model.AdapterStateFailed)
 				return
 			}

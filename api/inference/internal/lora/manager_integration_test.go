@@ -765,9 +765,14 @@ func TestDownloadFromStorage_RefusesUnusableTeeSigner(t *testing.T) {
 			if !contains(err.Error(), "no usable TEE signer address") {
 				t.Errorf("error = %q, want the signer refusal", err.Error())
 			}
-			// The remediation must be actionable, not "wait for the fine-tuning broker".
+			// The remediation must be actionable, not "wait for the fine-tuning broker",
+			// and both halves must name real routes: the push endpoint the operator can
+			// call, and the deploy endpoint that actually re-enters the download.
 			if !contains(err.Error(), "/internal/v1/adapter-keys") {
 				t.Errorf("error = %q, want it to name the push endpoint an operator can call", err.Error())
+			}
+			if !contains(err.Error(), "/v1/lora/adapters/deploy") {
+				t.Errorf("error = %q, want the deploy route with its /v1 prefix — the unprefixed path 404s", err.Error())
 			}
 		})
 	}
