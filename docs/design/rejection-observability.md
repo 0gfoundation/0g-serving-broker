@@ -13,11 +13,15 @@ A request can be rejected at several points before it ever reaches the upstream 
 ```
 POST /chat/completions
   │
+  ├─ global concurrency cap        → reject (global_concurrency)
+  │     runs FIRST, as middleware, before the session is even validated,
+  │     so it resolves no user address and attributes to none
   ├─ per-user RPM limit            → reject (rate_limit)
   ├─ per-user TPM limit            → reject (tpm_limit)
   ├─ per-user IPM limit            → reject (ipm_limit)
   ├─ per-user concurrency limit    → reject (concurrency)
   ├─ model-mismatch block          → reject (model_mismatch)
+  ├─ model past its retirement date → reject (model_expired)
   ├─ billing / balance gate ───────┐
   │     ├─ account not on contract → reject (account_not_exist)
   │     ├─ provider not acknowledged → reject (not_acknowledged)

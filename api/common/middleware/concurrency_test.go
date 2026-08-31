@@ -20,19 +20,28 @@ func TestConcurrencyLimitMiddlewareInvokesOnRejectForTheRejectedRequest(t *testi
 
 	limiter := NewConcurrencyLimiter(1)
 	release := make(chan struct{})
-	var rejectedCtxStatus int
 	var calls int
+	var seenIgnore interface{}
+	var activeInCallback int64 = -1
 
 	r := gin.New()
+	// Stands in for TrackMetrics, which wraps this gate and reads the context
+	// keys after the chain unwinds — the same way the real metric labels are
+	// derived.
+	r.Use(func(c *gin.Context) {
+		c.Next()
+		if c.Writer.Status() == http.StatusServiceUnavailable {
+			seenIgnore, _ = c.Get("ignoreError")
+		}
+	})
 	r.Use(ConcurrencyLimitMiddleware(limiter, func(c *gin.Context) {
 		calls++
-		// Reads the limiter from inside the callback: it must run with no lock
-		// held, or a callback like this one would deadlock. Also proves the
-		// context handed over is the one being rejected.
-		if limiter.GetActive() == 1 {
-			rejectedCtxStatus = http.StatusServiceUnavailable
-		}
-		c.Set("markedByOnReject", true)
+		// Read the limiter from inside the callback. This documents that the
+		// callback is invoked outside any limiter critical section; it is
+		// recorded rather than asserted as a deadlock probe, because the
+		// rejection path never takes cl.mu in the first place, so no change
+		// confined to this file could make it hang here.
+		activeInCallback = limiter.GetActive()
 	}))
 	r.GET("/x", func(c *gin.Context) {
 		<-release
@@ -59,8 +68,13 @@ func TestConcurrencyLimitMiddlewareInvokesOnRejectForTheRejectedRequest(t *testi
 	if calls != 1 {
 		t.Errorf("onReject calls = %d, want 1 (only the rejected request)", calls)
 	}
-	if rejectedCtxStatus != http.StatusServiceUnavailable {
-		t.Error("onReject could not read the limiter — the callback is running under a held lock")
+	if activeInCallback != 1 {
+		t.Errorf("limiter.GetActive() inside onReject = %d, want 1", activeInCallback)
+	}
+	// The gate must mark the 503 as expected before handing over, or the
+	// capacity shed is counted as a broker service error.
+	if seenIgnore != true {
+		t.Errorf("ignoreError = %v, want true", seenIgnore)
 	}
 	if w.Body.Len() == 0 {
 		t.Error("no 503 body written")
