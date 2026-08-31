@@ -218,6 +218,17 @@ const (
 	RejectionAccountNotExist = "account_not_exist"
 	RejectionUpstreamError   = "upstream_error"
 	RejectionModelExpired    = "model_expired"
+
+	// RejectionGlobalConcurrency is stamped by the global concurrency cap in
+	// common/middleware, which repeats the literal because common must not
+	// import this package; inference/internal/proxy's
+	// TestGlobalConcurrencyRejectionUsesMonitorLabels drives the real
+	// middleware and asserts the two have not drifted apart.
+	//
+	// Unlike its siblings it reaches only RecordFailure, via
+	// failureCodeFromGinContext: the cap aborts before the proxy's rejection
+	// recorder runs, so it never appears in RequestRejectedTotal.
+	RejectionGlobalConcurrency = "global_concurrency"
 )
 
 // CtxKeyRejectionReason is the gin context key under which a request handler

@@ -218,7 +218,7 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 	// Apply global concurrency limiting to all service types.
 	// This caps total in-flight requests to match backend GPU capacity,
 	// preventing queue buildup that degrades throughput.
-	p.serviceGroup.Use(middleware.ConcurrencyLimitMiddleware(p.concurrencyLimiter))
+	p.serviceGroup.Use(middleware.ConcurrencyLimitMiddleware(p.concurrencyLimiter, logger.Warnf))
 
 	// Apply request size limit middleware (32MB)
 	p.serviceGroup.Use(middleware.RequestSizeLimitMiddleware(middleware.MaxRequestSize))
