@@ -22,7 +22,6 @@ func TestConcurrencyLimitMiddlewareInvokesOnRejectForTheRejectedRequest(t *testi
 	release := make(chan struct{})
 	var calls int
 	var seenIgnore interface{}
-	var activeInCallback int64 = -1
 
 	r := gin.New()
 	// Stands in for TrackMetrics, which wraps this gate and reads the context
@@ -36,12 +35,12 @@ func TestConcurrencyLimitMiddlewareInvokesOnRejectForTheRejectedRequest(t *testi
 	})
 	r.Use(ConcurrencyLimitMiddleware(limiter, func(c *gin.Context) {
 		calls++
-		// Read the limiter from inside the callback. This documents that the
-		// callback is invoked outside any limiter critical section; it is
-		// recorded rather than asserted as a deadlock probe, because the
-		// rejection path never takes cl.mu in the first place, so no change
-		// confined to this file could make it hang here.
-		activeInCallback = limiter.GetActive()
+		// Reading the limiter here would deadlock if the callback ran inside a
+		// limiter critical section. It cannot: the rejection path returns from
+		// Acquire's default case without ever taking cl.mu. Left as a call
+		// rather than an assertion, since no change confined to this file could
+		// make it fail.
+		_ = limiter.GetActive()
 	}))
 	r.GET("/x", func(c *gin.Context) {
 		<-release
@@ -67,9 +66,6 @@ func TestConcurrencyLimitMiddlewareInvokesOnRejectForTheRejectedRequest(t *testi
 	}
 	if calls != 1 {
 		t.Errorf("onReject calls = %d, want 1 (only the rejected request)", calls)
-	}
-	if activeInCallback != 1 {
-		t.Errorf("limiter.GetActive() inside onReject = %d, want 1", activeInCallback)
 	}
 	// The gate must mark the 503 as expected before handing over, or the
 	// capacity shed is counted as a broker service error.

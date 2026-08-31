@@ -68,6 +68,10 @@ func (cl *ConcurrencyLimiter) GetActive() int64 {
 // The callback runs with no lock held, so it may safely call back into the
 // limiter (GetActive and friends) and a slow logger inside it cannot stall the
 // Acquire/Release of in-flight traffic.
+//
+// onReject MUST NOT panic: the inference engine runs without gin.Recovery(), so
+// a panic here takes the process down on the shed path — during a saturation
+// incident, which is the worst possible moment.
 func ConcurrencyLimitMiddleware(limiter *ConcurrencyLimiter, onReject func(*gin.Context)) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if !limiter.Acquire() {
