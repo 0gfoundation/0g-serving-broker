@@ -2,6 +2,7 @@ package db
 
 import (
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/0glabs/0g-serving-broker/inference/model"
@@ -146,7 +147,13 @@ func (d *DB) CreateAdapterKey(key *model.AdapterKey) error {
 		}
 
 		signer := key.TeeSignerAddress
-		if signer == "" && existing.StorageHash == key.StorageHash {
+		// EqualFold, not ==: these are hex strings, and the manual remediation the
+		// refusal advertises is an operator hand-assembling this payload. Pasting the
+		// same hash in a different case would otherwise be read as "the artifact
+		// changed", clear a perfectly good signer, and take a working adapter out of
+		// service. Our own sender is always hexutil.Encode (lower-case), so this only
+		// ever bites the hand-written path.
+		if signer == "" && strings.EqualFold(existing.StorageHash, key.StorageHash) {
 			signer = existing.TeeSignerAddress
 		}
 
