@@ -720,3 +720,55 @@ func TestConcurrentGetAndSet(t *testing.T) {
 
 	wg.Wait()
 }
+
+// The TEE signer guard is what makes the whole verification fail closed, so its
+// three refusal branches are pinned: absent, explicitly zero, and malformed. Each
+// must be rejected BEFORE any download or decrypt, and the message must name the
+// action an operator can actually take — pushAdapterKey has one caller inside
+// Finalizer.Execute, so an already-delivered task is never re-pushed on its own.
+func TestDownloadFromStorage_RefusesUnusableTeeSigner(t *testing.T) {
+	cases := []struct {
+		name   string
+		signer string
+	}{
+		{"absent", ""},
+		{"explicit zero address", "0x0000000000000000000000000000000000000000"},
+		{"malformed", "not-an-address"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			database := setupTestDB(t)
+
+			taskID := "task-signer-" + tc.name
+			if err := database.CreateAdapterKey(&model.AdapterKey{
+				TaskID:           taskID,
+				StorageHash:      "0x8888888888888888888888888888888888888888888888888888888888888888",
+				ProviderEncKey:   "0xabcdef",
+				TeeSignerAddress: tc.signer,
+			}); err != nil {
+				t.Fatalf("seed adapter key: %v", err)
+			}
+
+			m := &Manager{
+				adapters:          make(map[string]*AdapterInfo),
+				storageDownloader: &StorageDownloader{logger: getTestLogger()},
+				db:                database,
+				logger:            getTestLogger(),
+			}
+			info := &AdapterInfo{TaskID: taskID, AdapterName: "ft-signer-" + tc.name}
+
+			err := m.downloadFromStorage(context.Background(), info)
+			if err == nil {
+				t.Fatal("expected a refusal for an unusable TEE signer address")
+			}
+			if !contains(err.Error(), "no usable TEE signer address") {
+				t.Errorf("error = %q, want the signer refusal", err.Error())
+			}
+			// The remediation must be actionable, not "wait for the fine-tuning broker".
+			if !contains(err.Error(), "/internal/v1/adapter-keys") {
+				t.Errorf("error = %q, want it to name the push endpoint an operator can call", err.Error())
+			}
+		})
+	}
+}
