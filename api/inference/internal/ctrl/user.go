@@ -5,6 +5,8 @@ import (
 	"math/big"
 	"time"
 
+	"github.com/patrickmn/go-cache"
+
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/inference/contract"
 	providercontract "github.com/0glabs/0g-serving-broker/inference/internal/contract"
@@ -13,6 +15,67 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
 )
+
+// accountAbsent marks "no account exists on the contract for this address" in
+// contractAccountCache. It is a distinct type rather than a nil
+// *contract.Account so that a cache hit is unambiguous to the type switch in
+// contractAccount.
+type accountAbsent struct{}
+
+const (
+	// accountCacheTTL is how long a FOUND contract account is cached. It is the
+	// default expiration of contractAccountCache.
+	accountCacheTTL = 10 * time.Minute
+
+	// absentAccountTTL is how long an absent account is remembered.
+	// Deliberately far shorter than accountCacheTTL: it delays a caller who has
+	// just funded their account by at most this long, while still collapsing a
+	// flood from a never-funded address into one chain call per interval rather
+	// than one per request. Nothing invalidates this entry on deposit.
+	absentAccountTTL = 30 * time.Second
+)
+
+// contractAccount returns the user's on-chain account via contractAccountCache,
+// caching BOTH outcomes — the account, and its documented absence.
+//
+// Every reader of the contract account goes through here. Caching only the
+// success path meant a single never-funded address re-issued an eth_call on
+// EVERY request, indefinitely: it amplified RPC load, and because the call is
+// network I/O made while the request holds a global concurrency slot, it
+// stretched the window in which such a caller crowds out paying traffic.
+func (c *Ctrl) contractAccount(ctx *gin.Context, userAddress common.Address) (*contract.Account, error) {
+	key := userAddress.Hex()
+	if cached, found := c.contractAccountCache.Get(key); found {
+		switch v := cached.(type) {
+		case *contract.Account:
+			if v != nil {
+				return v, nil
+			}
+		case accountAbsent:
+			return nil, providercontract.ErrAccountNotExists
+		}
+	}
+
+	fetched, err := c.contract.GetUserAccount(ctx, userAddress)
+	if err != nil {
+		// Remember the absence only when the contract actually said so. The
+		// keyword fallback in WrapContractError classifies any error text
+		// containing "account", "not" and "exist" as an absence, so a transport
+		// fault can arrive here wearing the same sentinel. Acting on that once
+		// costs one spurious rejection; remembering it rejects a FUNDED user for
+		// the whole TTL while inflating
+		// broker_requests_rejected_total{reason="account_not_exist"}, so the
+		// incident reads as a genuine unfunded-user spike.
+		if errors.Is(err, providercontract.ErrAccountNotExists) &&
+			!errors.Is(err, providercontract.ErrAccountNotExistsInferred) {
+			c.contractAccountCache.Set(key, accountAbsent{}, absentAccountTTL)
+		}
+		return nil, err
+	}
+
+	c.contractAccountCache.Set(key, &fetched, cache.DefaultExpiration)
+	return &fetched, nil
+}
 
 func (c *Ctrl) GetOrCreateAccount(ctx *gin.Context, userAddress string) (model.User, error) {
 	c.mu.Lock()
@@ -26,7 +89,10 @@ func (c *Ctrl) GetOrCreateAccount(ctx *gin.Context, userAddress string) (model.U
 	}
 
 	// Clear cache when creating new account to ensure fresh data
-	c.contractAccountCache.Delete(userAddress)
+	// Normalised: every write to this cache is keyed on the checksummed form,
+	// and userAddress arrives verbatim from the client, so a lower-case address
+	// would otherwise delete nothing.
+	c.contractAccountCache.Delete(common.HexToAddress(userAddress).Hex())
 
 	contractAccount, err := c.contract.GetUserAccount(ctx, common.HexToAddress(userAddress))
 	if err != nil {
@@ -143,7 +209,7 @@ func (c *Ctrl) SyncUserAccountsByAddresses(ctx context.Context, userAddresses []
 	accounts := make([]model.User, 0, len(userAddresses))
 	for _, addr := range userAddresses {
 		// Clear cache for this account
-		c.contractAccountCache.Delete(addr)
+		c.contractAccountCache.Delete(common.HexToAddress(addr).Hex())
 
 		account, err := c.contract.GetUserAccount(ctx, common.HexToAddress(addr))
 		if err != nil {

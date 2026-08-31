@@ -325,7 +325,7 @@ func New(
 		// Initialize session cache with 5 minute expiration and cleanup every 10 minutes
 		sessionCache: cache.New(5*time.Minute, 10*time.Minute),
 		// Initialize contract data caches with appropriate expiration times
-		contractAccountCache: cache.New(10*time.Minute, 20*time.Minute), // Cache user accounts for 10 minutes
+		contractAccountCache: cache.New(accountCacheTTL, 2*accountCacheTTL),
 		serviceCache:         cache.New(15*time.Minute, 20*time.Minute), // Cache service data for 15 minutes
 		logPath:              logPath,
 		brokerLogDir:         brokerLogDir,

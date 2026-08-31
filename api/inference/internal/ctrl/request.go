@@ -17,7 +17,6 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/util"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
-	"github.com/0glabs/0g-serving-broker/inference/contract"
 	providercontract "github.com/0glabs/0g-serving-broker/inference/internal/contract"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
@@ -268,39 +267,23 @@ func (c *Ctrl) ValidateProviderAuth(ctx *gin.Context) error {
 func (c *Ctrl) ValidateRequestWithEstimatedFee(ctx *gin.Context, req model.Request, estimatedFee string) error {
 	// Try to get contract account from cache first
 	userAddress := common.HexToAddress(req.UserAddress)
-	accountCacheKey := userAddress.Hex()
 
-	var contractAccount *contract.Account
-	if cachedAccount, found := c.contractAccountCache.Get(accountCacheKey); found {
-		// Use cached account data
-		if acc, ok := cachedAccount.(*contract.Account); ok {
-			contractAccount = acc
+	contractAccount, err := c.contractAccount(ctx, userAddress)
+	if err != nil {
+		if errors.Is(err, providercontract.ErrAccountNotExists) {
+			// A not-yet-funded user (no account on the contract) is the
+			// dominant, client-caused case: suppress it and classify the
+			// rejection so it lands in the client bucket, not the broker alert.
+			ctx.Set("ignoreError", true)
+			ctx.Set(monitor.CtxKeyRejectionReason, monitor.RejectionAccountNotExist)
+			return errors.Wrap(err, "get account from contract, account not exist")
 		}
-	}
-
-	// If not in cache or invalid, fetch from contract
-	if contractAccount == nil {
-		fetchedAccount, err := c.contract.GetUserAccount(ctx, userAddress)
-		if err != nil {
-			if errors.Is(err, providercontract.ErrAccountNotExists) {
-				// A not-yet-funded user (no account on the contract) is the
-				// dominant, client-caused case: suppress it and classify the
-				// rejection so it lands in the client bucket, not the broker alert.
-				ctx.Set("ignoreError", true)
-				ctx.Set(monitor.CtxKeyRejectionReason, monitor.RejectionAccountNotExist)
-				return errors.Wrap(err, "get account from contract, account not exist")
-			}
-			// Otherwise this is an RPC/chain transport failure — a broker-side
-			// infra fault. Leave it unflagged (no ignoreError, no rejection code)
-			// so the unified failure metric attributes it to source=broker and the
-			// broker-fault alert fires; GetUserAccount already logged the cause at
-			// error level (see docs/design/rejection-observability.md).
-			return errors.Wrap(err, "get account from contract")
-		}
-		contractAccount = &fetchedAccount
-
-		// Cache the account data
-		c.contractAccountCache.Set(accountCacheKey, contractAccount, cache.DefaultExpiration)
+		// Otherwise this is an RPC/chain transport failure — a broker-side
+		// infra fault. Leave it unflagged (no ignoreError, no rejection code)
+		// so the unified failure metric attributes it to source=broker and the
+		// broker-fault alert fires; GetUserAccount already logged the cause at
+		// error level (see docs/design/rejection-observability.md).
+		return errors.Wrap(err, "get account from contract")
 	}
 
 	if contractAccount.Acknowledged == false {
@@ -480,25 +463,13 @@ func (c *Ctrl) GetUnsettledFee(userAddress string) (*big.Int, error) {
 func (c *Ctrl) validateTokenRevocation(ctx *gin.Context, token SessionToken) error {
 	// Get account from contract cache
 	userAddress := common.HexToAddress(token.Address)
-	accountCacheKey := userAddress.Hex()
 
-	var contractAccount *contract.Account
-	if cachedAccount, found := c.contractAccountCache.Get(accountCacheKey); found {
-		if acc, ok := cachedAccount.(*contract.Account); ok {
-			contractAccount = acc
-		}
-	}
-
-	// If not in cache, fetch from contract
-	if contractAccount == nil {
-		fetchedAccount, err := c.contract.GetUserAccount(ctx, userAddress)
-		if err != nil {
-			// If account doesn't exist, generation and bitmap are 0, which is valid
-			// for a new token with generation=0
-			return nil
-		}
-		contractAccount = &fetchedAccount
-		c.contractAccountCache.Set(accountCacheKey, contractAccount, cache.DefaultExpiration)
+	contractAccount, err := c.contractAccount(ctx, userAddress)
+	if err != nil {
+		// If account doesn't exist, generation and bitmap are 0, which is valid
+		// for a new token with generation=0. A transport failure reaches here
+		// too and is reported by the balance gate later in the same request.
+		return nil
 	}
 
 	// Check generation (batch revocation) - applies to ALL token types

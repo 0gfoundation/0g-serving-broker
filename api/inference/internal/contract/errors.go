@@ -16,13 +16,23 @@ import (
 // Common contract error types for better error handling
 var (
 	// InferenceAccount.sol errors
-	ErrAccountNotExists    = errors.New("account not exists")
-	ErrAccountExists       = errors.New("account already exists")
-	ErrInsufficientBalance = errors.New("insufficient balance")
-	ErrRefundInvalid       = errors.New("refund invalid")
-	ErrRefundProcessed     = errors.New("refund processed")
-	ErrRefundLocked        = errors.New("refund locked")
-	ErrTooManyRefunds      = errors.New("too many refunds")
+	ErrAccountNotExists = errors.New("account not exists")
+	// ErrAccountNotExistsInferred additionally marks an absence verdict reached
+	// by WrapContractError's keyword fallback rather than by decoding an ABI
+	// error. It is joined ALONGSIDE ErrAccountNotExists, so callers that merely
+	// branch on absence need not know about it.
+	//
+	// It exists for callers that PERSIST the verdict. The fallback matches any
+	// error text containing "account", "not" and "exist", so a transport fault
+	// — a lagging or pruned node, a reorg — can be classified as an absence.
+	// Acting on that once is harmless; remembering it is not.
+	ErrAccountNotExistsInferred = errors.New("account not exists (inferred from error text, not decoded)")
+	ErrAccountExists            = errors.New("account already exists")
+	ErrInsufficientBalance      = errors.New("insufficient balance")
+	ErrRefundInvalid            = errors.New("refund invalid")
+	ErrRefundProcessed          = errors.New("refund processed")
+	ErrRefundLocked             = errors.New("refund locked")
+	ErrTooManyRefunds           = errors.New("too many refunds")
 
 	// InferenceService.sol errors
 	ErrServiceNotExist       = errors.New("service not exist")
@@ -32,13 +42,13 @@ var (
 	ErrInvalidTEESignature = errors.New("invalid TEE signature")
 
 	// LedgerManager.sol errors
-	ErrLedgerNotExists        = errors.New("ledger not exists")
-	ErrLedgerExists           = errors.New("ledger already exists")
-	ErrTooManyProviders       = errors.New("too many providers")
-	ErrInvalidServiceType     = errors.New("invalid service type")
-	ErrServiceNotRegistered   = errors.New("service not registered")
-	ErrServiceNameExists      = errors.New("service name already exists")
-	ErrInvalidServiceAddress  = errors.New("invalid service address")
+	ErrLedgerNotExists       = errors.New("ledger not exists")
+	ErrLedgerExists          = errors.New("ledger already exists")
+	ErrTooManyProviders      = errors.New("too many providers")
+	ErrInvalidServiceType    = errors.New("invalid service type")
+	ErrServiceNotRegistered  = errors.New("service not registered")
+	ErrServiceNameExists     = errors.New("service name already exists")
+	ErrInvalidServiceAddress = errors.New("invalid service address")
 )
 
 // contractABI is the parsed ABI of the InferenceServing contract
@@ -96,7 +106,7 @@ func WrapContractError(err error) error {
 	errMsg := strings.ToLower(err.Error())
 	if strings.Contains(errMsg, "accountnotexists") ||
 		(strings.Contains(errMsg, "account") && strings.Contains(errMsg, "not") && strings.Contains(errMsg, "exist")) {
-		return errors.Join(ErrAccountNotExists, err)
+		return errors.Join(ErrAccountNotExists, ErrAccountNotExistsInferred, err)
 	}
 
 	if strings.Contains(errMsg, "servicenotexist") ||
