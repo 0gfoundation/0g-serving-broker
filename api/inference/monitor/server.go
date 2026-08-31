@@ -201,7 +201,7 @@ const CtxKeyFailureSource = "failureSource"
 
 // Rejection reason label values for RequestRejectedTotal. These are the only
 // strings ever passed to RecordRejection, keeping the metric's cardinality
-// bounded. Group: admission gates (rate/tpm/ipm/concurrency/model_mismatch),
+// bounded. Group: admission gates (rate/tpm/ipm/concurrency/global_concurrency/model_mismatch/model_expired),
 // billing gates (insufficient_balance/not_acknowledged/account_not_exist), and
 // the upstream_error catch-all for validation failures whose specific cause
 // isn't classified. Every constant here has a live emit site — a reason is not
@@ -218,6 +218,11 @@ const (
 	RejectionAccountNotExist = "account_not_exist"
 	RejectionUpstreamError   = "upstream_error"
 	RejectionModelExpired    = "model_expired"
+
+	// RejectionGlobalConcurrency is the global maxGlobalConcurrent cap, as
+	// distinct from RejectionConcurrency above, which is the PER-USER one. Both
+	// shed for capacity; only this one is broker-wide.
+	RejectionGlobalConcurrency = "global_concurrency"
 )
 
 // CtxKeyRejectionReason is the gin context key under which a request handler
@@ -451,7 +456,7 @@ func PrometheusInit(serverName, providerAddress string) {
 	RequestRejectedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_requests_rejected_total",
-			Help:        "Total number of requests rejected before reaching the upstream, labeled by reason (rate_limit, tpm_limit, ipm_limit, concurrency, model_mismatch, insufficient_balance, not_acknowledged, account_not_exist, upstream_error).",
+			Help:        "Total number of requests rejected before reaching the upstream, labeled by reason (rate_limit, tpm_limit, ipm_limit, concurrency, global_concurrency, model_mismatch, model_expired, insufficient_balance, not_acknowledged, account_not_exist, upstream_error). global_concurrency is the broker-wide capacity cap and is the only reason an UNAUTHENTICATED caller can drive: it aborts ahead of session validation, so it carries no user attribution.",
 			ConstLabels: constLabels,
 		},
 		[]string{"reason"},

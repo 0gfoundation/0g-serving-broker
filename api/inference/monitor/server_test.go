@@ -168,10 +168,22 @@ func setupTestMetrics(t *testing.T) *prometheus.Registry {
 		[]string{"source", "code", "model", "status"},
 	)
 
+	// broker_requests_rejected_total had no assertion anywhere in the repo, so
+	// deleting the RecordRejection call left every test green.
+	RequestRejectedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name:        "broker_requests_rejected_total",
+			Help:        "Total requests rejected before reaching the upstream.",
+			ConstLabels: constLabels,
+		},
+		[]string{"reason"},
+	)
+
 	registry.MustRegister(InputTokensTotal, OutputTokensTotal, TokensPerSecond,
 		RequestCount, ErrorCount, RequestDuration,
 		WhitelistRequestsTotal, WhitelistInputTokensTotal, WhitelistOutputTokensTotal,
-		AudioSecondsTotal, WhitelistAudioSecondsTotal, FailureCount)
+		AudioSecondsTotal, WhitelistAudioSecondsTotal, FailureCount,
+		RequestRejectedTotal)
 
 	return registry
 }
@@ -773,8 +785,17 @@ func TestTrackMetricsFailureSource(t *testing.T) {
 		// A client-caused 4xx the handler flagged with ignoreError -> client.
 		{"client 4xx (flagged) -> client", http.StatusUnauthorized, "", "", true, FailureSourceClient, "Unauthorized"},
 		{"client rejection 4xx (flagged) -> client", http.StatusTooManyRequests, "", RejectionRateLimit, true, FailureSourceClient, "Too Many Requests"},
-		// concurrency is a 503: 5xx never derives to client even if flagged.
+		// Not the per-user cap's production shape — that returns 429 with
+		// ignoreError, so it lands in the client bucket. Kept as the table's
+		// unflagged-5xx case; the flagged-5xx one is the row below.
 		{"concurrency 503 -> broker", http.StatusServiceUnavailable, "", RejectionConcurrency, false, FailureSourceBroker, "Service Unavailable"},
+		// The global cap's actual production shape, which the case above does
+		// NOT cover: it sets ignoreError so the 503 is not counted as a service
+		// error, and the "5xx never derives to client even if flagged" claim is
+		// only asserted here. Regressing the status guard in
+		// resolveFailureSource would silently move every capacity rejection into
+		// the client bucket, hiding broker saturation from the broker-fault alert.
+		{"global concurrency 503 (flagged) -> broker", http.StatusServiceUnavailable, "", RejectionGlobalConcurrency, true, FailureSourceBroker, "Service Unavailable"},
 		// upstream_error fallback stays broker even on a flagged 4xx.
 		{"upstream_error 4xx -> broker", http.StatusBadRequest, "", RejectionUpstreamError, true, FailureSourceBroker, "Bad Request"},
 		// Explicit overrides always win, regardless of ignoreError/status.
@@ -984,4 +1005,63 @@ func TestRecordWhitelistTokensNilMetrics(t *testing.T) {
 	defer func() { WhitelistInputTokensTotal = saved }()
 
 	RecordWhitelistTokens("chatbot", "glm-5", 100, 50) // should not panic
+}
+
+// The Rejection* values are the contract with the PromQL in
+// docs/design/rejection-observability.md and with the alert rules in 0g-monitor,
+// which live outside this repo and cannot fail a build. Every other test
+// compares against the constant, so changing a constant's VALUE — silently
+// breaking the documented `code!="global_concurrency"` exclusion and every
+// `reason=` selector — left the whole suite green.
+func TestRejectionReasonLiteralsAreStable(t *testing.T) {
+	for _, tc := range []struct{ got, want string }{
+		{RejectionRateLimit, "rate_limit"},
+		{RejectionTPMLimit, "tpm_limit"},
+		{RejectionIPMLimit, "ipm_limit"},
+		{RejectionConcurrency, "concurrency"},
+		{RejectionGlobalConcurrency, "global_concurrency"},
+		{RejectionModelMismatch, "model_mismatch"},
+		{RejectionModelExpired, "model_expired"},
+		{RejectionInsufficientBal, "insufficient_balance"},
+		{RejectionNotAcknowledged, "not_acknowledged"},
+		{RejectionAccountNotExist, "account_not_exist"},
+		{RejectionUpstreamError, "upstream_error"},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("rejection reason = %q, want %q — dashboards and alert rules key on this string", tc.got, tc.want)
+		}
+	}
+	// The two capacity reasons must stay distinct: one is broker-wide, the other
+	// per-user, and conflating them merges a global shed into a per-user series.
+	if RejectionConcurrency == RejectionGlobalConcurrency {
+		t.Error("the per-user and broker-wide concurrency reasons collided")
+	}
+}
+
+// RecordRejection is what produces broker_requests_rejected_total. Deleting the
+// call from the aggregator previously left every test green, so the metric this
+// gate exists to emit was on trust.
+func TestRecordRejectionIncrementsTheRejectionCounter(t *testing.T) {
+	setupTestMetrics(t)
+
+	before := getCounterValue(RequestRejectedTotal, RejectionGlobalConcurrency)
+	RecordRejection(RejectionGlobalConcurrency)
+	RecordRejection(RejectionGlobalConcurrency)
+	if got := getCounterValue(RequestRejectedTotal, RejectionGlobalConcurrency) - before; got != 2 {
+		t.Errorf("broker_requests_rejected_total{reason=%q} increased by %v, want 2",
+			RejectionGlobalConcurrency, got)
+	}
+	// A different reason must not land on the same series.
+	if got := getCounterValue(RequestRejectedTotal, RejectionConcurrency); got != 0 {
+		t.Errorf("per-user concurrency series = %v, want 0 — the global shed leaked into it", got)
+	}
+}
+
+// Safe before PrometheusInit, per its own doc comment: monitoring disabled must
+// not panic on the shed path.
+func TestRecordRejectionIsSafeWhenUninitialised(t *testing.T) {
+	saved := RequestRejectedTotal
+	RequestRejectedTotal = nil
+	defer func() { RequestRejectedTotal = saved }()
+	RecordRejection(RejectionGlobalConcurrency)
 }

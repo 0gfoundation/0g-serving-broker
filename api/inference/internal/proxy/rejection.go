@@ -153,6 +153,15 @@ func (a *rejectionAggregator) flush() {
 		if b.total == 0 {
 			continue
 		}
+		// A gate that rejects before a user address is resolved (the global
+		// concurrency cap aborts ahead of ValidateSession) records none, and
+		// "across 0 user(s); top: n/a" reads like an aggregator bug rather than
+		// like "this gate cannot attribute". Say so instead.
+		if len(b.users) == 0 {
+			a.logger.Warnf("request rejections [%s]: %d in last %s (no per-user attribution at this gate)",
+				reason, b.total, a.interval)
+			continue
+		}
 		a.logger.Warnf("request rejections [%s]: %d in last %s across %d user(s)%s; top: %s",
 			reason, b.total, a.interval, len(b.users), overflowSuffix(b.overflow), topUsers(b.users, 3))
 	}

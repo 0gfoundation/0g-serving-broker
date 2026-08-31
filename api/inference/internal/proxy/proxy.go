@@ -218,12 +218,33 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 	// Apply global concurrency limiting to all service types.
 	// This caps total in-flight requests to match backend GPU capacity,
 	// preventing queue buildup that degrades throughput.
-	p.serviceGroup.Use(middleware.ConcurrencyLimitMiddleware(p.concurrencyLimiter))
+	p.serviceGroup.Use(p.globalConcurrencyMiddleware())
 
 	// Apply request size limit middleware (32MB)
 	p.serviceGroup.Use(middleware.RequestSizeLimitMiddleware(middleware.MaxRequestSize))
 
 	return p
+}
+
+// globalConcurrencyMiddleware wires the global concurrency cap to the rejection
+// recorder. Both New() and its test build the middleware through here, so the
+// wiring cannot be correct in one and silently absent in the other — passing a
+// nil callback, or the per-user RejectionConcurrency constant instead of the
+// global one, functionally reverts this gate to an unattributed broker 5xx, and
+// both mutations previously left the whole suite green.
+//
+// The recorder does all three things this gate needs: stamps the reason on the
+// context, counts broker_requests_rejected_total, and emits a bounded periodic
+// summary rather than one line per shed request (#542). It is what every sibling
+// admission gate already uses, so the global cap appears on the same operator
+// panel as the rest.
+//
+// The user address is empty because the cap aborts before ValidateSession
+// resolves one; record() treats "" as "count the total, attribute to no user".
+func (p *Proxy) globalConcurrencyMiddleware() gin.HandlerFunc {
+	return middleware.ConcurrencyLimitMiddleware(p.concurrencyLimiter, func(c *gin.Context) {
+		p.rejections.record(c, monitor.RejectionGlobalConcurrency, "")
+	})
 }
 
 // buildPerUserOverrides converts the operator-supplied per-address override
