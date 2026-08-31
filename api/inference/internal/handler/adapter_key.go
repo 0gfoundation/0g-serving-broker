@@ -15,10 +15,19 @@ type adapterKeyRequest struct {
 	TaskID         string `json:"taskId" binding:"required"`
 	StorageHash    string `json:"storageHash" binding:"required"`
 	ProviderEncKey string `json:"providerEncKey" binding:"required"`
-	// TeeSignerAddress is the producing enclave's signer address, required so the
-	// inference broker can verify the artifact's TEE tag signature before it
-	// decrypts and deploys the adapter.
-	TeeSignerAddress string `json:"teeSignerAddress" binding:"required"`
+	// TeeSignerAddress is the producing enclave's signer address, used to verify the
+	// artifact's TEE tag signature before the adapter is decrypted and deployed.
+	//
+	// Deliberately NOT binding:"required". These are two separately deployed
+	// services, and the error codes here are a documented backwards-compatible
+	// contract. Requiring it would make every push from a fine-tuning broker that
+	// predates this field return 400: pushAdapterKey burns its three retries and
+	// Finalizer.Execute returns before UpdateTask and AddDeliverable, so training
+	// that already completed and was paid for never reaches the contract and the
+	// task is eventually marked failed. Absent, the field is stored empty and
+	// lora.Manager fails closed at deploy time with an actionable "re-push"
+	// message — the adapter does not deploy, but nothing is destroyed.
+	TeeSignerAddress string `json:"teeSignerAddress"`
 }
 
 // adapterKeyErrorCode is a machine-readable identifier sent alongside the
@@ -104,22 +113,33 @@ func (h *Handler) ReceiveAdapterKey(c *gin.Context) {
 	}
 
 	// The signer address gates TEE tag-signature verification on the consumption
-	// path, so reject anything that is not a well-formed address rather than
-	// storing a value that would later fail verification for the wrong reason.
-	if !common.IsHexAddress(req.TeeSignerAddress) {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "teeSignerAddress must be a 20-byte hex address",
-			"code":  adapterKeyErrInvalidSigner,
-		})
-		return
+	// path. An omitted value is accepted (see the field comment) and stored empty
+	// so the deploy path fails closed with a useful message; a value that IS
+	// present must be usable, because a malformed or zero one would otherwise be
+	// rejected much later — after a full 0G Storage download and ECIES decrypt —
+	// and with a message about the field being absent when it was not.
+	//
+	// common.IsHexAddress accepts the all-zero address, so it is excluded
+	// explicitly: it is not a signer any enclave can produce, and letting it
+	// through would let it act as a skip-verification sentinel at this layer.
+	signerAddress := ""
+	if trimmed := strings.TrimSpace(req.TeeSignerAddress); trimmed != "" {
+		if !common.IsHexAddress(trimmed) || common.HexToAddress(trimmed) == (common.Address{}) {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "teeSignerAddress must be a non-zero 20-byte hex address",
+				"code":  adapterKeyErrInvalidSigner,
+			})
+			return
+		}
+		// Checksummed so a later string comparison is not tripped by case drift.
+		signerAddress = common.HexToAddress(trimmed).Hex()
 	}
 
 	key := &model.AdapterKey{
-		TaskID:         req.TaskID,
-		StorageHash:    req.StorageHash,
-		ProviderEncKey: req.ProviderEncKey,
-		// Checksummed so a later string comparison is not tripped by case drift.
-		TeeSignerAddress: common.HexToAddress(req.TeeSignerAddress).Hex(),
+		TaskID:           req.TaskID,
+		StorageHash:      req.StorageHash,
+		ProviderEncKey:   req.ProviderEncKey,
+		TeeSignerAddress: signerAddress,
 	}
 
 	if err := h.ctrl.CreateAdapterKey(key); err != nil {

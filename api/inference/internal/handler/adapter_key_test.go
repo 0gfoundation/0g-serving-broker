@@ -331,7 +331,11 @@ func assertErrorCode(t *testing.T, body []byte, want string) {
 // well-formed address. Without it the signature the fine-tuning broker writes
 // into every artifact cannot be checked and the adapter must not be deployed.
 
-func TestReceiveAdapterKey_MissingTeeSignerAddress(t *testing.T) {
+// An older fine-tuning broker does not send teeSignerAddress. The push must still
+// succeed: rejecting it burns pushAdapterKey's retries and makes Finalizer.Execute
+// return before AddDeliverable, so training that was already paid for never reaches
+// the contract. The adapter instead fails closed later, in lora.Manager.
+func TestReceiveAdapterKey_OmittedTeeSignerAddressIsAccepted(t *testing.T) {
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 
@@ -343,13 +347,15 @@ func TestReceiveAdapterKey_MissingTeeSignerAddress(t *testing.T) {
 	c.Request = httptest.NewRequest("POST", "/internal/v1/adapter-keys", bytes.NewReader(body))
 	c.Request.Header.Set("Content-Type", "application/json")
 
+	// Reaches the persistence step, which needs a ctrl this unit test has not wired
+	// up; the point is that validation did NOT reject it as a bad payload.
 	h := &Handler{}
+	defer func() { _ = recover() }()
 	h.ReceiveAdapterKey(c)
 
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("status = %d, want %d; body = %s", w.Code, http.StatusBadRequest, w.Body.String())
+	if w.Code == http.StatusBadRequest {
+		t.Errorf("an omitted teeSignerAddress was rejected: %s", w.Body.String())
 	}
-	assertErrorCode(t, w.Body.Bytes(), adapterKeyErrInvalidPayload)
 }
 
 func TestReceiveAdapterKey_MalformedTeeSignerAddress(t *testing.T) {
@@ -358,6 +364,11 @@ func TestReceiveAdapterKey_MalformedTeeSignerAddress(t *testing.T) {
 		"0x71562b71999873DB5b286dF957af199Ec94617",     // too short
 		"0x71562b71999873DB5b286dF957af199Ec94617F7ff", // too long
 		"0xZZ562b71999873DB5b286dF957af199Ec94617F7",   // non-hex
+		// The all-zero address passes common.IsHexAddress but is not a signer any
+		// enclave produces. Rejected here so it cannot act as a
+		// skip-verification sentinel, and so the operator is told at the cheap
+		// boundary instead of after a full download and decrypt.
+		"0x0000000000000000000000000000000000000000",
 		// A bare 40-hex string with no 0x prefix is deliberately NOT rejected:
 		// common.IsHexAddress accepts it and it parses to the same address
 		// unambiguously, so rejecting it would be gratuitous strictness. Our own

@@ -386,12 +386,15 @@ func (m *Manager) downloadFromStorage(ctx context.Context, info *AdapterInfo) er
 	// signature cannot be verified, so refuse to deploy rather than decrypt an
 	// artifact whose origin we cannot check — a row this old predates the
 	// teeSignerAddress column and needs the fine-tuning broker to re-push.
-	if !common.IsHexAddress(adapterKey.TeeSignerAddress) {
+	// IsHexAddress accepts the all-zero address, so it is excluded too: no enclave
+	// signs with it, and AesDecryptLargeFile would otherwise reject it only after a
+	// full download and decrypt, reporting a missing field rather than this one.
+	expectedSigner := common.HexToAddress(adapterKey.TeeSignerAddress)
+	if !common.IsHexAddress(adapterKey.TeeSignerAddress) || expectedSigner == (common.Address{}) {
 		return fmt.Errorf(
-			"adapter key for task %s has no TEE signer address (got %q); the fine-tuning broker must re-push it before this adapter can be verified and deployed",
+			"adapter key for task %s has no usable TEE signer address (got %q); the fine-tuning broker must re-push it before this adapter can be verified and deployed",
 			info.TaskID, adapterKey.TeeSignerAddress)
 	}
-	expectedSigner := common.HexToAddress(adapterKey.TeeSignerAddress)
 
 	actualPath, err := m.storageDownloader.DownloadAndDecrypt(ctx, storageHashHex, providerEncKey, info.AdapterPath, expectedSigner)
 	if err != nil {

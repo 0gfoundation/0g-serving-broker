@@ -179,3 +179,63 @@ func TestRecoverSigner_RejectsBadInput(t *testing.T) {
 		t.Error("want an error for an out-of-range recovery id")
 	}
 }
+
+// defaultBufferSize is 64 MiB, so a file larger than that is the only way to
+// exercise the multi-chunk tag stream: the trailing gcm.Overhead() bytes of EACH
+// chunk, concatenated in order, with the nonce incremented per chunk.
+func TestAesDecryptLargeFile_MultiChunkTagStream(t *testing.T) {
+	if testing.Short() {
+		t.Skip("allocates >64 MiB")
+	}
+	dir := t.TempDir()
+	plainPath := filepath.Join(dir, "plain.bin")
+	encPath := filepath.Join(dir, "enc.data")
+
+	// 64 MiB + 1 MiB → exactly two chunks, the second one short.
+	size := defaultBufferSize + 1024*1024
+	want := make([]byte, size)
+	if _, err := rand.Read(want); err != nil {
+		t.Fatalf("rand: %v", err)
+	}
+	if err := os.WriteFile(plainPath, want, 0600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	aesKey := make([]byte, 32)
+	if _, err := rand.Read(aesKey); err != nil {
+		t.Fatalf("rand: %v", err)
+	}
+	tag, err := AesEncryptLargeFile(aesKey, plainPath, encPath)
+	if err != nil {
+		t.Fatalf("encrypt: %v", err)
+	}
+	// Two chunks → two 16-byte GCM tags.
+	if len(tag) != 32 {
+		t.Fatalf("tag stream is %d bytes, want 32 (two chunks); the fixture is not multi-chunk", len(tag))
+	}
+
+	key, err := ethcrypto.HexToECDSA(testEnclaveKey)
+	if err != nil {
+		t.Fatalf("key: %v", err)
+	}
+	sig, err := ethcrypto.Sign(ethcrypto.Keccak256(tag), key)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	if err := WriteToFileHead(encPath, sig); err != nil {
+		t.Fatalf("write head: %v", err)
+	}
+	signer := ethcrypto.PubkeyToAddress(key.PublicKey)
+
+	out := filepath.Join(dir, "out.bin")
+	if err := AesDecryptLargeFile(aesKey, encPath, out, signer); err != nil {
+		t.Fatalf("decrypt+verify across two chunks: %v", err)
+	}
+	got, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Errorf("multi-chunk round trip mismatch: got %d bytes, want %d", len(got), len(want))
+	}
+}

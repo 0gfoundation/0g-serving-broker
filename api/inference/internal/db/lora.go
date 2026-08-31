@@ -114,6 +114,15 @@ func (d *DB) CreateAdapterKey(key *model.AdapterKey) error {
 		Assign(model.AdapterKey{
 			StorageHash:    key.StorageHash,
 			ProviderEncKey: key.ProviderEncKey,
+			// TeeSignerAddress MUST be here. FirstOrCreate's found-branch issues
+			// Updates(assigns) with only the assigned columns, and its preceding
+			// Find has already overwritten key's field with the stored value — so
+			// leaving it out makes a re-push a silent no-op. That would strand any
+			// row written before this column existed: lora.Manager refuses to deploy
+			// it and tells the operator to re-push, the re-push returns 200, and the
+			// column stays empty. Same shape after an enclave-image change, where a
+			// re-push must replace a now-stale signer address.
+			TeeSignerAddress: key.TeeSignerAddress,
 		}).
 		FirstOrCreate(key).Error
 }
