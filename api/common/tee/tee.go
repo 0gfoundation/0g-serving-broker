@@ -13,7 +13,6 @@ import (
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/log"
-	"github.com/0glabs/0g-serving-broker/common/tee/alicloud"
 )
 
 // bindEncPubEnvVar toggles generating the §4.2 report_data quote that binds
@@ -45,11 +44,38 @@ const teeSocketEnvVar = "TEE_SOCKET"
 
 type ClientType int
 
+// The only TEE backends this broker supports.
+//
+// A GCP and an AliCloud backend used to be selectable here. Their INTEGRATION was
+// removed — these ClientType values, the NETWORK branches in each cmd/*/main.go,
+// and the alicloud node in the compose generator — while the quote-fetching
+// clients and the generated TAPP gRPC bindings stay in the tree, so re-adding a
+// backend later is wiring rather than a rewrite.
+//
+// What was deleted outright is their DeriveKey. Both ignored the path argument,
+// which is the one thing the E2EE design forbids: AliCloud handed back a single
+// cached secret for every path, so the secp256k1 provider signer and the X25519
+// HPKE recipient key were the SAME secret and disclosing either disclosed the
+// other, and with it every prompt ever sealed to that enclave (enckey.go states
+// the independence as a MUST, SPEC §4.1). GCP minted a fresh random key per call
+// instead, so a restart silently invalidated both the on-chain signer address and
+// the published enc_pub. Neither bound its key to the enclave measurement, so
+// neither could offer what an attestation claims.
+//
+// Losing DeriveKey means neither type satisfies TappdClient any more. That is the
+// point: the compiler now refuses to accept one as a client, so no code path is
+// left that can produce a non-measurement-bound key and neither backend can be
+// reconnected without someone writing a derivation first.
+//
+// The NETWORK values that selected them are rejected by name at startup rather
+// than falling through to the Phala default, so a stale deployment config fails
+// loudly instead of quietly running on a backend it did not ask for.
+//
+// Full rationale, and what a reinstated backend would have to do:
+// doc/removed-tee-backends.md
 const (
 	Mock ClientType = iota
 	Phala
-	GCP
-	AliCloud
 )
 
 const (
@@ -133,10 +159,6 @@ func (s *TeeService) SyncQuote(ctx context.Context, nvQuote bool) error {
 		if socket != "" {
 			s.remote = newRemoteSigner(socket)
 		}
-	case GCP:
-		client = &GcpTappdClient{}
-	case AliCloud:
-		client = &alicloud.AliCloudClient{}
 	default:
 		return errors.New("unsupported client type")
 	}
@@ -307,11 +329,6 @@ func (s *TeeService) getSigningKey(ctx context.Context, client TappdClient) (*ec
 			if err != nil {
 				return nil, errors.Wrap(err, "converting to ECDSA private key")
 			}
-		}
-	case GCP, AliCloud:
-		privateKey, err = crypto.HexToECDSA(key)
-		if err != nil {
-			return nil, errors.Wrap(err, "converting hex to ECDSA key")
 		}
 	default:
 		return nil, errors.New("unsupported key type")

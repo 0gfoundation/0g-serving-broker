@@ -198,7 +198,7 @@ func TestSplitPinnedImageRefusesToGuess(t *testing.T) {
 // template can emit something that contains all the right strings and still not be a
 // compose file.
 func TestEveryCombinationRendersParseableYAML(t *testing.T) {
-	for _, node := range []TeeNode{"phala", "hardhat", "alicloud"} {
+	for _, node := range []TeeNode{"phala", "hardhat"} {
 		for _, controller := range []bool{false, true} {
 			for _, nginx := range []bool{false, true} {
 				for _, monitoring := range []bool{false, true} {
@@ -249,7 +249,7 @@ func TestEveryCombinationRendersParseableYAML(t *testing.T) {
 func TestWithoutAControllerNothingNewAppears(t *testing.T) {
 	introduced := []string{"TEE_SOCKET", "ATTEST_PROXY_SOCKET", "IMAGE_REPO", "IMAGE_DIGEST", "zg-tee", attestSocketDir}
 
-	for _, node := range []TeeNode{"phala", "hardhat", "alicloud"} {
+	for _, node := range []TeeNode{"phala", "hardhat"} {
 		for _, nginx := range []bool{false, true} {
 			for _, monitoring := range []bool{false, true} {
 				data := dataFor(node, false)
@@ -267,12 +267,14 @@ func TestWithoutAControllerNothingNewAppears(t *testing.T) {
 	}
 }
 
-// hardhat and alicloud have no attestation proxy — the mounts and ATTEST_PROXY_SOCKET are
-// gated on the TEE node — so they must not be told to use one either. A broker pointed at a
-// socket nothing serves, or announcing an image pair no controller there can change, is worse
-// than plain.
+// hardhat has no attestation proxy — the mounts and ATTEST_PROXY_SOCKET are gated on the TEE
+// node — so it must not be told to use one either. A broker pointed at a socket nothing serves,
+// or announcing an image pair no controller there can change, is worse than plain.
+//
+// This used to cover alicloud as well; that TEE node was removed along with its backend (see
+// tee.ClientType), so hardhat is the only non-Phala node left.
 func TestNonPhalaNodesGetNoHalfHardenedDeployment(t *testing.T) {
-	for _, node := range []TeeNode{"hardhat", "alicloud"} {
+	for _, node := range []TeeNode{"hardhat"} {
 		rendered := renderCompose(t, dataFor(node, true))
 		for _, name := range []string{"TEE_SOCKET", "ATTEST_PROXY_SOCKET", "IMAGE_REPO", "zg-tee"} {
 			if strings.Contains(rendered, name) {
@@ -290,7 +292,7 @@ func TestNonPhalaNodesGetNoHalfHardenedDeployment(t *testing.T) {
 // no record at all, which would leave "no config record" meaning nothing. Nothing in the
 // broker or the event service writes it: the only writer in the tree is ApplyCoreConfig.
 func TestOnlyTheControllerCanWriteTheConfig(t *testing.T) {
-	for _, node := range []TeeNode{"phala", "hardhat", "alicloud"} {
+	for _, node := range []TeeNode{"phala", "hardhat"} {
 		for _, controller := range []bool{false, true} {
 			compose := renderCompose(t, dataFor(node, controller))
 
@@ -344,7 +346,7 @@ func TestTheControllersContainersPinTheirNames(t *testing.T) {
 // Anything a service waits on for health must actually define a healthcheck, or compose refuses
 // the whole file at startup rather than at parse — which no YAML check catches.
 func TestEveryHealthDependencyHasAHealthcheck(t *testing.T) {
-	for _, node := range []TeeNode{"phala", "hardhat", "alicloud"} {
+	for _, node := range []TeeNode{"phala", "hardhat"} {
 		for _, controller := range []bool{false, true} {
 			data := dataFor(node, controller)
 			data.DeployLLM = true
