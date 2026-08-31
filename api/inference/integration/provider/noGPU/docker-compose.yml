@@ -7,7 +7,13 @@ services:
       MYSQL_USER: provider
       MYSQL_PASSWORD: provider
     ports:
-      - "33060:3306"
+      # Bound to the loopback interface, not 0.0.0.0. A bare "33060:3306"
+      # publishes MySQL on every interface of the host, so anything that can
+      # route to it reaches the database directly with the credentials below.
+      # Nothing needs it published: services on this compose network reach the
+      # database by service name, and the checked-in local DSNs use
+      # localhost:33060, which still resolves through a loopback binding.
+      - "127.0.0.1:33060:3306"
     volumes:
       - mysql-data:/var/lib/mysql
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql

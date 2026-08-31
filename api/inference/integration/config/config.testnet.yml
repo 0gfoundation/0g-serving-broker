@@ -10,6 +10,11 @@ contractAddress: "0xa79F4c8311FF93C06b8CfB403690cc987c93F91E"
 # Database configuration
 database:
   # MySQL DSN (format: user:password@tcp(host:port)/database?parseTime=true)
+  # WARNING: this is an EXAMPLE value. Change it before deploying, and keep it in
+  # sync with MYSQL_ROOT_PASSWORD in the compose file — the broker does not expand
+  # environment variables inside this file, so the password is a literal here.
+  # A template shipped with a weak password normalises it; treat this line as
+  # required input, not a default.
   dsn: "root:123456@tcp(mysql:3306)/provider?parseTime=true"
 
 # Event service configuration
