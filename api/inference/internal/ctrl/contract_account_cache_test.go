@@ -3,6 +3,7 @@ package ctrl
 import (
 	"encoding/hex"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -217,3 +218,69 @@ type revertErr struct {
 
 func (e revertErr) Error() string          { return e.msg }
 func (e revertErr) ErrorData() interface{} { return e.data }
+
+// A typed-nil *contract.Account in the cache must fall through to a fresh
+// fetch, not be returned as a hit. Dropping the `if v != nil` guard makes
+// contractAccount return (nil, nil), and both call sites dereference the
+// account immediately — request.go reads .Acknowledged, then .Balance — so the
+// guard stands between a stale cache entry and a nil-pointer panic in the
+// request path. That mutation previously left the whole suite green.
+//
+// c.contract is nil here, so the fall-through panics; recovering proves it
+// happened, and asserting on the recovered value keeps an unrelated panic from
+// satisfying the test.
+func TestContractAccountTreatsTypedNilAsMiss(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	addr := common.HexToAddress(testAddr)
+	c := newCacheOnlyCtrl()
+	var absent *contract.Account
+	c.contractAccountCache.Set(addr.Hex(), absent, cache.DefaultExpiration)
+
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("a typed-nil entry was returned as a cache hit — callers would nil-deref it")
+		}
+		if _, ok := r.(error); !ok {
+			t.Fatalf("recovered %#v, want a runtime error from the nil c.contract fall-through", r)
+		}
+	}()
+	_, _ = c.contractAccount(testGinCtx(), addr)
+}
+
+// Reads, writes and deletes must agree on the key, or a delete silently no-ops.
+// Two of the deletes took a raw client- or DB-supplied string while the writes
+// keyed on the checksummed form, so invalidation never fired; reverting that
+// normalisation previously left the whole suite green.
+func TestAccountCacheKeyIsChecksummedRegardlessOfInputCase(t *testing.T) {
+	const mixed = testAddr
+	want := common.HexToAddress(mixed).Hex()
+
+	for _, in := range []string{
+		mixed,
+		strings.ToLower(mixed),
+		strings.ToUpper("0x" + mixed[2:]),
+		strings.TrimPrefix(mixed, "0x"),
+	} {
+		if got := accountCacheKey(in); got != want {
+			t.Errorf("accountCacheKey(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// The invariant that matters operationally: an entry written by the read path is
+// removable using the raw address a caller or DB row supplies, whatever its case.
+func TestAccountCacheEntryIsDeletableByRawAddress(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	addr := common.HexToAddress(testAddr)
+	c := newCacheOnlyCtrl()
+	c.contractAccountCache.Set(accountCacheKey(addr.Hex()), accountAbsent{}, absentAccountTTL)
+
+	c.contractAccountCache.Delete(accountCacheKey(strings.ToLower(testAddr)))
+
+	if _, found := c.contractAccountCache.Get(addr.Hex()); found {
+		t.Error("entry survived a delete keyed on the lower-case address — invalidation is a no-op")
+	}
+}

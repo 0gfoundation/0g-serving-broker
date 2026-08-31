@@ -46,10 +46,21 @@ const (
 	// 20 minutes — 40x its stated lifetime. That matters because a negative
 	// entry can be created BEFORE signature verification (validateTokenRevocation
 	// runs ahead of it), so an unauthenticated caller cycling distinct addresses
-	// controls how many get written; each one should actually be gone when its
-	// TTL says it is.
+	// controls how many get written. Worst-case residency is still TTL + this
+	// interval (90s for a 30s entry, i.e. 3x the TTL), not the TTL itself — but
+	// that is a 13x improvement on the 20 minutes it was.
 	accountCacheCleanupInterval = time.Minute
 )
+
+// accountCacheKey derives contractAccountCache's key for an address. Every read,
+// write and delete goes through it, so the "the key is always the checksummed
+// form" invariant is one function rather than an expression repeated at six
+// sites — which is how the two deletes came to take a caller- or DB-supplied
+// string verbatim while the writes keyed on .Hex(), so a lower-case address
+// deleted nothing at all.
+func accountCacheKey(userAddress string) string {
+	return common.HexToAddress(userAddress).Hex()
+}
 
 // cacheableAbsence reports whether an error from the contract is a verdict safe
 // to REMEMBER, as opposed to one safe merely to act on once.
@@ -61,6 +72,13 @@ const (
 // rejection, whereas remembering it rejects a FUNDED user for the whole TTL
 // while inflating broker_requests_rejected_total{reason="account_not_exist"},
 // making the incident read as a genuine unfunded-user spike.
+//
+// Keep the scale honest, though: this 30s entry is the SMALL staleness here. A
+// found account is cached for accountCacheTTL with its Generation and
+// RevokedBitmap frozen and nothing invalidating it on revocation, so a revoked
+// token is honoured for up to 10 minutes on a FUNDED account — the one that can
+// actually spend the user's balance. That is pre-existing and wants its own fix
+// (wiring the generated BalanceUpdated watcher would close both).
 //
 // What this does NOT protect against, despite being the obvious guess: a
 // lagging or pruned replica. Such a node answers with a real, ABI-decodable
@@ -98,7 +116,7 @@ func (c *Ctrl) rememberAbsence(key string, err error) {
 // network I/O made while the request holds a global concurrency slot, it
 // stretched the window in which such a caller crowds out paying traffic.
 func (c *Ctrl) contractAccount(ctx *gin.Context, userAddress common.Address) (*contract.Account, error) {
-	key := userAddress.Hex()
+	key := accountCacheKey(userAddress.Hex())
 	if cached, found := c.contractAccountCache.Get(key); found {
 		switch v := cached.(type) {
 		case *contract.Account:
@@ -132,10 +150,7 @@ func (c *Ctrl) GetOrCreateAccount(ctx *gin.Context, userAddress string) (model.U
 	}
 
 	// Clear cache when creating new account to ensure fresh data
-	// Normalised: every write to this cache is keyed on the checksummed form,
-	// and userAddress arrives verbatim from the client, so a lower-case address
-	// would otherwise delete nothing.
-	c.contractAccountCache.Delete(common.HexToAddress(userAddress).Hex())
+	c.contractAccountCache.Delete(accountCacheKey(userAddress))
 
 	contractAccount, err := c.contract.GetUserAccount(ctx, common.HexToAddress(userAddress))
 	if err != nil {
@@ -209,7 +224,7 @@ func (c *Ctrl) UpdateUserAccount(userAddress string, new model.User) error {
 
 func (c *Ctrl) SyncUserAccount(ctx context.Context, userAddress common.Address) error {
 	// Clear cache when syncing account to ensure fresh data
-	c.contractAccountCache.Delete(userAddress.Hex())
+	c.contractAccountCache.Delete(accountCacheKey(userAddress.Hex()))
 
 	account, err := c.contract.GetUserAccount(ctx, userAddress)
 	if err != nil {
@@ -252,7 +267,7 @@ func (c *Ctrl) SyncUserAccountsByAddresses(ctx context.Context, userAddresses []
 	accounts := make([]model.User, 0, len(userAddresses))
 	for _, addr := range userAddresses {
 		// Clear cache for this account
-		c.contractAccountCache.Delete(common.HexToAddress(addr).Hex())
+		c.contractAccountCache.Delete(accountCacheKey(addr))
 
 		account, err := c.contract.GetUserAccount(ctx, common.HexToAddress(addr))
 		if err != nil {
