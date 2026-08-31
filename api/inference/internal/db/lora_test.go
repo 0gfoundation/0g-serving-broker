@@ -382,3 +382,44 @@ func TestAdapterKeyRePushFillsTeeSignerAddress(t *testing.T) {
 		t.Errorf("TeeSignerAddress = %q, want %q after a rotating re-push", got.TeeSignerAddress, rotated)
 	}
 }
+
+// A push that omits teeSignerAddress must not WIPE a signer already stored. The
+// field is optional at the handler (an older fine-tuning broker does not send it),
+// and it is in the upsert's Assign set so a re-push can fill and rotate it — those
+// two together would let a stale-version push overwrite a good address with the
+// empty string and strand a working adapter.
+func TestAdapterKeyPushWithoutSignerDoesNotWipeIt(t *testing.T) {
+	d := setupTestDB(t)
+
+	const taskID = "task-key-no-wipe"
+	const signer = "0x71562b71999873DB5b286dF957af199Ec94617F7"
+	if err := d.CreateAdapterKey(&model.AdapterKey{
+		TaskID:           taskID,
+		StorageHash:      "0x4444444444444444444444444444444444444444444444444444444444444444",
+		ProviderEncKey:   "0xenckey",
+		TeeSignerAddress: signer,
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// The same task pushed again by a broker that predates the field.
+	if err := d.CreateAdapterKey(&model.AdapterKey{
+		TaskID:         taskID,
+		StorageHash:    "0x5555555555555555555555555555555555555555555555555555555555555555",
+		ProviderEncKey: "0xenckey-v2",
+	}); err != nil {
+		t.Fatalf("push without signer: %v", err)
+	}
+
+	got, err := d.GetAdapterKeyByTaskID(taskID)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if got.TeeSignerAddress != signer {
+		t.Errorf("TeeSignerAddress = %q, want %q preserved; a push without the field wiped a good signer", got.TeeSignerAddress, signer)
+	}
+	// The fields the push DID carry must still have been applied.
+	if got.ProviderEncKey != "0xenckey-v2" {
+		t.Errorf("ProviderEncKey = %q, want the pushed value", got.ProviderEncKey)
+	}
+}
