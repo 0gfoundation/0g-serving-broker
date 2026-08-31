@@ -33,6 +33,19 @@ const (
 	// flood from a never-funded address into one chain call per interval rather
 	// than one per request. Nothing invalidates this entry on deposit.
 	absentAccountTTL = 30 * time.Second
+
+	// absentAccountCleanupInterval is the cache's janitor period, deliberately
+	// NOT derived from accountCacheTTL.
+	//
+	// go-cache's Get reports an expired item as absent but does not delete it,
+	// so memory is reclaimed only by the janitor. Tying the janitor to the
+	// 10-minute account TTL left a 30-second negative entry resident for up to
+	// 20 minutes — 40x its stated lifetime. That matters because a negative
+	// entry can be created BEFORE signature verification (validateTokenRevocation
+	// runs ahead of it), so an unauthenticated caller cycling distinct addresses
+	// controls how many get written; each one should actually be gone when its
+	// TTL says it is.
+	absentAccountCleanupInterval = time.Minute
 )
 
 // contractAccount returns the user's on-chain account via contractAccountCache,
