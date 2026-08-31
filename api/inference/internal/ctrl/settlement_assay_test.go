@@ -3,6 +3,7 @@ package ctrl
 import (
 	"context"
 	"crypto/ecdsa"
+	"net/http"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/accounts"
@@ -399,5 +400,27 @@ func TestPartitionKeepsHonestRequestsAwayFromACheat(t *testing.T) {
 	}
 	if len(rejected) != 1 || rejected[0].RequestHash != "cheat" {
 		t.Errorf("rejected = %v, want [cheat]", requestHashes(rejected))
+	}
+}
+
+// Signing is fail-closed: a call that cannot be signed is not sent at all.
+//
+// It used to be sent unsigned with only a warning, which is one config flag
+// away from being a real hole — if the assay's --require-signed-requests is
+// ever off, an unsigned invoice or settlement check is simply accepted. The
+// broker now refuses to make the call and retries on the next cycle.
+func TestSignAssayBodyFailsClosedWithoutTEEKey(t *testing.T) {
+	c := &Ctrl{logger: testLogger()} // teeService nil: nothing to sign with
+	req, err := http.NewRequest(http.MethodPost, "https://assay.invalid/x", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := c.signAssayBody(req, []byte(`{"a":1}`)); err == nil {
+		t.Fatal("signAssayBody returned nil with no TEE key — the caller would " +
+			"then send the request unsigned")
+	}
+	if got := req.Header.Get("ZG-Body-Sig"); got != "" {
+		t.Errorf("ZG-Body-Sig = %q, want empty on failure", got)
 	}
 }

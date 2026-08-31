@@ -154,7 +154,12 @@ func (c *Ctrl) fetchAssayVerdicts(ctx context.Context, hashes []string) (map[str
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	c.signAssayBody(req, body)
+	// Fail closed, same reasoning as the invoice path. The caller falls back
+	// to the verdicts already recorded on each request, which is strictly
+	// safer than asking the assay a question we cannot authenticate.
+	if err := c.signAssayBody(req, body); err != nil {
+		return nil, fmt.Errorf("refusing to send an unsigned settlement check: %w", err)
+	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {

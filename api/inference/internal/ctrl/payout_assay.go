@@ -320,7 +320,13 @@ func (c *Ctrl) postInvoice(ctx context.Context, req invoiceRequest) (*invoiceRes
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	c.signAssayBody(httpReq, body)
+	// Fail closed: an unsigned invoice is either refused by the assay (a
+	// wasted round trip) or — if its enforcement flag is ever off — accepted
+	// unauthenticated, which is the thing signing exists to prevent. The
+	// cumulative stays pending and the next settlement cycle retries.
+	if err := c.signAssayBody(httpReq, body); err != nil {
+		return nil, fmt.Errorf("refusing to send an unsigned invoice: %w", err)
+	}
 	// The shared client, NOT http.DefaultClient: it carries the verifier's
 	// TLS key pin — through the default client the invoice would bypass the
 	// pin check entirely (settlement would work but invoicing would not).

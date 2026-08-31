@@ -1,6 +1,8 @@
 package ctrl
 
 import (
+	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/ethereum/go-ethereum/common/hexutil"
@@ -19,14 +21,14 @@ import (
 // contract's InsufficientAssayPool are). Invoice bodies are cumulative and
 // idempotent, so replaying a captured request cannot double-issue; extra
 // replay protection is deliberately deferred (B-4).
-func (c *Ctrl) signAssayBody(req *http.Request, body []byte) {
+func (c *Ctrl) signAssayBody(req *http.Request, body []byte) error {
 	if c.teeService == nil {
-		return
+		return errors.New("no TEE settlement key: cannot sign this call")
 	}
 	sig, err := c.teeService.Sign(crypto.Keccak256(body))
 	if err != nil {
-		c.logger.Warnf("Assay: cannot sign request body (an assay in signed mode will refuse this call): %v", err)
-		return
+		return fmt.Errorf("cannot sign request body: %w", err)
 	}
 	req.Header.Set("ZG-Body-Sig", hexutil.Encode(sig))
+	return nil
 }
