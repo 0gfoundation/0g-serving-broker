@@ -51,6 +51,44 @@ const (
 	accountCacheCleanupInterval = time.Minute
 )
 
+// cacheableAbsence reports whether an error from the contract is a verdict safe
+// to REMEMBER, as opposed to one safe merely to act on once.
+//
+// WrapContractError reaches "account not exists" two ways: by decoding the ABI
+// error, and by a keyword fallback matching any error text that contains
+// "account", "not" and "exist". Only the decoded verdict is authoritative, so
+// only it is cached — acting on a misclassification once costs a single spurious
+// rejection, whereas remembering it rejects a FUNDED user for the whole TTL
+// while inflating broker_requests_rejected_total{reason="account_not_exist"},
+// making the incident read as a genuine unfunded-user spike.
+//
+// What this does NOT protect against, despite being the obvious guess: a
+// lagging or pruned replica. Such a node answers with a real, ABI-decodable
+// AccountNotExists against an old block, which is authoritative by every test
+// available here and IS cached. The observed non-absence failures are all
+// transport text — `i/o timeout`, `EOF`, `context canceled`,
+// `connection refused` — none of which trips the keyword triple, so the fallback
+// path is rare in practice and this gate is a belt-and-braces measure rather
+// than a live defence. Fixing the stale-replica case needs invalidation on
+// deposit (the BalanceUpdated binding is generated but unwired), not a stricter
+// error test.
+func cacheableAbsence(err error) bool {
+	return errors.Is(err, providercontract.ErrAccountNotExists) &&
+		!errors.Is(err, providercontract.ErrAccountNotExistsInferred)
+}
+
+// rememberAbsence caches "this address has no account" when, and only when, the
+// error says so authoritatively. Split out from contractAccount so the decision
+// AND the write are reachable from a test: Ctrl.contract is a concrete type with
+// an unexported logger, so no test can make the fetch itself return a crafted
+// error, and without this seam both dropping the cacheableAbsence guard and
+// deleting the write outright left the whole suite green.
+func (c *Ctrl) rememberAbsence(key string, err error) {
+	if cacheableAbsence(err) {
+		c.contractAccountCache.Set(key, accountAbsent{}, absentAccountTTL)
+	}
+}
+
 // contractAccount returns the user's on-chain account via contractAccountCache,
 // caching BOTH outcomes — the account, and its documented absence.
 //
@@ -74,18 +112,7 @@ func (c *Ctrl) contractAccount(ctx *gin.Context, userAddress common.Address) (*c
 
 	fetched, err := c.contract.GetUserAccount(ctx, userAddress)
 	if err != nil {
-		// Remember the absence only when the contract actually said so. The
-		// keyword fallback in WrapContractError classifies any error text
-		// containing "account", "not" and "exist" as an absence, so a transport
-		// fault can arrive here wearing the same sentinel. Acting on that once
-		// costs one spurious rejection; remembering it rejects a FUNDED user for
-		// the whole TTL while inflating
-		// broker_requests_rejected_total{reason="account_not_exist"}, so the
-		// incident reads as a genuine unfunded-user spike.
-		if errors.Is(err, providercontract.ErrAccountNotExists) &&
-			!errors.Is(err, providercontract.ErrAccountNotExistsInferred) {
-			c.contractAccountCache.Set(key, accountAbsent{}, absentAccountTTL)
-		}
+		c.rememberAbsence(key, err)
 		return nil, err
 	}
 

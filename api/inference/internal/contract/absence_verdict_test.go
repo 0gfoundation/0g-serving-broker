@@ -64,13 +64,18 @@ type dataErrStub struct {
 func (e dataErrStub) Error() string          { return e.msg }
 func (e dataErrStub) ErrorData() interface{} { return e.data }
 
-// THE load-bearing test for the negative cache. ctrl caches an absence only when
-// this function returns a DECODED verdict, so if the decode branch ever stops
-// producing a non-inferred error — someone collapsing the two joins back
-// together, or reordering the keyword fallback ahead of the ABI decode — the
-// cache silently starts persisting transport faults, and a funded user is
-// rejected for the whole TTL during any RPC wobble. Every other test in this
-// package reaches formatContractError directly and would still pass.
+// Drives the decode branch end to end: ctrl caches an absence only for a
+// DECODED verdict, so if this stops producing a non-inferred error the cache
+// silently begins persisting transport faults and a funded user is rejected for
+// the whole TTL. Every other test in this package reaches formatContractError
+// directly and would still pass.
+//
+// Scope, precisely: this catches collapsing the two errors.Join arguments back
+// together. It does NOT catch reordering the keyword fallback ahead of the ABI
+// decode — with a real geth revert the fallback cannot match anyway (see the
+// message below), so both orderings yield the same verdict here. That reordering
+// is only observable on an error whose text trips the keyword triple, which the
+// keyword case in TestAbsenceVerdictDistinguishesInferredFromDecoded covers.
 //
 // The message is geth's real revert text, which deliberately contains no
 // "account": that is why the two paths are disjoint in production rather than

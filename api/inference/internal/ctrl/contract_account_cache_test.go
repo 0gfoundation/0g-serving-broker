@@ -1,6 +1,7 @@
 package ctrl
 
 import (
+	"encoding/hex"
 	"net/http/httptest"
 	"testing"
 
@@ -138,3 +139,81 @@ func TestValidateTokenRevocationFailsOpenOnCachedAbsence(t *testing.T) {
 		t.Errorf("err = %v, want nil (revocation check fails open on a lookup failure)", err)
 	}
 }
+
+// The decision AND the write, table-driven against real WrapContractError
+// output. Without this, dropping the cacheableAbsence guard or deleting the
+// Set() outright — a complete revert of this change — both left the whole suite
+// green, because every other test seeds a cache HIT and none exercises the
+// miss-then-write path.
+func TestRememberAbsenceCachesOnlyAuthoritativeVerdicts(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	addr := common.HexToAddress(testAddr)
+
+	abiErr, ok := providercontract.ContractABIForTest().Errors["AccountNotExists"]
+	if !ok {
+		t.Fatal("AccountNotExists missing from the ABI")
+	}
+	packed, err := abiErr.Inputs.Pack(addr, common.HexToAddress("0x4870CbC4D07d6Ac2EE5aA865588e5985FE77a4E9"))
+	if err != nil {
+		t.Fatalf("packing revert args: %v", err)
+	}
+	decoded := providercontract.WrapContractError(revertErr{
+		msg:  "execution reverted",
+		data: "0x" + hex.EncodeToString(append(append([]byte{}, abiErr.ID[:4]...), packed...)),
+	})
+
+	cases := []struct {
+		name      string
+		err       error
+		wantCache bool
+	}{
+		{"decoded ABI revert", decoded, true},
+		{
+			// The keyword fallback. Cached, this would reject a funded user for
+			// the whole TTL on a transport blip whose text happens to match.
+			"keyword-fallback text",
+			providercontract.WrapContractError(errors.New("account does not exist at this block")),
+			false,
+		},
+		{
+			// The shape transport failures actually take in production.
+			"real transport failure",
+			providercontract.WrapContractError(errors.New(`Post "https://evmrpc.0g.ai": EOF`)),
+			false,
+		},
+		{"unrelated error", errors.New("boom"), false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newCacheOnlyCtrl()
+			c.rememberAbsence(addr.Hex(), tc.err)
+
+			cached, found := c.contractAccountCache.Get(addr.Hex())
+			if tc.wantCache {
+				if !found {
+					t.Fatal("an authoritative absence was not remembered — every request will re-issue the eth_call")
+				}
+				if _, isAbsent := cached.(accountAbsent); !isAbsent {
+					t.Errorf("cached %T, want accountAbsent", cached)
+				}
+				return
+			}
+			if found {
+				t.Errorf("cached %T for a non-authoritative verdict — a funded user would be rejected for %s", cached, absentAccountTTL)
+			}
+		})
+	}
+}
+
+// revertErr is the shape a reverting eth_call arrives in: geth's *rpc.jsonError
+// is unexported but satisfies rpc.DataError, which is all WrapContractError
+// type-asserts for.
+type revertErr struct {
+	msg  string
+	data string
+}
+
+func (e revertErr) Error() string          { return e.msg }
+func (e revertErr) ErrorData() interface{} { return e.data }
