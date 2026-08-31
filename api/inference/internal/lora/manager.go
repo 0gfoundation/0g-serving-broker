@@ -389,10 +389,21 @@ func (m *Manager) downloadFromStorage(ctx context.Context, info *AdapterInfo) er
 	// IsHexAddress accepts the all-zero address, so it is excluded too: no enclave
 	// signs with it, and AesDecryptLargeFile would otherwise reject it only after a
 	// full download and decrypt, reporting a missing field rather than this one.
+	//
+	// The remediation names the endpoint deliberately. Finalizer.pushAdapterKey has
+	// exactly one caller, inside Finalizer.Execute, and Execute only runs for a task
+	// still inside the finalizer state machine — so for an already-delivered task
+	// the fine-tuning broker will never re-push on its own, and an error telling an
+	// operator to wait for it would name a remedy that does not exist. The push
+	// endpoint itself is reachable and idempotent, so an operator can complete the
+	// row directly.
 	expectedSigner := common.HexToAddress(adapterKey.TeeSignerAddress)
 	if !common.IsHexAddress(adapterKey.TeeSignerAddress) || expectedSigner == (common.Address{}) {
 		return fmt.Errorf(
-			"adapter key for task %s has no usable TEE signer address (got %q); the fine-tuning broker must re-push it before this adapter can be verified and deployed",
+			"adapter key for task %s has no usable TEE signer address (got %q), so the artifact's TEE tag signature cannot be verified and the adapter will not be deployed. "+
+				"To fix: POST to the inference broker's /internal/v1/adapter-keys with this task's taskId, its existing storageHash and providerEncKey, and teeSignerAddress set to the address of the enclave that PRODUCED this adapter "+
+				"(the fine-tuning broker's TEE signer — stable across restarts, so its current address is correct unless the enclave image changed since this adapter was built). "+
+				"The endpoint upserts, so re-pushing an existing task is safe",
 			info.TaskID, adapterKey.TeeSignerAddress)
 	}
 

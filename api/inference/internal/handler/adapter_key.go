@@ -135,6 +135,18 @@ func (h *Handler) ReceiveAdapterKey(c *gin.Context) {
 		signerAddress = common.HexToAddress(trimmed).Hex()
 	}
 
+	// A signer-less push is accepted so a version-skewed fine-tuning broker does not
+	// strand a paid-for deliverable — but it means the adapter will refuse to deploy
+	// later, after the user has acknowledged and paid. Logged at Warn so the skew is
+	// visible at the point it is still cheap to fix, rather than only surfacing as a
+	// failed deploy once nothing can be done about that task.
+	if signerAddress == "" {
+		h.logger.Warnf(
+			"adapter-key push for task %s carries no teeSignerAddress: the artifact's TEE tag signature will not be verifiable and the adapter will NOT deploy. "+
+				"This usually means the fine-tuning broker predates the field and needs upgrading; the key can be completed later by re-pushing to this endpoint with teeSignerAddress set",
+			req.TaskID)
+	}
+
 	key := &model.AdapterKey{
 		TaskID:           req.TaskID,
 		StorageHash:      req.StorageHash,

@@ -419,11 +419,14 @@ func (d *DB) Migrate() error {
 				// the producing enclave's address, which nothing carried, so the adapter key
 				// push now includes it and this column stores it.
 				//
-				// Nullable on purpose: a row written before this column existed has no signer
-				// and must be distinguishable from an explicit zero address. lora.Manager
-				// refuses to deploy such a row (with a "re-push required" error) rather than
-				// verifying against 0x0, so pre-existing adapters fail closed instead of
-				// silently keeping the old unverified behaviour.
+				// Nullable because AutoMigrate cannot add a NOT NULL column to a table that
+				// already has rows without a default. It does NOT make pre-migration rows
+				// distinguishable from explicitly-empty ones: model.AdapterKey declares a
+				// plain string, so gorm reads a legacy NULL back as "" and writes "" for a
+				// push that omits the field. Nothing depends on telling them apart —
+				// lora.Manager refuses to deploy on "", on a malformed value and on 0x0
+				// alike, so pre-existing adapters fail closed rather than silently keeping
+				// the old unverified behaviour.
 				type AdapterKey struct {
 					TeeSignerAddress string `gorm:"type:varchar(42)"`
 				}

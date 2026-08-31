@@ -402,10 +402,12 @@ func TestAdapterKeyPushWithoutSignerDoesNotWipeIt(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	// The same task pushed again by a broker that predates the field.
+	// The same task, same artifact bytes, pushed again by a broker that predates the
+	// field. storageHash is unchanged, so the stored signer still describes these
+	// bytes and must survive.
 	if err := d.CreateAdapterKey(&model.AdapterKey{
 		TaskID:         taskID,
-		StorageHash:    "0x5555555555555555555555555555555555555555555555555555555555555555",
+		StorageHash:    "0x4444444444444444444444444444444444444444444444444444444444444444",
 		ProviderEncKey: "0xenckey-v2",
 	}); err != nil {
 		t.Fatalf("push without signer: %v", err)
@@ -416,10 +418,50 @@ func TestAdapterKeyPushWithoutSignerDoesNotWipeIt(t *testing.T) {
 		t.Fatalf("read back: %v", err)
 	}
 	if got.TeeSignerAddress != signer {
-		t.Errorf("TeeSignerAddress = %q, want %q preserved; a push without the field wiped a good signer", got.TeeSignerAddress, signer)
+		t.Errorf("TeeSignerAddress = %q, want %q preserved; a same-artifact push without the field wiped a good signer", got.TeeSignerAddress, signer)
 	}
 	// The fields the push DID carry must still have been applied.
 	if got.ProviderEncKey != "0xenckey-v2" {
 		t.Errorf("ProviderEncKey = %q, want the pushed value", got.ProviderEncKey)
+	}
+}
+
+// The converse: a push that CHANGES the artifact without supplying a signer must
+// not leave the row describing artifact B with signer A. Keeping the stale signer
+// makes verification fail as "signer mismatch", which reads as tampering; clearing
+// it fails closed with the documented, recoverable "no usable TEE signer" error.
+func TestAdapterKeyPushWithNewArtifactClearsStaleSigner(t *testing.T) {
+	d := setupTestDB(t)
+
+	const taskID = "task-key-stale-signer"
+	const oldHash = "0x6666666666666666666666666666666666666666666666666666666666666666"
+	const newHash = "0x7777777777777777777777777777777777777777777777777777777777777777"
+	if err := d.CreateAdapterKey(&model.AdapterKey{
+		TaskID:           taskID,
+		StorageHash:      oldHash,
+		ProviderEncKey:   "0xenckey-a",
+		TeeSignerAddress: "0x71562b71999873DB5b286dF957af199Ec94617F7",
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Re-encrypted by a rolled-back broker: new artifact, new AES key, no signer.
+	if err := d.CreateAdapterKey(&model.AdapterKey{
+		TaskID:         taskID,
+		StorageHash:    newHash,
+		ProviderEncKey: "0xenckey-b",
+	}); err != nil {
+		t.Fatalf("push new artifact without signer: %v", err)
+	}
+
+	got, err := d.GetAdapterKeyByTaskID(taskID)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if got.StorageHash != newHash || got.ProviderEncKey != "0xenckey-b" {
+		t.Errorf("artifact fields not applied: hash=%q key=%q", got.StorageHash, got.ProviderEncKey)
+	}
+	if got.TeeSignerAddress != "" {
+		t.Errorf("TeeSignerAddress = %q, want cleared; a signer describing the previous artifact was kept alongside a new one", got.TeeSignerAddress)
 	}
 }
