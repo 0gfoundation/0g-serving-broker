@@ -5,6 +5,8 @@ import (
 	"math/big"
 	"time"
 
+	"github.com/patrickmn/go-cache"
+
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/inference/contract"
 	providercontract "github.com/0glabs/0g-serving-broker/inference/internal/contract"
@@ -13,6 +15,128 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
 )
+
+// accountAbsent marks "no account exists on the contract for this address" in
+// contractAccountCache. It is a distinct type rather than a nil
+// *contract.Account so that a cache hit is unambiguous to the type switch in
+// contractAccount.
+type accountAbsent struct{}
+
+const (
+	// accountCacheTTL is how long a FOUND contract account is cached. It is the
+	// default expiration of contractAccountCache.
+	accountCacheTTL = 10 * time.Minute
+
+	// absentAccountTTL is how long an absent account is remembered.
+	// Deliberately far shorter than accountCacheTTL: it delays a caller who has
+	// just funded their account by at most this long, while still reducing a
+	// never-funded address's steady-state cost from one chain call per request to
+	// one per interval. There is no single-flight, so a CONCURRENT burst from one
+	// such address still issues one call each — they all miss the cache before
+	// any of them writes it. Nothing invalidates this entry on deposit.
+	absentAccountTTL = 30 * time.Second
+
+	// accountCacheCleanupInterval is the janitor period for the WHOLE cache —
+	// positive 10-minute entries included — deliberately not derived from
+	// accountCacheTTL.
+	//
+	// go-cache's Get reports an expired item as absent but does not delete it,
+	// so memory is reclaimed only by the janitor. Tying the janitor to the
+	// 10-minute account TTL left a 30-second negative entry resident for up to
+	// 20 minutes — 40x its stated lifetime. That matters because a negative
+	// entry can be created BEFORE signature verification (validateTokenRevocation
+	// runs ahead of it), so an unauthenticated caller cycling distinct addresses
+	// controls how many get written. Worst-case residency is still TTL + this
+	// interval (90s for a 30s entry, i.e. 3x the TTL), not the TTL itself — but
+	// that is a 13x improvement on the 20 minutes it was.
+	accountCacheCleanupInterval = time.Minute
+)
+
+// accountCacheKey derives contractAccountCache's key for an address. Every read,
+// write and delete goes through it, so the "the key is always the checksummed
+// form" invariant is one function rather than an expression repeated at six
+// sites — which is how the two deletes came to take a caller- or DB-supplied
+// string verbatim while the writes keyed on .Hex(), so a lower-case address
+// deleted nothing at all.
+func accountCacheKey(userAddress string) string {
+	return common.HexToAddress(userAddress).Hex()
+}
+
+// cacheableAbsence reports whether an error from the contract is a verdict safe
+// to REMEMBER, as opposed to one safe merely to act on once.
+//
+// WrapContractError reaches "account not exists" two ways: by decoding the ABI
+// error, and by a keyword fallback matching any error text that contains
+// "account", "not" and "exist". Only the decoded verdict is authoritative, so
+// only it is cached — acting on a misclassification once costs a single spurious
+// rejection, whereas remembering it rejects a FUNDED user for the whole TTL
+// while inflating broker_requests_rejected_total{reason="account_not_exist"},
+// making the incident read as a genuine unfunded-user spike.
+//
+// Keep the scale honest, though: this 30s entry is the SMALL staleness here. A
+// found account is cached for accountCacheTTL with its Generation and
+// RevokedBitmap frozen and nothing invalidating it on revocation, so a revoked
+// token is honoured for up to 10 minutes on a FUNDED account — the one that can
+// actually spend the user's balance. That is pre-existing and wants its own fix
+// (wiring the generated BalanceUpdated watcher would close both).
+//
+// What this does NOT protect against, despite being the obvious guess: a
+// lagging or pruned replica. Such a node answers with a real, ABI-decodable
+// AccountNotExists against an old block, which is authoritative by every test
+// available here and IS cached. The observed non-absence failures are all
+// transport text — `i/o timeout`, `EOF`, `context canceled`,
+// `connection refused` — none of which trips the keyword triple, so the fallback
+// path is rare in practice and this gate is a belt-and-braces measure rather
+// than a live defence. Fixing the stale-replica case needs invalidation on
+// deposit (the BalanceUpdated binding is generated but unwired), not a stricter
+// error test.
+func cacheableAbsence(err error) bool {
+	return errors.Is(err, providercontract.ErrAccountNotExists) &&
+		!errors.Is(err, providercontract.ErrAccountNotExistsInferred)
+}
+
+// rememberAbsence caches "this address has no account" when, and only when, the
+// error says so authoritatively. Split out from contractAccount so the decision
+// AND the write are reachable from a test: Ctrl.contract is a concrete type with
+// an unexported logger, so no test can make the fetch itself return a crafted
+// error, and without this seam both dropping the cacheableAbsence guard and
+// deleting the write outright left the whole suite green.
+func (c *Ctrl) rememberAbsence(key string, err error) {
+	if cacheableAbsence(err) {
+		c.contractAccountCache.Set(key, accountAbsent{}, absentAccountTTL)
+	}
+}
+
+// contractAccount returns the user's on-chain account via contractAccountCache,
+// caching BOTH outcomes — the account, and its documented absence.
+//
+// Every reader of the contract account goes through here. Caching only the
+// success path meant a single never-funded address re-issued an eth_call on
+// EVERY request, indefinitely: it amplified RPC load, and because the call is
+// network I/O made while the request holds a global concurrency slot, it
+// stretched the window in which such a caller crowds out paying traffic.
+func (c *Ctrl) contractAccount(ctx *gin.Context, userAddress common.Address) (*contract.Account, error) {
+	key := accountCacheKey(userAddress.Hex())
+	if cached, found := c.contractAccountCache.Get(key); found {
+		switch v := cached.(type) {
+		case *contract.Account:
+			if v != nil {
+				return v, nil
+			}
+		case accountAbsent:
+			return nil, providercontract.ErrAccountNotExists
+		}
+	}
+
+	fetched, err := c.contract.GetUserAccount(ctx, userAddress)
+	if err != nil {
+		c.rememberAbsence(key, err)
+		return nil, err
+	}
+
+	c.contractAccountCache.Set(key, &fetched, cache.DefaultExpiration)
+	return &fetched, nil
+}
 
 func (c *Ctrl) GetOrCreateAccount(ctx *gin.Context, userAddress string) (model.User, error) {
 	c.mu.Lock()
@@ -26,7 +150,7 @@ func (c *Ctrl) GetOrCreateAccount(ctx *gin.Context, userAddress string) (model.U
 	}
 
 	// Clear cache when creating new account to ensure fresh data
-	c.contractAccountCache.Delete(userAddress)
+	c.contractAccountCache.Delete(accountCacheKey(userAddress))
 
 	contractAccount, err := c.contract.GetUserAccount(ctx, common.HexToAddress(userAddress))
 	if err != nil {
@@ -100,7 +224,7 @@ func (c *Ctrl) UpdateUserAccount(userAddress string, new model.User) error {
 
 func (c *Ctrl) SyncUserAccount(ctx context.Context, userAddress common.Address) error {
 	// Clear cache when syncing account to ensure fresh data
-	c.contractAccountCache.Delete(userAddress.Hex())
+	c.contractAccountCache.Delete(accountCacheKey(userAddress.Hex()))
 
 	account, err := c.contract.GetUserAccount(ctx, userAddress)
 	if err != nil {
@@ -143,7 +267,7 @@ func (c *Ctrl) SyncUserAccountsByAddresses(ctx context.Context, userAddresses []
 	accounts := make([]model.User, 0, len(userAddresses))
 	for _, addr := range userAddresses {
 		// Clear cache for this account
-		c.contractAccountCache.Delete(addr)
+		c.contractAccountCache.Delete(accountCacheKey(addr))
 
 		account, err := c.contract.GetUserAccount(ctx, common.HexToAddress(addr))
 		if err != nil {
