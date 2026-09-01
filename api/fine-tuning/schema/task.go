@@ -1,9 +1,11 @@
 package schema
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/db"
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"gorm.io/plugin/soft_delete"
@@ -34,6 +36,23 @@ func (d *Task) Bind(ctx *gin.Context) error {
 		return err
 	}
 
+	// UserAddress is validated here rather than at each use, because it is used as
+	// a PATH ELEMENT: services.prepareData joins it under the data dir, and
+	// filepath.Join cleans any ".." it contains.
+	//
+	// common.HexToAddress is not a validator. hex.DecodeString returns its partial
+	// output, so "0x" + <40 hex> + "/../.." decodes to exactly the attacker's own
+	// 20-byte address and therefore passes validateProviderSigner, verifySignature
+	// and every other check that compares through HexToAddress — while the same
+	// string, used as a directory name, walks out of datasets/ (verified:
+	// filepath.Join("/data","datasets",that,"hash") is "/data/hash"). prepareData
+	// runs before verification in Execute, so nothing downstream gates it.
+	//
+	// common.IsHexAddress rejects it: it requires the whole string to be a 20-byte
+	// hex address.
+	if !common.IsHexAddress(r.UserAddress) {
+		return fmt.Errorf("userAddress %q is not a valid hex address", r.UserAddress)
+	}
 	d.UserAddress = r.UserAddress
 	d.PreTrainedModelHash = r.PreTrainedModelHash
 	d.DatasetHash = r.DatasetHash

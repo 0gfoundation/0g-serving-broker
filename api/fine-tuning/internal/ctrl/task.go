@@ -145,13 +145,21 @@ func (*Ctrl) validateSignature(task *schema.Task) error {
 	if err != nil {
 		return err
 	}
-	// Compare as addresses, not as strings. Hex() returns the EIP-55 mixed-case
-	// form while task.UserAddress is whatever the client put in the JSON body and
-	// is normalised nowhere on the path, so an all-lowercase address — valid, and
-	// what plenty of wallets emit — was rejected despite a valid signature. That is
-	// the same "correct signature refused over its representation" failure this
-	// change exists to remove, and the two sibling verifiers below already do it
-	// this way.
+	// Compare as addresses, not as strings: Hex() returns the EIP-55 mixed-case form
+	// while task.UserAddress is whatever spelling the caller used, so a byte-exact
+	// compare refused valid signatures over their representation. The two sibling
+	// verifiers below already compared this way.
+	//
+	// This makes THIS check agree with them; it does not make the whole
+	// lowercase-address flow work end to end. CancelTask still compares
+	// existing.UserAddress against the path param byte-exact (task.go:98), and
+	// db.CancelTask's WHERE user_address = ? does the same, so a task created with a
+	// lowercase address and cancelled with the EIP-55 spelling now reaches a 403
+	// "task does not belong to this user" instead of a 401 "address mismatch" —
+	// a better place to fail, still a failure. Fixing it properly means normalising
+	// UserAddress at both ingresses (body and path param) to one spelling, which
+	// changes what is stored and so needs a migration for existing rows. That is a
+	// separate change, not something to smuggle into this one.
 	if recoveredAddress != common.HexToAddress(task.UserAddress) {
 		return errors.New("signature verification failed: address mismatch")
 	}

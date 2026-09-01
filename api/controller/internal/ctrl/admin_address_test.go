@@ -30,3 +30,29 @@ func TestNewAdminAddressSetTrimsAndLowercases(t *testing.T) {
 		t.Errorf("surrounding whitespace was not trimmed before lookup: %v", set)
 	}
 }
+
+// IsAdminAddress is called with recoveredAddr.Hex(), which always carries the 0x
+// prefix. A bare 40-char address — which some tooling emits — would otherwise sit
+// in the set as a key nothing can ever match, and the operator would see only a
+// 403 with nothing in the log explaining it.
+func TestNewAdminAddressSetNormalisesAddressForm(t *testing.T) {
+	const want = "0xabc0000000000000000000000000000000000001"
+
+	for _, spelling := range []string{
+		"0xAbC0000000000000000000000000000000000001",
+		"abc0000000000000000000000000000000000001", // no 0x prefix
+		"  0xABC0000000000000000000000000000000000001  ",
+	} {
+		set := newAdminAddressSet([]string{spelling})
+		if !set[want] {
+			t.Errorf("%q did not normalise to a matchable key: %v", spelling, set)
+		}
+	}
+
+	// Not an address at all: dropped rather than stored as an unmatchable key.
+	for _, bad := range []string{"0xabc", "not-an-address", "0xzz00000000000000000000000000000000000001"} {
+		if set := newAdminAddressSet([]string{bad}); len(set) != 0 {
+			t.Errorf("%q was kept in the admin set: %v", bad, set)
+		}
+	}
+}

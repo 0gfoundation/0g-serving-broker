@@ -329,7 +329,16 @@ func newAdminAddressSet(addrs []string) map[string]bool {
 		if addr == "" {
 			continue
 		}
-		set[strings.ToLower(addr)] = true
+		// Also validated, not just non-blank. IsAdminAddress is called with
+		// recoveredAddr.Hex(), which always carries the 0x prefix, so a bare
+		// "AbC0…0001" — which some tooling emits — would sit in the set as a 40-char
+		// key that can never match, and the operator would see only a 403 with
+		// nothing in the log to explain it. Normalising through HexToAddress folds
+		// the prefix and casing variants onto one key at the same time.
+		if !common.IsHexAddress(addr) {
+			continue
+		}
+		set[strings.ToLower(common.HexToAddress(addr).Hex())] = true
 	}
 	return set
 }
