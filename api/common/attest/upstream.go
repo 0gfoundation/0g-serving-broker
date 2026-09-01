@@ -133,9 +133,13 @@ func (s *upstreamSet) remove(payload string) error {
 	return nil
 }
 
-// list returns the permitted set in the order names were first added. Nil when the
-// set is empty, so RunningState.Upstreams distinguishes "no records" from "records
-// that cancelled out" only by the event log, not by a zero-length slice.
+// list returns the permitted set in the order names entered it: a name re-added
+// while present keeps its position, and one removed and added again takes a new one
+// at the end.
+//
+// Nil for an empty set. That does NOT mean "no records" — RunningState.UpstreamsRecorded
+// is what separates a log that never mentioned upstreams from one that withdrew them
+// all, because a slice cannot express both.
 func (s *upstreamSet) list() []Upstream {
 	if len(s.order) == 0 {
 		return nil

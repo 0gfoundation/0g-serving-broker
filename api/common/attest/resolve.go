@@ -169,8 +169,13 @@ type RunningState struct {
 	// changed to.
 	ConfigSHA256 string
 	// Upstreams is the set of destinations the ledger permits, in the order names
-	// were last added. Meaningful only when UpstreamsRecorded is true and
-	// UpstreamsErr is nil.
+	// entered it — a name re-added while present keeps its position, one removed and
+	// added again takes a new one at the end. Meaningful only when UpstreamsRecorded
+	// is true and UpstreamsErr is nil.
+	//
+	// The order is for reading the set, not for identifying it: UpstreamSetHash sorts,
+	// so two deployments permitting the same destinations agree whatever order their
+	// records arrived in.
 	//
 	// What the set is worth depends on the provider, which this package does not
 	// know: for a self-hosted deployment every entry is a container inside the CVM,
