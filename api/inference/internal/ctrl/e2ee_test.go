@@ -349,7 +349,7 @@ func TestSealNonStreamResponse_RoundTrip(t *testing.T) {
 
 	respBody := []byte(`{"id":"chatcmpl-x","model":"gpt-4o","usage":{"total_tokens":30},"choices":[{"index":0,"message":{"role":"assistant","content":"hi"}}]}`)
 
-	sealed, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, respBody)
+	sealed, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, respBody, e2eeChatResponseSealedFields)
 	if err != nil {
 		t.Fatalf("maybeSealNonStreamResponse: %v", err)
 	}
@@ -417,7 +417,7 @@ func TestSealNonStreamResponse_UnboundTraceInjectable(t *testing.T) {
 	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
 
 	respBody := []byte(`{"id":"x","model":"gpt-4o","usage":{"total_tokens":3},"choices":[{"message":{"content":"hi"}}]}`)
-	sealed, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, respBody)
+	sealed, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, respBody, e2eeChatResponseSealedFields)
 	if err != nil || !isSealed {
 		t.Fatalf("maybeSealNonStreamResponse: sealed=%v err=%v", isSealed, err)
 	}
@@ -510,7 +510,7 @@ func TestSealNonStreamResponse_NotSealed(t *testing.T) {
 	f := newE2EEFixture(t)
 	ctx := newGinCtx() // not marked sealed
 	body := []byte(`{"choices":[]}`)
-	out, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, body)
+	out, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, body, e2eeChatResponseSealedFields)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -789,7 +789,7 @@ func TestSealNonStreamResponse_NullBodyFailsClosed(t *testing.T) {
 
 	// A literal JSON null unmarshals to a nil map without error — must fail closed,
 	// not panic.
-	_, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, []byte("null"))
+	_, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, []byte("null"), e2eeChatResponseSealedFields)
 	if !isSealed {
 		t.Fatal("expected isSealed=true for a sealed request")
 	}

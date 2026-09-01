@@ -215,7 +215,7 @@ func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, acc
 	// signature instead binds the on-wire aad‖ciphertext of the sealed frame.
 	outBody := clientBody
 	var e2eeSignedText string
-	if sealed, isSealed, respBindHash, sealErr := c.maybeSealNonStreamResponse(ctx, clientBody); isSealed {
+	if sealed, isSealed, respBindHash, sealErr := c.maybeSealNonStreamResponse(ctx, clientBody, e2eeChatResponseSealedFields); isSealed {
 		if sealErr != nil {
 			// Fail-closed: never forward plaintext for a sealed request.
 			c.handleBrokerError(ctx, sealErr, "seal response")
