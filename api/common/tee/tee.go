@@ -432,21 +432,27 @@ const hardhatChainID = 31337
 // chain is configured independently by network.url and network.chainID, and
 // NETWORK=hardhat is the default in the all-in-one compose file.
 //
-// What this proves is that the chain the config DECLARES is the local one. It
-// does not dial anything, so a config that declares 31337 while pointing
-// network.url at a real chain still passes — VerifyChainIsLocal is the half that
-// closes that, and callers selecting the mock backend are expected to call it.
+// The declared chain id is checked first because it fails without touching the
+// network, and then the node is asked, because the declaration alone proves
+// nothing: a config declaring 31337 while pointing network.url at a real chain
+// would otherwise pass. Both halves live in this one function rather than beside
+// each other, so selecting the mock backend cannot be separated from proving the
+// chain is local — an earlier version exported the dial as its own function that
+// "callers are expected to call", which is not a property, only a hope.
 //
 // The error paths return Phala rather than the ClientType zero value, which is
 // Mock: a caller that mishandles the error must not thereby select the very
 // backend this function exists to withhold.
-func ClientTypeForNetwork(network string, chainID int64) (ClientType, error) {
+func ClientTypeForNetwork(ctx context.Context, network string, chainID int64, url string) (ClientType, error) {
 	switch network {
 	case "hardhat":
 		if chainID != hardhatChainID {
 			return Phala, fmt.Errorf(
 				"NETWORK=hardhat selects the mock TEE backend, whose signing and E2EE keys are a constant committed to this repository, but network.chainID is %d rather than the local hardhat node's %d. Every key this broker would publish is already known to anyone with a checkout, so refusing to start: set NETWORK=phala for a real chain, or point network.url/chainID at a local hardhat node",
 				chainID, hardhatChainID)
+		}
+		if err := verifyChainIsLocal(ctx, url); err != nil {
+			return Phala, err
 		}
 		return Mock, nil
 	// gcp and alicloud selected TEE backends that have been REMOVED (see
@@ -463,13 +469,35 @@ func ClientTypeForNetwork(network string, chainID int64) (ClientType, error) {
 	}
 }
 
-// VerifyChainIsLocal proves that the node behind url really is a local hardhat
-// chain. It is a no-op for every backend but Mock.
+// VerifierForNetwork returns the TEE verifier a service advertises on-chain for
+// the given NETWORK value, so the verifier and the backend that produces the quote
+// are decided in one place.
 //
-// ClientTypeForNetwork compares network.chainID, which the operator declares.
-// That catches the configuration this whole guard exists for — the wizard and the
-// compose file both hand out a real chain id — but a config that declares 31337
-// while pointing network.url at a real chain passes it.
+// They were not, and disagreed: with NETWORK unset ClientTypeForNetwork selects
+// Phala, which produces a dstack quote, while the switch in
+// inference/internal/contract.addOrUpdateService published cryptopilot. A client
+// that honours TEEVerifier would then reach for the wrong verifier and fail. The
+// default here follows the backend — Phala means dstack.
+//
+// hardhat keeps cryptopilot rather than gaining a meaning of its own: its quote is
+// MockTappdClient's, which no verifier accepts, so the value is inert either way
+// and changing it would only add a third case to reason about.
+func VerifierForNetwork(network string) string {
+	switch network {
+	case "hardhat":
+		return VerifierCryptoPilot
+	default:
+		return VerifierDStack
+	}
+}
+
+// verifyChainIsLocal proves that the node behind url really is a local hardhat
+// chain. Only ClientTypeForNetwork's hardhat branch reaches it, so no other
+// backend ever pays for the round trip.
+//
+// The declared network.chainID catches the configuration this whole guard exists
+// for — the wizard and the compose file both hand out a real chain id — but a
+// config that declares 31337 while pointing network.url at a real chain passes it.
 //
 // Such a config cannot settle: EIP-155 signing uses the declared id
 // (common/chain.EthereumNetwork builds its transactor from it), so no transaction
@@ -482,10 +510,7 @@ func ClientTypeForNetwork(network string, chainID int64) (ClientType, error) {
 // broker serves mock key material under it.
 //
 // One eth_chainId at startup closes that, and only the mock path pays for it.
-func VerifyChainIsLocal(ctx context.Context, clientType ClientType, url string) error {
-	if clientType != Mock {
-		return nil
-	}
+func verifyChainIsLocal(ctx context.Context, url string) error {
 	if url == "" {
 		return fmt.Errorf("NETWORK=hardhat selects the mock TEE backend, but network.url is empty, so the chain it would run against cannot be checked")
 	}

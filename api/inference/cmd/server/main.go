@@ -62,13 +62,9 @@ func Main() {
 
 	svcCache := cache.New(5*time.Minute, 10*time.Minute)
 
-	teeClientType, err := tee.ClientTypeForNetwork(os.Getenv("NETWORK"), config.Network.ChainID)
+	teeClientType, err := tee.ClientTypeForNetwork(
+		context.Background(), os.Getenv("NETWORK"), config.Network.ChainID, config.Network.URL)
 	if err != nil {
-		panic(err)
-	}
-	// The declared chain id got us this far; this is the half that dials. See
-	// tee.VerifyChainIsLocal for why the declaration alone is not enough.
-	if err := tee.VerifyChainIsLocal(context.Background(), teeClientType, config.Network.URL); err != nil {
 		panic(err)
 	}
 

@@ -49,12 +49,7 @@ func buildAdditionalInfo(service config.Service, imageName, imageDigest string, 
 	// is already skipped client-side).
 	var teeVerifier string
 	if !service.IsStandard() {
-		switch os.Getenv("NETWORK") {
-		case "phala":
-			teeVerifier = tee.VerifierDStack
-		default:
-			teeVerifier = tee.VerifierCryptoPilot
-		}
+		teeVerifier = tee.VerifierForNetwork(os.Getenv("NETWORK"))
 	}
 
 	verifierURL := service.VerifierURL

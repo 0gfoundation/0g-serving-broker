@@ -12,16 +12,49 @@ import (
 )
 
 func TestClientTypeForNetwork(t *testing.T) {
-	const zgTestnetChainID = 16601
+	const zgTestnetChainID = 16602 // the wizard's testnet base config
 
 	tests := []struct {
 		name    string
 		network string
 		chainID int64
+		// url is only dialled on the hardhat path; every other case can leave it
+		// pointing nowhere, which is itself the assertion that no dial happens.
+		url     func(t *testing.T) string
 		want    ClientType
 		wantErr string
 	}{
-		{name: "hardhat on the local node", network: "hardhat", chainID: hardhatChainID, want: Mock},
+		{
+			name:    "hardhat on the local node",
+			network: "hardhat",
+			chainID: hardhatChainID,
+			url:     func(t *testing.T) string { return chainIDServer(t, hardhatChainID) },
+			want:    Mock,
+		},
+		{
+			// The declaration says local, the node says otherwise. Only dialling catches it.
+			name:    "hardhat declaring 31337 while pointing at a real chain",
+			network: "hardhat",
+			chainID: hardhatChainID,
+			url:     func(t *testing.T) string { return chainIDServer(t, zgTestnetChainID) },
+			want:    Phala,
+			wantErr: "16602",
+		},
+		{
+			name:    "hardhat with no url to check",
+			network: "hardhat",
+			chainID: hardhatChainID,
+			want:    Phala,
+			wantErr: "network.url is empty",
+		},
+		{
+			name:    "hardhat against an unreachable node",
+			network: "hardhat",
+			chainID: hardhatChainID,
+			url:     func(t *testing.T) string { return "http://127.0.0.1:1" },
+			want:    Phala,
+			wantErr: "must be confirmed local",
+		},
 		{
 			name:    "hardhat pointed at a real chain",
 			network: "hardhat",
@@ -46,7 +79,11 @@ func TestClientTypeForNetwork(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := ClientTypeForNetwork(tt.network, tt.chainID)
+			url := ""
+			if tt.url != nil {
+				url = tt.url(t)
+			}
+			got, err := ClientTypeForNetwork(t.Context(), tt.network, tt.chainID, url)
 			if tt.wantErr == "" {
 				if err != nil {
 					t.Fatalf("unexpected error: %v", err)
@@ -124,44 +161,39 @@ func chainIDServer(t *testing.T, id int64) string {
 	return srv.URL
 }
 
-func TestVerifyChainIsLocal(t *testing.T) {
-	const zgTestnetChainID = 16601
+func TestVerifierForNetworkAgreesWithClientType(t *testing.T) {
+	tests := []struct {
+		network  string
+		chainID  int64
+		wantType ClientType
+		wantVer  string
+	}{
+		{network: "", chainID: 16602, wantType: Phala, wantVer: VerifierDStack},
+		{network: "phala", chainID: 16602, wantType: Phala, wantVer: VerifierDStack},
+		{network: "hardhat", chainID: hardhatChainID, wantType: Mock, wantVer: VerifierCryptoPilot},
+	}
 
-	t.Run("phala never dials", func(t *testing.T) {
-		// A URL nothing is listening on: reaching the network at all would fail
-		// the test, which is the property real deployments depend on.
-		if err := VerifyChainIsLocal(t.Context(), Phala, "http://127.0.0.1:1"); err != nil {
-			t.Fatalf("Phala must skip the check entirely, got %v", err)
-		}
-	})
-
-	t.Run("mock against the local node", func(t *testing.T) {
-		if err := VerifyChainIsLocal(t.Context(), Mock, chainIDServer(t, hardhatChainID)); err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-	})
-
-	t.Run("mock against a real chain that a config declared as local", func(t *testing.T) {
-		// The gap ClientTypeForNetwork alone leaves: network.chainID says 31337,
-		// network.url points somewhere else. Only dialing catches it.
-		err := VerifyChainIsLocal(t.Context(), Mock, chainIDServer(t, zgTestnetChainID))
-		if err == nil {
-			t.Fatal("expected a refusal when the node reports a real chain id")
-		}
-		if !strings.Contains(err.Error(), "16601") {
-			t.Errorf("error should name the observed chain id, got: %v", err)
-		}
-	})
-
-	t.Run("mock with no url", func(t *testing.T) {
-		if err := VerifyChainIsLocal(t.Context(), Mock, ""); err == nil {
-			t.Fatal("expected a refusal when there is no url to check")
-		}
-	})
-
-	t.Run("mock against an unreachable node", func(t *testing.T) {
-		if err := VerifyChainIsLocal(t.Context(), Mock, "http://127.0.0.1:1"); err == nil {
-			t.Fatal("expected a refusal when the node cannot be reached")
-		}
-	})
+	for _, tt := range tests {
+		t.Run("NETWORK="+tt.network, func(t *testing.T) {
+			url := ""
+			if tt.network == "hardhat" {
+				url = chainIDServer(t, hardhatChainID)
+			}
+			gotType, err := ClientTypeForNetwork(t.Context(), tt.network, tt.chainID, url)
+			if err != nil {
+				t.Fatalf("ClientTypeForNetwork: %v", err)
+			}
+			if gotType != tt.wantType {
+				t.Errorf("client type = %v, want %v", gotType, tt.wantType)
+			}
+			if got := VerifierForNetwork(tt.network); got != tt.wantVer {
+				t.Errorf("verifier = %q, want %q", got, tt.wantVer)
+			}
+			// The property that matters: the Phala backend never advertises a verifier
+			// that cannot check a dstack quote.
+			if gotType == Phala && VerifierForNetwork(tt.network) != VerifierDStack {
+				t.Errorf("NETWORK=%q selects the Phala backend but advertises %q", tt.network, VerifierForNetwork(tt.network))
+			}
+		})
+	}
 }

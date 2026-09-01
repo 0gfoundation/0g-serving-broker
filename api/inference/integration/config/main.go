@@ -144,6 +144,17 @@ const (
 	hardhatNodeURL         = "http://hardhat-node-with-contract:8545"
 	hardhatChainID         = 31337
 	hardhatContractAddress = "0x0165878A594ca255338adfa4d48449f69242Eb8F"
+	// One of the hardhat node's own pre-funded accounts. It is a well-known test key
+	// published in hardhat's documentation and already committed in
+	// integration/all-in-one/config.local.yml — not a secret, and worthless anywhere
+	// but on a local node.
+	//
+	// It has to replace whatever key the operator typed, because that one has no
+	// balance on a freshly started hardhat container: first-time registration stakes
+	// DefaultProviderStake (100 0G) plus gas, and ctrl.SyncService failing there
+	// panics the broker at startup. Prompting for a key and then ignoring it would be
+	// worse than confusing, so the substitution is printed.
+	hardhatFundedPrivateKey = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
 )
 
 type NetworkConfig struct {
@@ -1706,8 +1717,12 @@ func generateYAMLConfig(originalDir string, deployLLM bool, targetTeeAddress str
 		config.Network.URL = hardhatNodeURL
 		config.Network.ChainID = hardhatChainID
 		config.ContractAddress = hardhatContractAddress
+		config.Network.PrivateKeys = []string{hardhatFundedPrivateKey}
 		fmt.Printf("   ℹ️  Hardhat selected: network.url → %s, chainID → %d, contractAddress → %s\n",
 			hardhatNodeURL, hardhatChainID, hardhatContractAddress)
+		fmt.Print("   ℹ️  The private key you entered was replaced with one of the hardhat node's\n" +
+			"      pre-funded test accounts — yours holds no balance there, and first-time\n" +
+			"      service registration stakes 100 0G. Your key is not written to the config.\n")
 	}
 
 	// Save final configuration
