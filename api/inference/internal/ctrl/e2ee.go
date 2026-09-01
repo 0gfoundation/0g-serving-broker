@@ -151,23 +151,14 @@ func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, reqBody []byte) ([]byte, err
 		return nil, fmt.Errorf("sealed request signer_addr %q does not match this enclave", e2ee.SignerAddr)
 	}
 
-	// Enforce the per-endpoint sealed-set policy the protocol leaves to the
-	// enclave (SPEC §5.1 profiles). OpenRequest only checks that the decrypted
-	// keys match the DECLARED sealed_fields — a client that declares and seals
-	// nothing but "size" would open fine while its prompt rode along in the
-	// clear. The endpoint knows which field is the payload, so it is the place
-	// that can refuse.
-	if err := c.verifySealedFieldsForServiceType(e2ee.SealedFields); err != nil {
-		return nil, err
-	}
-
-	// Sealing the payload is not sufficient on its own: a CLEARTEXT field can
-	// direct this enclave to publish the RESULT outside the sealed channel
-	// (SPEC §7.1). Checked here, pre-inference, so such a request never reaches
-	// the GPU. The reference client refuses to build one, but a third-party
-	// client is under no such obligation — same reasoning as the sealed-set check.
-	if err := c.verifyPinnedCleartextForServiceType(env); err != nil {
-		return nil, err
+	// Everything the receiver is responsible for now runs inside
+	// wire.OpenRequestFor below (SPEC §12): the sealed set covers this profile's
+	// payload, and the pinned cleartext field is present, correctly valued, not
+	// sealed away and not declared unbound. Resolve the profile here — the
+	// protocol package cannot know which endpoint this broker serves.
+	profile, sealable := profileForServiceType(c.Service.Type)
+	if !sealable {
+		return nil, fmt.Errorf("sealed requests are not supported for service type %q", c.Service.Type)
 	}
 
 	// Extract the client's response ephemeral key before opening, so the response
@@ -205,7 +196,7 @@ func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, reqBody []byte) ([]byte, err
 	// Open (verifies v/kem_id, recomputes AAD, HPKE-Open fail-closed, checks
 	// decrypted keys == sealed_fields with no cleartext collision, and reconstructs
 	// the original request = cleartext ∪ decrypted). SPEC §6.
-	reconstructed, err := wire.OpenRequest(c.teeService.EncPrivateKey, env)
+	reconstructed, err := wire.OpenRequestFor(profile, c.teeService.EncPrivateKey, env)
 	if err != nil {
 		return nil, fmt.Errorf("unseal request: %w", err)
 	}
@@ -245,73 +236,6 @@ func profileForServiceType(svcType string) (p wire.Profile, sealable bool) {
 	default:
 		return "", false
 	}
-}
-
-// verifySealedFieldsForServiceType enforces the sealed-set policy for the
-// endpoint this broker serves (SPEC §5.1 profiles), by delegating to the
-// protocol package's own rule rather than restating it.
-//
-// The check is needed because OpenRequest verifies only that the decrypted keys
-// match the DECLARED sealed_fields — which a request that seals nothing
-// sensitive satisfies exactly as well as one that seals the payload. The
-// reference client refuses to BUILD such an envelope; a third-party client is
-// under no such obligation, so this is the half that does not depend on the
-// sender.
-//
-// Chat is now checked too. It used to be skipped on the reasoning that the
-// router's front door rejects a chat request with no messages and the reference
-// client enforces the set at seal time — but neither of those is this enclave,
-// and both are exactly the "someone else will catch it" argument that left the
-// image case open in the first place.
-func (c *Ctrl) verifySealedFieldsForServiceType(sealedFields []string) error {
-	profile, sealable := profileForServiceType(c.Service.Type)
-	if !sealable {
-		return fmt.Errorf("sealed requests are not supported for service type %q", c.Service.Type)
-	}
-	if err := wire.ValidateSealedFieldsFor(profile, sealedFields); err != nil {
-		return fmt.Errorf("sealed %s request: %w", c.Service.Type, err)
-	}
-	return nil
-}
-
-// verifyPinnedCleartextForServiceType enforces the cleartext fields a sealed
-// request of this endpoint may only carry one value for (SPEC §7.1) — today, a
-// sealed text-to-image request MUST carry an explicit
-// `response_format: "b64_json"`.
-//
-// The checks themselves live in the protocol package (wire.ValidatePinnedCleartextFor),
-// which covers all three ways the pin can be defeated: a wrong or absent value, the
-// field SEALED away so nothing is left in the cleartext to read, and the field
-// declared UNBOUND so an intermediary could have rewritten it in transit. Calling
-// into it rather than re-implementing keeps this enclave and the client that
-// builds the envelope reading the same rule — and it is the reason those checks
-// are exported at all.
-//
-// Why the enclave repeats a check the reference client already makes: a
-// third-party client is under no obligation to use that client. This is the half
-// that does not depend on the sender.
-//
-// url mode has this broker persist the generated images and hand back
-// broker-served URLs — plaintext images reachable by anyone holding the chatKey,
-// which includes the router, i.e. the party the sealing exists to keep out. The
-// value is REQUIRED rather than merely "not url" because OpenAI's
-// response_format defaults to `url` for the DALL·E family, so an omitted field is
-// a request to publish in the clear spelled as silence. (This broker happens not
-// to honour that default today — forceB64ResponseFormat reports "" for an absent
-// field and the URL rewrite tests for "url" — but that is incidental, one
-// OpenAI-compat fix away from becoming a leak.)
-//
-// Rejected rather than downgraded to b64: the caller asked for a format this mode
-// cannot honour and must learn that, not silently receive a different one.
-func (c *Ctrl) verifyPinnedCleartextForServiceType(env wire.Request) error {
-	profile, sealable := profileForServiceType(c.Service.Type)
-	if !sealable {
-		return nil // already refused by verifySealedFieldsForServiceType
-	}
-	if err := wire.ValidatePinnedCleartextFor(profile, env); err != nil {
-		return fmt.Errorf("sealed %s request: %w", c.Service.Type, err)
-	}
-	return nil
 }
 
 // verifyEncKeyID checks that a request's key_id (base64url) selects this

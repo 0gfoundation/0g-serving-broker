@@ -97,39 +97,37 @@ func TestMaybeUnsealImageRequestRejectsSealedSetWithoutPrompt(t *testing.T) {
 	}
 }
 
-// The policy itself, per service type.
-func TestVerifySealedFieldsForServiceType(t *testing.T) {
+// The broker's half of the policy: which endpoint maps to which wire profile,
+// and which endpoints accept a sealed request at all. The RULE each profile
+// then applies lives in the protocol package (wire.ValidateSealedFieldsFor,
+// reached via wire.OpenRequestFor) — this only decides which rule to apply.
+func TestProfileForServiceType(t *testing.T) {
 	tests := []struct {
 		name         string
 		svcType      string
-		sealedFields []string
-		wantErr      bool
+		wantProfile  wire.Profile
+		wantSealable bool
 	}{
-		{"image with prompt", constant.ServiceTypeTextToImage, []string{"prompt"}, false},
-		{"image with prompt and extras", constant.ServiceTypeTextToImage, []string{"prompt", "user"}, false},
-		{"image without prompt", constant.ServiceTypeTextToImage, []string{"size"}, true},
-		{"image with nothing sealed", constant.ServiceTypeTextToImage, nil, true},
-		// Chat is checked here too. It used to be waved through on the reasoning
-		// that the router's front door and the reference client both catch it —
-		// but neither of those is this enclave, and "someone else will catch it"
-		// is what left the image case open to begin with.
-		{"chatbot", constant.ServiceTypeChatbot, []string{"messages"}, false},
-		{"chatbot without messages", constant.ServiceTypeChatbot, []string{"whatever"}, true},
-		// The mapping is an allowlist: no profile is specified for these, so a
-		// sealed request on one is refused rather than checked against a guessed
-		// rule. Multipart shapes cannot be envelopes at all; video-generation and
-		// anything added later simply have not been analyzed.
-		{"speech-to-text", constant.ServiceTypeSpeechToText, []string{"file"}, true},
-		{"image-editing", constant.ServiceTypeImageEditing, []string{"prompt"}, true},
-		{"video-generation", constant.ServiceTypeVideoGeneration, []string{"prompt"}, true},
-		{"a service type that does not exist yet", "some-future-type", []string{"prompt"}, true},
+		{"chatbot", constant.ServiceTypeChatbot, wire.ProfileChat, true},
+		{"text-to-image", constant.ServiceTypeTextToImage, wire.ProfileImage, true},
+		// An ALLOWLIST, not a switch with a default. The multipart shapes cannot
+		// be envelopes at all; video-generation and anything added later simply
+		// have no profile specified, and guessing one would apply the wrong rule
+		// to a request shape nobody has analyzed.
+		{"speech-to-text", constant.ServiceTypeSpeechToText, "", false},
+		{"image-editing", constant.ServiceTypeImageEditing, "", false},
+		{"video-generation", constant.ServiceTypeVideoGeneration, "", false},
+		{"a service type that does not exist yet", "some-future-type", "", false},
+		{"unset", "", "", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c := &Ctrl{Service: config.Service{Type: tt.svcType}}
-			err := c.verifySealedFieldsForServiceType(tt.sealedFields)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("verifySealedFieldsForServiceType() error = %v, wantErr %v", err, tt.wantErr)
+			gotProfile, gotSealable := profileForServiceType(tt.svcType)
+			if gotSealable != tt.wantSealable {
+				t.Fatalf("sealable = %v, want %v", gotSealable, tt.wantSealable)
+			}
+			if gotProfile != tt.wantProfile {
+				t.Fatalf("profile = %q, want %q", gotProfile, tt.wantProfile)
 			}
 		})
 	}
