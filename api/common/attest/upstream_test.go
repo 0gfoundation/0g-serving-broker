@@ -3,6 +3,7 @@ package attest
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -64,24 +65,36 @@ func TestUpstreamSetReplay(t *testing.T) {
 			want:  nil,
 		},
 		{
-			name:    "redefining a name to another URL is refused",
-			steps:   []string{"add|a http://x:1/v1", "add|a http://y:1/v1"},
-			wantErr: "redefines",
+			// Last wins, and the slot is kept: a re-emit must not reshuffle the order,
+			// and refusing here would trap a writer re-emitting its table at boot.
+			name:  "re-adding a name moves it in place",
+			steps: []string{"add|a http://x:1/v1", "add|b http://y:1/v1", "add|a http://z:1/v1"},
+			want: []Upstream{
+				{Name: "a", URL: "http://z:1/v1"},
+				{Name: "b", URL: "http://y:1/v1"},
+			},
 		},
 		{
-			name:    "redefining only the identity is refused too",
-			steps:   []string{"add|a http://x:1/v1", "add|a http://x:1/v1 0xid"},
-			wantErr: "redefines",
+			name:  "re-adding with an added identity moves it too",
+			steps: []string{"add|a http://x:1/v1", "add|a http://x:1/v1 vendor"},
+			want:  []Upstream{{Name: "a", URL: "http://x:1/v1", Identity: "vendor"}},
 		},
 		{
-			name:    "removing a name that was never added is refused",
-			steps:   []string{"add|a http://x:1/v1", "remove|b"},
-			wantErr: "which no zg-upstream-add record added",
+			// A no-op, not an error: the set is the same either way, and refusing would
+			// trap a writer reconciling against a freshly cleared ledger.
+			name:  "removing a name that was never added changes nothing",
+			steps: []string{"add|a http://x:1/v1", "remove|b"},
+			want:  []Upstream{{Name: "a", URL: "http://x:1/v1"}},
 		},
 		{
-			name:    "removing after a remove is refused",
-			steps:   []string{"add|a http://x:1/v1", "remove|a", "remove|a"},
-			wantErr: "which no zg-upstream-add record added",
+			name:  "removing twice is idempotent",
+			steps: []string{"add|a http://x:1/v1", "remove|a", "remove|a"},
+			want:  nil,
+		},
+		{
+			name:    "a remove naming something unparseable is still refused",
+			steps:   []string{"remove|NotAName"},
+			wantErr: "which is not a lowercase alphanumeric name",
 		},
 		{
 			name:    "add with one field is refused",
@@ -195,6 +208,21 @@ func TestValidUpstreamURL(t *testing.T) {
 		{raw: "http://x:1/v1/../v2", wantErr: "dot segment"},
 		{raw: "http://x:1/v1/./v2", wantErr: "dot segment"},
 		{raw: "http://x:1/v1/..", wantErr: "dot segment"},
+		// A look-alike host is the one that matters most: it decides where plaintext
+		// actually goes, and a rendered set cannot show the difference. The "е" here
+		// is Cyrillic.
+		{raw: "http://еngine-1:8000/v1", wantErr: "non-ASCII host"},
+		// The remaining alternate spellings. Each would give one destination two set
+		// hashes, and therefore two signing keys once the derivation path binds it.
+		{raw: "http://x:80/v1", wantErr: "default port"},
+		{raw: "https://x:443/v1", wantErr: "default port"},
+		{raw: "http://x.:1/v1", wantErr: "trailing dot"},
+		{raw: "http://x:1/v%31", wantErr: "percent-encodes"},
+		{raw: "http://x:1//v1", wantErr: "empty path segment"},
+		// And the ones that must still pass, so the rules above are not overreaching.
+		{raw: "http://x:8080/v1"},
+		{raw: "https://vendor.example:8443/v1"},
+		{raw: "http://x/v1"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.raw, func(t *testing.T) {
@@ -221,7 +249,11 @@ func TestUpstreamSetHash(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		return (&RunningState{Upstreams: s.list()}).UpstreamSetHash()
+		sum, err := (&RunningState{Upstreams: s.list(), UpstreamsRecorded: true}).UpstreamSetHash()
+		if err != nil {
+			t.Fatalf("UpstreamSetHash() = %v", err)
+		}
+		return sum
 	}
 
 	t.Run("insertion order does not change it", func(t *testing.T) {
@@ -264,10 +296,48 @@ func TestUpstreamSetHash(t *testing.T) {
 		}
 	})
 
-	t.Run("the empty set is the empty-string hash, not a sentinel", func(t *testing.T) {
-		want := sha256.Sum256(nil)
-		if got := (&RunningState{}).UpstreamSetHash(); got != hex.EncodeToString(want[:]) {
-			t.Fatalf("empty set hash = %s, want %s", got, hex.EncodeToString(want[:]))
+	// The three states must not collapse. Once this hash feeds a derivation path, a
+	// deployment that bounds nothing and one bounded to nothing deriving the same key
+	// would be the failure that matters.
+	t.Run("an unrecorded set has no hash", func(t *testing.T) {
+		if _, err := (&RunningState{}).UpstreamSetHash(); err == nil {
+			t.Fatal("want an error when nothing was recorded, got a hash")
+		}
+	})
+
+	t.Run("an unknown set has no hash", func(t *testing.T) {
+		st := &RunningState{UpstreamsRecorded: true, UpstreamsErr: errors.New("boom")}
+		if _, err := st.UpstreamSetHash(); err == nil {
+			t.Fatal("want an error when the set is unknown, got a hash")
+		}
+	})
+
+	t.Run("a recorded-then-emptied set has a hash, and it is not the empty-string hash", func(t *testing.T) {
+		got, err := (&RunningState{UpstreamsRecorded: true}).UpstreamSetHash()
+		if err != nil {
+			t.Fatalf("UpstreamSetHash() = %v", err)
+		}
+		bare := sha256.Sum256(nil)
+		if got == hex.EncodeToString(bare[:]) {
+			t.Fatal("the empty recorded set hashes to sha256(\"\"), so the prefix is not being applied")
+		}
+		if got == "" {
+			t.Fatal("want a hash for an explicitly emptied set")
+		}
+	})
+
+	t.Run("the prefix domain-separates the encoding", func(t *testing.T) {
+		s, err := applyAll(t, "add|a http://x:1/v1")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		got, err := (&RunningState{Upstreams: s.list(), UpstreamsRecorded: true}).UpstreamSetHash()
+		if err != nil {
+			t.Fatalf("UpstreamSetHash() = %v", err)
+		}
+		unprefixed := sha256.Sum256([]byte("a http://x:1/v1 \n"))
+		if got == hex.EncodeToString(unprefixed[:]) {
+			t.Fatal("the hash matches the unprefixed lines, so the version prefix is absent")
 		}
 	})
 
@@ -287,8 +357,16 @@ func TestUpstreamSetHash(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		st := &RunningState{Upstreams: s.list()}
-		if st.UpstreamSetHash() != st.UpstreamSetHash() {
+		st := &RunningState{Upstreams: s.list(), UpstreamsRecorded: true}
+		first, err := st.UpstreamSetHash()
+		if err != nil {
+			t.Fatalf("UpstreamSetHash() = %v", err)
+		}
+		second, err := st.UpstreamSetHash()
+		if err != nil {
+			t.Fatalf("UpstreamSetHash() = %v", err)
+		}
+		if first != second {
 			t.Fatal("the hash is not stable across calls")
 		}
 	})

@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 // upstreamNamePattern is what a name may be. Deliberately narrow: the name is the
@@ -40,16 +41,34 @@ func newUpstreamSet() *upstreamSet {
 	return &upstreamSet{byName: map[string]Upstream{}}
 }
 
+// apply dispatches one record by event name, so the caller does not repeat the
+// mapping from name to method.
+func (s *upstreamSet) apply(event, payload string) error {
+	switch event {
+	case EventUpstreamAdd:
+		return s.add(payload)
+	case EventUpstreamRemove:
+		return s.remove(payload)
+	default:
+		return fmt.Errorf("upstreamSet cannot apply %q", event)
+	}
+}
+
 // add applies one EventUpstreamAdd payload: "<name> <base URL>" or
 // "<name> <base URL> <identity>".
 //
-// Re-adding a name with an identical record is accepted, so a writer that re-emits
-// its table at boot (which it must: RTMR3 is cleared, and the assignment that
-// survives on disk has to be recorded again) does not have to diff against what it
-// already wrote. Re-adding a name with a DIFFERENT record is refused: the config
-// maps models onto names, so a name that silently changed meaning mid-boot would
-// make that mapping unreadable — the one thing recording the set is for. Moving a
-// name to another URL is remove-then-add, which says so in the log.
+// Re-adding a name is a MOVE: the last record wins, and both records stay in the log
+// so the move is visible. An earlier version refused a differing re-add, on the
+// grounds that a name meaning two things in one boot makes the config's model mapping
+// unreadable. That was stricter than the rest of the ledger for no gain and it put a
+// trap on the design's normal path: a writer re-emits its table at boot (it must —
+// RTMR3 is cleared and the assignment survives on disk), so an operator adding an
+// identity to an already-recorded name would produce a differing re-add and, with no
+// corrective record possible on an append-only log, leave the set unknown until the
+// next reboot.
+//
+// Last-wins matches how the image and config records already behave, and a reader
+// still learns of the move: the superseded record is right there above it.
 func (s *upstreamSet) add(payload string) error {
 	fields := strings.Fields(payload)
 	if len(fields) < 2 || len(fields) > 3 {
@@ -70,10 +89,11 @@ func (s *upstreamSet) add(payload string) error {
 		}
 		next.Identity = fields[2]
 	}
-	if prev, ok := s.byName[name]; ok {
-		if prev != next {
-			return fmt.Errorf("%s record %q redefines %q, which the log already bound to %q: a name that means two things in one boot makes the config's model mapping unreadable, so move it with %s and then %s", EventUpstreamAdd, payload, name, prev.URL, EventUpstreamRemove, EventUpstreamAdd)
-		}
+	if _, ok := s.byName[name]; ok {
+		// Already present: overwrite in place and leave its position alone, so a boot
+		// re-emit does not reshuffle the reported order and a move keeps the slot the
+		// name has always had.
+		s.byName[name] = next
 		return nil
 	}
 	s.byName[name] = next
@@ -83,18 +103,25 @@ func (s *upstreamSet) add(payload string) error {
 
 // remove applies one EventUpstreamRemove payload: "<name>".
 //
-// Removing a name the log never added is refused rather than ignored. Only the
-// controller can write RTMR3 (see the package doc), so such a record means either a
-// writer whose idea of the set differs from the log's — and then neither side's set
-// can be trusted — or a log that is not what it claims to be.
+// Removing a name that is not in the set is a no-op, not an error. The set semantics
+// are the same either way — it is absent afterwards — and refusing would put the same
+// trap on the writer that a strict add did: a writer reconciling its table against a
+// freshly cleared RTMR3 emits removes for entries it has dropped, finds no matching
+// add, and would leave the set unknown for the boot.
+//
+// The name is still validated, because an unparseable one means the record does not
+// describe an operation on this set at all.
 func (s *upstreamSet) remove(payload string) error {
 	fields := strings.Fields(payload)
 	if len(fields) != 1 {
 		return fmt.Errorf("%s payload %q has %d fields, want just a name", EventUpstreamRemove, payload, len(fields))
 	}
 	name := fields[0]
+	if !upstreamNamePattern.MatchString(name) {
+		return fmt.Errorf("%s record %q names %q, which is not a lowercase alphanumeric name (dashes and underscores allowed, 63 bytes max)", EventUpstreamRemove, payload, name)
+	}
 	if _, ok := s.byName[name]; !ok {
-		return fmt.Errorf("%s record %q removes %q, which no %s record added: the log does not describe a set this reader can reconstruct", EventUpstreamRemove, payload, name, EventUpstreamAdd)
+		return nil
 	}
 	delete(s.byName, name)
 	for i, n := range s.order {
@@ -165,6 +192,32 @@ func validUpstreamURL(raw string) error {
 	if u.Host != strings.ToLower(u.Host) {
 		return fmt.Errorf("base URL %q has an uppercase host; record it lowercase so one destination has one spelling", raw)
 	}
+	// The host must be ASCII. upstreamNamePattern is narrow because unicode
+	// look-alikes let one name mean two things, and the host is where that matters
+	// more than the name: it decides where the plaintext actually goes. A Cyrillic
+	// "е" in "еngine-1" is indistinguishable, to a person or a rendered set, from the
+	// in-CVM container it impersonates.
+	for i := 0; i < len(u.Host); i++ {
+		if u.Host[i] >= utf8.RuneSelf {
+			return fmt.Errorf("base URL %q has a non-ASCII host; record it in ASCII so a look-alike cannot pass for another destination", raw)
+		}
+	}
+	// The rest are alternate spellings of one destination. Each is refused rather
+	// than normalised, because the set has to be a function of the recorded bytes:
+	// normalising here would mean two different records build the same set, and then
+	// the bytes in the log no longer determine the hash the derivation path binds.
+	if port := u.Port(); (u.Scheme == "http" && port == "80") || (u.Scheme == "https" && port == "443") {
+		return fmt.Errorf("base URL %q states the scheme's default port; record it without one", raw)
+	}
+	if strings.HasSuffix(u.Hostname(), ".") {
+		return fmt.Errorf("base URL %q has a trailing dot in its host; record it without one", raw)
+	}
+	if u.EscapedPath() != u.Path {
+		return fmt.Errorf("base URL %q percent-encodes its path; record the decoded path", raw)
+	}
+	if strings.Contains(u.Path, "//") {
+		return fmt.Errorf("base URL %q has an empty path segment; record it without one", raw)
+	}
 	// A dot segment is another second spelling: "/v1/../v2" and "/v2" address the
 	// same endpoint. Refusing beats normalising for the same reason as above — the
 	// bytes in the log have to determine the set.
@@ -195,19 +248,34 @@ func validUpstreamURL(raw string) error {
 // many times a name was moved. A history-dependent value would make the same set
 // look like different sets.
 //
-// The empty set hashes to the SHA-256 of the empty string rather than to a special
-// value: a caller distinguishes "no upstreams recorded" by RunningState.Upstreams
-// being nil, and must not read a hash as evidence that any set was recorded.
+// It errors when there is no set to hash — no records appeared, or they could not be
+// replayed. Returning a value in those cases is the failure mode that matters most:
+// this hash is destined for the signing key's derivation path, so a deployment that
+// bounds nothing and one bounded to nothing must not derive the same key, and neither
+// must one whose log is unreadable.
 //
-// This is the encoding the signing key's derivation path will bind, so writer and
-// reader have to produce it identically. It lives here for the reason the event
-// names do: one definition, or the two sides drift.
-func (r *RunningState) UpstreamSetHash() string {
+// The prefix line is version-tagged so a later change to the encoding produces
+// different hashes rather than silently colliding with this one.
+//
+// This is the encoding writer and reader have to produce identically. It lives here
+// for the reason the event names do: one definition, or the two sides drift.
+func (r *RunningState) UpstreamSetHash() (string, error) {
+	if r.UpstreamsErr != nil {
+		return "", fmt.Errorf("the upstream set is unknown, so it has no hash: %w", r.UpstreamsErr)
+	}
+	if !r.UpstreamsRecorded {
+		return "", fmt.Errorf("no %s or %s record appeared, so no set was recorded and there is nothing to hash", EventUpstreamAdd, EventUpstreamRemove)
+	}
 	lines := make([]string, 0, len(r.Upstreams))
 	for _, u := range r.Upstreams {
 		lines = append(lines, u.Name+" "+u.URL+" "+u.Identity+"\n")
 	}
 	sort.Strings(lines)
-	sum := sha256.Sum256([]byte(strings.Join(lines, "")))
-	return hex.EncodeToString(sum[:])
+	sum := sha256.Sum256([]byte(upstreamSetHashPrefix + strings.Join(lines, "")))
+	return hex.EncodeToString(sum[:]), nil
 }
+
+// upstreamSetHashPrefix domain-separates this encoding from any other SHA-256 in the
+// protocol and versions it, so changing the line format below cannot produce a hash a
+// reader of the old format would accept.
+const upstreamSetHashPrefix = "zg-upstream-set-v1\n"

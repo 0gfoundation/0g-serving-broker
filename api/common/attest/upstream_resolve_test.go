@@ -56,10 +56,14 @@ func TestResolveWithoutUpstreamRecords(t *testing.T) {
 	}
 }
 
-// One unreadable upstream record fails the whole resolution. Unlike an image record,
-// where only the last matters, the set is cumulative — reporting the members that
-// happened to parse would understate where plaintext can go.
-func TestResolveRefusesAnUnreadableUpstreamRecord(t *testing.T) {
+// An unreadable upstream record makes the SET unknown without taking the rest of the
+// answer down with it. Two things are being asserted, and both matter:
+//
+//   - the set does not degrade to "the members that parsed" — a partial set
+//     understates where plaintext can go;
+//   - which image the broker runs still resolves, because it rests on other records
+//     and an append-only log gives an upstream record no corrective successor.
+func TestResolveReportsAnUnknownUpstreamSet(t *testing.T) {
 	for _, tt := range []struct {
 		name    string
 		event   RuntimeEvent
@@ -76,23 +80,98 @@ func TestResolveRefusesAnUnreadableUpstreamRecord(t *testing.T) {
 			wantErr: "not http or https",
 		},
 		{
-			name:    "a remove of something never added",
-			event:   RuntimeEvent{Event: EventUpstreamRemove, Payload: []byte("ghost")},
-			wantErr: "which no zg-upstream-add record added",
+			name:    "an add whose identity is malformed",
+			event:   RuntimeEvent{Event: EventUpstreamAdd, Payload: []byte("engine1 http://engine-1:8000/v1 NotAnIdentity")},
+			wantErr: "which is not lowercase alphanumeric",
+		},
+		{
+			name:    "a remove naming something unparseable",
+			event:   RuntimeEvent{Event: EventUpstreamRemove, Payload: []byte("Ghost")},
+			wantErr: "which is not a lowercase alphanumeric name",
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			events := append(bootEvents(),
 				RuntimeEvent{Event: EventUpstreamAdd, Payload: []byte("good http://engine-1:8000/v1")},
 				tt.event,
+				RuntimeEvent{Event: EventImageUpdate, Payload: imageRecordPayload("ghcr.io/0gfoundation/0g-serving-broker@" + upgradeDigest)},
 			)
-			_, err := resolve(t, pinnedCompose(t), events)
-			if err == nil {
-				t.Fatal("want an error, got none")
+			state, err := resolve(t, pinnedCompose(t), events)
+			if err != nil {
+				t.Fatalf("ResolveRunningState() = %v, want the rest of the answer to survive", err)
 			}
-			if !strings.Contains(err.Error(), tt.wantErr) {
-				t.Fatalf("want an error containing %q, got %v", tt.wantErr, err)
+			if state.UpstreamsErr == nil {
+				t.Fatal("want UpstreamsErr set, got nil")
+			}
+			if !strings.Contains(state.UpstreamsErr.Error(), tt.wantErr) {
+				t.Fatalf("UpstreamsErr = %v, want it to contain %q", state.UpstreamsErr, tt.wantErr)
+			}
+			if state.Upstreams != nil {
+				t.Errorf("Upstreams = %+v, want nil when the set is unknown — a partial set understates where plaintext can go", state.Upstreams)
+			}
+			if !state.UpstreamsRecorded {
+				t.Error("UpstreamsRecorded = false, want true: records did appear, they just could not be replayed")
+			}
+			if _, err := state.UpstreamSetHash(); err == nil {
+				t.Error("UpstreamSetHash() returned a hash for an unknown set")
+			}
+			// The point of not failing the call.
+			if state.BrokerDigest != upgradeDigest {
+				t.Errorf("BrokerDigest = %q, want %q: an upstream record must not cost the answer that does not depend on it", state.BrokerDigest, upgradeDigest)
 			}
 		})
+	}
+}
+
+// Once unknown, a later well-formed record must not repair the set: the earlier
+// members are still unreadable, so reporting anything would report a subset.
+func TestResolveKeepsAnUnknownUpstreamSetUnknown(t *testing.T) {
+	events := append(bootEvents(),
+		RuntimeEvent{Event: EventUpstreamAdd, Payload: []byte("broken")},
+		RuntimeEvent{Event: EventUpstreamAdd, Payload: []byte("good http://engine-1:8000/v1")},
+	)
+	state, err := resolve(t, pinnedCompose(t), events)
+	if err != nil {
+		t.Fatalf("ResolveRunningState() = %v", err)
+	}
+	if state.UpstreamsErr == nil {
+		t.Fatal("a later good record cleared UpstreamsErr")
+	}
+	if state.Upstreams != nil {
+		t.Fatalf("Upstreams = %+v, want nil", state.Upstreams)
+	}
+}
+
+// A log that added upstreams and then withdrew them all is a bound of zero, and must
+// be distinguishable from a log that never mentioned upstreams — those two are the
+// states that would otherwise derive the same key.
+func TestResolveDistinguishesEmptiedFromUnrecorded(t *testing.T) {
+	emptied, err := resolve(t, pinnedCompose(t), append(bootEvents(),
+		RuntimeEvent{Event: EventUpstreamAdd, Payload: []byte("engine1 http://engine-1:8000/v1")},
+		RuntimeEvent{Event: EventUpstreamRemove, Payload: []byte("engine1")},
+	))
+	if err != nil {
+		t.Fatalf("ResolveRunningState() = %v", err)
+	}
+	if !emptied.UpstreamsRecorded {
+		t.Fatal("UpstreamsRecorded = false after records appeared")
+	}
+	if emptied.Upstreams != nil {
+		t.Fatalf("Upstreams = %+v, want nil for an emptied set", emptied.Upstreams)
+	}
+	emptiedHash, err := emptied.UpstreamSetHash()
+	if err != nil {
+		t.Fatalf("an emptied set must still hash: %v", err)
+	}
+
+	unrecorded, err := resolve(t, pinnedCompose(t), bootEvents())
+	if err != nil {
+		t.Fatalf("ResolveRunningState() = %v", err)
+	}
+	if unrecorded.UpstreamsRecorded {
+		t.Fatal("UpstreamsRecorded = true with no records")
+	}
+	if _, err := unrecorded.UpstreamSetHash(); err == nil {
+		t.Fatalf("an unrecorded set must not hash, got %q", emptiedHash)
 	}
 }
