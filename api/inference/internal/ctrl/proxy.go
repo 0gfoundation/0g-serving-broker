@@ -388,6 +388,24 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 		req.Body = io.NopCloser(bytes.NewBuffer(body))
 	}
 
+	// Assay: sign the inference body too, not just the money endpoints.
+	// Without it the verifier's /v1/chat/completions answers anyone who can
+	// reach the port — free inference, and a way to make a GPU emit signed
+	// commitments for prompts we never sent. Same scheme and same key as the
+	// invoice/settlement calls, so the assay checks it against the on-chain
+	// teeSigner it already reads.
+	//
+	// Fail closed: if we cannot sign, we do not send. This one IS on the user
+	// request path, so the error surfaces to the caller and their SDK can try
+	// another provider rather than being served unverifiably.
+	if c.assayVerdictFilter && len(body) > 0 {
+		if err := c.signAssayBody(req, body); err != nil {
+			c.handleBrokerError(ctx, err,
+				"refusing to send an unsigned inference request to the assay")
+			return err
+		}
+	}
+
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		if strings.Contains(ctx.Request.RequestURI, "/api/event_logging/batch") {
