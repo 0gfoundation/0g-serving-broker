@@ -2020,6 +2020,29 @@ func loadConfig(cfg *Config) error {
 		return fmt.Errorf("invalid config: service.canonicalId %q must be bare lowercase (letters, digits, '-', '.'); namespaced names like 'org/model' belong in service.model instead", cfg.Service.CanonicalID)
 	}
 
+	// service.upstreamModel / modelAliases / canonicalID are consumed only by
+	// PrepareHTTPRequest's single-model rewrite path (proxy.go), which runs
+	// exclusively on the chatbot JSON request path — setting any of them on an
+	// embedding service would silently no-op (no rewrite, no alias
+	// acceptance, no canonical mapping) rather than producing the behavior an
+	// operator configuring them would expect. Reject at load rather than let
+	// a config that looks correct do nothing at request time. Scoped to
+	// embedding only: the other non-chatbot types (speech-to-text,
+	// text-to-image, image-editing, video-generation) have this exact same
+	// gap pre-existing this change, and retroactively tightening it for them
+	// is out of scope here.
+	if cfg.Service.Type == constant.ServiceTypeEmbedding {
+		if cfg.Service.UpstreamModel != "" {
+			return fmt.Errorf("invalid config: service.upstreamModel is only supported for service type '%s' (the body rewrite runs only on the JSON chatbot path), got '%s'", constant.ServiceTypeChatbot, cfg.Service.Type)
+		}
+		if len(cfg.Service.ModelAliases) > 0 {
+			return fmt.Errorf("invalid config: service.modelAliases is only supported for service type '%s', got '%s'", constant.ServiceTypeChatbot, cfg.Service.Type)
+		}
+		if cfg.Service.CanonicalID != "" {
+			return fmt.Errorf("invalid config: service.canonicalId is only supported for service type '%s', got '%s'", constant.ServiceTypeChatbot, cfg.Service.Type)
+		}
+	}
+
 	// VideoPollConfig defaults, applied regardless of Enabled and regardless of whether the
 	// caller pre-populated GetConfig()'s defaults (loadConfig is also exercised directly against
 	// a bare zero-value Config by unit tests unrelated to video polling) — same
@@ -2285,6 +2308,13 @@ func loadConfig(cfg *Config) error {
 	// the per-1M-token fields; a multi-model video service carries the USD price
 	// per entry instead (see the multiModelUSD branch below).
 	isVideoType := cfg.Service.Type == constant.ServiceTypeVideoGeneration
+	// Embedding bills PromptTokens × InputPrice only (updateEmbeddingWithUsage
+	// has no completion/output side), so — like the image/video branches below —
+	// it gets its own carve-out rather than falling into the generic "both
+	// required" branch, which would force an operator to invent a meaningless
+	// output price for a dimension that is never billed (and that value would
+	// otherwise be published on-chain by the price processor).
+	isEmbeddingType := cfg.Service.Type == constant.ServiceTypeEmbedding
 	multiModelUSD := len(cfg.Service.ModelPricing) > 0
 	switch cfg.Service.PriceDenomination {
 	case constant.PriceDenominationNative:
@@ -2338,6 +2368,27 @@ func loadConfig(cfg *Config) error {
 			}
 			cfg.Service.OutputPriceUSDPerMillionTokens = normalized
 			cfg.Service.InputPriceUSDPerMillionTokens = "0"
+		} else if isEmbeddingType {
+			// USD embedding service: inputPriceUSDPerMillionTokens is mandatory;
+			// outputPriceUSDPerMillionTokens must stay empty (there is nothing to
+			// price on the output side) and is normalized to "0" below, the same
+			// way the image/video branches normalize their unused dimension.
+			if cfg.Service.OutputPriceUSDPerImage != "" {
+				return fmt.Errorf("invalid config: service.outputPriceUSDPerImage is only valid for image service types ('%s' / '%s'), got '%s'", constant.ServiceTypeTextToImage, constant.ServiceTypeImageEditing, cfg.Service.Type)
+			}
+			if cfg.Service.OutputPriceUSDPerSecond != "" {
+				return fmt.Errorf("invalid config: service.outputPriceUSDPerSecond is only valid for service type '%s', got '%s'", constant.ServiceTypeVideoGeneration, cfg.Service.Type)
+			}
+			if cfg.Service.OutputPriceUSDPerMillionTokens != "" {
+				return fmt.Errorf("invalid config: service.outputPriceUSDPerMillionTokens must be empty for service type '%s' under USD denomination (embedding has no completion/output side to price)", cfg.Service.Type)
+			}
+			if cfg.Service.InputPriceUSDPerMillionTokens == "" {
+				return fmt.Errorf("invalid config: service.inputPriceUSDPerMillionTokens is required for service type '%s' when priceDenomination is '%s'", cfg.Service.Type, constant.PriceDenominationUSD)
+			}
+			if err := validateUSDPriceString("service.inputPriceUSDPerMillionTokens", cfg.Service.InputPriceUSDPerMillionTokens); err != nil {
+				return err
+			}
+			cfg.Service.OutputPriceUSDPerMillionTokens = "0"
 		} else {
 			if cfg.Service.OutputPriceUSDPerImage != "" {
 				return fmt.Errorf("invalid config: service.outputPriceUSDPerImage is only valid for image service types ('%s' / '%s'), got '%s'", constant.ServiceTypeTextToImage, constant.ServiceTypeImageEditing, cfg.Service.Type)

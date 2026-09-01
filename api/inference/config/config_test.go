@@ -2123,6 +2123,93 @@ priceFeed:
 	}
 }
 
+// TestLoadConfig_USDEmbeddingInputOnly is the embedding analog of
+// TestLoadConfig_USDImagePerImage: a USD embedding service needs only
+// inputPriceUSDPerMillionTokens (embedding has no completion/output side to
+// price) — outputPriceUSDPerMillionTokens must NOT be required, unlike the
+// generic token-priced branch (chatbot etc.), which requires both.
+func TestLoadConfig_USDEmbeddingInputOnly(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "http://backend:8000"
+  type: "embedding"
+  model: "qwen3.7-text-embedding"
+  verifiability: "TeeML"
+  priceDenomination: "USD"
+  inputPriceUSDPerMillionTokens: "0.50"
+priceFeed:
+  sources: ["coingecko"]
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+
+	cfg := &Config{}
+	if err := loadConfig(cfg); err != nil {
+		t.Fatalf("loadConfig failed: %v", err)
+	}
+	if cfg.Service.InputPriceUSDPerMillionTokens != "0.50" {
+		t.Errorf("input side: got %q want 0.50", cfg.Service.InputPriceUSDPerMillionTokens)
+	}
+	if cfg.Service.OutputPriceUSDPerMillionTokens != "0" {
+		t.Errorf("output side normalized: got %q want 0", cfg.Service.OutputPriceUSDPerMillionTokens)
+	}
+}
+
+// TestLoadConfig_USDEmbeddingRequiresInput mirrors
+// TestLoadConfig_USDImageRequiresPerImage: without inputPriceUSDPerMillionTokens
+// there is nothing to bill, so load must fail loud rather than silently price
+// the model at some default.
+func TestLoadConfig_USDEmbeddingRequiresInput(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "http://backend:8000"
+  type: "embedding"
+  model: "qwen3.7-text-embedding"
+  verifiability: "TeeML"
+  priceDenomination: "USD"
+priceFeed:
+  sources: ["coingecko"]
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+
+	cfg := &Config{}
+	err := loadConfig(cfg)
+	if err == nil || !strings.Contains(err.Error(), "inputPriceUSDPerMillionTokens is required") {
+		t.Errorf("expected error about required inputPriceUSDPerMillionTokens, got %v", err)
+	}
+}
+
+// TestLoadConfig_USDEmbeddingRejectsOutput is the regression guard for the
+// review finding this fixes: before this carve-out, a USD embedding service
+// fell into the generic branch requiring BOTH input and output per-1M-token
+// prices, forcing an operator to invent a meaningless output price for a
+// dimension updateEmbeddingWithUsage never bills — one that would then be
+// published on-chain by the price processor. Now it must be rejected outright
+// rather than silently accepted and ignored.
+func TestLoadConfig_USDEmbeddingRejectsOutput(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "http://backend:8000"
+  type: "embedding"
+  model: "qwen3.7-text-embedding"
+  verifiability: "TeeML"
+  priceDenomination: "USD"
+  inputPriceUSDPerMillionTokens: "0.50"
+  outputPriceUSDPerMillionTokens: "1.50"
+priceFeed:
+  sources: ["coingecko"]
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+
+	cfg := &Config{}
+	err := loadConfig(cfg)
+	if err == nil || !strings.Contains(err.Error(), "outputPriceUSDPerMillionTokens must be empty") {
+		t.Errorf("expected error rejecting outputPriceUSDPerMillionTokens for embedding, got %v", err)
+	}
+}
+
 func TestLoadConfig_NativeRejectsPerImage(t *testing.T) {
 	configPath := writeTestConfig(t, `
 service:
@@ -3689,6 +3776,65 @@ service:
 	t.Setenv("CONFIG_FILE", configPath)
 	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "upstreamModel is only supported") {
 		t.Fatalf("expected per-entry upstreamModel rejection for speech-to-text, got: %v", err)
+	}
+}
+
+// TestLoadConfig_EmbeddingRejectsServiceLevelUpstreamModel is the
+// service-level analog of TestLoadConfig_ModelPricing_PerEntryUpstreamRejectedForSpeechToText:
+// service.upstreamModel is consumed only by PrepareHTTPRequest's single-model
+// rewrite path, which runs exclusively on the chatbot JSON request path.
+// Setting it on an embedding service would silently no-op rather than rewrite
+// anything, so it must be rejected at load.
+func TestLoadConfig_EmbeddingRejectsServiceLevelUpstreamModel(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "embedding"
+  model: "qwen3.7-text-embedding"
+  verifiability: "TeeML"
+  upstreamModel: "dashscope/qwen3.7-text-embedding"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "upstreamModel is only supported") {
+		t.Fatalf("expected service-level upstreamModel rejection for embedding, got: %v", err)
+	}
+}
+
+// TestLoadConfig_EmbeddingRejectsServiceLevelModelAliases mirrors
+// TestLoadConfig_EmbeddingRejectsServiceLevelUpstreamModel for
+// service.modelAliases — same rewrite-path gap, same fix.
+func TestLoadConfig_EmbeddingRejectsServiceLevelModelAliases(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "embedding"
+  model: "qwen3.7-text-embedding"
+  verifiability: "TeeML"
+  modelAliases: ["qwen-text-embedding-legacy"]
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "modelAliases is only supported") {
+		t.Fatalf("expected service-level modelAliases rejection for embedding, got: %v", err)
+	}
+}
+
+// TestLoadConfig_EmbeddingRejectsServiceLevelCanonicalID mirrors the two
+// tests above for service.canonicalId.
+func TestLoadConfig_EmbeddingRejectsServiceLevelCanonicalID(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "embedding"
+  model: "qwen3.7-text-embedding"
+  verifiability: "TeeML"
+  canonicalId: "qwen3.7-text-embedding"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "canonicalId is only supported") {
+		t.Fatalf("expected service-level canonicalId rejection for embedding, got: %v", err)
 	}
 }
 
