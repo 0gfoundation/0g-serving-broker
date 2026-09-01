@@ -14,6 +14,7 @@ import (
 	"compress/flate"
 	"compress/gzip"
 
+	"github.com/0gfoundation/0g-pc-e2ee/protocol/wire"
 	"github.com/google/uuid"
 
 	"github.com/andybalholm/brotli"
@@ -215,7 +216,7 @@ func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, acc
 	// signature instead binds the on-wire aad‖ciphertext of the sealed frame.
 	outBody := clientBody
 	var e2eeSignedText string
-	if sealed, isSealed, respBindHash, sealErr := c.maybeSealNonStreamResponse(ctx, clientBody, e2eeChatResponseSealedFields); isSealed {
+	if sealed, isSealed, respBindHash, sealErr := c.maybeSealNonStreamResponse(ctx, clientBody, wire.ProfileChat); isSealed {
 		if sealErr != nil {
 			// Fail-closed: never forward plaintext for a sealed request.
 			c.handleBrokerError(ctx, sealErr, "seal response")

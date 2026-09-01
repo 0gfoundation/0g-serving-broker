@@ -174,7 +174,7 @@ func TestSealedImageResponseHidesImagesAndPublishesBillableCount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("withImageUsage: %v", err)
 	}
-	out, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, withUsage, e2eeImageResponseSealedFields)
+	out, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, withUsage, wire.ProfileImage)
 	if err != nil || !isSealed {
 		t.Fatalf("seal image response: sealed=%v err=%v", isSealed, err)
 	}
@@ -232,7 +232,7 @@ func TestSealedImageResponseDetectsTamperedBillableCount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("withImageUsage: %v", err)
 	}
-	out, _, _, err := f.c.maybeSealNonStreamResponse(ctx, withUsage, e2eeImageResponseSealedFields)
+	out, _, _, err := f.c.maybeSealNonStreamResponse(ctx, withUsage, wire.ProfileImage)
 	if err != nil {
 		t.Fatalf("seal: %v", err)
 	}
@@ -415,4 +415,37 @@ func mustRawJSON(t *testing.T, s string) json.RawMessage {
 		t.Fatalf("invalid test JSON %q", s)
 	}
 	return json.RawMessage(s)
+}
+
+// The image response path must seal under the IMAGE profile, not the chat one.
+// Both profiles produce the same wire format, so a mix-up is invisible in the
+// output — what differs is that the image profile refuses a final frame with no
+// cleartext usage.output_images (SPEC §7.1), and the chat profile knows of no
+// such rule. Sealing images through the chat profile therefore ships a frame the
+// router bills as zero images, silently.
+func TestSealedImageResponseWithoutBillableCountIsRefused(t *testing.T) {
+	f := newE2EEFixture(t)
+	f.c.Service = config.Service{Type: constant.ServiceTypeTextToImage}
+	ctx := newGinCtx()
+	if _, err := f.c.MaybeUnsealRequest(ctx, f.sealImageRequest(t, []string{"prompt"})); err != nil {
+		t.Fatalf("unseal: %v", err)
+	}
+
+	// withImageUsage was skipped (or the count could not be determined).
+	noCount := []byte(`{"created":1700000000,"data":[{"b64_json":"aW1hZ2VieXRlcw"}]}`)
+	out, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, noCount, wire.ProfileImage)
+	if err == nil {
+		t.Fatal("an image response with no billable count must not be sealed")
+	}
+	if !strings.Contains(err.Error(), "output_images") {
+		t.Fatalf("error should name the missing count, got: %v", err)
+	}
+	// Fail-closed: the caller must have nothing forwardable, since the plaintext
+	// body still holds the images.
+	if out != nil {
+		t.Fatal("a failed seal must not hand back a body to forward")
+	}
+	if !isSealed {
+		t.Fatal("the request WAS sealed; reporting otherwise would let the caller forward plaintext")
+	}
 }

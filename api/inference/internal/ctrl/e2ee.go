@@ -292,17 +292,23 @@ func e2eeReqBindHash(ctx *gin.Context) ([32]byte, bool) {
 	return h, ok
 }
 
-// maybeSealNonStreamResponse seals sealedFields of a non-streaming response
-// (SPEC §7) when the request was sealed; otherwise it returns body unchanged
-// with sealed=false. sealedFields selects the profile's generated content —
-// e2eeChatResponseSealedFields or e2eeImageResponseSealedFields. Fail-closed:
-// when the request was sealed but sealing fails, it returns an error and the
-// caller MUST NOT forward the plaintext body.
-func (c *Ctrl) maybeSealNonStreamResponse(ctx *gin.Context, body []byte, sealedFields []string) (out []byte, sealed bool, respBindHash [32]byte, err error) {
+// maybeSealNonStreamResponse seals a non-streaming response (SPEC §7) under the
+// profile the request used, when the request was sealed; otherwise it returns
+// body unchanged with sealed=false. Fail-closed: when the request was sealed but
+// sealing fails, it returns an error and the caller MUST NOT forward the
+// plaintext body.
+//
+// It takes the profile rather than a sealed-field list because the profile
+// implies the list AND the profile-specific checks the sealer runs on the frame
+// — for image, that it carries the cleartext `usage.output_images` the router
+// bills on (§7.1). Passing the list alone let the image path seal through the
+// chat profile, which knows of no such requirement.
+func (c *Ctrl) maybeSealNonStreamResponse(ctx *gin.Context, body []byte, profile wire.Profile) (out []byte, sealed bool, respBindHash [32]byte, err error) {
 	ephPub, isSealed := e2eeSealedRequest(ctx)
 	if !isSealed {
 		return body, false, respBindHash, nil
 	}
+	sealedFields := wire.DefaultResponseSealedFieldsFor(profile)
 	var resp wire.Response
 	// A literal JSON `null` unmarshals into a nil map WITHOUT error;
 	// ensureSealedFieldsPresent would then panic writing to it. Reject any
@@ -313,7 +319,7 @@ func (c *Ctrl) maybeSealNonStreamResponse(ctx *gin.Context, body []byte, sealedF
 	ensureSealedFieldsPresent(resp, sealedFields)
 	// Declare model + x_0g_trace unbound so the router may rewrite/inject them
 	// downstream (SPEC §5.2).
-	frame, err := wire.SealResponse(ephPub, resp, sealedFields, e2eeResponseUnboundFields...)
+	frame, err := wire.SealResponseFor(profile, ephPub, resp, sealedFields, e2eeResponseUnboundFields...)
 	if err != nil {
 		return nil, true, respBindHash, fmt.Errorf("seal response: %w", err)
 	}
