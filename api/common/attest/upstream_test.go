@@ -113,6 +113,29 @@ func TestUpstreamSetReplay(t *testing.T) {
 			steps:   []string{"add|" + strings.Repeat("a", 64) + " http://x:1/v1"},
 			wantErr: "which is not a lowercase alphanumeric name",
 		},
+		// The identity is held to the same shape inference/config enforces. It goes
+		// into the canonical text the derivation path will bind, so a value one side
+		// would normalise and the other would not is a key mismatch waiting to happen.
+		{
+			name:  "a well-formed identity is accepted",
+			steps: []string{"add|a http://x:1/v1 open-router"},
+			want:  []Upstream{{Name: "a", URL: "http://x:1/v1", Identity: "open-router"}},
+		},
+		{
+			name:    "an uppercase identity is refused",
+			steps:   []string{"add|a http://x:1/v1 OpenRouter"},
+			wantErr: "which is not lowercase alphanumeric",
+		},
+		{
+			name:    "an identity with a path in it is refused",
+			steps:   []string{"add|a http://x:1/v1 ../../etc/passwd"},
+			wantErr: "which is not lowercase alphanumeric",
+		},
+		{
+			name:    "an identity with a trailing hyphen is refused",
+			steps:   []string{"add|a http://x:1/v1 vendor-"},
+			wantErr: "which is not lowercase alphanumeric",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -159,6 +182,19 @@ func TestValidUpstreamURL(t *testing.T) {
 		{raw: "http:///v1", wantErr: "has no host"},
 		{raw: "http://x:1/v1/", wantErr: "ends in a slash"},
 		{raw: "http://x:1/", wantErr: "bare slash path"},
+		// The ledger is public, so anything that could carry a secret is refused
+		// rather than stripped.
+		{raw: "http://user:pass@x:1/v1", wantErr: "carries credentials"},
+		{raw: "http://user@x:1/v1", wantErr: "carries credentials"},
+		{raw: "http://x:1/v1?key=secret", wantErr: "carries a query string"},
+		{raw: "http://x:1/v1?", wantErr: "carries a query string"},
+		{raw: "http://x:1/v1#frag", wantErr: "carries a fragment"},
+		// One destination must have exactly one spelling, or one set gets two hashes.
+		{raw: "HTTP://X:1/v1", wantErr: "uppercase host"},
+		{raw: "http://X:1/v1", wantErr: "uppercase host"},
+		{raw: "http://x:1/v1/../v2", wantErr: "dot segment"},
+		{raw: "http://x:1/v1/./v2", wantErr: "dot segment"},
+		{raw: "http://x:1/v1/..", wantErr: "dot segment"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.raw, func(t *testing.T) {

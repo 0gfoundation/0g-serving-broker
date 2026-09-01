@@ -17,6 +17,17 @@ import (
 // things. Lowercase alphanumeric with dashes and underscores has no such freedom.
 var upstreamNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,62}$`)
 
+// upstreamIdentityPattern is the same shape inference/config accepts for a provider
+// identity (lowercase alphanumeric with optional hyphens), restated here rather than
+// imported because common must not depend on inference.
+//
+// Restated, so it can drift — and drift would be silent and expensive: the identity
+// goes into the canonical text UpstreamSetHash covers, which the signing key's
+// derivation path will bind, so a writer normalising it one way and a reader another
+// would produce two different keys for what everyone believes is one deployment.
+// Changing either copy means changing both.
+var upstreamIdentityPattern = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
+
 // upstreamSet replays EventUpstreamAdd and EventUpstreamRemove into the set that is
 // permitted now, keeping the order names were first added so a caller can print the
 // set as the log built it. UpstreamSetHash does not use that order — see there.
@@ -54,6 +65,9 @@ func (s *upstreamSet) add(payload string) error {
 	}
 	next := Upstream{Name: name, URL: base}
 	if len(fields) == 3 {
+		if !upstreamIdentityPattern.MatchString(fields[2]) {
+			return fmt.Errorf("%s record %q carries identity %q, which is not lowercase alphanumeric with optional hyphens", EventUpstreamAdd, payload, fields[2])
+		}
 		next.Identity = fields[2]
 	}
 	if prev, ok := s.byName[name]; ok {
@@ -126,6 +140,37 @@ func validUpstreamURL(raw string) error {
 	}
 	if u.Host == "" {
 		return fmt.Errorf("base URL %q has no host", raw)
+	}
+	// Credentials in the URL are refused, not stripped. This record goes into RTMR3
+	// and RTMR3 travels in the quote, which is served to anyone who asks — so a
+	// userinfo section would publish whatever it holds. Stripping it would be worse
+	// than refusing: the secret would already have been written by the time a reader
+	// could tell, and the writer would think it had been accepted.
+	if u.User != nil {
+		return fmt.Errorf("base URL %q carries credentials; the ledger this record enters is public, so record the URL without them", raw)
+	}
+	// A query or a fragment cannot be part of a base. The forward URL is base+route,
+	// so "…/v1?k=v" + "/chat/completions" is not a URL anyone meant, and a query is
+	// also where an API key would end up if one were pasted in — see above.
+	if u.RawQuery != "" || u.ForceQuery {
+		return fmt.Errorf("base URL %q carries a query string; a base is concatenated with a route, so it cannot have one", raw)
+	}
+	if u.Fragment != "" {
+		return fmt.Errorf("base URL %q carries a fragment; a base is concatenated with a route, so it cannot have one", raw)
+	}
+	// The host must be recorded in one form only. url.Parse lowercases the scheme but
+	// not the host, so "HTTP://X:1/v1" would otherwise reach the canonical text as a
+	// second spelling of one destination — two set hashes for one set, and therefore
+	// two signing keys.
+	if u.Host != strings.ToLower(u.Host) {
+		return fmt.Errorf("base URL %q has an uppercase host; record it lowercase so one destination has one spelling", raw)
+	}
+	// A dot segment is another second spelling: "/v1/../v2" and "/v2" address the
+	// same endpoint. Refusing beats normalising for the same reason as above — the
+	// bytes in the log have to determine the set.
+	if strings.Contains(u.Path, "/../") || strings.Contains(u.Path, "/./") ||
+		strings.HasSuffix(u.Path, "/..") || strings.HasSuffix(u.Path, "/.") {
+		return fmt.Errorf("base URL %q has a dot segment in its path; record the resolved path", raw)
 	}
 	// A trailing slash is refused rather than trimmed. The forward URL is base+route
 	// and the route starts with "/", so a base ending in one produces a double slash;
