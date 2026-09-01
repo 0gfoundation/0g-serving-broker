@@ -80,6 +80,17 @@ func TestUpstreamSetReplay(t *testing.T) {
 			want:  []Upstream{{Name: "a", URL: "http://x:1/v1", Identity: "vendor"}},
 		},
 		{
+			// The two paths differ, and the doc says so: in-place keeps the slot,
+			// remove-then-add takes a new one. Locked down because the reported order is
+			// what a person reads the set by.
+			name:  "remove then re-add sends a name to the end",
+			steps: []string{"add|a http://x:1/v1", "add|b http://y:1/v1", "remove|a", "add|a http://x:1/v1"},
+			want: []Upstream{
+				{Name: "b", URL: "http://y:1/v1"},
+				{Name: "a", URL: "http://x:1/v1"},
+			},
+		},
+		{
 			// A no-op, not an error: the set is the same either way, and refusing would
 			// trap a writer reconciling against a freshly cleared ledger.
 			name:  "removing a name that was never added changes nothing",
