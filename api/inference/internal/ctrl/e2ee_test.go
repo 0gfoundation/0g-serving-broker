@@ -5,10 +5,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	brokererrors "github.com/0glabs/0g-serving-broker/common/errors"
 
 	pccrypto "github.com/0gfoundation/0g-pc-e2ee/protocol/crypto"
 	"github.com/0gfoundation/0g-pc-e2ee/protocol/proof"
@@ -1240,13 +1243,6 @@ func TestStreamFrameSealer_AnthropicFramesSealed(t *testing.T) {
 // usage must stay cleartext on every surface: the billing path and the router read
 // it off the forwarded frame, so sealing it would break settlement.
 func TestSealedFieldsFor_NeverSealsRoutingOrBillingFields(t *testing.T) {
-	for _, f := range e2eeSensitiveResponseFields {
-		switch f {
-		case "usage", "model", "id", "x_0g_trace", "object", "created":
-			t.Errorf("%q is a routing/billing field and must not be sealed", f)
-		}
-	}
-
 	frame := wire.Response{
 		"usage":   json.RawMessage(`{"total_tokens":9}`),
 		"model":   json.RawMessage(`"m"`),
@@ -1255,6 +1251,122 @@ func TestSealedFieldsFor_NeverSealsRoutingOrBillingFields(t *testing.T) {
 	got := e2eeSealedFieldsFor(frame)
 	if !equalStringSet(got, []string{"choices"}) {
 		t.Errorf("e2eeSealedFieldsFor = %v, want [choices]", got)
+	}
+
+	// The name-comparison loop this test used to open with only failed if someone
+	// typed "usage" or "model" into e2eeSensitiveResponseFields, which says nothing
+	// about a listed field whose VALUE nests them. Seal a real frame and look at
+	// what is left in cleartext instead. Anthropic's message_delta is the case that
+	// matters for billing: output_tokens must survive.
+	f := newE2EEFixture(t)
+	ctx := newGinCtx()
+	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
+	rs, err := f.c.newResponseFrameSealer(ctx)
+	if err != nil {
+		t.Fatalf("newResponseFrameSealer: %v", err)
+	}
+
+	out, err := rs.sealSSELine(`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":15}}` + "\n")
+	if err != nil {
+		t.Fatalf("sealSSELine(message_delta): %v", err)
+	}
+	if !strings.Contains(out, "output_tokens") {
+		t.Errorf("message_delta sealed away the usage a downstream meter reads: %s", out)
+	}
+	if strings.Contains(out, "end_turn") {
+		t.Errorf("message_delta forwarded its delta in cleartext: %s", out)
+	}
+}
+
+// message_start is the one frame where a sealed field is a CONTAINER, and sealing
+// it takes model and usage.input_tokens out of cleartext with it. This test exists
+// so that stays a decision rather than a surprise: over-sealing is the safe
+// direction (the alternative leaks output on Ollama's /api/chat, which puts the
+// completion under the same "message" key), broker billing is unaffected because
+// it meters rawBody rather than the sealed frame, and the router does not yet
+// support sealed Anthropic streams. If any of those three stop being true, this
+// test is where to start.
+func TestSealFrame_MessageStartAlsoSealsNestedModelAndUsage(t *testing.T) {
+	f := newE2EEFixture(t)
+	ctx := newGinCtx()
+	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
+	rs, err := f.c.newResponseFrameSealer(ctx)
+	if err != nil {
+		t.Fatalf("newResponseFrameSealer: %v", err)
+	}
+
+	out, err := rs.sealSSELine(`data: {"type":"message_start","message":{"model":"claude-x","content":[],"usage":{"input_tokens":41}}}` + "\n")
+	if err != nil {
+		t.Fatalf("sealSSELine(message_start): %v", err)
+	}
+	if strings.Contains(out, "input_tokens") || strings.Contains(out, "claude-x") {
+		t.Errorf("message_start is expected to seal its whole message object; cleartext still carries it: %s", out)
+	}
+}
+
+// The reported vulnerability, on the streaming path: a frame whose payload is
+// under a key we do not recognise must not be forwarded in cleartext beside an
+// injected "choices":[] and a valid binding.
+func TestSealFrame_RefusesUnrecognisedShape(t *testing.T) {
+	unknownShapes := map[string]string{
+		"OpenAI Responses surface": `data: {"type":"response.output_item.done","item":{"text":"secret"}}`,
+		"Ollama /api/generate":     `data: {"response":"secret","done":false}`,
+	}
+
+	for name, line := range unknownShapes {
+		t.Run(name, func(t *testing.T) {
+			f := newE2EEFixture(t)
+			ctx := newGinCtx()
+			ctx.Set(CtxKeyE2EESealed, true)
+			ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+			ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
+			rs, err := f.c.newResponseFrameSealer(ctx)
+			if err != nil {
+				t.Fatalf("newResponseFrameSealer: %v", err)
+			}
+
+			out, err := rs.sealSSELine(line + "\n")
+			if err == nil {
+				t.Fatalf("unrecognised frame was sealed instead of refused; output: %s", out)
+			}
+			if strings.Contains(out, "secret") {
+				t.Errorf("payload leaked in the output: %s", out)
+			}
+			var httpErr *brokererrors.HTTPError
+			if !errors.As(err, &httpErr) || httpErr.Status() != http.StatusBadGateway {
+				t.Errorf("want a 502 (upstream/broker fault), got %v", err)
+			}
+		})
+	}
+}
+
+// The other half of the same branch: frames that genuinely carry no output must
+// still seal, or every Anthropic stream breaks at its first control frame.
+func TestSealFrame_SealsKnownOutputFreeFrames(t *testing.T) {
+	outputFree := []string{
+		`data: {"type":"content_block_stop","index":0}`,
+		`data: {"type":"message_stop"}`,
+		`data: {"type":"ping"}`,
+		`data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"gpt-4o","usage":{"total_tokens":9}}`,
+	}
+
+	for _, line := range outputFree {
+		f := newE2EEFixture(t)
+		ctx := newGinCtx()
+		ctx.Set(CtxKeyE2EESealed, true)
+		ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+		ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
+		rs, err := f.c.newResponseFrameSealer(ctx)
+		if err != nil {
+			t.Fatalf("newResponseFrameSealer: %v", err)
+		}
+		if _, err := rs.sealSSELine(line + "\n"); err != nil {
+			t.Errorf("output-free frame refused: %s -> %v", line, err)
+		}
 	}
 }
 

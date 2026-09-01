@@ -14,6 +14,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"slices"
 	"strings"
 
 	pccrypto "github.com/0gfoundation/0g-pc-e2ee/protocol/crypto"
@@ -105,6 +107,53 @@ var e2eeSensitiveResponseFields = []string{
 	"message",       // Anthropic streaming: message_start
 	"content_block", // Anthropic streaming: content_block_start
 	"delta",         // Anthropic streaming: content_block_delta, message_delta
+}
+
+// e2eeResponseControlFields are the keys a frame may carry while carrying no
+// model output. Everything here is transport, identity, routing or billing
+// metadata, and none of it is the completion.
+//
+// It exists so that "this frame has no sealable field" can be split into the two
+// cases that need opposite answers: a frame that is legitimately output-free
+// (content_block_stop, message_stop, a ping, a usage-only trailer) and a frame
+// whose output lives under a key we do not recognise. Sealing a placeholder is
+// right for the first and is the reported vulnerability for the second, so a key
+// that is in neither list makes the frame refuse to seal.
+//
+// Adding a key here asserts it never carries model output on any surface we
+// forward. Getting that wrong forwards a completion in cleartext, so add only
+// what has been checked against the surface that emits it.
+var e2eeResponseControlFields = map[string]bool{
+	// OpenAI /v1/chat/completions streaming
+	"id":                 true,
+	"object":             true,
+	"created":            true,
+	"system_fingerprint": true,
+	"service_tier":       true,
+	// Anthropic /v1/messages streaming
+	"type":  true,
+	"index": true,
+	// Both surfaces, and declared unbound so the router may rewrite them.
+	"model": true,
+	"usage": true,
+}
+
+// unrecognisedFrameKeys returns, sorted, the keys of frame that are neither a
+// sealable output field nor known control metadata — i.e. the reason a frame with
+// nothing to seal cannot be assumed to be output-free.
+func unrecognisedFrameKeys(frame wire.Response) []string {
+	var unknown []string
+	for k := range frame {
+		if e2eeResponseControlFields[k] {
+			continue
+		}
+		if slices.Contains(e2eeSensitiveResponseFields, k) {
+			continue
+		}
+		unknown = append(unknown, k)
+	}
+	slices.Sort(unknown)
+	return unknown
 }
 
 // e2eeSealedFieldsFor returns the sensitive fields actually present in frame, in
@@ -300,8 +349,9 @@ func (c *Ctrl) maybeSealNonStreamResponse(ctx *gin.Context, body []byte) (out []
 		return body, false, respBindHash, nil
 	}
 	var resp wire.Response
-	// A literal JSON `null` unmarshals into a nil map WITHOUT error; ensureChoices
-	// would then panic writing to it. Reject any non-object body fail-closed.
+	// A literal JSON `null` unmarshals into a nil map WITHOUT error, and a nil map
+	// has no fields to seal, so without this it would reach the fail-closed branch
+	// below and be reported as an unrecognised shape rather than as what it is.
 	if uerr := json.Unmarshal(body, &resp); uerr != nil || resp == nil {
 		return nil, true, respBindHash, fmt.Errorf("seal response: body is not a JSON object")
 	}
@@ -313,8 +363,15 @@ func (c *Ctrl) maybeSealNonStreamResponse(ctx *gin.Context, body []byte) (out []
 	// beside an injected "choices":[]).
 	sealedFields := e2eeSealedFieldsFor(resp)
 	if len(sealedFields) == 0 {
-		return nil, true, respBindHash, fmt.Errorf(
-			"seal response: no sealable output field in response (looked for %v)", e2eeSensitiveResponseFields)
+		// 502, not the default 400. The upstream answered 200 with a body this broker
+		// cannot identify, so the request is refused for a reason that is ours and the
+		// upstream's, never the caller's — and a 400 here would file a shape we failed
+		// to recognise (or an upstream returning {"error":…} under a 200, which some
+		// gateways do) under client error in the rejection and health accounting,
+		// which is exactly where nobody would look for it. errors.Response also logs
+		// 5xx at Error level, so an unrecognised surface is loud instead of silent.
+		return nil, true, respBindHash, errors.NewHTTPError(http.StatusBadGateway, fmt.Errorf(
+			"seal response: no sealable output field in response (looked for %v)", e2eeSensitiveResponseFields))
 	}
 	// model + x_0g_trace stay unbound so the router may rewrite/inject them
 	// downstream (SPEC §5.2).
@@ -432,6 +489,19 @@ func (rs *responseFrameSealer) sealFrame(frame wire.Response, final bool) (strin
 	// ensureChoices used to inject, which merges to nothing on the client.
 	sealedFields := e2eeSealedFieldsFor(frame)
 	if len(sealedFields) == 0 {
+		// Nothing recognised to seal. That is only safe when the frame is one we can
+		// positively identify as output-free; otherwise its payload is under a key we
+		// do not know, and sealing the placeholder instead would forward that payload
+		// in cleartext under sealed_fields:["choices"] with a valid §8 binding — the
+		// no-signal degradation this change exists to remove, reproduced on the
+		// streaming path. Refuse, and let the caller stop the stream.
+		if unknown := unrecognisedFrameKeys(frame); len(unknown) > 0 {
+			// 502 for the same reason as the non-streaming path: an unrecognised frame
+			// shape is the upstream's and ours, not the caller's.
+			return "", errors.NewHTTPError(http.StatusBadGateway, fmt.Errorf(
+				"seal frame: frame carries no sealable output field (looked for %v) but has unrecognised field(s) %v, so its payload cannot be identified",
+				e2eeSensitiveResponseFields, unknown))
+		}
 		ensureChoices(frame)
 		sealedFields = []string{"choices"}
 	}
