@@ -24,6 +24,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/common/log"
 )
 
 // ErrE2EEKeyMismatch marks a sealed request whose key_id is not the enclave's
@@ -113,17 +114,16 @@ var e2eeSensitiveResponseFields = []string{
 // model output. Everything here is transport, identity, routing or billing
 // metadata, and none of it is the completion.
 //
-// Every key of every frame is checked against this list and
-// e2eeSensitiveResponseFields, whatever else the frame carries. Gating that check
-// on "the frame had nothing to seal" was not enough — a frame carrying a known
-// field AND an unknown one passed it, so
+// This list is what keeps a field in CLEARTEXT. Everything in a frame that is
+// neither here nor in e2eeSensitiveResponseFields is sealed (see
+// e2eeSealedFieldsFor), so the default for an unknown key is confidentiality.
 //
-//	{"choices":[],"response":"…"}
-//
-// sealed the empty array and forwarded "response" in cleartext under
-// sealed_fields:["choices"] with a valid binding: the reported vulnerability, byte
-// for byte. Azure OpenAI's first streaming chunk is exactly that shape (choices:[]
-// beside prompt_filter_results), and those results derive from the user's prompt.
+// Adding a key here therefore asserts it never carries model output, nor anything
+// derived from the request, on any surface we forward. Getting that wrong forwards
+// it in cleartext beside a sealed frame, which is the vulnerability rather than a
+// cosmetic issue: Azure OpenAI's first streaming chunk is choices:[] beside
+// prompt_filter_results, and those results are derived from the user's prompt. They
+// are sealed precisely because they are not on this list.
 //
 // Adding a key here asserts it never carries model output on any surface we
 // forward. Getting that wrong forwards a completion in cleartext, so add only
@@ -145,52 +145,50 @@ var e2eeResponseControlFields = map[string]bool{
 	// Both surfaces
 	"model": true,
 	"usage": true,
-	// Diagnostics, never model output. Refusing these would turn an upstream error
-	// into a stream that simply stops: by the time one arrives the headers are
-	// flushed, so the 502 cannot reach the client as a status and the upstream's own
-	// message would be lost with it.
-	"error": true,
 	// Declared in e2eeResponseUnboundFields, i.e. a frame is expected to be able to
-	// carry it. The two lists have to agree, or a chained broker/router upstream that
-	// injects it early would abort the stream.
+	// carry it and the router may rewrite it. The two lists have to agree.
 	"x_0g_trace": true,
+	// Deliberately NOT here: "error". Gateway error text is not guaranteed to be
+	// prompt-free — LiteLLM and OpenRouter embed the upstream's raw error body,
+	// which can quote the request ("prompt too long: '…'") — so it is sealed like any
+	// other unrecognised field rather than forwarded in the clear. The client still
+	// gets the diagnostics; it opens the frame either way.
 }
 
-// unrecognisedFrameKeys returns, sorted, the keys of frame that are neither a
-// sealable output field nor known control metadata — i.e. the keys that stop this
-// frame from being shown to carry no unsealed model output.
+// e2eeSealedFieldsFor returns every field of frame that must be sealed: the known
+// output fields it carries, in the fixed order of e2eeSensitiveResponseFields so a
+// client sees a deterministic sealed_fields list, then every remaining field that
+// is not known cleartext metadata, sorted.
 //
-// The sensitive-field skip is load-bearing now that callers run this on frames
-// that DO carry output: those keys are the ones about to be sealed.
-func unrecognisedFrameKeys(frame wire.Response) []string {
-	var unknown []string
-	for k := range frame {
-		if e2eeResponseControlFields[k] {
-			continue
-		}
-		if slices.Contains(e2eeSensitiveResponseFields, k) {
-			continue
-		}
-		unknown = append(unknown, k)
-	}
-	slices.Sort(unknown)
-	return unknown
-}
-
-// e2eeSealedFieldsFor returns the sensitive fields actually present in frame, in
-// the fixed order of e2eeSensitiveResponseFields so the sealed_fields list a
-// client sees is deterministic. An empty result means the frame carries no model
-// output at all — legitimate for a streaming keepalive, a usage-only trailer or
-// an Anthropic content_block_stop / message_stop, and a fail-closed condition on
-// the non-streaming path where a completion always carries output.
+// An unrecognised field is SEALED, not refused. Refusing it was the obvious
+// reading of "fail closed" and it is the wrong one: vLLM — this broker's primary
+// upstream — serialises through model_dump(), so prompt_logprobs and
+// kv_transfer_params are on every body, and refusing turned every sealed request
+// into a 502. Sealing keeps the confidentiality that mattered (the client merges
+// the field back when it opens the frame) without betting availability on a list
+// of upstream quirks being complete. Refusal is reserved for what cannot be sealed
+// at all: a body or line that is not a JSON object.
+//
+// An empty result means the frame carries nothing but cleartext metadata —
+// legitimate for a streaming keepalive, a usage-only trailer or an Anthropic
+// content_block_stop / message_stop, and a fail-closed condition on the
+// non-streaming path where a completion always carries output.
 func e2eeSealedFieldsFor(frame wire.Response) []string {
-	fields := make([]string, 0, len(e2eeSensitiveResponseFields))
+	fields := make([]string, 0, len(frame))
 	for _, f := range e2eeSensitiveResponseFields {
 		if _, ok := frame[f]; ok {
 			fields = append(fields, f)
 		}
 	}
-	return fields
+	var unknown []string
+	for k := range frame {
+		if e2eeResponseControlFields[k] || slices.Contains(e2eeSensitiveResponseFields, k) {
+			continue
+		}
+		unknown = append(unknown, k)
+	}
+	slices.Sort(unknown)
+	return append(fields, unknown...)
 }
 
 // hasE2EEMarker is a cheap substring pre-check to skip the JSON parse on the vast
@@ -374,7 +372,11 @@ func (c *Ctrl) maybeSealNonStreamResponse(ctx *gin.Context, body []byte) (out []
 	// has no fields to seal, so without this it would reach the fail-closed branch
 	// below and be reported as an unrecognised shape rather than as what it is.
 	if uerr := json.Unmarshal(body, &resp); uerr != nil || resp == nil {
-		return nil, true, respBindHash, fmt.Errorf("seal response: body is not a JSON object")
+		// 502 like the other unsealable-shape refusals below: an upstream that
+		// answered 200 with a body that is not a JSON object is not the caller's
+		// fault, and a 400 would file it under client error in the health accounting.
+		return nil, true, respBindHash, errors.NewHTTPError(http.StatusBadGateway,
+			fmt.Errorf("seal response: body is not a JSON object"))
 	}
 	// Seal whatever output fields this response actually carries rather than the
 	// wire v1 default ["choices"], which is empty on the Anthropic surface. A
@@ -382,13 +384,6 @@ func (c *Ctrl) maybeSealNonStreamResponse(ctx *gin.Context, body []byte) (out []
 	// not recognise the shape — fail closed instead of forwarding a body whose
 	// payload we could not identify (and which the old code shipped in cleartext
 	// beside an injected "choices":[]).
-	// Same unconditional check as the streaming path: a body carrying "choices"
-	// beside a field we do not recognise would otherwise forward that field in
-	// cleartext next to a sealed frame.
-	if unknown := unrecognisedFrameKeys(resp); len(unknown) > 0 {
-		return nil, true, respBindHash, errors.NewHTTPError(http.StatusBadGateway, fmt.Errorf(
-			"seal response: unrecognised field(s) %v, so this body cannot be shown to carry no model output; refusing rather than forwarding them in cleartext", unknown))
-	}
 	sealedFields := e2eeSealedFieldsFor(resp)
 	if len(sealedFields) == 0 {
 		// 502, not the default 400. The upstream answered 200 with a body this broker
@@ -425,6 +420,7 @@ func (c *Ctrl) maybeSealNonStreamResponse(ctx *gin.Context, body []byte) (out []
 type responseFrameSealer struct {
 	sealer       *wire.ResponseSealer
 	binder       *proof.StreamBinder
+	logger       log.Logger
 	emittedFinal bool
 	frameCount   int
 }
@@ -450,7 +446,11 @@ func (c *Ctrl) newResponseFrameSealer(ctx *gin.Context) (*responseFrameSealer, e
 	if !ok {
 		return nil, fmt.Errorf("e2ee stream: request binding hash missing from context")
 	}
-	return &responseFrameSealer{sealer: s, binder: proof.NewStreamBinderFromReqHash(reqBindHash)}, nil
+	return &responseFrameSealer{
+		sealer: s,
+		binder: proof.NewStreamBinderFromReqHash(reqBindHash),
+		logger: c.logger,
+	}, nil
 }
 
 // sealSSELine transforms one already-sanitized SSE line into its sealed form
@@ -460,7 +460,8 @@ func (c *Ctrl) newResponseFrameSealer(ctx *gin.Context) (*responseFrameSealer, e
 // per-frame usage is deliberately avoided: some upstreams emit empty "usage":{}
 // mid-stream, and vLLM continuous_usage_stats puts usage on every chunk, either of
 // which would mark a non-terminal frame final and truncate the client's stream.
-// Blank/comment/non-JSON lines pass through unchanged.
+// Blank lines and the payload-free SSE fields pass through unchanged; anything
+// else that cannot be turned into a frame is refused rather than forwarded.
 func (rs *responseFrameSealer) sealSSELine(line string) (string, error) {
 	trimmed := strings.TrimSpace(line)
 	if trimmed == "" {
@@ -473,19 +474,59 @@ func (rs *responseFrameSealer) sealSSELine(line string) (string, error) {
 		}
 		return final + line, nil // synthetic final frame (if any) precedes [DONE]
 	}
+	// SSE lines that carry no payload: a comment (":" — also how keepalives are
+	// sent) and the event/id/retry fields. Forwarded as-is because there is nothing
+	// in them to hide.
+	if strings.HasPrefix(trimmed, ":") ||
+		strings.HasPrefix(trimmed, "event:") ||
+		strings.HasPrefix(trimmed, "id:") ||
+		strings.HasPrefix(trimmed, "retry:") {
+		return line, nil
+	}
+	// Everything past here is content, and on a sealed request content that cannot
+	// be turned into a frame must be refused rather than passed through. Returning
+	// such a line unchanged is how the previous version leaked: an Ollama-style
+	// upstream streams bare ND-JSON with no "data:" prefix at all, so
+	// {"model":"…","response":"…"} was forwarded byte for byte in the clear, and so
+	// was any "data:" payload that was not an object (a JSON array, say).
 	after, ok := strings.CutPrefix(trimmed, "data:")
 	if !ok {
-		return line, nil
+		return "", rs.refuseUnsealableLine("line is not an SSE field", trimmed)
 	}
 	payload := strings.TrimSpace(after)
-	if !strings.HasPrefix(payload, "{") {
-		return line, nil
-	}
 	var frame wire.Response
-	if err := json.Unmarshal([]byte(payload), &frame); err != nil {
-		return "", fmt.Errorf("seal stream frame: %w", err)
+	if err := json.Unmarshal([]byte(payload), &frame); err != nil || frame == nil {
+		return "", rs.refuseUnsealableLine("data payload is not a JSON object", payload)
 	}
 	return rs.sealFrame(frame, false)
+}
+
+// refuseUnsealableLine logs why a line could not be sealed and returns the client a
+// 502 that does not describe it.
+//
+// The client-facing message is deliberately shapeless. A 502 body reaches the
+// caller verbatim (errors.Response substitutes the message only for 500), and the
+// upstream's own vocabulary is a fingerprint: prompt_filter_results is Azure,
+// kv_transfer_params is vLLM, x_groq is Groq, done_reason is Ollama. #184 strips
+// provider identity out of responses; describing the upstream here would put it
+// back.
+//
+// The log gets the shape and not the content: detail may BE the model output, or
+// quote the prompt, so only its first byte and length are recorded — enough to
+// tell an ND-JSON upstream from a JSON array, which is what an operator needs to
+// act on.
+func (rs *responseFrameSealer) refuseUnsealableLine(why, detail string) error {
+	firstByte := "(empty)"
+	if len(detail) > 0 {
+		firstByte = string(detail[0])
+	}
+	if rs.logger != nil {
+		rs.logger.Errorf(
+			"e2ee: refusing to forward a stream line on a sealed request: %s (starts with %q, %d bytes) — this upstream's streaming format cannot be sealed",
+			why, firstByte, len(detail))
+	}
+	return errors.NewHTTPError(http.StatusBadGateway,
+		fmt.Errorf("upstream returned a streaming response this broker cannot seal"))
 }
 
 // finalFrameLine returns a synthetic final SSE frame (empty choices) so the client
@@ -515,19 +556,11 @@ func (rs *responseFrameSealer) sealFrame(frame wire.Response, final bool) (strin
 	// synthetic final frame) has nothing to seal, and SealFrame rejects both an
 	// empty set and a named field that is absent — so give it the placeholder
 	// ensureChoices used to inject, which merges to nothing on the client.
-	// Checked whatever the frame turns out to carry, not only when there is nothing
-	// to seal: a known field present alongside an unknown one is the leak shape. 502
-	// rather than the default 400 — an unrecognised frame is the upstream's and ours,
-	// never the caller's.
-	if unknown := unrecognisedFrameKeys(frame); len(unknown) > 0 {
-		return "", errors.NewHTTPError(http.StatusBadGateway, fmt.Errorf(
-			"seal frame: unrecognised field(s) %v, so this frame cannot be shown to carry no model output; refusing rather than forwarding them in cleartext", unknown))
-	}
 	sealedFields := e2eeSealedFieldsFor(frame)
 	if len(sealedFields) == 0 {
-		// Output-free, and now positively so: every key was recognised above. Give it
-		// the placeholder ensureChoices used to inject, which merges to nothing on the
-		// client, so control frames still seal instead of breaking the stream.
+		// Nothing but cleartext metadata, so nothing to hide. Give it the placeholder
+		// ensureChoices used to inject, which merges to nothing on the client, so
+		// control frames still seal instead of breaking the stream.
 		ensureChoices(frame)
 		sealedFields = []string{"choices"}
 	}

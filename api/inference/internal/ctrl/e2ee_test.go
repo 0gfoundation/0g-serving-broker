@@ -1149,21 +1149,62 @@ func TestSealNonStreamResponse_UnknownShapeFailsClosed(t *testing.T) {
 
 	respBody := []byte(`{"id":"x","model":"m","output_text":"secret payload in an unknown field"}`)
 
-	_, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, respBody)
+	out, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, respBody)
 	if !isSealed {
 		t.Fatal("want isSealed=true so the caller refuses to forward plaintext")
 	}
+	// Sealed, not refused: refusing an unknown field broke every sealed request on a
+	// vLLM upstream. What has to hold is that the field does not reach the client in
+	// cleartext, and it is the same assertion either way.
+	if err != nil {
+		t.Fatalf("an unknown field should be sealed, not refused: %v", err)
+	}
+	if strings.Contains(string(out), "secret payload") {
+		t.Errorf("unknown field forwarded in cleartext: %s", out)
+	}
+	if !strings.Contains(string(out), `"output_text"`) {
+		t.Errorf("output_text should appear in sealed_fields: %s", out)
+	}
+}
+
+// A body whose only fields are cleartext metadata carries no output, and on the
+// non-streaming path a completion always carries output — so that is still refused.
+func TestSealNonStreamResponse_NoOutputFailsClosed(t *testing.T) {
+	f := newE2EEFixture(t)
+	ctx := newGinCtx()
+	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
+
+	_, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, []byte(`{"id":"x","model":"m","usage":{"total_tokens":1}}`))
+	if !isSealed {
+		t.Fatal("want isSealed=true")
+	}
 	if err == nil {
-		t.Fatal("want an error for an unrecognised response shape, got nil")
+		t.Fatal("a completion with no output at all must fail closed")
 	}
-	// The unrecognised-key check now fires first and names the offending field,
-	// which is the more useful refusal: "output_text" is what an operator has to
-	// either allowlist or teach the sealer about.
-	if !strings.Contains(err.Error(), "output_text") {
-		t.Errorf("error should name the unrecognised field, got: %v", err)
+}
+
+// vLLM is this broker's primary upstream and serialises through model_dump(), so
+// prompt_logprobs and kv_transfer_params are on every body. Refusing unknown
+// fields made every sealed request against it a 502; this pins that it works.
+func TestSealNonStreamResponse_VLLMBodySeals(t *testing.T) {
+	f := newE2EEFixture(t)
+	ctx := newGinCtx()
+	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
+
+	body := []byte(`{"id":"c1","object":"chat.completion","created":1,"model":"llama3",` +
+		`"choices":[{"index":0,"message":{"role":"assistant","content":"SECRET"}}],` +
+		`"usage":{"total_tokens":5},"prompt_logprobs":null,"kv_transfer_params":null}`)
+
+	out, _, _, err := f.c.maybeSealNonStreamResponse(ctx, body)
+	if err != nil {
+		t.Fatalf("a standard vLLM body was refused: %v", err)
 	}
-	if strings.Contains(err.Error(), "secret payload") {
-		t.Errorf("the refusal echoed the payload it refused to forward: %v", err)
+	if strings.Contains(string(out), "SECRET") {
+		t.Errorf("completion forwarded in cleartext: %s", out)
 	}
 }
 
@@ -1315,36 +1356,35 @@ func TestSealFrame_MessageStartAlsoSealsNestedModelAndUsage(t *testing.T) {
 }
 
 // The reported vulnerability, on the streaming path: a frame whose payload is
-// under a key we do not recognise must not be forwarded in cleartext beside an
-// injected "choices":[] and a valid binding.
-func TestSealFrame_RefusesUnrecognisedShape(t *testing.T) {
-	unknownShapes := map[string]string{
-		"OpenAI Responses surface": `data: {"type":"response.output_item.done","item":{"text":"secret"}}`,
-		"Ollama /api/generate":     `data: {"response":"secret","done":false}`,
+// under a key we do not recognise must not reach the client in cleartext. It is
+// SEALED rather than refused — see e2eeSealedFieldsFor for why refusing was the
+// wrong reading of fail-closed — so the assertion is on the cleartext, which is
+// the property that actually matters.
+func TestSealFrame_SealsUnrecognisedShape(t *testing.T) {
+	unknownShapes := map[string]struct{ line, secret, sealedKey string }{
+		"OpenAI Responses surface": {
+			line:      `data: {"type":"response.output_item.done","item":{"text":"SECRET"}}`,
+			secret:    "SECRET",
+			sealedKey: "item",
+		},
+		"Ollama /api/generate over SSE": {
+			line:      `data: {"response":"SECRET","done":false}`,
+			secret:    "SECRET",
+			sealedKey: "response",
+		},
 	}
 
-	for name, line := range unknownShapes {
+	for name, tc := range unknownShapes {
 		t.Run(name, func(t *testing.T) {
-			f := newE2EEFixture(t)
-			ctx := newGinCtx()
-			ctx.Set(CtxKeyE2EESealed, true)
-			ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
-			ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
-			rs, err := f.c.newResponseFrameSealer(ctx)
+			out, err := newTestFrameSealer(t).sealSSELine(tc.line + "\n")
 			if err != nil {
-				t.Fatalf("newResponseFrameSealer: %v", err)
+				t.Fatalf("unrecognised field should be sealed, not refused: %v", err)
 			}
-
-			out, err := rs.sealSSELine(line + "\n")
-			if err == nil {
-				t.Fatalf("unrecognised frame was sealed instead of refused; output: %s", out)
+			if strings.Contains(out, tc.secret) {
+				t.Errorf("payload forwarded in cleartext: %s", out)
 			}
-			if strings.Contains(out, "secret") {
-				t.Errorf("payload leaked in the output: %s", out)
-			}
-			var httpErr *brokererrors.HTTPError
-			if !errors.As(err, &httpErr) || httpErr.Status() != http.StatusBadGateway {
-				t.Errorf("want a 502 (upstream/broker fault), got %v", err)
+			if !strings.Contains(out, `"`+tc.sealedKey+`"`) {
+				t.Errorf("%q should appear in sealed_fields: %s", tc.sealedKey, out)
 			}
 		})
 	}
@@ -1415,12 +1455,12 @@ func newTestFrameSealer(t *testing.T) *responseFrameSealer {
 	return rs
 }
 
-// The leak the first version of this guard missed: it only ran when the frame had
+// The leak the first version of this guard missed: it only checked frames that had
 // nothing to seal, so a KNOWN field beside an UNKNOWN one sailed through and the
 // unknown one was forwarded in cleartext under sealed_fields:["choices"] with a
-// valid binding — the reported vulnerability, unchanged.
-func TestSealFrame_RefusesUnknownKeyBesideAKnownOne(t *testing.T) {
-	leaky := map[string]struct{ line, secret string }{
+// valid binding. Now every unrecognised key joins the sealed set.
+func TestSealFrame_SealsUnknownKeyBesideAKnownOne(t *testing.T) {
+	cases := map[string]struct{ line, secret string }{
 		"unknown key beside an empty choices array": {
 			line:   `data: {"choices":[],"response":"SECRET-PAYLOAD"}`,
 			secret: "SECRET-PAYLOAD",
@@ -1430,26 +1470,28 @@ func TestSealFrame_RefusesUnknownKeyBesideAKnownOne(t *testing.T) {
 		// something about the very thing the client sealed.
 		"Azure OpenAI first chunk": {
 			line:   `data: {"choices":[],"created":0,"id":"","model":"","prompt_filter_results":[{"prompt_index":0}]}`,
-			secret: "prompt_filter_results",
+			secret: "prompt_index",
 		},
 		"unknown key beside real output": {
 			line:   `data: {"choices":[{"delta":{"content":"hi"}}],"citations":["SECRET-CITATION"]}`,
 			secret: "SECRET-CITATION",
 		},
+		// Gateway error text can quote the request, which is why "error" is not on the
+		// cleartext list.
+		"upstream error text": {
+			line:   `data: {"type":"error","error":{"message":"prompt too long: 'SECRET-PROMPT'"}}`,
+			secret: "SECRET-PROMPT",
+		},
 	}
 
-	for name, tc := range leaky {
+	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			out, err := newTestFrameSealer(t).sealSSELine(tc.line + "\n")
-			if err == nil {
-				t.Fatalf("frame was sealed instead of refused; output: %s", out)
+			if err != nil {
+				t.Fatalf("frame should be sealed, not refused: %v", err)
 			}
 			if strings.Contains(out, tc.secret) {
-				t.Errorf("payload leaked in the output: %s", out)
-			}
-			var httpErr *brokererrors.HTTPError
-			if !errors.As(err, &httpErr) || httpErr.Status() != http.StatusBadGateway {
-				t.Errorf("want a 502 (upstream/broker fault), got %v", err)
+				t.Errorf("payload forwarded in cleartext: %s", out)
 			}
 		})
 	}
@@ -1506,5 +1548,79 @@ func TestSealNonStreamResponse_AnthropicTopLevelFieldsRecognised(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "stop_reason") {
 		t.Errorf("stop_reason should stay in cleartext: %s", out)
+	}
+}
+
+// sealSSELine used to return anything it could not recognise as "data: {…}"
+// verbatim, which bypassed sealing entirely. An Ollama-style upstream streams bare
+// ND-JSON with no "data:" prefix at all, so the whole completion was forwarded in
+// the clear, token by token, on a sealed request.
+func TestSealSSELine_RefusesWhatItCannotSeal(t *testing.T) {
+	cases := map[string]struct{ line, secret string }{
+		// Ollama native /api/generate and /api/chat streaming
+		"bare ND-JSON, no data: prefix": {
+			line:   `{"model":"llama3","response":"SECRET-PAYLOAD","done":false}`,
+			secret: "SECRET-PAYLOAD",
+		},
+		"data: payload is a JSON array": {
+			line:   `data: [{"response":"SECRET-ARR"}]`,
+			secret: "SECRET-ARR",
+		},
+		"data: payload is a bare string": {
+			line:   `data: "SECRET-STR"`,
+			secret: "SECRET-STR",
+		},
+		"data: null": {
+			line:   `data: null`,
+			secret: "",
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			out, err := newTestFrameSealer(t).sealSSELine(tc.line + "\n")
+			if err == nil {
+				t.Fatalf("line was forwarded instead of refused; output: %q", out)
+			}
+			if tc.secret != "" && strings.Contains(out, tc.secret) {
+				t.Errorf("payload leaked: %q", out)
+			}
+			var httpErr *brokererrors.HTTPError
+			if !errors.As(err, &httpErr) || httpErr.Status() != http.StatusBadGateway {
+				t.Errorf("want a 502 (upstream fault), got %v", err)
+			}
+			// The refusal must not describe the upstream: its vocabulary fingerprints
+			// the provider, which #184 deliberately strips out of responses. Only
+			// tokens that identify it are checked — the generic message legitimately
+			// contains ordinary words like "response".
+			for _, leak := range []string{"llama3", "ND-JSON", "prompt_logprobs", tc.secret} {
+				if leak != "" && strings.Contains(err.Error(), leak) {
+					t.Errorf("client-facing error describes the upstream (%q): %v", leak, err)
+				}
+			}
+		})
+	}
+}
+
+// The payload-free SSE lines still have to pass through, or Anthropic's
+// "event: error" / keepalive comments would abort every sealed stream.
+func TestSealSSELine_PassesPayloadFreeSSEFields(t *testing.T) {
+	passthrough := []string{
+		"",
+		": keepalive",
+		"event: content_block_delta",
+		"id: 42",
+		"retry: 1000",
+	}
+
+	for _, line := range passthrough {
+		out, err := newTestFrameSealer(t).sealSSELine(line + "\n")
+		if err != nil {
+			t.Errorf("payload-free SSE line refused: %q -> %v", line, err)
+			continue
+		}
+		if out != line+"\n" {
+			t.Errorf("payload-free SSE line was altered: %q -> %q", line, out)
+		}
 	}
 }
