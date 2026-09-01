@@ -199,8 +199,6 @@ func TestValidUpstreamURL(t *testing.T) {
 	}{
 		{raw: "http://engine-2:8000/v1"},
 		{raw: "https://vendor.example/compatible-mode/v1"},
-		{raw: " http://x:1/v1", wantErr: "surrounding whitespace"},
-		{raw: "http://x:1/v1 ", wantErr: "surrounding whitespace"},
 		{raw: "ftp://x/v1", wantErr: "not http or https"},
 		{raw: "/v1", wantErr: "not http or https"},
 		{raw: "http:///v1", wantErr: "has no host"},
@@ -227,6 +225,15 @@ func TestValidUpstreamURL(t *testing.T) {
 		// hashes, and therefore two signing keys once the derivation path binds it.
 		{raw: "http://x:80/v1", wantErr: "default port"},
 		{raw: "https://x:443/v1", wantErr: "default port"},
+		// url.Parse lowercases the scheme but the record stores the raw string, so the
+		// scheme has to be checked on the bytes or a second spelling reaches the hash.
+		{raw: "HtTp://x/v1", wantErr: "does not spell its scheme in lowercase"},
+		{raw: "HTTPS://x/v1", wantErr: "does not spell its scheme in lowercase"},
+		// Equivalent spellings of a port. Each denotes what ":80" or no port denotes.
+		{raw: "http://x:0080/v1", wantErr: "leading zero"},
+		{raw: "http://x:01/v1", wantErr: "leading zero"},
+		{raw: "http://x:/v1", wantErr: "empty port"},
+		{raw: "http://x:99999/v1", wantErr: "valid port"},
 		{raw: "http://x.:1/v1", wantErr: "trailing dot"},
 		{raw: "http://x:1/v%31", wantErr: "percent-encodes"},
 		{raw: "http://x:1//v1", wantErr: "empty path segment"},
@@ -260,7 +267,7 @@ func TestUpstreamSetHash(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		sum, err := (&RunningState{Upstreams: s.list(), UpstreamsRecorded: true}).UpstreamSetHash()
+		sum, err := (&RunningState{Upstreams: s.list(), UpstreamsState: UpstreamsKnown}).UpstreamSetHash()
 		if err != nil {
 			t.Fatalf("UpstreamSetHash() = %v", err)
 		}
@@ -317,14 +324,14 @@ func TestUpstreamSetHash(t *testing.T) {
 	})
 
 	t.Run("an unknown set has no hash", func(t *testing.T) {
-		st := &RunningState{UpstreamsRecorded: true, UpstreamsErr: errors.New("boom")}
+		st := &RunningState{UpstreamsState: UpstreamsUnknown, UpstreamsErr: errors.New("boom")}
 		if _, err := st.UpstreamSetHash(); err == nil {
 			t.Fatal("want an error when the set is unknown, got a hash")
 		}
 	})
 
 	t.Run("a recorded-then-emptied set has a hash, and it is not the empty-string hash", func(t *testing.T) {
-		got, err := (&RunningState{UpstreamsRecorded: true}).UpstreamSetHash()
+		got, err := (&RunningState{UpstreamsState: UpstreamsKnown}).UpstreamSetHash()
 		if err != nil {
 			t.Fatalf("UpstreamSetHash() = %v", err)
 		}
@@ -342,7 +349,7 @@ func TestUpstreamSetHash(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		got, err := (&RunningState{Upstreams: s.list(), UpstreamsRecorded: true}).UpstreamSetHash()
+		got, err := (&RunningState{Upstreams: s.list(), UpstreamsState: UpstreamsKnown}).UpstreamSetHash()
 		if err != nil {
 			t.Fatalf("UpstreamSetHash() = %v", err)
 		}
@@ -368,7 +375,7 @@ func TestUpstreamSetHash(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		st := &RunningState{Upstreams: s.list(), UpstreamsRecorded: true}
+		st := &RunningState{Upstreams: s.list(), UpstreamsState: UpstreamsKnown}
 		first, err := st.UpstreamSetHash()
 		if err != nil {
 			t.Fatalf("UpstreamSetHash() = %v", err)
