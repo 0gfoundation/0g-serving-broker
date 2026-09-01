@@ -37,6 +37,10 @@ var upstreamIdentityPattern = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 const (
 	UpstreamsUnrecorded = "" // no upstream record appeared
 	UpstreamsKnown      = "known"
+	// UpstreamsIncomplete: records appeared and replayed cleanly, but no completeness
+	// marker closed the batch. What replayed may be a prefix of what the writer meant
+	// to say, so it is not a set — and a prefix understates where plaintext can go.
+	UpstreamsIncomplete = "incomplete"
 	UpstreamsUnknown    = "unknown" // records appeared and could not be replayed
 )
 
@@ -148,6 +152,9 @@ func describeUpstream(u Upstream) string {
 	}
 	return u.URL + " (" + u.Identity + ")"
 }
+
+// size is the member count a completeness marker is checked against.
+func (s *upstreamSet) size() int { return len(s.byName) }
 
 // changes reports every transition the set underwent this boot, in order: a name
 // rebound to something else, or withdrawn. Nil when the set never changed.
@@ -389,8 +396,8 @@ func validUpstreamURL(raw string) error {
 // for the reason the event names do: one definition, or the two sides drift.
 func (r *RunningState) UpstreamSetHash() (string, error) {
 	switch r.UpstreamsState {
-	case UpstreamsUnknown:
-		return "", fmt.Errorf("the upstream set is unknown, so it has no hash: %s", r.UpstreamsErr)
+	case UpstreamsUnknown, UpstreamsIncomplete:
+		return "", fmt.Errorf("the upstream set is %s, so it has no hash: %s", r.UpstreamsState, r.UpstreamsErr)
 	case UpstreamsUnrecorded:
 		return "", fmt.Errorf("no %s or %s record appeared, so no set was recorded and there is nothing to hash", EventUpstreamAdd, EventUpstreamRemove)
 	case UpstreamsKnown:

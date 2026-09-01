@@ -104,6 +104,7 @@ func TestResolveReportsARewrittenUpstream(t *testing.T) {
 	state, err := resolve(t, pinnedCompose(t), append(bootEvents(),
 		RuntimeEvent{Event: EventUpstreamAdd, Payload: []byte("vendor https://vendor.example/v1 openrouter")},
 		RuntimeEvent{Event: EventUpstreamAdd, Payload: []byte("vendor http://engine-1:8000/v1")},
+		RuntimeEvent{Event: EventUpstreamSetComplete, Payload: []byte("1")},
 	))
 	if err != nil {
 		t.Fatalf("ResolveRunningState() = %v", err)
@@ -181,21 +182,107 @@ func TestRunningStateSurvivesJSON(t *testing.T) {
 	}
 }
 
-// A remove of a name nothing added asserts nothing, so on its own it must not promote
-// an unbounded deployment into "recorded, and bounded to nothing" — the strongest
-// claim, reachable from the weakest record.
-func TestResolveDoesNotPromoteOnALoneRemove(t *testing.T) {
+// Nothing but a matching completeness marker produces a set. These are the ways a log
+// can fall short of one, and every one of them must land somewhere that is not
+// UpstreamsKnown — because the fail-open reading ("these are all the destinations") is
+// available from any prefix of a batch.
+func TestResolveNeedsACompletenessMarker(t *testing.T) {
+	tests := []struct {
+		name      string
+		events    []RuntimeEvent
+		wantState string
+		wantErr   string
+	}{
+		{
+			name:      "a lone remove of a name nothing added",
+			events:    []RuntimeEvent{{Event: EventUpstreamRemove, Payload: []byte("ghost")}},
+			wantState: UpstreamsIncomplete,
+			wantErr:   "batch in progress",
+		},
+		{
+			// The truncation that matters: the writer emits its in-CVM engines, is killed
+			// before the external vendor, and a reader that promoted on the first add
+			// would report an all-in-CVM set with a valid hash while the config still
+			// routes some models outside.
+			name: "adds with no marker after them",
+			events: []RuntimeEvent{
+				{Event: EventUpstreamAdd, Payload: []byte("engine1 http://engine-1:8000/v1")},
+				{Event: EventUpstreamAdd, Payload: []byte("engine2 http://engine-2:8000/v1")},
+			},
+			wantState: UpstreamsIncomplete,
+			wantErr:   "batch in progress",
+		},
+		{
+			name: "a marker that lands after the batch reopens",
+			events: []RuntimeEvent{
+				{Event: EventUpstreamAdd, Payload: []byte("engine1 http://engine-1:8000/v1")},
+				{Event: EventUpstreamSetComplete, Payload: []byte("1")},
+				{Event: EventUpstreamAdd, Payload: []byte("engine2 http://engine-2:8000/v1")},
+			},
+			wantState: UpstreamsIncomplete,
+			wantErr:   "batch in progress",
+		},
+		{
+			// A count that disagrees means writer and reader do not have the same set,
+			// and neither can say which is right.
+			name: "a marker whose count disagrees",
+			events: []RuntimeEvent{
+				{Event: EventUpstreamAdd, Payload: []byte("engine1 http://engine-1:8000/v1")},
+				{Event: EventUpstreamSetComplete, Payload: []byte("2")},
+			},
+			wantState: UpstreamsUnknown,
+			wantErr:   "do not have the same set",
+		},
+		{
+			name: "a marker that is not a number",
+			events: []RuntimeEvent{
+				{Event: EventUpstreamAdd, Payload: []byte("engine1 http://engine-1:8000/v1")},
+				{Event: EventUpstreamSetComplete, Payload: []byte("lots")},
+			},
+			wantState: UpstreamsUnknown,
+			wantErr:   "is not a member count",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			state, err := resolve(t, pinnedCompose(t), append(bootEvents(), tt.events...))
+			if err != nil {
+				t.Fatalf("ResolveRunningState() = %v", err)
+			}
+			if state.UpstreamsState != tt.wantState {
+				t.Errorf("UpstreamsState = %q, want %q", state.UpstreamsState, tt.wantState)
+			}
+			if !strings.Contains(state.UpstreamsErr, tt.wantErr) {
+				t.Errorf("UpstreamsErr = %q, want it to contain %q", state.UpstreamsErr, tt.wantErr)
+			}
+			if _, err := state.UpstreamSetHash(); err == nil {
+				t.Error("a log without a matching marker produced a set hash, which the derivation path would bind")
+			}
+		})
+	}
+}
+
+// And the marker does its job: a closed batch is a set.
+func TestResolveAcceptsAClosedBatch(t *testing.T) {
 	state, err := resolve(t, pinnedCompose(t), append(bootEvents(),
-		RuntimeEvent{Event: EventUpstreamRemove, Payload: []byte("ghost")},
+		RuntimeEvent{Event: EventUpstreamAdd, Payload: []byte("engine1 http://engine-1:8000/v1")},
+		RuntimeEvent{Event: EventUpstreamAdd, Payload: []byte("vendor https://vendor.example/v1 openrouter")},
+		RuntimeEvent{Event: EventUpstreamSetComplete, Payload: []byte("2")},
 	))
 	if err != nil {
 		t.Fatalf("ResolveRunningState() = %v", err)
 	}
-	if state.UpstreamsState != UpstreamsUnrecorded {
-		t.Fatalf("UpstreamsState = %q, want %q: a remove that removed nothing established nothing", state.UpstreamsState, UpstreamsUnrecorded)
+	if state.UpstreamsState != UpstreamsKnown {
+		t.Fatalf("UpstreamsState = %q (%s), want %q", state.UpstreamsState, state.UpstreamsErr, UpstreamsKnown)
 	}
-	if _, err := state.UpstreamSetHash(); err == nil {
-		t.Fatal("a lone remove produced a set hash, which the derivation path would bind")
+	if state.UpstreamsErr != "" {
+		t.Errorf("UpstreamsErr = %q, want it cleared once the batch closed", state.UpstreamsErr)
+	}
+	if len(state.Upstreams) != 2 {
+		t.Errorf("Upstreams = %+v, want both members", state.Upstreams)
+	}
+	if _, err := state.UpstreamSetHash(); err != nil {
+		t.Errorf("UpstreamSetHash() = %v for a closed batch", err)
 	}
 }
 
@@ -204,6 +291,7 @@ func TestResolveAllowsAnExplicitEmptySet(t *testing.T) {
 	state, err := resolve(t, pinnedCompose(t), append(bootEvents(),
 		RuntimeEvent{Event: EventUpstreamAdd, Payload: []byte("engine1 http://engine-1:8000/v1")},
 		RuntimeEvent{Event: EventUpstreamRemove, Payload: []byte("engine1")},
+		RuntimeEvent{Event: EventUpstreamSetComplete, Payload: []byte("0")},
 	))
 	if err != nil {
 		t.Fatalf("ResolveRunningState() = %v", err)

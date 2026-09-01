@@ -9,6 +9,7 @@ import (
 	"maps"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -41,6 +42,22 @@ const (
 	// Present because RTMR3 only appends, so withdrawing one has to be its own
 	// record; a reader replays adds and removes in order to reach the current set.
 	EventUpstreamRemove = "zg-upstream-remove"
+	// EventUpstreamSetComplete carries the decimal count of members the writer
+	// believes the set now holds. It marks the end of a batch of adds and removes,
+	// and nothing before it establishes a set.
+	//
+	// It exists because a batch can be truncated, and truncation is fail-open in the
+	// worst way. A writer re-emits its whole table at boot — RTMR3 is cleared while
+	// the assignment survives on disk — so it emits N adds; if it is killed after the
+	// in-CVM engines but before an external vendor, a reader that promoted on the
+	// first add would report a set of nothing but in-CVM destinations, with a valid
+	// hash, while the config still routes some models outside. A caller would conclude
+	// "plaintext never left" from a strict subset of the truth.
+	//
+	// The count is checked, not just the marker's presence: a marker whose number
+	// disagrees with what replayed means writer and reader do not have the same set,
+	// and neither of them can say which is right.
+	EventUpstreamSetComplete = "zg-upstream-set-complete"
 
 	// EventNamespace prefixes every event this project writes. dstack already
 	// writes app-id, compose-hash and system-ready into RTMR3, and other
@@ -197,11 +214,19 @@ type RunningState struct {
 	//                        records or never writes them, so it forwards according
 	//                        to a config no measurement covers and NOTHING here
 	//                        bounds where plaintext goes.
-	//   UpstreamsKnown       the set is Upstreams, possibly empty. Empty is the
-	//                        opposite of unrecorded: destinations were recorded and
-	//                        then withdrawn, which is a bound of zero.
-	//   UpstreamsUnknown     the records could not be replayed. Neither Upstreams nor
-	//                        UpstreamSetHash means anything; UpstreamsErr says why.
+	//   UpstreamsKnown       the set is Upstreams, possibly empty, and a completeness
+	//                        marker closed it. Empty is the opposite of unrecorded:
+	//                        destinations were recorded and then withdrawn, which is a
+	//                        bound of zero.
+	//   UpstreamsIncomplete  records replayed cleanly but no marker closed them, so
+	//                        what replayed may be a prefix of what the writer meant.
+	//   UpstreamsUnknown     the records could not be replayed, or a marker disagreed
+	//                        with them. UpstreamsErr says which.
+	//
+	// Only UpstreamsKnown is a set. The other three differ in why they are not one,
+	// and that difference is worth keeping: unrecorded means nothing was claimed,
+	// incomplete means a claim was cut short, unknown means a claim contradicted
+	// itself.
 	//
 	// Collapsing unrecorded and empty would be worst once the set feeds the signing
 	// key's derivation path: an unbounded deployment and one explicitly bounded to
@@ -228,11 +253,27 @@ type RunningState struct {
 	// What is NOT done is reporting the members that happened to parse. A partial set
 	// understates where plaintext can go, which is the direction that misleads.
 	UpstreamsErr string
-	// UpstreamChanges names every upstream whose meaning at the end of the log differs
-	// from what it meant the first time this boot bound it — rebound elsewhere, or
-	// withdrawn — one line per name, as
-	// "<name>: <old URL> (<old identity>) -> <new URL> (<new identity>)" or
-	// "<name>: <old URL> (<old identity>) -> withdrawn".
+	// UpstreamChanges is one line per transition the set actually underwent, in the
+	// order they were recorded:
+	//
+	//   "<name>: <old URL> (<old identity>) -> <new URL> (<new identity>)"
+	//   "<name>: <old URL> (<old identity>) -> withdrawn"
+	//
+	// Each line compares against what the name meant IMMEDIATELY BEFORE, not against
+	// its first binding this boot. Two consequences worth knowing before filtering on
+	// this:
+	//
+	//   - a round trip reports both legs, so a name back where it started still shows
+	//     that it pointed elsewhere in between. This is deliberate: comparing first to
+	//     final would report nothing there, and "somewhere else was permitted for a
+	//     while" is exactly what a reader needs.
+	//   - a rebinding spelled as remove-then-add reports the withdrawal, and the name
+	//     is then present again in Upstreams. So a name can appear here as "withdrawn"
+	//     while being a current member. Read Upstreams for what is permitted now and
+	//     these lines for what changed; neither substitutes for the other.
+	//
+	// A writer re-emitting its unchanged table adds nothing here, because each record
+	// is compared with the binding it replaces.
 	//
 	// It exists because Upstreams and UpstreamSetHash — the two values a caller
 	// actually consumes — describe only the final state. Telling a caller to walk
@@ -362,7 +403,7 @@ func ResolveRunningState(v VerifiedQuote, tcbInfoJSON []byte, brokerService stri
 				configErr = fmt.Errorf("%s payload %q is not a hex sha256", EventConfigUpdate, sum)
 			}
 			state.ConfigSHA256 = sum
-		case EventUpstreamAdd, EventUpstreamRemove:
+		case EventUpstreamAdd, EventUpstreamRemove, EventUpstreamSetComplete:
 			// Unlike the image records, EVERY upstream record matters, not just the last:
 			// the set is cumulative, so one unreadable record leaves the whole set unknown
 			// rather than merely stale. Unknown is carried in UpstreamsErr instead of
@@ -374,25 +415,34 @@ func ResolveRunningState(v VerifiedQuote, tcbInfoJSON []byte, brokerService stri
 			if state.UpstreamsState == UpstreamsUnknown {
 				break
 			}
-			if err := upstreams.apply(event.Event, string(event.Payload)); err != nil {
-				state.UpstreamsState, state.UpstreamsErr = UpstreamsUnknown, err.Error()
+			// Any add or remove opens a batch, and an open batch is not a set. Only a
+			// matching completeness marker closes one — see EventUpstreamSetComplete for
+			// why a prefix of a batch is the dangerous thing to report.
+			//
+			// So this reaches UpstreamsKnown by exactly one path, and a truncated batch
+			// (however it was truncated, and whichever records were lost) lands on
+			// unknown rather than on a set that is a subset of the truth.
+			if event.Event != EventUpstreamSetComplete {
+				if err := upstreams.apply(event.Event, string(event.Payload)); err != nil {
+					state.UpstreamsState, state.UpstreamsErr = UpstreamsUnknown, err.Error()
+					break
+				}
+				state.UpstreamsState = UpstreamsIncomplete
+				state.UpstreamsErr = fmt.Sprintf("records appeared with no %s after them, so this is a batch in progress and not a set", EventUpstreamSetComplete)
 				break
 			}
-			// Promote only on an add. A remove of a name nothing added changes no
-			// member, so on its own it asserts nothing — and promoting on it would turn
-			// the WEAKEST record into the STRONGEST claim: an unbounded deployment would
-			// report "recorded, and bounded to nothing", with a valid set hash to match.
-			//
-			// Two ways that happens, and neither is exotic. A container that can reach
-			// dstack.sock appends one record that says nothing. Or the reconciling writer
-			// emits its removes, dies before its adds, and a partial write ends up
-			// claiming more than a total failure would have.
-			//
-			// A bound of zero is still expressible: add something, then remove it. That
-			// path went through an add.
-			if event.Event == EventUpstreamAdd {
-				state.UpstreamsState = UpstreamsKnown
+			want, err := strconv.Atoi(strings.TrimSpace(string(event.Payload)))
+			if err != nil || want < 0 {
+				state.UpstreamsState = UpstreamsUnknown
+				state.UpstreamsErr = fmt.Sprintf("%s payload %q is not a member count", EventUpstreamSetComplete, event.Payload)
+				break
 			}
+			if got := upstreams.size(); got != want {
+				state.UpstreamsState = UpstreamsUnknown
+				state.UpstreamsErr = fmt.Sprintf("%s claims %d members and the log replays to %d, so the writer and this reader do not have the same set", EventUpstreamSetComplete, want, got)
+				break
+			}
+			state.UpstreamsState, state.UpstreamsErr = UpstreamsKnown, ""
 		default:
 			return nil, fmt.Errorf("unrecognised %s event %q: this reader is older than the CVM that wrote the log, so it cannot say what is running", EventNamespace, event.Event)
 		}
