@@ -188,6 +188,7 @@ lossy token-column skip `daily_stat` makes for STT (#530):
 | speech-to-text (gpt-4o-transcribe) | `tokens` | input tokens | output tokens |
 | text-to-image / image-editing | `images` | 0 | image count |
 | video-generation | `seconds` | 0 | raw output seconds (resolution carried in `rate_class`) |
+| embedding | `tokens` | input tokens | 0 |
 
 Reconciliation interprets the counts from `unit`: a `tokens` statement (MiniMax) is compared
 token-for-token, an `images` statement against `output_count`, a `seconds` statement against
