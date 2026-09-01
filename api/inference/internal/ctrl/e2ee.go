@@ -102,6 +102,14 @@ var e2eeResponseUnboundFields = []string{"model", "x_0g_trace"}
 // metadata, never a routing/billing field — a sealed field is removed from the
 // cleartext frame, so sealing "model" or "usage" would hide what the router and
 // the billing path read.
+//
+// "message" is the one entry that bends that rule, knowingly: on Anthropic's
+// message_start it is a CONTAINER that nests model and usage.input_tokens, so
+// sealing it takes those out of cleartext too. It is here anyway because Ollama's
+// /api/chat puts the completion under the same key, and under-sealing leaks while
+// over-sealing costs a metering field the broker does not read (it bills rawBody).
+// docs/design/e2ee.md records the exception and
+// TestSealFrame_MessageStartAlsoSealsNestedModelAndUsage pins it.
 var e2eeSensitiveResponseFields = []string{
 	"choices",       // OpenAI /v1/chat/completions
 	"content",       // Anthropic /v1/messages, non-streaming
@@ -129,10 +137,6 @@ const streamDoneSentinel = "[DONE]"
 // cosmetic issue: Azure OpenAI's first streaming chunk is choices:[] beside
 // prompt_filter_results, and those results are derived from the user's prompt. They
 // are sealed precisely because they are not on this list.
-//
-// Adding a key here asserts it never carries model output on any surface we
-// forward. Getting that wrong forwards a completion in cleartext, so add only
-// what has been checked against the surface that emits it.
 var e2eeResponseControlFields = map[string]bool{
 	// OpenAI /v1/chat/completions, streaming and not
 	"id":                 true,
@@ -188,6 +192,14 @@ func e2eeSealedFieldsFor(frame wire.Response) []string {
 	var unknown []string
 	for k := range frame {
 		if e2eeResponseControlFields[k] || slices.Contains(e2eeSensitiveResponseFields, k) {
+			continue
+		}
+		// The envelope key itself is reserved: wire rejects it as a sealed field, so
+		// including it would build a sealed set we already know is invalid. An upstream
+		// answering with an already-sealed body (a chained broker/router) is the case
+		// that produces it, and it is left in cleartext for the shape refusal below to
+		// report rather than turned into a wire error.
+		if k == e2eeBodyMarker {
 			continue
 		}
 		unknown = append(unknown, k)
@@ -364,8 +376,7 @@ func e2eeReqBindHash(ctx *gin.Context) ([32]byte, bool) {
 
 // maybeSealNonStreamResponse seals the output fields a non-streaming response
 // actually carries, plus anything it carries that is not known cleartext metadata
-// (e2eeSealedFieldsFor), of
-// a non-streaming response (SPEC §7) when the request was sealed; otherwise it
+// (e2eeSealedFieldsFor), when the request was sealed (SPEC §7); otherwise it
 // returns body unchanged with sealed=false. Fail-closed: when the request was
 // sealed but sealing fails, it returns an error and the caller MUST NOT forward
 // the plaintext body.
@@ -418,7 +429,11 @@ func (c *Ctrl) maybeSealNonStreamResponse(ctx *gin.Context, body []byte) (out []
 	// downstream (SPEC §5.2).
 	frame, err := wire.SealResponse(ephPub, resp, sealedFields, e2eeResponseUnboundFields...)
 	if err != nil {
-		return nil, true, respBindHash, fmt.Errorf("seal response: %w", err)
+		// 502 like the shape refusals above: sealing fails on what the upstream sent
+		// (a reserved key, an unbound/sealed overlap), so a 400 would file an upstream
+		// fault under client error and skip the Error-level 5xx log.
+		return nil, true, respBindHash, errors.NewHTTPError(http.StatusBadGateway,
+			fmt.Errorf("seal response: %w", err))
 	}
 	// §8 response binding over the exact sealed frame the client receives.
 	respBindHash, err = proof.FrameBindingHash(frame)
@@ -507,6 +522,14 @@ func (rs *responseFrameSealer) sealSSELine(line string) (string, error) {
 		return "", rs.refuseUnsealableLine("line is not an SSE field", trimmed)
 	}
 	payload := strings.TrimSpace(after)
+	// An empty data value ("data:" or "data: ") is legal SSE with nothing in it to
+	// hide, and some proxies use "data:\n\n" as a heartbeat. Refusing it would end
+	// the stream the same way the "data:[DONE]" spacing variants did — the loop
+	// returns, no final frame is emitted, and the flushed headers mean the 502
+	// cannot even be delivered as a status.
+	if payload == "" {
+		return line, nil
+	}
 	// The done sentinel, decided from the payload rather than from a byte-exact
 	// compare of the whole line. isStreamDone only matches "data: [DONE]", and
 	// sanitizeStreamLine normalises the "data:" spacing only for JSON payloads — so
@@ -594,7 +617,9 @@ func (rs *responseFrameSealer) sealFrame(frame wire.Response, final bool) (strin
 	}
 	out, err := rs.sealer.SealFrame(frame, sealedFields, final)
 	if err != nil {
-		return "", fmt.Errorf("seal frame: %w", err)
+		// 502 for the same reason as the shape refusals: sealing failed on what the
+		// upstream sent, not on anything the caller did.
+		return "", errors.NewHTTPError(http.StatusBadGateway, fmt.Errorf("seal frame: %w", err))
 	}
 	// Fold the exact on-wire frame into the §8 streaming binding, in send order
 	// (the final frame last), so the signed aggregate matches what the client

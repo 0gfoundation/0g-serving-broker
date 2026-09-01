@@ -1651,3 +1651,56 @@ func TestSealSSELine_RecognisesEveryDoneSpelling(t *testing.T) {
 		}
 	}
 }
+
+// An empty data value is legal SSE with nothing in it to hide, and some proxies
+// use "data:\n\n" as a heartbeat. Refusing it ends the stream the same way the
+// "data:[DONE]" spacing variants did.
+func TestSealSSELine_PassesEmptyDataValue(t *testing.T) {
+	for _, line := range []string{"data:", "data: ", "data:   "} {
+		out, err := newTestFrameSealer(t).sealSSELine(line + "\n")
+		if err != nil {
+			t.Errorf("%q was refused, which truncates the stream: %v", line, err)
+			continue
+		}
+		if out != line+"\n" {
+			t.Errorf("%q was altered: %q", line, out)
+		}
+	}
+}
+
+// A chained broker/router upstream can answer with an already-sealed body. The
+// envelope key must not join the sealed set (wire reserves it), and when sealing
+// does fail the status has to be a 502 rather than the default 400, or an upstream
+// fault is filed under client error in the health accounting.
+func TestSeal_AlreadySealedUpstreamBody(t *testing.T) {
+	t.Run("streaming frame", func(t *testing.T) {
+		out, err := newTestFrameSealer(t).sealSSELine(`data: {"_e2ee":{"v":1},"choices":[{"delta":{"content":"x"}}]}` + "\n")
+		if err != nil {
+			var httpErr *brokererrors.HTTPError
+			if !errors.As(err, &httpErr) || httpErr.Status() != http.StatusBadGateway {
+				t.Errorf("a sealing failure on upstream bytes must be a 502, got %v", err)
+			}
+			return
+		}
+		if strings.Contains(out, `"_e2ee"`) && strings.Contains(out, `"sealed_fields":["_e2ee"`) {
+			t.Errorf("the envelope key joined the sealed set: %s", out)
+		}
+	})
+
+	t.Run("non-streaming body", func(t *testing.T) {
+		f := newE2EEFixture(t)
+		ctx := newGinCtx()
+		ctx.Set(CtxKeyE2EESealed, true)
+		ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+		ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
+
+		_, _, _, err := f.c.maybeSealNonStreamResponse(ctx, []byte(`{"_e2ee":{"v":1},"choices":[{"message":{"content":"x"}}]}`))
+		if err == nil {
+			return // sealed successfully with _e2ee left in cleartext
+		}
+		var httpErr *brokererrors.HTTPError
+		if !errors.As(err, &httpErr) || httpErr.Status() != http.StatusBadGateway {
+			t.Errorf("a sealing failure on upstream bytes must be a 502, got %v", err)
+		}
+	})
+}
