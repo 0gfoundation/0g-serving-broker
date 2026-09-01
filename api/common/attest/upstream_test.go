@@ -3,7 +3,6 @@ package attest
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"strings"
 	"testing"
 )
@@ -211,6 +210,8 @@ func TestValidUpstreamURL(t *testing.T) {
 		{raw: "http://x:1/v1?key=secret", wantErr: "carries a query string"},
 		{raw: "http://x:1/v1?", wantErr: "carries a query string"},
 		{raw: "http://x:1/v1#frag", wantErr: "carries a fragment"},
+		// A bare "#" parses to an empty Fragment, so this is checked on the raw bytes.
+		{raw: "http://x:1/v1#", wantErr: "carries a fragment"},
 		// One destination must have exactly one spelling, or one set gets two hashes.
 		{raw: "HTTP://X:1/v1", wantErr: "uppercase host"},
 		{raw: "http://X:1/v1", wantErr: "uppercase host"},
@@ -324,7 +325,7 @@ func TestUpstreamSetHash(t *testing.T) {
 	})
 
 	t.Run("an unknown set has no hash", func(t *testing.T) {
-		st := &RunningState{UpstreamsState: UpstreamsUnknown, UpstreamsErr: errors.New("boom")}
+		st := &RunningState{UpstreamsState: UpstreamsUnknown, UpstreamsErr: "boom"}
 		if _, err := st.UpstreamSetHash(); err == nil {
 			t.Fatal("want an error when the set is unknown, got a hash")
 		}

@@ -19,19 +19,26 @@ func TestUpstreamMovesAreReported(t *testing.T) {
 		{
 			name:      "a bare re-add to another URL is a move",
 			steps:     []string{"add|vendor https://vendor.example/v1", "add|vendor http://engine-1:8000/v1"},
-			wantMoves: []string{"vendor: https://vendor.example/v1 -> http://engine-1:8000/v1"},
+			wantMoves: []string{"vendor: https://vendor.example/v1 (no identity) -> http://engine-1:8000/v1 (no identity)"},
 		},
 		{
 			// The same rewrite, spelled as two records. Equally invisible to the
 			// consumed values, so equally reported.
 			name:      "remove then add elsewhere is also a move",
 			steps:     []string{"add|vendor https://vendor.example/v1", "remove|vendor", "add|vendor http://engine-1:8000/v1"},
-			wantMoves: []string{"vendor: https://vendor.example/v1 -> http://engine-1:8000/v1"},
+			wantMoves: []string{"vendor: https://vendor.example/v1 (no identity) -> http://engine-1:8000/v1 (no identity)"},
 		},
 		{
-			name:      "adding an identity to a recorded name is a move",
+			name:      "adding an identity to a recorded name is a move, and the message says so",
 			steps:     []string{"add|a http://x:1/v1", "add|a http://x:1/v1 vendor"},
-			wantMoves: []string{"a: http://x:1/v1 -> http://x:1/v1"},
+			wantMoves: []string{"a: http://x:1/v1 (no identity) -> http://x:1/v1 (vendor)"},
+		},
+		{
+			// The fail-open direction: an attributable vendor becomes one with no
+			// attribution. Printing only URLs made this report two identical halves.
+			name:      "dropping an identity is a move the message shows",
+			steps:     []string{"add|vendor https://vendor.example/v1 openrouter", "add|vendor https://vendor.example/v1"},
+			wantMoves: []string{"vendor: https://vendor.example/v1 (openrouter) -> https://vendor.example/v1 (no identity)"},
 		},
 		{
 			// The case that must NOT be a move, or a writer re-publishing its whole
@@ -50,7 +57,7 @@ func TestUpstreamMovesAreReported(t *testing.T) {
 			// to where it started still counts: it meant something else in between.
 			name:      "moving away and back still reports the round trip",
 			steps:     []string{"add|a http://x:1/v1", "add|a http://y:1/v1", "add|a http://x:1/v1"},
-			wantMoves: []string{"a: http://x:1/v1 -> http://y:1/v1"},
+			wantMoves: []string{"a: http://x:1/v1 (no identity) -> http://y:1/v1 (no identity)"},
 		},
 	}
 	for _, tt := range tests {
@@ -96,29 +103,97 @@ func TestResolveReportsARewrittenUpstream(t *testing.T) {
 	}
 }
 
-// UpstreamsState has to survive transport, because this type is destined for the SDK
-// and an `error` field marshals to `{}` — a verifier on the far side would otherwise
-// render an unreplayable log as "records appeared, zero permitted destinations".
-func TestUpstreamsStateSurvivesJSON(t *testing.T) {
-	for _, want := range []string{UpstreamsUnrecorded, UpstreamsKnown, UpstreamsUnknown} {
-		t.Run("state="+want, func(t *testing.T) {
-			blob, err := json.Marshal(&RunningState{UpstreamsState: want})
+// The whole state has to survive transport, because this type is destined for the SDK.
+//
+// An earlier version of this test built each case as &RunningState{UpstreamsState: want}
+// and so left the reason nil. That hid a real bug: the reason was an `error`, which
+// marshals to `{}` and cannot be unmarshalled at all, so the ONE state that carries a
+// reason — unknown — failed to decode, and an SDK consumer doing the ordinary
+// `if err := json.Unmarshal(...)` would have discarded the whole answer for exactly the
+// log a verifier most needs. So each case is now populated the way the resolver
+// populates it.
+func TestRunningStateSurvivesJSON(t *testing.T) {
+	tests := []struct {
+		name string
+		in   RunningState
+	}{
+		{name: "unrecorded", in: RunningState{UpstreamsState: UpstreamsUnrecorded}},
+		{
+			name: "known",
+			in: RunningState{
+				UpstreamsState: UpstreamsKnown,
+				Upstreams:      []Upstream{{Name: "a", URL: "http://x:1/v1", Identity: "vendor"}},
+				UpstreamMoves:  []string{"a: http://y:1/v1 (no identity) -> http://x:1/v1 (vendor)"},
+			},
+		},
+		{
+			name: "unknown carries its reason",
+			in:   RunningState{UpstreamsState: UpstreamsUnknown, UpstreamsErr: "payload has 1 field"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			blob, err := json.Marshal(&tt.in)
 			if err != nil {
 				t.Fatalf("Marshal() = %v", err)
 			}
 			var back RunningState
 			if err := json.Unmarshal(blob, &back); err != nil {
-				t.Fatalf("Unmarshal() = %v", err)
+				t.Fatalf("Unmarshal() = %v — the far side cannot read this state at all", err)
 			}
-			if back.UpstreamsState != want {
-				t.Fatalf("UpstreamsState = %q after a round trip, want %q", back.UpstreamsState, want)
+			if back.UpstreamsState != tt.in.UpstreamsState {
+				t.Errorf("UpstreamsState = %q, want %q", back.UpstreamsState, tt.in.UpstreamsState)
 			}
-			// The point: unknown must not be mistaken for known-and-empty on the far side.
-			if want == UpstreamsUnknown {
-				if _, err := back.UpstreamSetHash(); err == nil {
-					t.Fatal("an unknown set hashed after transport")
-				}
+			if back.UpstreamsErr != tt.in.UpstreamsErr {
+				t.Errorf("UpstreamsErr = %q, want %q", back.UpstreamsErr, tt.in.UpstreamsErr)
+			}
+			if len(back.Upstreams) != len(tt.in.Upstreams) {
+				t.Errorf("Upstreams = %+v, want %+v", back.Upstreams, tt.in.Upstreams)
+			}
+			if len(back.UpstreamMoves) != len(tt.in.UpstreamMoves) {
+				t.Errorf("UpstreamMoves = %q, want %q", back.UpstreamMoves, tt.in.UpstreamMoves)
+			}
+			// The point of the three states: after transport, unknown must still refuse to
+			// hash rather than passing for known-and-empty.
+			_, hashErr := back.UpstreamSetHash()
+			if (hashErr == nil) != (tt.in.UpstreamsState == UpstreamsKnown) {
+				t.Errorf("UpstreamSetHash() error = %v for state %q", hashErr, tt.in.UpstreamsState)
 			}
 		})
+	}
+}
+
+// A remove of a name nothing added asserts nothing, so on its own it must not promote
+// an unbounded deployment into "recorded, and bounded to nothing" — the strongest
+// claim, reachable from the weakest record.
+func TestResolveDoesNotPromoteOnALoneRemove(t *testing.T) {
+	state, err := resolve(t, pinnedCompose(t), append(bootEvents(),
+		RuntimeEvent{Event: EventUpstreamRemove, Payload: []byte("ghost")},
+	))
+	if err != nil {
+		t.Fatalf("ResolveRunningState() = %v", err)
+	}
+	if state.UpstreamsState != UpstreamsUnrecorded {
+		t.Fatalf("UpstreamsState = %q, want %q: a remove that removed nothing established nothing", state.UpstreamsState, UpstreamsUnrecorded)
+	}
+	if _, err := state.UpstreamSetHash(); err == nil {
+		t.Fatal("a lone remove produced a set hash, which the derivation path would bind")
+	}
+}
+
+// But a bound of zero is still expressible, because that path went through an add.
+func TestResolveAllowsAnExplicitEmptySet(t *testing.T) {
+	state, err := resolve(t, pinnedCompose(t), append(bootEvents(),
+		RuntimeEvent{Event: EventUpstreamAdd, Payload: []byte("engine1 http://engine-1:8000/v1")},
+		RuntimeEvent{Event: EventUpstreamRemove, Payload: []byte("engine1")},
+	))
+	if err != nil {
+		t.Fatalf("ResolveRunningState() = %v", err)
+	}
+	if state.UpstreamsState != UpstreamsKnown {
+		t.Fatalf("UpstreamsState = %q, want %q", state.UpstreamsState, UpstreamsKnown)
+	}
+	if _, err := state.UpstreamSetHash(); err != nil {
+		t.Fatalf("an explicitly emptied set must hash: %v", err)
 	}
 }

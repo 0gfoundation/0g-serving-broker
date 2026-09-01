@@ -117,7 +117,12 @@ func (s *upstreamSet) add(payload string) error {
 	// re-publish its whole table at boot without every name looking moved.
 	if first, seen := s.firstBinding[name]; seen {
 		if first != next {
-			s.moved = append(s.moved, fmt.Sprintf("%s: %s -> %s", name, first.URL, next.URL))
+			// The identity is in the message, not just the URL. An identity-only change
+			// is the one that turns "an external vendor a routing proof can attribute
+			// this to" into "a destination with no attribution" — the fail-open
+			// direction — and printing only URLs made that move report two identical
+			// halves, saying nothing to the reader it exists for.
+			s.moved = append(s.moved, fmt.Sprintf("%s: %s -> %s", name, describeUpstream(first), describeUpstream(next)))
 		}
 	} else {
 		if s.firstBinding == nil {
@@ -134,6 +139,17 @@ func (s *upstreamSet) add(payload string) error {
 	s.byName[name] = next
 	s.order = append(s.order, name)
 	return nil
+}
+
+// describeUpstream renders one binding for a move message: the URL, and the identity
+// when there is one. "(no identity)" is spelled out rather than left blank, because
+// losing an identity is the change a reader most needs to see and an empty string
+// beside an arrow reads like a formatting slip.
+func describeUpstream(u Upstream) string {
+	if u.Identity == "" {
+		return u.URL + " (no identity)"
+	}
+	return u.URL + " (" + u.Identity + ")"
 }
 
 // moves returns the rebindings recorded this boot, nil when there were none.
@@ -237,7 +253,10 @@ func validUpstreamURL(raw string) error {
 	if u.RawQuery != "" || u.ForceQuery {
 		return fmt.Errorf("base URL %q carries a query string; a base is concatenated with a route, so it cannot have one", raw)
 	}
-	if u.Fragment != "" {
+	// Checked on the raw bytes, not on u.Fragment: a bare "#" parses to an empty
+	// Fragment, and there is no ForceQuery-equivalent flag to notice it. Without this
+	// ".../v1" and ".../v1#" are one destination with two hashes.
+	if strings.ContainsRune(raw, '#') {
 		return fmt.Errorf("base URL %q carries a fragment; a base is concatenated with a route, so it cannot have one", raw)
 	}
 	// The host must be recorded in one form only. url.Parse lowercases the scheme but
@@ -343,7 +362,7 @@ func validUpstreamURL(raw string) error {
 func (r *RunningState) UpstreamSetHash() (string, error) {
 	switch r.UpstreamsState {
 	case UpstreamsUnknown:
-		return "", fmt.Errorf("the upstream set is unknown, so it has no hash: %w", r.UpstreamsErr)
+		return "", fmt.Errorf("the upstream set is unknown, so it has no hash: %s", r.UpstreamsErr)
 	case UpstreamsUnrecorded:
 		return "", fmt.Errorf("no %s or %s record appeared, so no set was recorded and there is nothing to hash", EventUpstreamAdd, EventUpstreamRemove)
 	case UpstreamsKnown:
