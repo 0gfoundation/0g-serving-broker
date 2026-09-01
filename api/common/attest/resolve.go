@@ -170,8 +170,8 @@ type RunningState struct {
 	ConfigSHA256 string
 	// Upstreams is the set of destinations the ledger permits, in the order names
 	// entered it — a name re-added while present keeps its position, one removed and
-	// added again takes a new one at the end. Meaningful only when UpstreamsRecorded
-	// is true and UpstreamsErr is nil.
+	// added again takes a new one at the end. Meaningful only when UpstreamsState is
+	// UpstreamsKnown.
 	//
 	// The order is for reading the set, not for identifying it: UpstreamSetHash sorts,
 	// so two deployments permitting the same destinations agree whatever order their
@@ -207,7 +207,15 @@ type RunningState struct {
 	// key's derivation path: an unbounded deployment and one explicitly bounded to
 	// nothing would derive the same key.
 	UpstreamsState string
-	// UpstreamsErr says why the set is unknown, and is nil in the other two states.
+	// UpstreamsErr says why the set is unknown, and is empty in the other two states.
+	//
+	// A string and not an `error`, for the reason UpstreamsState is a string: an
+	// `error` field marshals to `{}` and cannot be unmarshalled back at all, so the
+	// ONE state that carries a reason — unknown — would fail to decode, and an SDK
+	// consumer doing the ordinary `if err := json.Unmarshal(...)` would discard the
+	// whole RunningState for precisely the log a verifier most needs to see.
+	//
+	// Nothing matches on this value, so no error identity is lost by flattening it.
 	//
 	// Unknown is reported rather than returned as a hard error because the rest of
 	// this answer does not depend on it: which image the broker runs and which keys
@@ -219,7 +227,7 @@ type RunningState struct {
 	//
 	// What is NOT done is reporting the members that happened to parse. A partial set
 	// understates where plaintext can go, which is the direction that misleads.
-	UpstreamsErr error
+	UpstreamsErr string
 	// UpstreamMoves names every upstream whose binding changed during this boot,
 	// in the order the changes were recorded, as "<name>: <old URL> -> <new URL>".
 	//
@@ -359,13 +367,27 @@ func ResolveRunningState(v VerifiedQuote, tcbInfoJSON []byte, brokerService stri
 			//
 			// Once unknown, stay unknown: a later record cannot repair a set whose earlier
 			// members are unreadable, and pretending otherwise would report a subset.
-			if state.UpstreamsState == UpstreamsUnrecorded {
-				state.UpstreamsState = UpstreamsKnown
+			if state.UpstreamsState == UpstreamsUnknown {
+				break
 			}
-			if state.UpstreamsState == UpstreamsKnown {
-				if err := upstreams.apply(event.Event, string(event.Payload)); err != nil {
-					state.UpstreamsState, state.UpstreamsErr = UpstreamsUnknown, err
-				}
+			if err := upstreams.apply(event.Event, string(event.Payload)); err != nil {
+				state.UpstreamsState, state.UpstreamsErr = UpstreamsUnknown, err.Error()
+				break
+			}
+			// Promote only on an add. A remove of a name nothing added changes no
+			// member, so on its own it asserts nothing — and promoting on it would turn
+			// the WEAKEST record into the STRONGEST claim: an unbounded deployment would
+			// report "recorded, and bounded to nothing", with a valid set hash to match.
+			//
+			// Two ways that happens, and neither is exotic. A container that can reach
+			// dstack.sock appends one record that says nothing. Or the reconciling writer
+			// emits its removes, dies before its adds, and a partial write ends up
+			// claiming more than a total failure would have.
+			//
+			// A bound of zero is still expressible: add something, then remove it. That
+			// path went through an add.
+			if event.Event == EventUpstreamAdd {
+				state.UpstreamsState = UpstreamsKnown
 			}
 		default:
 			return nil, fmt.Errorf("unrecognised %s event %q: this reader is older than the CVM that wrote the log, so it cannot say what is running", EventNamespace, event.Event)

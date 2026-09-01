@@ -106,10 +106,10 @@ func TestResolveReportsAnUnknownUpstreamSet(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ResolveRunningState() = %v, want the rest of the answer to survive", err)
 			}
-			if state.UpstreamsErr == nil {
-				t.Fatal("want UpstreamsErr set, got nil")
+			if state.UpstreamsErr == "" {
+				t.Fatal("want UpstreamsErr set, got empty")
 			}
-			if !strings.Contains(state.UpstreamsErr.Error(), tt.wantErr) {
+			if !strings.Contains(state.UpstreamsErr, tt.wantErr) {
 				t.Fatalf("UpstreamsErr = %v, want it to contain %q", state.UpstreamsErr, tt.wantErr)
 			}
 			if state.Upstreams != nil {
@@ -140,7 +140,7 @@ func TestResolveKeepsAnUnknownUpstreamSetUnknown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveRunningState() = %v", err)
 	}
-	if state.UpstreamsErr == nil {
+	if state.UpstreamsErr == "" {
 		t.Fatal("a later good record cleared UpstreamsErr")
 	}
 	if state.Upstreams != nil {
