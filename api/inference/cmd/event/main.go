@@ -1,6 +1,7 @@
 package event
 
 import (
+	"context"
 	"os"
 	"time"
 
@@ -67,6 +68,11 @@ func Main() {
 
 	teeClientType, err := tee.ClientTypeForNetwork(os.Getenv("NETWORK"), conf.Network.ChainID)
 	if err != nil {
+		panic(err)
+	}
+	// The declared chain id got us this far; this is the half that dials. See
+	// tee.VerifyChainIsLocal for why the declaration alone is not enough.
+	if err := tee.VerifyChainIsLocal(context.Background(), teeClientType, conf.Network.URL); err != nil {
 		panic(err)
 	}
 	teeService, err := tee.NewTeeService(teeClientType, logger)

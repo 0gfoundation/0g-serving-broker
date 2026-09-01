@@ -129,6 +129,23 @@ type Service struct {
 	ProviderIdentity string                 `yaml:"providerIdentity,omitempty"`
 }
 
+// The local chain the hardhat TEE option brings up. The compose template starts
+// a hardhat-node-with-contract service (see the TeeNode == "hardhat" block) which
+// deploys the contracts at deterministic addresses; these three values are what
+// point the generated config at it instead of at the public RPC the mainnet and
+// testnet base configs carry.
+//
+// Without them the hardhat option produces a broker running the mock TEE backend
+// — whose signing and E2EE keys are a public constant — against a real chain and
+// the real InferenceServing proxy. common/tee.ClientTypeForNetwork refuses to
+// start on that combination, so leaving these unset makes the menu entry a
+// guaranteed crash-loop rather than merely a dangerous one.
+const (
+	hardhatNodeURL         = "http://hardhat-node-with-contract:8545"
+	hardhatChainID         = 31337
+	hardhatContractAddress = "0x0165878A594ca255338adfa4d48449f69242Eb8F"
+)
+
 type NetworkConfig struct {
 	URL                 string   `yaml:"url,omitempty"`
 	ChainID             int64    `yaml:"chainID,omitempty"`
@@ -1447,7 +1464,7 @@ func main() {
 
 	// Step 2: Load and configure YAML config (with monitoring setting)
 	fmt.Println("\n📋 Step 2: Configuration File Setup")
-	configFile, configPath, _, err := generateYAMLConfig(originalDir, deployLLM, targetTeeAddress, targetSeparated, verifierUrl, additionalHeaders, useMonitoring, networkType, revenueTransferConfig.TargetAddress, revenueTransferConfig.ReserveAmount, revenueTransferConfig.Interval, controllerConfig.Enable, controllerConfig.AdminAddress, modelInfoConfig, ownedBy, providerType, providerIdentity)
+	configFile, configPath, _, err := generateYAMLConfig(originalDir, deployLLM, targetTeeAddress, targetSeparated, verifierUrl, additionalHeaders, useMonitoring, networkType, teeNodeType, revenueTransferConfig.TargetAddress, revenueTransferConfig.ReserveAmount, revenueTransferConfig.Interval, controllerConfig.Enable, controllerConfig.AdminAddress, modelInfoConfig, ownedBy, providerType, providerIdentity)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error generating YAML config: %v\n", err)
 		os.Exit(1)
@@ -1543,7 +1560,7 @@ func promptOutputDirectory() (string, error) {
 	return outputDir, nil
 }
 
-func generateYAMLConfig(originalDir string, deployLLM bool, targetTeeAddress string, targetSeparated bool, verifierUrl string, additionalHeaders map[string]string, useMonitoring bool, networkType string, revenueTargetAddress string, revenueReserveAmount string, revenueInterval durationYAML, controllerEnable bool, controllerAdminAddress string, modelInfo *ModelInfo, ownedBy string, providerType string, providerIdentity string) (string, string, *Config, error) {
+func generateYAMLConfig(originalDir string, deployLLM bool, targetTeeAddress string, targetSeparated bool, verifierUrl string, additionalHeaders map[string]string, useMonitoring bool, networkType string, teeNode TeeNode, revenueTargetAddress string, revenueReserveAmount string, revenueInterval durationYAML, controllerEnable bool, controllerAdminAddress string, modelInfo *ModelInfo, ownedBy string, providerType string, providerIdentity string) (string, string, *Config, error) {
 	reader := bufio.NewReader(os.Stdin)
 
 	// Find base config file in original directory
@@ -1675,6 +1692,22 @@ func generateYAMLConfig(originalDir string, deployLLM bool, targetTeeAddress str
 			Enable:         true,
 			AdminAddresses: []string{controllerAdminAddress},
 		}
+	}
+
+	// Point a hardhat deployment at the chain its own compose file starts, rather
+	// than at the public RPC and mainnet/testnet contract the base config carries.
+	// The mainnet/testnet question earlier drives which base config is merged and
+	// says nothing about the TEE backend, so without this the two answers combine
+	// into a config the broker refuses to boot on.
+	if teeNode == TeeNodeLocalHardhat {
+		if config.Network == nil {
+			config.Network = &NetworkConfig{}
+		}
+		config.Network.URL = hardhatNodeURL
+		config.Network.ChainID = hardhatChainID
+		config.ContractAddress = hardhatContractAddress
+		fmt.Printf("   ℹ️  Hardhat selected: network.url → %s, chainID → %d, contractAddress → %s\n",
+			hardhatNodeURL, hardhatChainID, hardhatContractAddress)
 	}
 
 	// Save final configuration

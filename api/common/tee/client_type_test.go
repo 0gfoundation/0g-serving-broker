@@ -1,6 +1,10 @@
 package tee
 
 import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -95,4 +99,69 @@ func TestMockKeysAreRecomputableFromTheRepository(t *testing.T) {
 	if got := crypto.PubkeyToAddress(signer.PublicKey).Hex(); got != knownAddress {
 		t.Fatalf("mock signer address = %s, want the publicly derivable %s", got, knownAddress)
 	}
+}
+
+// chainIDServer is a minimal JSON-RPC endpoint that answers eth_chainId with the
+// given id, which is all VerifyChainIsLocal asks a node for.
+func chainIDServer(t *testing.T, id int64) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode rpc request: %v", err)
+			return
+		}
+		if req.Method != "eth_chainId" {
+			t.Errorf("unexpected rpc method %q; VerifyChainIsLocal should ask only for the chain id", req.Method)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%s,"result":"0x%x"}`, req.ID, id)
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+func TestVerifyChainIsLocal(t *testing.T) {
+	const zgTestnetChainID = 16601
+
+	t.Run("phala never dials", func(t *testing.T) {
+		// A URL nothing is listening on: reaching the network at all would fail
+		// the test, which is the property real deployments depend on.
+		if err := VerifyChainIsLocal(t.Context(), Phala, "http://127.0.0.1:1"); err != nil {
+			t.Fatalf("Phala must skip the check entirely, got %v", err)
+		}
+	})
+
+	t.Run("mock against the local node", func(t *testing.T) {
+		if err := VerifyChainIsLocal(t.Context(), Mock, chainIDServer(t, hardhatChainID)); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("mock against a real chain that a config declared as local", func(t *testing.T) {
+		// The gap ClientTypeForNetwork alone leaves: network.chainID says 31337,
+		// network.url points somewhere else. Only dialing catches it.
+		err := VerifyChainIsLocal(t.Context(), Mock, chainIDServer(t, zgTestnetChainID))
+		if err == nil {
+			t.Fatal("expected a refusal when the node reports a real chain id")
+		}
+		if !strings.Contains(err.Error(), "16601") {
+			t.Errorf("error should name the observed chain id, got: %v", err)
+		}
+	})
+
+	t.Run("mock with no url", func(t *testing.T) {
+		if err := VerifyChainIsLocal(t.Context(), Mock, ""); err == nil {
+			t.Fatal("expected a refusal when there is no url to check")
+		}
+	})
+
+	t.Run("mock against an unreachable node", func(t *testing.T) {
+		if err := VerifyChainIsLocal(t.Context(), Mock, "http://127.0.0.1:1"); err == nil {
+			t.Fatal("expected a refusal when the node cannot be reached")
+		}
+	})
 }

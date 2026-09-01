@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	pccrypto "github.com/0gfoundation/0g-pc-e2ee/protocol/crypto"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/ethclient"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/log"
@@ -428,11 +430,12 @@ const hardhatChainID = 31337
 //
 // Nothing else prevents the combination. NETWORK selects only the backend; the
 // chain is configured independently by network.url and network.chainID, and
-// NETWORK=hardhat is the default in both the all-in-one compose file and the
-// config wizard. chainID is the operator's own declaration rather than
-// something observed, but it has to match the chain behind network.url for
-// EIP-155 signing to produce a transaction that chain accepts, so a config that
-// lies about it cannot settle anything anyway.
+// NETWORK=hardhat is the default in the all-in-one compose file.
+//
+// What this proves is that the chain the config DECLARES is the local one. It
+// does not dial anything, so a config that declares 31337 while pointing
+// network.url at a real chain still passes — VerifyChainIsLocal is the half that
+// closes that, and callers selecting the mock backend are expected to call it.
 //
 // The error paths return Phala rather than the ClientType zero value, which is
 // Mock: a caller that mishandles the error must not thereby select the very
@@ -458,4 +461,52 @@ func ClientTypeForNetwork(network string, chainID int64) (ClientType, error) {
 	default:
 		return Phala, nil
 	}
+}
+
+// VerifyChainIsLocal proves that the node behind url really is a local hardhat
+// chain. It is a no-op for every backend but Mock.
+//
+// ClientTypeForNetwork compares network.chainID, which the operator declares.
+// That catches the configuration this whole guard exists for — the wizard and the
+// compose file both hand out a real chain id — but a config that declares 31337
+// while pointing network.url at a real chain passes it.
+//
+// Such a config cannot settle: EIP-155 signing uses the declared id
+// (common/chain.EthereumNetwork builds its transactor from it), so no transaction
+// it produces is accepted by the chain it is actually talking to. That is not
+// enough on its own. GET /v1/quote and GET /v1/e2ee/pubkey are served straight
+// off TeeService and need no transaction at all, so a client sealing to the
+// advertised enc_pub would be sealing to a key anyone can derive from a checkout.
+// Worse for a provider already registered on-chain with a real Phala signer that
+// restarts into such a config: its on-chain teeSignerAddress stays valid while the
+// broker serves mock key material under it.
+//
+// One eth_chainId at startup closes that, and only the mock path pays for it.
+func VerifyChainIsLocal(ctx context.Context, clientType ClientType, url string) error {
+	if clientType != Mock {
+		return nil
+	}
+	if url == "" {
+		return fmt.Errorf("NETWORK=hardhat selects the mock TEE backend, but network.url is empty, so the chain it would run against cannot be checked")
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	client, err := ethclient.DialContext(ctx, url)
+	if err != nil {
+		return fmt.Errorf("NETWORK=hardhat selects the mock TEE backend, whose keys are public, so the chain behind network.url must be confirmed local before starting; dialing %s failed: %w", url, err)
+	}
+	defer client.Close()
+
+	observed, err := client.ChainID(ctx)
+	if err != nil {
+		return fmt.Errorf("NETWORK=hardhat selects the mock TEE backend, whose keys are public, so the chain behind network.url must be confirmed local before starting; eth_chainId against %s failed: %w", url, err)
+	}
+	if observed.Int64() != hardhatChainID {
+		return fmt.Errorf(
+			"NETWORK=hardhat selects the mock TEE backend, whose signing and E2EE keys are a constant committed to this repository, but %s reports chain id %s rather than the local hardhat node's %d. Refusing to publish publicly derivable keys against that chain: set NETWORK=phala, or point network.url at a local hardhat node",
+			url, observed, hardhatChainID)
+	}
+	return nil
 }
