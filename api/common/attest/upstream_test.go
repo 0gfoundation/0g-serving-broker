@@ -238,10 +238,17 @@ func TestValidUpstreamURL(t *testing.T) {
 		{raw: "http://x.:1/v1", wantErr: "trailing dot"},
 		{raw: "http://x:1/v%31", wantErr: "percent-encodes"},
 		{raw: "http://x:1//v1", wantErr: "empty path segment"},
+		// IP literals get the same rule as ports: one address, one spelling. The last of
+		// these is the leading-zero form refused for ports two rules above.
+		{raw: "http://[::0001]:8000/v1", wantErr: "non-canonically"},
+		{raw: "http://[0:0:0:0:0:0:0:1]:8000/v1", wantErr: "non-canonically"},
+		{raw: "http://010.0.0.1:8000/v1", wantErr: "digits and dots"},
 		// And the ones that must still pass, so the rules above are not overreaching.
 		{raw: "http://x:8080/v1"},
 		{raw: "https://vendor.example:8443/v1"},
 		{raw: "http://x/v1"},
+		{raw: "http://[::1]:8000/v1"},
+		{raw: "http://10.0.0.1:8000/v1"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.raw, func(t *testing.T) {
@@ -368,6 +375,36 @@ func TestUpstreamSetHash(t *testing.T) {
 		ba := hashOf(t, "add|a http://y:1/v1", "add|b http://x:1/v1")
 		if ab == ba {
 			t.Fatal("swapping the pairing did not change the hash")
+		}
+	})
+
+	// The encoding is space-delimited, so it is injective only while no field holds a
+	// space. The replay cannot produce such a member, but this type is transported, so a
+	// hand-built or unmarshalled state can. Refuse rather than return a hash that does
+	// not identify the set it claims to.
+	t.Run("a member with whitespace has no hash", func(t *testing.T) {
+		for _, bad := range []Upstream{
+			{Name: "a b", URL: "http://x:1/v1"},
+			{Name: "a", URL: "http://x:1/v1 http://y:1/v1"},
+			{Name: "a", URL: "http://x:1/v1", Identity: "one two"},
+			{Name: "a", URL: "http://x:1/v1", Identity: "one\ntwo"},
+		} {
+			st := &RunningState{UpstreamsState: UpstreamsKnown, Upstreams: []Upstream{bad}}
+			if _, err := st.UpstreamSetHash(); err == nil {
+				t.Errorf("hashed %+v, which the space-delimited encoding cannot represent unambiguously", bad)
+			}
+		}
+	})
+
+	t.Run("the ambiguous pair cannot both hash", func(t *testing.T) {
+		// Without the guard these two render the identical line "a b c \n".
+		one := &RunningState{UpstreamsState: UpstreamsKnown, Upstreams: []Upstream{{Name: "a", URL: "b c"}}}
+		two := &RunningState{UpstreamsState: UpstreamsKnown, Upstreams: []Upstream{{Name: "a b", URL: "c"}}}
+		if _, err := one.UpstreamSetHash(); err == nil {
+			t.Error("a URL containing a space hashed")
+		}
+		if _, err := two.UpstreamSetHash(); err == nil {
+			t.Error("a name containing a space hashed")
 		}
 	})
 

@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"net/url"
 	"regexp"
 	"sort"
@@ -45,12 +46,9 @@ const (
 type upstreamSet struct {
 	byName map[string]Upstream
 	order  []string
-	// firstBinding holds what each name meant the first time this boot recorded it,
-	// and is never deleted — a name removed and added again has still been rebound.
-	firstBinding map[string]Upstream
-	// moved records every rebinding, because last-wins otherwise hides one from the
-	// values a caller consumes. See RunningState.UpstreamMoves.
-	moved []string
+	// changed accumulates one line per transition a name actually underwent, in order.
+	// See changes().
+	changed []string
 }
 
 func newUpstreamSet() *upstreamSet {
@@ -84,9 +82,9 @@ func (s *upstreamSet) apply(event, payload string) error {
 // next reboot.
 //
 // Last-wins matches how the image and config records already behave. And the rebinding
-// is not left implicit: it is reported in RunningState.UpstreamMoves, because telling a
-// caller to find the superseded record in the raw events is no mitigation when neither
-// the set nor its hash does that.
+// is not left implicit: changes() reports it in RunningState.UpstreamChanges, because
+// telling a caller to find the superseded record in the raw events is no mitigation
+// when neither the set nor its hash does that.
 func (s *upstreamSet) add(payload string) error {
 	fields := strings.Fields(payload)
 	if len(fields) < 2 || len(fields) > 3 {
@@ -107,32 +105,20 @@ func (s *upstreamSet) add(payload string) error {
 		}
 		next.Identity = fields[2]
 	}
-	// A rebinding is recorded whether it happened as a bare re-add or as
-	// remove-then-add: both are invisible to the values a caller consumes, and both
-	// can turn an external destination into one that looks like an in-CVM container.
-	// Comparison is against the FIRST binding this boot, not the immediately previous
-	// one, so a name that was removed and brought back elsewhere still counts.
-	//
-	// Re-emitting the identical record is not a rebinding, which is what lets a writer
-	// re-publish its whole table at boot without every name looking moved.
-	if first, seen := s.firstBinding[name]; seen {
-		if first != next {
-			// The identity is in the message, not just the URL. An identity-only change
-			// is the one that turns "an external vendor a routing proof can attribute
-			// this to" into "a destination with no attribution" — the fail-open
-			// direction — and printing only URLs made that move report two identical
-			// halves, saying nothing to the reader it exists for.
-			s.moved = append(s.moved, fmt.Sprintf("%s: %s -> %s", name, describeUpstream(first), describeUpstream(next)))
-		}
-	} else {
-		if s.firstBinding == nil {
-			s.firstBinding = map[string]Upstream{}
-		}
-		s.firstBinding[name] = next
-	}
-	if _, ok := s.byName[name]; ok {
+	if prev, ok := s.byName[name]; ok {
 		// Already present: overwrite in place and leave its position alone, so a boot
 		// re-emit does not reshuffle the reported order.
+		//
+		// Record the transition when there is one. Comparing against the CURRENT binding
+		// rather than the first of the boot is what makes a re-emitted table quiet: the
+		// second and third re-emit of the same value find prev == next and append
+		// nothing, while a genuine change still lands exactly once. It also keeps a round
+		// trip visible — X to Y to X yields two lines, both of which happened, where
+		// comparing first-to-final would have reported nothing at all even though Y was
+		// permitted in between.
+		if prev != next {
+			s.changed = append(s.changed, fmt.Sprintf("%s: %s -> %s", name, describeUpstream(prev), describeUpstream(next)))
+		}
 		s.byName[name] = next
 		return nil
 	}
@@ -141,7 +127,18 @@ func (s *upstreamSet) add(payload string) error {
 	return nil
 }
 
-// describeUpstream renders one binding for a move message: the URL, and the identity
+// looksNumeric says whether a host is written as digits and dots only — the shape of
+// an IPv4 literal, whatever it parses to.
+func looksNumeric(host string) bool {
+	for i := 0; i < len(host); i++ {
+		if (host[i] < '0' || host[i] > '9') && host[i] != '.' {
+			return false
+		}
+	}
+	return host != ""
+}
+
+// describeUpstream renders one binding for a change line: the URL, and the identity
 // when there is one. "(no identity)" is spelled out rather than left blank, because
 // losing an identity is the change a reader most needs to see and an empty string
 // beside an arrow reads like a formatting slip.
@@ -152,12 +149,21 @@ func describeUpstream(u Upstream) string {
 	return u.URL + " (" + u.Identity + ")"
 }
 
-// moves returns the rebindings recorded this boot, nil when there were none.
-func (s *upstreamSet) moves() []string {
-	if len(s.moved) == 0 {
+// changes reports every transition the set underwent this boot, in order: a name
+// rebound to something else, or withdrawn. Nil when the set never changed.
+//
+// It exists because Upstreams and UpstreamSetHash — the two values a caller consumes —
+// describe only the final state, and both directions of change are fail-open. Rewriting
+// a name from an external vendor to something that looks like an in-CVM container makes
+// a deployment appear to have kept plaintext inside. Withdrawing that vendor leaves a
+// set of nothing but in-CVM containers, which reads the same way, while the log itself
+// holds the evidence that plaintext could have left minutes earlier. Telling a caller to
+// walk the raw events instead is no answer when neither value they use does that.
+func (s *upstreamSet) changes() []string {
+	if len(s.changed) == 0 {
 		return nil
 	}
-	return s.moved
+	return s.changed
 }
 
 // remove applies one EventUpstreamRemove payload: "<name>".
@@ -179,9 +185,11 @@ func (s *upstreamSet) remove(payload string) error {
 	if !upstreamNamePattern.MatchString(name) {
 		return fmt.Errorf("%s record %q names %q, which is not a lowercase alphanumeric name (dashes and underscores allowed, 63 bytes max)", EventUpstreamRemove, payload, name)
 	}
-	if _, ok := s.byName[name]; !ok {
+	prev, ok := s.byName[name]
+	if !ok {
 		return nil
 	}
+	s.changed = append(s.changed, fmt.Sprintf("%s: %s -> withdrawn", name, describeUpstream(prev)))
 	delete(s.byName, name)
 	for i, n := range s.order {
 		if n == name {
@@ -314,6 +322,26 @@ func validUpstreamURL(raw string) error {
 	if strings.HasSuffix(u.Hostname(), ".") {
 		return fmt.Errorf("base URL %q has a trailing dot in its host; record it without one", raw)
 	}
+	// An IP literal has to be in the form net.IP.String() produces. Otherwise the
+	// same address has several accepted spellings — "[::1]", "[::0001]",
+	// "[0:0:0:0:0:0:0:1]", and "010.0.0.1" for "10.0.0.1", which is the very
+	// leading-zero form refused for ports above — and each is a different set hash for
+	// one destination. A hostname is left alone: DNS names have no canonical form this
+	// package could impose.
+	if host := u.Hostname(); host != "" {
+		ip := net.ParseIP(host)
+		switch {
+		case ip != nil && ip.String() != host:
+			return fmt.Errorf("base URL %q spells the address %q non-canonically; record it as %q", raw, host, ip.String())
+		case ip == nil && looksNumeric(host):
+			// Digits and dots only, but not an address Go will parse — "010.0.0.1", say.
+			// ParseIP refuses a leading zero because its meaning is ambiguous (some
+			// resolvers read it as octal), and that ambiguity is exactly what must not
+			// reach the set: it is another spelling of a destination the canonical form
+			// already names.
+			return fmt.Errorf("base URL %q has a host of digits and dots that is not a valid address; record the canonical form", raw)
+		}
+	}
 	if u.EscapedPath() != u.Path {
 		return fmt.Errorf("base URL %q percent-encodes its path; record the decoded path", raw)
 	}
@@ -369,8 +397,18 @@ func (r *RunningState) UpstreamSetHash() (string, error) {
 	default:
 		return "", fmt.Errorf("unrecognised UpstreamsState %q", r.UpstreamsState)
 	}
+	// The encoding is space-delimited, so it is injective only while no field contains
+	// a space: {Name:"a", URL:"b c"} and {Name:"a b", URL:"c"} would both render
+	// "a b c". The replay cannot produce such a member — strings.Fields split the
+	// record, and every field was pattern-checked — but this type is documented as
+	// transported, so a RunningState arriving by json.Unmarshal can hold anything.
+	// Refuse rather than hash, because a hash that does not identify the set it claims
+	// to is worse than no hash at all.
 	lines := make([]string, 0, len(r.Upstreams))
 	for _, u := range r.Upstreams {
+		if strings.ContainsAny(u.Name+u.URL+u.Identity, " \t\n") {
+			return "", fmt.Errorf("upstream %q has whitespace in a field, so the set cannot be encoded unambiguously", u.Name)
+		}
 		lines = append(lines, u.Name+" "+u.URL+" "+u.Identity+"\n")
 	}
 	sort.Strings(lines)

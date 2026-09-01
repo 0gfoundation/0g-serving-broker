@@ -10,54 +10,72 @@ import (
 // re-emit from bricking the set, and the cost of it is that Upstreams and
 // UpstreamSetHash show only the final binding — so the move has to be reported
 // separately or it is invisible to everyone who does not walk the raw events.
-func TestUpstreamMovesAreReported(t *testing.T) {
+func TestUpstreamChangesAreReported(t *testing.T) {
 	tests := []struct {
-		name      string
-		steps     []string
-		wantMoves []string
+		name        string
+		steps       []string
+		wantChanges []string
 	}{
 		{
-			name:      "a bare re-add to another URL is a move",
-			steps:     []string{"add|vendor https://vendor.example/v1", "add|vendor http://engine-1:8000/v1"},
-			wantMoves: []string{"vendor: https://vendor.example/v1 (no identity) -> http://engine-1:8000/v1 (no identity)"},
+			name:        "a bare re-add to another URL is a move",
+			steps:       []string{"add|vendor https://vendor.example/v1", "add|vendor http://engine-1:8000/v1"},
+			wantChanges: []string{"vendor: https://vendor.example/v1 (no identity) -> http://engine-1:8000/v1 (no identity)"},
 		},
 		{
-			// The same rewrite, spelled as two records. Equally invisible to the
-			// consumed values, so equally reported.
-			name:      "remove then add elsewhere is also a move",
-			steps:     []string{"add|vendor https://vendor.example/v1", "remove|vendor", "add|vendor http://engine-1:8000/v1"},
-			wantMoves: []string{"vendor: https://vendor.example/v1 (no identity) -> http://engine-1:8000/v1 (no identity)"},
+			// The same rewrite, spelled as two records. The withdrawal is the transition
+			// that happened; the following add is a fresh binding of a name the set no
+			// longer held. A reader sees the vendor go away.
+			name:        "remove then add elsewhere reports the withdrawal",
+			steps:       []string{"add|vendor https://vendor.example/v1", "remove|vendor", "add|vendor http://engine-1:8000/v1"},
+			wantChanges: []string{"vendor: https://vendor.example/v1 (no identity) -> withdrawn"},
 		},
 		{
-			name:      "adding an identity to a recorded name is a move, and the message says so",
-			steps:     []string{"add|a http://x:1/v1", "add|a http://x:1/v1 vendor"},
-			wantMoves: []string{"a: http://x:1/v1 (no identity) -> http://x:1/v1 (vendor)"},
+			// A withdrawal on its own. The remaining set is all in-CVM, which reads as
+			// "plaintext never left" unless this line says otherwise.
+			name:        "withdrawing a vendor is reported",
+			steps:       []string{"add|vendor https://vendor.example/v1 openrouter", "add|engine1 http://engine-1:8000/v1", "remove|vendor"},
+			wantChanges: []string{"vendor: https://vendor.example/v1 (openrouter) -> withdrawn"},
+		},
+		{
+			// The noise case: the design requires the writer to re-emit its whole table on
+			// each reconcile, so a genuine change must land once, not once per reconcile.
+			name:        "re-emitting a changed table repeatedly reports the change once",
+			steps:       []string{"add|a http://x:1/v1", "add|a http://y:1/v1", "add|a http://y:1/v1", "add|a http://y:1/v1"},
+			wantChanges: []string{"a: http://x:1/v1 (no identity) -> http://y:1/v1 (no identity)"},
+		},
+		{
+			name:        "adding an identity to a recorded name is a move, and the message says so",
+			steps:       []string{"add|a http://x:1/v1", "add|a http://x:1/v1 vendor"},
+			wantChanges: []string{"a: http://x:1/v1 (no identity) -> http://x:1/v1 (vendor)"},
 		},
 		{
 			// The fail-open direction: an attributable vendor becomes one with no
 			// attribution. Printing only URLs made this report two identical halves.
-			name:      "dropping an identity is a move the message shows",
-			steps:     []string{"add|vendor https://vendor.example/v1 openrouter", "add|vendor https://vendor.example/v1"},
-			wantMoves: []string{"vendor: https://vendor.example/v1 (openrouter) -> https://vendor.example/v1 (no identity)"},
+			name:        "dropping an identity is a move the message shows",
+			steps:       []string{"add|vendor https://vendor.example/v1 openrouter", "add|vendor https://vendor.example/v1"},
+			wantChanges: []string{"vendor: https://vendor.example/v1 (openrouter) -> https://vendor.example/v1 (no identity)"},
 		},
 		{
 			// The case that must NOT be a move, or a writer re-publishing its whole
 			// table at boot would make every name look rewritten.
-			name:      "re-emitting the identical record is not a move",
-			steps:     []string{"add|a http://x:1/v1 vendor", "add|a http://x:1/v1 vendor"},
-			wantMoves: nil,
+			name:        "re-emitting the identical record is not a move",
+			steps:       []string{"add|a http://x:1/v1 vendor", "add|a http://x:1/v1 vendor"},
+			wantChanges: nil,
 		},
 		{
-			name:      "a plain add is not a move",
-			steps:     []string{"add|a http://x:1/v1", "add|b http://y:1/v1"},
-			wantMoves: nil,
+			name:        "a plain add is not a move",
+			steps:       []string{"add|a http://x:1/v1", "add|b http://y:1/v1"},
+			wantChanges: nil,
 		},
 		{
-			// Comparison is against the first binding of the boot, so returning a name
-			// to where it started still counts: it meant something else in between.
-			name:      "moving away and back still reports the round trip",
-			steps:     []string{"add|a http://x:1/v1", "add|a http://y:1/v1", "add|a http://x:1/v1"},
-			wantMoves: []string{"a: http://x:1/v1 (no identity) -> http://y:1/v1 (no identity)"},
+			// A round trip must not vanish. Comparing the first binding against the final
+			// one would report nothing here, even though Y was permitted in between.
+			name:  "moving away and back reports both legs",
+			steps: []string{"add|a http://x:1/v1", "add|a http://y:1/v1", "add|a http://x:1/v1"},
+			wantChanges: []string{
+				"a: http://x:1/v1 (no identity) -> http://y:1/v1 (no identity)",
+				"a: http://y:1/v1 (no identity) -> http://x:1/v1 (no identity)",
+			},
 		},
 	}
 	for _, tt := range tests {
@@ -66,13 +84,13 @@ func TestUpstreamMovesAreReported(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			got := s.moves()
-			if len(got) != len(tt.wantMoves) {
-				t.Fatalf("moves = %q, want %q", got, tt.wantMoves)
+			got := s.changes()
+			if len(got) != len(tt.wantChanges) {
+				t.Fatalf("moves = %q, want %q", got, tt.wantChanges)
 			}
-			for i := range tt.wantMoves {
-				if got[i] != tt.wantMoves[i] {
-					t.Errorf("moves[%d] = %q, want %q", i, got[i], tt.wantMoves[i])
+			for i := range tt.wantChanges {
+				if got[i] != tt.wantChanges[i] {
+					t.Errorf("moves[%d] = %q, want %q", i, got[i], tt.wantChanges[i])
 				}
 			}
 		})
@@ -90,11 +108,11 @@ func TestResolveReportsARewrittenUpstream(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveRunningState() = %v", err)
 	}
-	if len(state.UpstreamMoves) != 1 {
-		t.Fatalf("UpstreamMoves = %q, want one entry: last-wins hides the rewrite from Upstreams and the hash", state.UpstreamMoves)
+	if len(state.UpstreamChanges) != 1 {
+		t.Fatalf("UpstreamChanges = %q, want one entry: last-wins hides the rewrite from Upstreams and the hash", state.UpstreamChanges)
 	}
-	if !strings.Contains(state.UpstreamMoves[0], "vendor.example") || !strings.Contains(state.UpstreamMoves[0], "engine-1") {
-		t.Errorf("UpstreamMoves[0] = %q, want both the old and the new destination", state.UpstreamMoves[0])
+	if !strings.Contains(state.UpstreamChanges[0], "vendor.example") || !strings.Contains(state.UpstreamChanges[0], "engine-1") {
+		t.Errorf("UpstreamChanges[0] = %q, want both the old and the new destination", state.UpstreamChanges[0])
 	}
 	// And the consumed value does show only the final binding, which is why the above
 	// has to exist.
@@ -121,9 +139,9 @@ func TestRunningStateSurvivesJSON(t *testing.T) {
 		{
 			name: "known",
 			in: RunningState{
-				UpstreamsState: UpstreamsKnown,
-				Upstreams:      []Upstream{{Name: "a", URL: "http://x:1/v1", Identity: "vendor"}},
-				UpstreamMoves:  []string{"a: http://y:1/v1 (no identity) -> http://x:1/v1 (vendor)"},
+				UpstreamsState:  UpstreamsKnown,
+				Upstreams:       []Upstream{{Name: "a", URL: "http://x:1/v1", Identity: "vendor"}},
+				UpstreamChanges: []string{"a: http://y:1/v1 (no identity) -> http://x:1/v1 (vendor)"},
 			},
 		},
 		{
@@ -150,8 +168,8 @@ func TestRunningStateSurvivesJSON(t *testing.T) {
 			if len(back.Upstreams) != len(tt.in.Upstreams) {
 				t.Errorf("Upstreams = %+v, want %+v", back.Upstreams, tt.in.Upstreams)
 			}
-			if len(back.UpstreamMoves) != len(tt.in.UpstreamMoves) {
-				t.Errorf("UpstreamMoves = %q, want %q", back.UpstreamMoves, tt.in.UpstreamMoves)
+			if len(back.UpstreamChanges) != len(tt.in.UpstreamChanges) {
+				t.Errorf("UpstreamChanges = %q, want %q", back.UpstreamChanges, tt.in.UpstreamChanges)
 			}
 			// The point of the three states: after transport, unknown must still refuse to
 			// hash rather than passing for known-and-empty.

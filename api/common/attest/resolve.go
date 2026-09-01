@@ -228,25 +228,29 @@ type RunningState struct {
 	// What is NOT done is reporting the members that happened to parse. A partial set
 	// understates where plaintext can go, which is the direction that misleads.
 	UpstreamsErr string
-	// UpstreamMoves names every upstream whose binding changed during this boot,
-	// in the order the changes were recorded, as "<name>: <old URL> -> <new URL>".
+	// UpstreamChanges names every upstream whose meaning at the end of the log differs
+	// from what it meant the first time this boot bound it — rebound elsewhere, or
+	// withdrawn — one line per name, as
+	// "<name>: <old URL> (<old identity>) -> <new URL> (<new identity>)" or
+	// "<name>: <old URL> (<old identity>) -> withdrawn".
 	//
-	// It exists because a re-add is last-wins, so Upstreams and UpstreamSetHash — the
-	// two values a caller actually consumes — show only the final binding. Telling a
-	// caller to walk Events for the superseded record is not a mitigation: neither of
-	// the values they use does that.
+	// It exists because Upstreams and UpstreamSetHash — the two values a caller
+	// actually consumes — describe only the final state. Telling a caller to walk
+	// Events for the rest is not a mitigation: neither of those values does that.
 	//
-	// Why it matters: rewriting a name from an external vendor to something that looks
-	// like an in-CVM container makes a deployment appear to keep plaintext inside when
-	// it did not. That is the fail-open direction, and it is the one place in this
-	// ledger where last-wins has no cross-check to catch it — an image record's signer
-	// has to match the quote's report_data, and nothing yet ties an upstream record to
-	// anything outside the log.
+	// Both directions are fail-open. Rewriting a name from an external vendor to
+	// something that looks like an in-CVM container makes a deployment appear to have
+	// kept plaintext inside. Withdrawing an external vendor leaves a set of nothing but
+	// in-CVM containers, which reads the same way — while the log itself holds the
+	// evidence that plaintext could have left minutes earlier. And this is the one place
+	// in this ledger where last-wins has no cross-check: an image record's signer must
+	// match the quote's report_data, and nothing yet ties an upstream record to anything
+	// outside the log.
 	//
 	// Empty is the ordinary case. A caller treating a non-empty value as suspicious is
 	// making a judgement this package does not make: a legitimate reconfiguration
 	// produces one too.
-	UpstreamMoves []string
+	UpstreamChanges []string
 	// Events is the full runtime event sequence whose replay matched the quote.
 	Events []RuntimeEvent
 }
@@ -400,7 +404,7 @@ func ResolveRunningState(v VerifiedQuote, tcbInfoJSON []byte, brokerService stri
 		return nil, configErr
 	}
 	if state.UpstreamsState == UpstreamsKnown {
-		state.Upstreams, state.UpstreamMoves = upstreams.list(), upstreams.moves()
+		state.Upstreams, state.UpstreamChanges = upstreams.list(), upstreams.changes()
 	}
 
 	// A record wins over the compose pin, and the two are mutually exclusive.
