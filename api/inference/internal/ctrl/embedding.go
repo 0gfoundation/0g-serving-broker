@@ -1,6 +1,7 @@
 package ctrl
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -62,14 +63,45 @@ func (c *Ctrl) handleEmbeddingResponse(ctx *gin.Context, resp *http.Response, _ 
 	// treatment speech-to-text and image-editing give their own responses,
 	// and for the same reason: sanitize-before-sign keeps the signature bound
 	// to what the client receives. Reassigns `body` itself (rather than a
-	// separate clientBody) so every later use of `body` — write, parse,
-	// AND sign — is consistently the sanitized bytes; a separate variable
-	// here previously let the signature bind to the pre-sanitization body
-	// while the client received the sanitized one, breaking verification for
-	// exactly the forwarder+centralized case this feature targets.
+	// separate clientBody) so every later use of `body` — sign, write, parse —
+	// is consistently the sanitized bytes; a separate variable here previously
+	// let the signature bind to the pre-sanitization body while the client
+	// received the sanitized one, breaking verification for exactly the
+	// forwarder+centralized case this feature targets.
 	// Handles decompression itself (see its own doc).
 	if c.Service.IsForwarder() {
-		body = c.sanitizeForwarderResponseBody(ctx, body, resp.Header.Get("Content-Encoding"))
+		body = c.sanitizeForwarderEmbeddingResponseBody(ctx, body, resp.Header.Get("Content-Encoding"))
+	}
+
+	// Signing: centralized providers get a routing proof (TLS cert fingerprint
+	// bound at request time); an in-network decentralized provider gets a plain
+	// content signature. Mirrors chatbot's identical dispatch and — critically —
+	// chatbot's cache-BEFORE-flush ordering (signChatResponse / handleChargingResponse):
+	// cache the signature before the body reaches the client, so that by the time
+	// it reads ZG-Res-Key and fetches GET /v1/proxy/signature/{chatID}, the
+	// signature already resolves rather than racing a post-flush cache write
+	// (issue #619). Signs `body`, which is the sanitized bytes as of the
+	// reassignment above (identical to what will be written to the client).
+	//
+	// The two cases are NOT symmetric on error, matching signChatResponse exactly:
+	//   - IsCentralized(): a missing/malformed TLS fingerprint is an expected,
+	//     non-fatal condition (no sidecar report, etc.) — log and continue. A
+	//     404 on the signature endpoint is more honest than blocking a request
+	//     that has nothing to do with TLS evidence being absent.
+	//   - !TargetSeparated: signChatWithKey only fails when the TEE signer
+	//     itself fails, which is a genuine broker fault — fail closed rather
+	//     than serve a body the client can never verify.
+	switch {
+	case c.Service.IsCentralized():
+		fingerprint := ctx.GetString(CtxKeyUpstreamCertFingerprint)
+		if err := c.signCentralizedRoutingProof(reqBody, body, chatKey, fingerprint, ""); err != nil {
+			c.logger.Errorf("routing proof not created for embedding %s: %v", chatKey, err)
+		}
+	case !c.Service.TargetSeparated:
+		if err := c.signChatWithKey(reqBody, body, chatKey); err != nil {
+			c.handleBrokerError(ctx, errors.Internal(err), "sign embedding response")
+			return err
+		}
 	}
 
 	if _, writeErr := ctx.Writer.Write(body); writeErr != nil {
@@ -95,24 +127,6 @@ func (c *Ctrl) handleEmbeddingResponse(ctx *gin.Context, resp *http.Response, _ 
 	var parsed EmbeddingResponse
 	if err := json.Unmarshal(decompressedBody, &parsed); err != nil {
 		c.logger.Warnf("failed to parse embedding response for usage extraction: %v", err)
-	}
-
-	// Signing: centralized providers get a routing proof (TLS cert fingerprint
-	// bound at request time); an in-network decentralized provider gets a plain
-	// content signature. Mirrors chatbot/image-editing's identical dispatch —
-	// see handleImageEditingResponse for why these two cases don't overlap.
-	// Signs `body`, which is the sanitized bytes as of the reassignment above
-	// (identical to what was written to the client).
-	switch {
-	case c.Service.IsCentralized():
-		fingerprint := ctx.GetString(CtxKeyUpstreamCertFingerprint)
-		if err := c.signCentralizedRoutingProof(reqBody, body, chatKey, fingerprint, ""); err != nil {
-			c.logger.Errorf("routing proof not created for embedding %s: %v", chatKey, err)
-		}
-	case !c.Service.TargetSeparated:
-		if err := c.signChatWithKey(reqBody, body, chatKey); err != nil {
-			c.logger.Errorf("could not sign the embedding response for %s: %v", chatKey, err)
-		}
 	}
 
 	usage := parsed.Usage
@@ -298,4 +312,87 @@ func countTokenIDs(input json.RawMessage) int {
 		return len(ids)
 	}
 	return 0
+}
+
+// sanitizeForwarderEmbeddingResponseBody is sanitizeForwarderResponseBody's
+// embedding-scoped counterpart: same decompress-first contract (a compressed
+// body is decoded before sanitizing so the #184 leak control can never
+// silently no-op on bytes it cannot parse as JSON), but calls
+// sanitizeEmbeddingResponseBody instead of the general-purpose
+// sanitizeResponseBody, so the (potentially large) `data` vector array is
+// never decoded into Go's generic interface{} tree. See
+// sanitizeEmbeddingResponseBody's doc for why that matters here specifically.
+func (c *Ctrl) sanitizeForwarderEmbeddingResponseBody(ctx *gin.Context, body []byte, contentEncoding string) []byte {
+	out := body
+	if isCompressedEncoding(contentEncoding) {
+		decoded, err := decodeBody(body, contentEncoding)
+		if err != nil {
+			c.logger.Warnf("#184 leak sanitization SKIPPED: could not decode %s response; forwarding upstream body unsanitized (potential identity/cost leak): %v", contentEncoding, err)
+			return body
+		}
+		out = decoded
+		ctx.Writer.Header().Del("Content-Encoding")
+	}
+	if sanitized, changed := c.sanitizeEmbeddingResponseBody(out); changed {
+		return sanitized
+	}
+	return out
+}
+
+// sanitizeEmbeddingResponseBody strips #184 upstream identity/cost leak
+// fields from an embeddings response body without paying the cost of
+// decoding `data` (the embedding vectors) into Go's generic interface{}
+// tree — which the shared sanitizeResponseBody/stripLeakKeys machinery does,
+// and which scales with vector count × dimensions: a 64-input batch at 1536
+// dimensions is roughly 1MB of floats, each becoming its own heap-allocated
+// json.Number under sanitizeResponseBody's decoder. None of the #184 leak
+// keys (leakKeysAlways / leakKeysIfZero in sanitize.go) are ever nested
+// inside `data[]` — an embeddings response element is only
+// {object, index, embedding}, per the OpenAI Embeddings API shape — so `data`
+// is carved out untouched here and reattached after sanitizing every OTHER
+// top-level field with that same, already-tested stripLeakKeys logic (via
+// sanitizeResponseBody), rather than duplicating a second leak-key list that
+// could drift out of sync with it.
+//
+// Returns (body, false) unchanged on any decode/encode failure or when
+// nothing needed stripping, matching sanitizeResponseBody's own fail-open
+// contract: a body this cannot parse is forwarded as-is rather than dropped.
+func (c *Ctrl) sanitizeEmbeddingResponseBody(body []byte) ([]byte, bool) {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(body, &top); err != nil {
+		if len(bytes.TrimSpace(body)) > 0 {
+			c.logger.Warnf("sanitizeEmbeddingResponseBody: body not a JSON object, leak-field stripping skipped (forwarded unsanitized): %v", err)
+		}
+		return body, false
+	}
+
+	rawData, hasData := top["data"]
+	delete(top, "data")
+
+	rest, err := json.Marshal(top)
+	if err != nil {
+		c.logger.Errorf("sanitizeEmbeddingResponseBody: failed to marshal non-data fields, forwarding original unsanitized: %v", err)
+		return body, false
+	}
+
+	sanitizedRest, changed := c.sanitizeResponseBody(rest, "")
+	if !changed {
+		return body, false
+	}
+
+	var sanitizedTop map[string]json.RawMessage
+	if err := json.Unmarshal(sanitizedRest, &sanitizedTop); err != nil {
+		c.logger.Errorf("sanitizeEmbeddingResponseBody: failed to re-parse sanitized fields, forwarding original unsanitized: %v", err)
+		return body, false
+	}
+	if hasData {
+		sanitizedTop["data"] = rawData
+	}
+
+	out, err := json.Marshal(sanitizedTop)
+	if err != nil {
+		c.logger.Errorf("sanitizeEmbeddingResponseBody: failed to re-encode sanitized body, forwarding original unsanitized: %v", err)
+		return body, false
+	}
+	return out, true
 }
