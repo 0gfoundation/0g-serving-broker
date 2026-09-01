@@ -278,11 +278,11 @@ func PrometheusInit(serverName, providerAddress string) {
 	RequestDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:        "broker_request_duration_seconds",
-			Help:        "Histogram of request latencies.",
+			Help:        "Histogram of request latencies, labeled by path and model.",
 			Buckets:     prometheus.DefBuckets, // or customize the buckets according to your needs
 			ConstLabels: constLabels,
 		},
-		[]string{"path"},
+		[]string{"path", "model"},
 	)
 
 	UniqueUsersTotal = prometheus.NewGauge(
@@ -719,16 +719,19 @@ func TrackMetrics() gin.HandlerFunc {
 
 		ignoreError := c.GetBool("ignoreError")
 
+		// The model label is read AFTER c.Next(), so it carries whatever the
+		// request path resolved ("" for non-inference paths and unresolved
+		// requests). Latency and request counts share it so a model selected on
+		// a dashboard filters both.
+		model := modelFromGinContext(c)
+
 		// Track request duration
 		duration := time.Since(startTime).Seconds()
-		RequestDuration.WithLabelValues(path).Observe(duration)
+		RequestDuration.WithLabelValues(path, model).Observe(duration)
 
-		// Track request count and errors. The model label is read AFTER c.Next(),
-		// so it carries whatever the request path resolved ("" for non-inference
-		// paths and unresolved requests).
+		// Track request count and errors.
 		status := c.Writer.Status()
 		statusText := http.StatusText(status)
-		model := modelFromGinContext(c)
 		RequestCount.WithLabelValues(path, statusText, model).Inc()
 		if !ignoreError && status >= 400 {
 			ErrorCount.WithLabelValues(path, statusText).Inc()

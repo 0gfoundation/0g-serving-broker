@@ -107,11 +107,11 @@ func setupTestMetrics(t *testing.T) *prometheus.Registry {
 	RequestDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:        "broker_request_duration_seconds",
-			Help:        "Histogram of request latencies.",
+			Help:        "Histogram of request latencies, labeled by path and model.",
 			Buckets:     prometheus.DefBuckets,
 			ConstLabels: constLabels,
 		},
-		[]string{"path"},
+		[]string{"path", "model"},
 	)
 
 	WhitelistRequestsTotal = prometheus.NewCounterVec(
@@ -719,15 +719,35 @@ func TestTrackMetricsRecordsRequestMetrics(t *testing.T) {
 	})
 
 	t.Run("records request duration", func(t *testing.T) {
-		beforeCount := getHistogramCount(RequestDuration, "/api/test")
+		beforeCount := getHistogramCount(RequestDuration, "/api/test", "")
 
 		w := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, "/api/test", nil)
 		engine.ServeHTTP(w, req)
 
-		afterCount := getHistogramCount(RequestDuration, "/api/test")
+		afterCount := getHistogramCount(RequestDuration, "/api/test", "")
 		if afterCount <= beforeCount {
 			t.Error("request duration histogram not updated")
+		}
+	})
+
+	t.Run("request duration carries the bounded metric model", func(t *testing.T) {
+		engine.GET("/api/slow", func(c *gin.Context) {
+			c.Set(CtxKeyMetricModel, "glm-5")
+			c.Status(http.StatusOK)
+		})
+
+		before := getHistogramCount(RequestDuration, "/api/slow", "glm-5")
+
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/slow", nil)
+		engine.ServeHTTP(w, req)
+
+		if delta := getHistogramCount(RequestDuration, "/api/slow", "glm-5") - before; delta != 1 {
+			t.Errorf("duration histogram delta for bounded model = %v, want 1", delta)
+		}
+		if n := getHistogramCount(RequestDuration, "/api/slow", ""); n != 0 {
+			t.Errorf("duration landed on the empty model label too, count = %v, want 0", n)
 		}
 	})
 }
