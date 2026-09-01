@@ -247,8 +247,9 @@ func (c *Ctrl) handleTextToImageResponse(ctx *gin.Context, resp *http.Response, 
 	// count the images into the reconciliation rollup (they hit the upstream).
 	if reqModel.IsWhitelisted {
 		metricModel := c.metricModel(ctx)
-		monitor.RecordTokens("text-to-image", metricModel, 0, imageNum)
-		monitor.RecordWhitelistTokens("text-to-image", metricModel, 0, imageNum)
+		metricUpstream := c.metricUpstream(ctx)
+		monitor.RecordTokens("text-to-image", metricModel, metricUpstream, 0, imageNum)
+		monitor.RecordWhitelistTokens("text-to-image", metricModel, metricUpstream, 0, imageNum)
 		c.recordWhitelistedUsage(reqModel, 0, imageNum, 0, 0, "")
 		return nil
 	}
@@ -263,7 +264,7 @@ func (c *Ctrl) handleTextToImageResponse(ctx *gin.Context, resp *http.Response, 
 		return errors.Wrap(err, "update request fees and count in database")
 	}
 
-	monitor.RecordTokens("text-to-image", c.metricModel(ctx), 0, imageNum)
+	monitor.RecordTokens("text-to-image", c.metricModel(ctx), c.metricUpstream(ctx), 0, imageNum)
 
 	// Update IPM limiter with actual image consumption
 	if ipmLimiter, exists := ctx.Get("ipmLimiter"); exists {

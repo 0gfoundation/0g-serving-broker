@@ -25,7 +25,7 @@ type asyncCtrl interface {
 	IsAsyncEnabled() bool
 	ValidateSession(ctx *gin.Context) (string, error)
 	IsWhitelistedUser(userAddress string) bool
-	WhitelistMetricModel(reqBody []byte, contentType string) string
+	WhitelistMetricLabels(ctx *gin.Context, reqBody []byte, contentType string) (model, upstream string)
 	SubmitAsyncJob(ctx *gin.Context, userAddress, svcType string, reqHeaders, reqBody []byte, isWhitelisted bool) (string, error)
 	GetAsyncJob(jobID string) (model.AsyncJob, error)
 }
