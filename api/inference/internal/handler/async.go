@@ -45,9 +45,11 @@ func (h *Handler) submitAsyncJob(ctx *gin.Context, svcType string) {
 	// Check whitelist
 	isWhitelisted := h.asyncCtrl.IsWhitelistedUser(userAddress)
 	if isWhitelisted {
-		// Bounded label (enumerated id / "*" / configured model) — mirrors
-		// the sync proxy site; raw body values must never become labels.
-		monitor.RecordWhitelistRequest(svcType, h.asyncCtrl.WhitelistMetricModel(reqBody, ctx.GetHeader("Content-Type")))
+		// Bounded labels (enumerated id / "*" / configured model, plus the
+		// upstream that pair resolves to) — mirrors the sync proxy site; raw
+		// body values and identity headers must never become labels.
+		wlModel, wlUpstream := h.asyncCtrl.WhitelistMetricLabels(ctx, reqBody, ctx.GetHeader("Content-Type"))
+		monitor.RecordWhitelistRequest(svcType, wlModel, wlUpstream)
 	}
 
 	// Store only necessary request headers (Content-Type is critical for multipart boundary)

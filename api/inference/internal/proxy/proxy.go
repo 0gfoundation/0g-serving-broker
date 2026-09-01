@@ -771,7 +771,8 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	// Identity-aware: a same-model entry carries its own expiry, so gate against
 	// the upstream the router named (X-0G-Upstream, read at admission — this runs
 	// before PrepareHTTPRequest sets CtxKeyResolvedIdentity). Without it a
-	// multi-upstream model resolves ambiguous and an EXPIRED one would fail OPEN.
+	// multi-upstream model answers for its CHEAPEST entry, so an expired cheapest
+	// entry gates the model even when a dearer sibling is still live.
 	if exp, ok := p.ctrl.Service.ModelExpirationFor(modelForExpiry, ctrl.UpstreamIdentity(ctx)); ok && time.Now().After(exp) {
 		ctx.Set("ignoreError", true)
 		// record stamps CtxKeyRejectionReason for the unified failure metric.
@@ -796,10 +797,11 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 			logPath = logPath[:idx]
 		}
 		p.logger.Infof("Whitelist user request: user=%s, service=%s, path=%s", userAddress, svcType, logPath)
-		// Label from the BOUNDED whitelist helper, never the raw body value:
-		// these counters record before allowlist validation, and raw user
-		// strings as label values are an unbounded-cardinality vector.
-		monitor.RecordWhitelistRequest(svcType, p.ctrl.WhitelistMetricModel(reqBody, ctx.Request.Header.Get("Content-Type")))
+		// Labels from the BOUNDED whitelist helper, never the raw body value or
+		// identity header: these counters record before allowlist validation, and
+		// raw user strings as label values are an unbounded-cardinality vector.
+		wlModel, wlUpstream := p.ctrl.WhitelistMetricLabels(ctx, reqBody, ctx.Request.Header.Get("Content-Type"))
+		monitor.RecordWhitelistRequest(svcType, wlModel, wlUpstream)
 		// Raw on purpose: the DB row records the user-requested id verbatim;
 		// only the metric label above goes through the bounded fold.
 		modelName := ctrl.ExtractModelName(reqBody, ctx.Request.Header.Get("Content-Type"))

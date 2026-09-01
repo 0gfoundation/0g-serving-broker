@@ -3544,6 +3544,43 @@ service:
 	}
 }
 
+func TestLoadConfig_ModelPricing_UpstreamModelSelfReferenceOnSameModelSibling(t *testing.T) {
+	// A same-model multi-upstream pair where one entry's upstreamModel is that
+	// model's own public id. Forwarding under the id the client already asked for
+	// is a no-op, so this must LOAD — and it must load whichever sibling the
+	// model-keyed map happens to hold, so the collision check compares Model ids
+	// rather than pointers. The dearer entry is listed FIRST and carries the
+	// self-reference, so the cheapest-entry map holds the OTHER sibling: a pointer
+	// comparison rejects this config, and the broker would refuse to boot on a yaml
+	// that loaded before the cheapest-entry pick.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "chatbot"
+  model: "glm-5.2"
+  providerType: "centralized"
+  providerIdentity: "aliyun"
+  verifiability: "TeeML"
+  modelPricing:
+    - model: "glm-5.2"
+      providerIdentity: "zhipu"
+      inputPrice: "300"
+      outputPrice: "400"
+      targetUrl: "https://zhipu.example.com/v1"
+      upstreamModel: "glm-5.2"
+    - model: "glm-5.2"
+      providerIdentity: "aliyun"
+      inputPrice: "100"
+      outputPrice: "200"
+      targetUrl: "https://aliyun.example.com/v1"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err != nil {
+		t.Fatalf("same-model sibling self-reference must load, got: %v", err)
+	}
+}
+
 func TestLoadConfig_ModelPricing_UpstreamCollidesWithAlias(t *testing.T) {
 	configPath := writeTestConfig(t, `
 service:

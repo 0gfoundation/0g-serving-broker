@@ -214,11 +214,15 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 		}
 	}
 
-	// Stamp the BOUNDED metric label for TrackMetrics: the monitor package
+	// Stamp the BOUNDED metric labels for TrackMetrics: the monitor package
 	// has no pricing-config access, and CtxKeyResolvedModel holds RAW user
 	// strings on wildcard deployments — they must never become label values
-	// (unbounded series). metricModel folds them to "*".
+	// (unbounded series). metricModel folds them to "*". metricUpstream names
+	// which upstream served the model, resolved from the same (model, identity)
+	// pair used just above to pick the target URL, so the label always agrees
+	// with the host the request was actually forwarded to.
 	ctx.Set(monitor.CtxKeyMetricModel, c.metricModel(ctx))
+	ctx.Set(monitor.CtxKeyMetricUpstream, c.metricUpstream(ctx))
 
 	// For text-to-image and image-editing: store the original client body (used for
 	// signing) and rewrite response_format to b64_json so the broker always receives
@@ -1495,9 +1499,6 @@ func (c *Ctrl) ValidateModelAllowlist(ctx *gin.Context, body []byte, userAddr st
 
 	entry, resolved, err := c.Service.ResolveRequestedModel(requestModel, UpstreamIdentity(ctx))
 	if err != nil {
-		if errors.Is(err, config.ErrAmbiguousUpstream) {
-			return nil, err
-		}
 		c.recordModelMismatch(userAddr, requestModel)
 		return nil, fmt.Errorf("model not supported: '%s' is not available for this service", requestModel)
 	}
@@ -1598,9 +1599,6 @@ func (c *Ctrl) ResolveModelForBilling(ctx *gin.Context, body []byte, contentType
 	}
 	_, resolved, err := c.Service.ResolveRequestedModel(requestModel, UpstreamIdentity(ctx))
 	if err != nil {
-		if errors.Is(err, config.ErrAmbiguousUpstream) {
-			return err
-		}
 		c.recordModelMismatch(userAddr, requestModel)
 		return fmt.Errorf("model not supported: '%s' is not available for this service", requestModel)
 	}

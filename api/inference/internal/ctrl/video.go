@@ -642,8 +642,9 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 			rateClass = resolutionRateClass(tier)
 			outputCount := c.videoOutputUnits(ctx, sec, tier, respFields.completionTokens())
 			metricModel := c.metricModel(ctx)
-			monitor.RecordTokens("video-generation", metricModel, 0, outputCount)
-			monitor.RecordWhitelistTokens("video-generation", metricModel, 0, outputCount)
+			metricUpstream := c.metricUpstream(ctx)
+			monitor.RecordTokens("video-generation", metricModel, metricUpstream, 0, outputCount)
+			monitor.RecordWhitelistTokens("video-generation", metricModel, metricUpstream, 0, outputCount)
 		} else {
 			c.logger.Warnf("whitelist video: no usable seconds in response or request for %s; recording request count only", reqModel.RequestHash)
 		}
@@ -739,7 +740,7 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 		return errors.Wrap(err, "update request video billing in database")
 	}
 
-	monitor.RecordTokens("video-generation", c.metricModel(ctx), 0, outputCount)
+	monitor.RecordTokens("video-generation", c.metricModel(ctx), c.metricUpstream(ctx), 0, outputCount)
 	return nil
 }
 

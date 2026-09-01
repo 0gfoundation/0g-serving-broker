@@ -352,8 +352,14 @@ func (c *Ctrl) pollVideoJob(job model.VideoPollJob) {
 		if metricModel == "" {
 			metricModel = c.Service.ModelType
 		}
-		monitor.RecordTokens("video-generation", metricModel, 0, outputCount)
-		monitor.RecordWhitelistTokens("video-generation", metricModel, 0, outputCount)
+		// Empty identity is exact here, not a fallback: validateModelUpstream
+		// REJECTS per-model targetUrl and providerIdentity on video-generation, so
+		// two entries of one video model would collide on (model, "") in
+		// BuildModelPricingMap and fail config load. A video model therefore always
+		// has exactly one upstream — the service-level identity this resolves to.
+		metricUpstream := c.UpstreamForModel(job.ResolvedModel, "")
+		monitor.RecordTokens("video-generation", metricModel, metricUpstream, 0, outputCount)
+		monitor.RecordWhitelistTokens("video-generation", metricModel, metricUpstream, 0, outputCount)
 		return
 	}
 
@@ -429,7 +435,10 @@ func (c *Ctrl) pollVideoJob(job model.VideoPollJob) {
 	if metricModel == "" {
 		metricModel = c.Service.ModelType
 	}
-	monitor.RecordTokens("video-generation", metricModel, 0, outputCount)
+	// Exact, not a fallback — see the sibling site above: config validation makes
+	// a same-model multi-upstream video config unloadable.
+	metricUpstream := c.UpstreamForModel(job.ResolvedModel, "")
+	monitor.RecordTokens("video-generation", metricModel, metricUpstream, 0, outputCount)
 }
 
 // evictVideoSignature drops the create-time signature cached under job.ChatKey.
