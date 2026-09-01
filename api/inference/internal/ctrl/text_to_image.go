@@ -206,6 +206,18 @@ func (c *Ctrl) handleTextToImageResponse(ctx *gin.Context, resp *http.Response, 
 	// channel — anyone who can reach the URL reads them, defeating the point of
 	// sealing. Refuse rather than silently downgrading to b64: the client asked
 	// for a format this mode cannot honour, and it must learn that.
+	//
+	// Belt and braces, not the primary enforcement. `response_format` is a pinned
+	// cleartext field of the image profile, so wire.OpenRequestFor already refused
+	// this request at unseal time, in the proxy, before it ever reached a
+	// provider — which is where a leak is PREVENTED rather than caught after the
+	// images exist. By the time clientResponseFormat is read here it was taken
+	// from the reconstructed plaintext, so for a sealed request it is "b64_json"
+	// and this branch is unreachable. It stays because the two live in different
+	// packages and nothing but this comment ties them together: if the pin is ever
+	// relaxed, this is what keeps the images out of the clear.
+	// Attributed to the client (via ignoreError), unlike the guards below: asking
+	// for a format this mode cannot honour is the caller's error, not upstream's.
 	if e2eeSealed && wantURL {
 		ctx.Set("ignoreError", true)
 		err := fmt.Errorf("e2ee: response_format=url is not supported for sealed requests (the images would be served in the clear); use b64_json")
@@ -218,11 +230,14 @@ func (c *Ctrl) handleTextToImageResponse(ctx *gin.Context, resp *http.Response, 
 	// count actually delivered. If the response cannot be decoded there is no honest
 	// count to publish — the plaintext path bills the requested count in that
 	// case, which under sealing would ask the router to bill a number the enclave
-	// never verified. Refuse instead, mirroring the wantURL guard below.
+	// never verified. Refuse instead — the same shape as the undecodable-response
+	// guard directly below, which refuses for the url path for its own reason.
 	if e2eeSealed && (extractErr != nil || len(images) == 0) {
 		ctx.Set("ignoreError", true)
-		// Undecodable 200 from the provider: an upstream fault, not a client one
-		// (same attribution as the wantURL guard).
+		// Undecodable 200 from the provider: an upstream fault, not a client one,
+		// so override the client default ignoreError implies — same attribution as
+		// the undecodable-response guard below, and deliberately NOT the same as
+		// the sealed-url guard above, where the client is at fault.
 		ctx.Set(monitor.CtxKeyFailureSource, monitor.FailureSourceUpstream)
 		err := fmt.Errorf("e2ee: provider returned no decodable b64 images, refusing to seal a response with no verifiable image count: %w", extractErr)
 		c.handleBrokerError(ctx, err, "sealed image response")
