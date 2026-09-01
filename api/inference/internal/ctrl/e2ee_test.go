@@ -1156,8 +1156,14 @@ func TestSealNonStreamResponse_UnknownShapeFailsClosed(t *testing.T) {
 	if err == nil {
 		t.Fatal("want an error for an unrecognised response shape, got nil")
 	}
-	if !strings.Contains(err.Error(), "no sealable output field") {
-		t.Errorf("unexpected error: %v", err)
+	// The unrecognised-key check now fires first and names the offending field,
+	// which is the more useful refusal: "output_text" is what an operator has to
+	// either allowlist or teach the sealer about.
+	if !strings.Contains(err.Error(), "output_text") {
+		t.Errorf("error should name the unrecognised field, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "secret payload") {
+		t.Errorf("the refusal echoed the payload it refused to forward: %v", err)
 	}
 }
 
@@ -1391,5 +1397,114 @@ func TestSealedFieldsFor_DeterministicOrder(t *testing.T) {
 				t.Fatalf("iteration %d: got %v, want %v", i, got, want)
 			}
 		}
+	}
+}
+
+// newTestFrameSealer is the boilerplate every frame-level test repeats.
+func newTestFrameSealer(t *testing.T) *responseFrameSealer {
+	t.Helper()
+	f := newE2EEFixture(t)
+	ctx := newGinCtx()
+	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
+	rs, err := f.c.newResponseFrameSealer(ctx)
+	if err != nil {
+		t.Fatalf("newResponseFrameSealer: %v", err)
+	}
+	return rs
+}
+
+// The leak the first version of this guard missed: it only ran when the frame had
+// nothing to seal, so a KNOWN field beside an UNKNOWN one sailed through and the
+// unknown one was forwarded in cleartext under sealed_fields:["choices"] with a
+// valid binding — the reported vulnerability, unchanged.
+func TestSealFrame_RefusesUnknownKeyBesideAKnownOne(t *testing.T) {
+	leaky := map[string]struct{ line, secret string }{
+		"unknown key beside an empty choices array": {
+			line:   `data: {"choices":[],"response":"SECRET-PAYLOAD"}`,
+			secret: "SECRET-PAYLOAD",
+		},
+		// Azure OpenAI's first streaming chunk. prompt_filter_results is derived from
+		// the user's prompt, so forwarding it in the clear on a sealed request leaks
+		// something about the very thing the client sealed.
+		"Azure OpenAI first chunk": {
+			line:   `data: {"choices":[],"created":0,"id":"","model":"","prompt_filter_results":[{"prompt_index":0}]}`,
+			secret: "prompt_filter_results",
+		},
+		"unknown key beside real output": {
+			line:   `data: {"choices":[{"delta":{"content":"hi"}}],"citations":["SECRET-CITATION"]}`,
+			secret: "SECRET-CITATION",
+		},
+	}
+
+	for name, tc := range leaky {
+		t.Run(name, func(t *testing.T) {
+			out, err := newTestFrameSealer(t).sealSSELine(tc.line + "\n")
+			if err == nil {
+				t.Fatalf("frame was sealed instead of refused; output: %s", out)
+			}
+			if strings.Contains(out, tc.secret) {
+				t.Errorf("payload leaked in the output: %s", out)
+			}
+			var httpErr *brokererrors.HTTPError
+			if !errors.As(err, &httpErr) || httpErr.Status() != http.StatusBadGateway {
+				t.Errorf("want a 502 (upstream/broker fault), got %v", err)
+			}
+		})
+	}
+}
+
+// The other direction. Refusing these would turn an upstream failure into a stream
+// that merely stops: the headers are long flushed by the time one arrives, so the
+// 502 cannot reach the client as a status and the upstream's own message would go
+// with it — indistinguishable from truncation.
+func TestSealFrame_PassesDiagnosticAndControlFrames(t *testing.T) {
+	accepted := []string{
+		// vLLM / LiteLLM / OpenRouter mid-stream generation failure
+		`data: {"error":{"message":"upstream overloaded","type":"server_error"}}`,
+		// Anthropic's error event
+		`data: {"type":"error","error":{"type":"overloaded_error"}}`,
+		// A router-injected trace on an otherwise output-free frame
+		`data: {"type":"message_stop","x_0g_trace":"abc"}`,
+	}
+
+	for _, line := range accepted {
+		out, err := newTestFrameSealer(t).sealSSELine(line + "\n")
+		if err != nil {
+			t.Errorf("diagnostic/control frame refused, which would silently truncate the stream: %s -> %v", line, err)
+			continue
+		}
+		if out == "" {
+			t.Errorf("frame produced no output: %s", line)
+		}
+	}
+}
+
+// Anthropic's non-streaming body carries role/stop_reason/stop_sequence at the top
+// level beside the sealed "content". They have to be recognised or every sealed
+// Anthropic completion is refused.
+func TestSealNonStreamResponse_AnthropicTopLevelFieldsRecognised(t *testing.T) {
+	f := newE2EEFixture(t)
+	ctx := newGinCtx()
+	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
+
+	body := []byte(`{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"SECRET"}],` +
+		`"model":"claude-x","stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":4,"output_tokens":2}}`)
+
+	out, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, body)
+	if err != nil {
+		t.Fatalf("a well-formed Anthropic completion was refused: %v", err)
+	}
+	if !isSealed {
+		t.Fatal("want isSealed=true")
+	}
+	if strings.Contains(string(out), "SECRET") {
+		t.Errorf("content was forwarded in cleartext: %s", out)
+	}
+	if !strings.Contains(string(out), "stop_reason") {
+		t.Errorf("stop_reason should stay in cleartext: %s", out)
 	}
 }
