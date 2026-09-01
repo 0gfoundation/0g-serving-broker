@@ -168,22 +168,44 @@ type RunningState struct {
 	// learns that the file changed and when, relative to the image records — not what it
 	// changed to.
 	ConfigSHA256 string
-	// Upstreams is the set of destinations the ledger currently permits, in the
-	// order they were first added.
+	// Upstreams is the set of destinations the ledger permits, in the order names
+	// were last added. Meaningful only when UpstreamsRecorded is true and
+	// UpstreamsErr is nil.
 	//
-	// Nil means no upstream record appeared, which is not the same as "the broker
-	// forwards nowhere": a deployment that predates these records, or one that
-	// never writes them, forwards according to a config no measurement covers. So
-	// an empty set bounds nothing, and a caller must not read it as a guarantee.
-	//
-	// A non-empty set is a bound, and what that bound is worth depends on the
-	// provider: for a self-hosted deployment every entry is a container inside the
-	// CVM, so the set says the plaintext did not leave; for one forwarding to an
-	// external vendor the plaintext leaves by definition, and the set says which
-	// vendors could have received it. This package cannot tell those apart — it
-	// reports the set and the caller, which knows the provider type, decides what
-	// it establishes.
+	// What the set is worth depends on the provider, which this package does not
+	// know: for a self-hosted deployment every entry is a container inside the CVM,
+	// so the set says the plaintext did not leave; for one forwarding to an external
+	// vendor the plaintext leaves by definition, and the set says which vendors could
+	// have received it. This package reports the set; the caller decides what it
+	// establishes.
 	Upstreams []Upstream
+	// UpstreamsRecorded says whether any upstream record appeared at all.
+	//
+	// It exists because three states have to be told apart and a slice can express
+	// two. False means no record appeared — the deployment predates these records or
+	// never writes them, so it forwards according to a config no measurement covers
+	// and NOTHING here bounds where plaintext goes. True with an empty Upstreams is
+	// the opposite: a log that recorded destinations and then withdrew them all, which
+	// is a bound of zero.
+	//
+	// Collapsing those two into "empty" would be worst once the set feeds the signing
+	// key's derivation path: an unbounded deployment and one explicitly bounded to
+	// nothing would derive the same key.
+	UpstreamsRecorded bool
+	// UpstreamsErr is non-nil when the upstream records could not be replayed, and
+	// then the set is UNKNOWN — neither Upstreams nor UpstreamSetHash means anything.
+	//
+	// Unknown is reported rather than returned as a hard error because the rest of
+	// this answer does not depend on it: which image the broker runs and which keys
+	// it holds are established by other records, and a malformed upstream record must
+	// not take them down with it. That matters more here than for the other record
+	// types, because RTMR3 only appends and an upstream record has no corrective
+	// successor — where a bad image record is fixed by appending the truth after it,
+	// a log that cannot be replayed stays that way for the boot.
+	//
+	// What is NOT done is reporting the members that happened to parse. A partial set
+	// understates where plaintext can go, which is the direction that misleads.
+	UpstreamsErr error
 	// Events is the full runtime event sequence whose replay matched the quote.
 	Events []RuntimeEvent
 }
@@ -295,18 +317,18 @@ func ResolveRunningState(v VerifiedQuote, tcbInfoJSON []byte, brokerService stri
 				configErr = fmt.Errorf("%s payload %q is not a hex sha256", EventConfigUpdate, sum)
 			}
 			state.ConfigSHA256 = sum
-		case EventUpstreamAdd:
+		case EventUpstreamAdd, EventUpstreamRemove:
 			// Unlike the image records, EVERY upstream record matters, not just the last:
-			// the set is cumulative, so one unreadable record leaves the set unknown. And
-			// unknown must not degrade to "the ones I could parse" — that is the dangerous
-			// direction. It would report a smaller set than reality and so understate where
-			// plaintext can go, which is exactly the claim a caller leans on.
-			if err := upstreams.add(string(event.Payload)); err != nil {
-				return nil, err
-			}
-		case EventUpstreamRemove:
-			if err := upstreams.remove(string(event.Payload)); err != nil {
-				return nil, err
+			// the set is cumulative, so one unreadable record leaves the whole set unknown
+			// rather than merely stale. Unknown is carried in UpstreamsErr instead of
+			// failing this call, so the records that have nothing to do with upstreams
+			// still answer — see the field's doc for why that asymmetry is deliberate.
+			//
+			// Once unknown, stay unknown: a later record cannot repair a set whose earlier
+			// members are unreadable, and pretending otherwise would report a subset.
+			state.UpstreamsRecorded = true
+			if state.UpstreamsErr == nil {
+				state.UpstreamsErr = upstreams.apply(event.Event, string(event.Payload))
 			}
 		default:
 			return nil, fmt.Errorf("unrecognised %s event %q: this reader is older than the CVM that wrote the log, so it cannot say what is running", EventNamespace, event.Event)
@@ -318,7 +340,9 @@ func ResolveRunningState(v VerifiedQuote, tcbInfoJSON []byte, brokerService stri
 	if configErr != nil {
 		return nil, configErr
 	}
-	state.Upstreams = upstreams.list()
+	if state.UpstreamsErr == nil {
+		state.Upstreams = upstreams.list()
+	}
 
 	// A record wins over the compose pin, and the two are mutually exclusive.
 	//
