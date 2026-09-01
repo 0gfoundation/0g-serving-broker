@@ -49,13 +49,26 @@ performance is unrelated. Each metric that carries `model` therefore also carrie
 | `ctrl.metricUpstream` (memoized under `CtxKeyMetricUpstream`) | `ctrl.UpstreamForModel(resolvedModel, resolvedIdentity)` — the per-model `providerIdentity`, else the service-level one, else the `"self"` sentinel for a decentralized provider with no identity |
 | `ctrl.WhitelistMetricLabels` (pre-resolution whitelist counters) | the same resolution, from the FOLDED model label and the request's identity header — deriving both halves from one value is what keeps this counter on the same series as the post-resolution token counters for the request |
 
-The whitelist counters carry the same caveat on this label as on `model`: they
-record BEFORE resolution, so a request that omits `X-0G-Upstream` (or sends a
-stale one) for a model configured at several upstreams is attributed to the
-first configured entry — even though `ValidateModelAllowlist` then rejects it
-with `ErrAmbiguousUpstream` and it never reaches any upstream. When reading
-whitelist traffic per upstream, cross-reference
-`broker_requests_total{status>=400}` the same way the model row above says to.
+A request that OMITS `X-0G-Upstream` on a model served by several upstreams is
+resolved to the entry with the lowest base price — price, `targetUrl`, secret and
+this label all come from that one entry, so every counter agrees and the label
+names the upstream that actually served it. (It used to be rejected as an
+ambiguous upstream; no OpenAI-compatible client knows to send the header, so a
+direct caller could never reach such a model.)
+
+A request that SENDS an identity matching no entry is a different case, not the
+same fallback: `ResolveRequestedModel` returns not-found, so it is rejected and
+trips the invalid-model rate limiter without reaching any upstream. The whitelist
+counters still record it first — they run before resolution, and
+`UpstreamForModel` ignores the resolve error — so a stale-header whitelist request
+is attributed to the cheapest entry's `provider_identity` for a request nothing
+served. Cross-reference `broker_requests_total{status>=400}` when reading
+whitelist traffic per upstream, the same way the model row above says to.
+
+`provider_identity` is the only signal for which upstream absorbed header-less
+traffic: there is deliberately no per-request log for the pick, and the choice is
+by price rather than config order, so it does not move when an operator reorders
+the yaml.
 
 **The raw header never reaches a label value.** `UpstreamForModel` returns only what
 the pricing config holds, so a forged or stale `X-0G-Upstream` folds to a configured

@@ -19,10 +19,11 @@ import (
 // This is the regression guard for the load-bearing seam: delete the
 // ctx.Set(CtxKeyResolvedIdentity, …) line in ValidateModelAllowlist and this
 // test FAILS — resolvedIdentity(ctx) goes empty, and the identity assertion
-// (plus EffectiveTargetURLFor, which then resolves ambiguous) no longer sees
-// zhipu. aliyun is listed FIRST so the identity-agnostic model-keyed lookup
-// would return aliyun for every glm-5.2 request, making a passing test proof of
-// real identity binding rather than list order.
+// (plus EffectiveTargetURLFor, which then answers for the cheapest entry) no longer sees
+// zhipu. aliyun is also the CHEAPEST entry (in 1 / out 2 vs zhipu's 3 / 4), so the
+// identity-agnostic lookup would return aliyun for every glm-5.2 request — a
+// passing test is therefore proof of real identity binding. Keep aliyun cheaper if
+// the fixture prices are ever edited, or this stops proving anything.
 func TestValidateModelAllowlist_BindsUpstreamIdentity(t *testing.T) {
 	svc := newMultiModelService(t, "NATIVE", []config.ModelPricingEntry{
 		{Model: "glm-5.2", ProviderIdentity: "aliyun", InputPrice: "1", OutputPrice: "2",

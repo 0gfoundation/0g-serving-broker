@@ -1499,9 +1499,6 @@ func (c *Ctrl) ValidateModelAllowlist(ctx *gin.Context, body []byte, userAddr st
 
 	entry, resolved, err := c.Service.ResolveRequestedModel(requestModel, UpstreamIdentity(ctx))
 	if err != nil {
-		if errors.Is(err, config.ErrAmbiguousUpstream) {
-			return nil, err
-		}
 		c.recordModelMismatch(userAddr, requestModel)
 		return nil, fmt.Errorf("model not supported: '%s' is not available for this service", requestModel)
 	}
@@ -1602,9 +1599,6 @@ func (c *Ctrl) ResolveModelForBilling(ctx *gin.Context, body []byte, contentType
 	}
 	_, resolved, err := c.Service.ResolveRequestedModel(requestModel, UpstreamIdentity(ctx))
 	if err != nil {
-		if errors.Is(err, config.ErrAmbiguousUpstream) {
-			return err
-		}
 		c.recordModelMismatch(userAddr, requestModel)
 		return fmt.Errorf("model not supported: '%s' is not available for this service", requestModel)
 	}

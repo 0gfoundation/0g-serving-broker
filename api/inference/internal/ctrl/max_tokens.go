@@ -58,7 +58,7 @@ func (c *Ctrl) TranslateMaxTokens(body []byte, resolvedModel string) ([]byte, er
 // TranslateMaxTokensFor is TranslateMaxTokens keyed to the router-named upstream
 // identity (config.UpstreamIdentityHeader), so a multi-upstream model's
 // per-entry supportedParameters drive the translation for the selected upstream
-// rather than being dropped on an ambiguous resolve. identity="" is identical to
+// rather than being taken from the cheapest entry. identity="" is identical to
 // the bare call.
 func (c *Ctrl) TranslateMaxTokensFor(body []byte, resolvedModel, identity string) ([]byte, error) {
 	if len(body) == 0 {

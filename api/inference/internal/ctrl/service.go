@@ -538,7 +538,7 @@ func (c *Ctrl) resolveModelPricing(ctx context.Context) *config.ModelPricingEntr
 	// Bill the EXACT entry the router selected: when one canonical model is served
 	// by several upstreams, the resolved model string alone is ambiguous — pair it
 	// with the stashed identity. Empty identity (single-entry / non-multi-upstream)
-	// resolves identically to GetModelPricing (first-entry/wildcard).
+	// resolves identically to GetModelPricing (cheapest-entry/wildcard).
 	entry := c.Service.GetModelPricingFor(modelStr, resolvedIdentity(ginCtx))
 	if entry == nil {
 		c.logger.Errorf("GetBillingPrices: resolvedModel %q passed the allowlist but has no pricing entry; billing at on-chain max price", modelStr)
