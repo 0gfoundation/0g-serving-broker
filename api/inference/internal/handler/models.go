@@ -839,6 +839,13 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 		// variants table to correct for it — see videoPriceUnit for why naming a
 		// baseline rate "per second" is worse than leaving the consumer's existing
 		// per-second assumption alone.
+	case constant.ServiceTypeEmbedding:
+		// Embedding bills PromptTokens × InputPrice only (updateEmbeddingWithUsage) —
+		// there is no completion/output side, so report Completion as 0 rather than
+		// a configured OutputPrice that is never actually charged. Same convention
+		// as the image branch above.
+		obj.Pricing.Prompt = svc.InputPrice
+		obj.Pricing.Completion = "0"
 	default:
 		obj.Pricing.Prompt = svc.InputPrice
 		obj.Pricing.Completion = svc.OutputPrice
@@ -914,7 +921,17 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 	var priceFeedOut *PriceFeedState
 	isImageType := svc.Type == constant.ServiceTypeTextToImage || svc.Type == constant.ServiceTypeImageEditing
 	isVideoType := svc.Type == constant.ServiceTypeVideoGeneration
+	isEmbeddingType := svc.Type == constant.ServiceTypeEmbedding
 	switch {
+	case isEmbeddingType && svc.InputPriceUSDPerMillionTokens != "":
+		// Embedding bills PromptTokens × InputPrice only (updateEmbeddingWithUsage) —
+		// there is no completion/output side, so report Completion as 0 and derive
+		// Prompt alone, mirroring the image/video branches below. Unlike those two,
+		// this does NOT require OutputPriceUSDPerMillionTokens to be set (see the
+		// embedding carve-out in config.go's USD validation).
+		if prompt, ok := h.derivePerUnitUSD("token", svc.InputPriceUSDPerMillionTokens, ""); ok {
+			obj.PricingUSD = &ModelPricingUSD{Prompt: prompt, Completion: "0"}
+		}
 	case isImageType && svc.OutputPriceUSDPerMillionTokens != "":
 		// Image bills per generated image, not per token: surface the per-image
 		// USD under `image` (mirrors the native pricing.image) and report the
