@@ -256,43 +256,40 @@ func (c *Ctrl) verifySealedFieldsForServiceType(sealedFields []string) error {
 }
 
 // verifyPinnedCleartextForServiceType enforces the cleartext fields a sealed
-// request of this endpoint may only carry one value for (SPEC §7.1).
+// request of this endpoint may only carry one value for (SPEC §7.1) — today, a
+// sealed text-to-image request MUST carry an explicit
+// `response_format: "b64_json"`.
 //
-// Today that is exactly one field: a sealed text-to-image request MUST carry an
-// explicit `response_format: "b64_json"`. url mode has this broker persist the
-// generated images and hand back broker-served URLs — plaintext images reachable
-// by anyone holding the chatKey, which includes the router, i.e. the party the
-// sealing exists to keep out.
+// The checks themselves live in the protocol package (wire.ValidatePinnedCleartextFor),
+// which covers all three ways the pin can be defeated: a wrong or absent value, the
+// field SEALED away so nothing is left in the cleartext to read, and the field
+// declared UNBOUND so an intermediary could have rewritten it in transit. Calling
+// into it rather than re-implementing keeps this enclave and the client that
+// builds the envelope reading the same rule — and it is the reason those checks
+// are exported at all.
 //
-// REQUIRED, not merely "not url": OpenAI's response_format defaults to `url` for
-// the DALL·E family, so an omitted field is a request to publish in the clear
-// spelled as silence. This broker happens not to honour that default today
-// (forceB64ResponseFormat reports "" for an absent field and the URL rewrite
-// tests for "url"), so an omitted value would currently be served as b64 anyway
-// — but that is incidental, one OpenAI-compat fix away from becoming a leak, so
-// it is rejected explicitly rather than left to hold by accident.
+// Why the enclave repeats a check the reference client already makes: a
+// third-party client is under no obligation to use that client. This is the half
+// that does not depend on the sender.
 //
-// Rejected rather than downgraded to b64: the caller asked for a format this
-// mode cannot honour and must learn that, not silently receive a different one.
+// url mode has this broker persist the generated images and hand back
+// broker-served URLs — plaintext images reachable by anyone holding the chatKey,
+// which includes the router, i.e. the party the sealing exists to keep out. The
+// value is REQUIRED rather than merely "not url" because OpenAI's
+// response_format defaults to `url` for the DALL·E family, so an omitted field is
+// a request to publish in the clear spelled as silence. (This broker happens not
+// to honour that default today — forceB64ResponseFormat reports "" for an absent
+// field and the URL rewrite tests for "url" — but that is incidental, one
+// OpenAI-compat fix away from becoming a leak.)
+//
+// Rejected rather than downgraded to b64: the caller asked for a format this mode
+// cannot honour and must learn that, not silently receive a different one.
 func (c *Ctrl) verifyPinnedCleartextForServiceType(env wire.Request) error {
 	if c.Service.Type != constant.ServiceTypeTextToImage {
 		return nil
 	}
-	const (
-		field = "response_format"
-		want  = "b64_json"
-	)
-	raw, ok := env[field]
-	if !ok {
-		return fmt.Errorf("sealed %s request must set %q to %q explicitly (an absent value takes the server default, which is %q for some models and would publish the images outside the sealed channel)",
-			c.Service.Type, field, want, "url")
-	}
-	var got string
-	if err := json.Unmarshal(raw, &got); err != nil {
-		return fmt.Errorf("sealed %s request field %q must be the JSON string %q: %w", c.Service.Type, field, want, err)
-	}
-	if got != want {
-		return fmt.Errorf("sealed %s request field %q must be %q, got %q", c.Service.Type, field, want, got)
+	if err := wire.ValidatePinnedCleartextFor(wire.ProfileImage, env); err != nil {
+		return fmt.Errorf("sealed %s request: %w", c.Service.Type, err)
 	}
 	return nil
 }
