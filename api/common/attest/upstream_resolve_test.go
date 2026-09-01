@@ -16,6 +16,7 @@ func TestResolveReplaysUpstreamRecords(t *testing.T) {
 		RuntimeEvent{Event: EventImageUpdate, Payload: imageRecordPayload("ghcr.io/0gfoundation/0g-serving-broker@" + upgradeDigest)},
 		RuntimeEvent{Event: EventUpstreamAdd, Payload: []byte("engine2 http://engine-2:8000/v1")},
 		RuntimeEvent{Event: EventUpstreamRemove, Payload: []byte("vendor")},
+		RuntimeEvent{Event: EventUpstreamSetComplete, Payload: []byte("2")},
 	)
 
 	state, err := resolve(t, compose, events)
@@ -100,6 +101,7 @@ func TestResolveReportsAnUnknownUpstreamSet(t *testing.T) {
 			events := append(bootEvents(),
 				RuntimeEvent{Event: EventUpstreamAdd, Payload: []byte("good http://engine-1:8000/v1")},
 				tt.event,
+				RuntimeEvent{Event: EventUpstreamSetComplete, Payload: []byte("1")},
 				RuntimeEvent{Event: EventImageUpdate, Payload: imageRecordPayload("ghcr.io/0gfoundation/0g-serving-broker@" + upgradeDigest)},
 			)
 			state, err := resolve(t, pinnedCompose(t), events)
@@ -135,6 +137,7 @@ func TestResolveKeepsAnUnknownUpstreamSetUnknown(t *testing.T) {
 	events := append(bootEvents(),
 		RuntimeEvent{Event: EventUpstreamAdd, Payload: []byte("broken")},
 		RuntimeEvent{Event: EventUpstreamAdd, Payload: []byte("good http://engine-1:8000/v1")},
+		RuntimeEvent{Event: EventUpstreamSetComplete, Payload: []byte("1")},
 	)
 	state, err := resolve(t, pinnedCompose(t), events)
 	if err != nil {
@@ -155,6 +158,7 @@ func TestResolveDistinguishesEmptiedFromUnrecorded(t *testing.T) {
 	emptied, err := resolve(t, pinnedCompose(t), append(bootEvents(),
 		RuntimeEvent{Event: EventUpstreamAdd, Payload: []byte("engine1 http://engine-1:8000/v1")},
 		RuntimeEvent{Event: EventUpstreamRemove, Payload: []byte("engine1")},
+		RuntimeEvent{Event: EventUpstreamSetComplete, Payload: []byte("0")},
 	))
 	if err != nil {
 		t.Fatalf("ResolveRunningState() = %v", err)
