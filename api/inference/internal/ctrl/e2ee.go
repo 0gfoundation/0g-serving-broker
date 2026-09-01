@@ -223,36 +223,55 @@ func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, reqBody []byte) ([]byte, err
 	return plaintext, nil
 }
 
-// verifySealedFieldsForServiceType enforces the sealed-set policy for the
-// endpoint this broker serves (SPEC §5.1 profiles). The protocol package
-// deliberately leaves it here: OpenRequest verifies only that the decrypted keys
-// match the DECLARED sealed_fields, which a request that seals nothing sensitive
-// satisfies just as well as one that seals the prompt.
+// profileForServiceType maps the endpoint this broker serves to the wire profile
+// whose rules apply to a sealed request on it. sealable=false means "no sealed
+// request is acceptable here".
 //
-// chatbot / anthropic-chat are NOT checked here — the router's own front door
-// already rejects a chat request with no messages, and the reference client
-// enforces the chat sealed set at seal time.
-//
-// The multipart service types are refused outright: their real request is
-// multipart/form-data, which cannot be an envelope, so a JSON envelope arriving
-// on one of those endpoints would unseal into a JSON body the multipart upstream
-// cannot consume. The protocol has no section for them yet (SPEC §1 scope note).
-func (c *Ctrl) verifySealedFieldsForServiceType(sealedFields []string) error {
-	required := ""
-	switch c.Service.Type {
+// The mapping is an ALLOWLIST, and deliberately so. SPEC §1 covers exactly two
+// profiles; everything else either has no envelope format yet (the multipart
+// service types — their request is multipart/form-data, which cannot be an
+// envelope, so a JSON envelope arriving on one would unseal into a body the
+// upstream cannot consume) or has simply not been specified (video-generation,
+// and whatever service type is added next). A default arm that guessed
+// ProfileChat for those would apply the wrong rule to a request shape nobody has
+// analyzed — and would do it silently for a service type that does not exist
+// yet. Refusing is the honest answer, and it is what SPEC §1 requires.
+func profileForServiceType(svcType string) (p wire.Profile, sealable bool) {
+	switch svcType {
+	case constant.ServiceTypeChatbot:
+		return wire.ProfileChat, true
 	case constant.ServiceTypeTextToImage:
-		required = "prompt"
-	case constant.ServiceTypeSpeechToText, constant.ServiceTypeImageEditing:
-		return fmt.Errorf("sealed requests are not supported for service type %q", c.Service.Type)
+		return wire.ProfileImage, true
 	default:
-		return nil
+		return "", false
 	}
-	for _, f := range sealedFields {
-		if f == required {
-			return nil
-		}
+}
+
+// verifySealedFieldsForServiceType enforces the sealed-set policy for the
+// endpoint this broker serves (SPEC §5.1 profiles), by delegating to the
+// protocol package's own rule rather than restating it.
+//
+// The check is needed because OpenRequest verifies only that the decrypted keys
+// match the DECLARED sealed_fields — which a request that seals nothing
+// sensitive satisfies exactly as well as one that seals the payload. The
+// reference client refuses to BUILD such an envelope; a third-party client is
+// under no such obligation, so this is the half that does not depend on the
+// sender.
+//
+// Chat is now checked too. It used to be skipped on the reasoning that the
+// router's front door rejects a chat request with no messages and the reference
+// client enforces the set at seal time — but neither of those is this enclave,
+// and both are exactly the "someone else will catch it" argument that left the
+// image case open in the first place.
+func (c *Ctrl) verifySealedFieldsForServiceType(sealedFields []string) error {
+	profile, sealable := profileForServiceType(c.Service.Type)
+	if !sealable {
+		return fmt.Errorf("sealed requests are not supported for service type %q", c.Service.Type)
 	}
-	return fmt.Errorf("sealed %s request must seal %q (sealed_fields=%v)", c.Service.Type, required, sealedFields)
+	if err := wire.ValidateSealedFieldsFor(profile, sealedFields); err != nil {
+		return fmt.Errorf("sealed %s request: %w", c.Service.Type, err)
+	}
+	return nil
 }
 
 // verifyPinnedCleartextForServiceType enforces the cleartext fields a sealed
@@ -285,10 +304,11 @@ func (c *Ctrl) verifySealedFieldsForServiceType(sealedFields []string) error {
 // Rejected rather than downgraded to b64: the caller asked for a format this mode
 // cannot honour and must learn that, not silently receive a different one.
 func (c *Ctrl) verifyPinnedCleartextForServiceType(env wire.Request) error {
-	if c.Service.Type != constant.ServiceTypeTextToImage {
-		return nil
+	profile, sealable := profileForServiceType(c.Service.Type)
+	if !sealable {
+		return nil // already refused by verifySealedFieldsForServiceType
 	}
-	if err := wire.ValidatePinnedCleartextFor(wire.ProfileImage, env); err != nil {
+	if err := wire.ValidatePinnedCleartextFor(profile, env); err != nil {
 		return fmt.Errorf("sealed %s request: %w", c.Service.Type, err)
 	}
 	return nil

@@ -92,7 +92,7 @@ func TestMaybeUnsealImageRequestRejectsSealedSetWithoutPrompt(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected the enclave to refuse an image request that does not seal its prompt")
 	}
-	if !strings.Contains(err.Error(), `must seal "prompt"`) {
+	if !strings.Contains(err.Error(), `must include "prompt"`) {
 		t.Fatalf("expected the sealed-set policy to reject it, got: %v", err)
 	}
 }
@@ -109,12 +109,20 @@ func TestVerifySealedFieldsForServiceType(t *testing.T) {
 		{"image with prompt and extras", constant.ServiceTypeTextToImage, []string{"prompt", "user"}, false},
 		{"image without prompt", constant.ServiceTypeTextToImage, []string{"size"}, true},
 		{"image with nothing sealed", constant.ServiceTypeTextToImage, nil, true},
-		// Chat is left to the router's front door and the client library.
+		// Chat is checked here too. It used to be waved through on the reasoning
+		// that the router's front door and the reference client both catch it —
+		// but neither of those is this enclave, and "someone else will catch it"
+		// is what left the image case open to begin with.
 		{"chatbot", constant.ServiceTypeChatbot, []string{"messages"}, false},
-		{"chatbot with an odd set", constant.ServiceTypeChatbot, []string{"whatever"}, false},
-		// No envelope format defined for these yet (SPEC §1 scope note).
+		{"chatbot without messages", constant.ServiceTypeChatbot, []string{"whatever"}, true},
+		// The mapping is an allowlist: no profile is specified for these, so a
+		// sealed request on one is refused rather than checked against a guessed
+		// rule. Multipart shapes cannot be envelopes at all; video-generation and
+		// anything added later simply have not been analyzed.
 		{"speech-to-text", constant.ServiceTypeSpeechToText, []string{"file"}, true},
 		{"image-editing", constant.ServiceTypeImageEditing, []string{"prompt"}, true},
+		{"video-generation", constant.ServiceTypeVideoGeneration, []string{"prompt"}, true},
+		{"a service type that does not exist yet", "some-future-type", []string{"prompt"}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

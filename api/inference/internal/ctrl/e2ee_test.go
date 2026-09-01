@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"github.com/0glabs/0g-serving-broker/inference/config"
+	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -143,8 +145,12 @@ func newE2EEFixture(t *testing.T) *e2eeTestFixture {
 	}
 
 	c := &Ctrl{
-		logger:              &testAsyncLoggerImpl{},
-		teeService:          ts,
+		logger:     &testAsyncLoggerImpl{},
+		teeService: ts,
+		// The sealed-request path is gated on the service type (only the profiles
+		// SPEC §1 covers are sealable), so the fixture has to say which endpoint
+		// it is standing in for. These are chat tests.
+		Service:             config.Service{Type: constant.ServiceTypeChatbot},
 		svcCache:            cache.New(5*time.Minute, 10*time.Minute),
 		chatCacheExpiration: 5 * time.Minute,
 	}
