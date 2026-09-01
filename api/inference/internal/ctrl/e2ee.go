@@ -357,7 +357,9 @@ func e2eeReqBindHash(ctx *gin.Context) ([32]byte, bool) {
 	return h, ok
 }
 
-// maybeSealNonStreamResponse seals the sensitive fields (v1 default: choices) of
+// maybeSealNonStreamResponse seals the output fields a non-streaming response
+// actually carries, plus anything it carries that is not known cleartext metadata
+// (e2eeSealedFieldsFor), of
 // a non-streaming response (SPEC §7) when the request was sealed; otherwise it
 // returns body unchanged with sealed=false. Fail-closed: when the request was
 // sealed but sealing fails, it returns an error and the caller MUST NOT forward

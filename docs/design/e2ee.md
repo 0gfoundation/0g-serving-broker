@@ -17,7 +17,7 @@ The client seals the sensitive request fields (`messages`, `tools`) into an
 `_e2ee` object so the prompt stays encrypted end-to-end to **this broker's
 enclave**. The router routes on the cleartext fields (`model`, sampling params,
 `stream`) but cannot read the prompt. The enclave decrypts inside the TEE, runs
-inference, and seals the response (`choices`) back to a client ephemeral key.
+inference, and seals the response back to a client ephemeral key.
 
 ## Crypto suite (SPEC §3)
 
@@ -137,7 +137,9 @@ uses the `ctrl.ErrE2EEKeyMismatch` sentinel; the router must key off the
 
 ## Response seal (SPEC §7)
 
-`ctrl/e2ee.go` seals the sensitive response fields (v1 default: `choices`) to the
+`ctrl/e2ee.go` seals the response fields the body actually carries — the known
+output fields plus anything that is not on the cleartext allowlist, see
+`e2eeSealedFieldsFor` — to the
 request's `client_eph_pub` (`info = "0g-pc/v1/resp"`), leaving `usage`/`model`/
 `id` cleartext for router billing.
 
@@ -164,7 +166,13 @@ broker → router → client, and the **router** rewrites `model` (substituting 
 served model back to the alias the client requested) and attaches `x_0g_trace`
 (an observability trace) to the sealed response on the way back. Because they are
 unbound, the router's rewrite/injection does not break the client's `Open`, while
-every bound field (`choices` sealed, `usage`/`id` cleartext) stays tamper-evident.
+every bound field stays tamper-evident. What is sealed is computed per frame
+rather than fixed at `choices`: `e2eeSensitiveResponseFields` names the known
+output fields across surfaces, `e2eeResponseControlFields` is the cleartext
+allowlist (`model`, `usage`, `id`, …), and anything in neither is sealed — so a
+new upstream field defaults to confidential instead of leaking. Adding a key to
+the cleartext allowlist asserts it never carries model output or anything derived
+from the request.
 Per the §8 corollary a router-injected value is not cryptographically trusted
 (trust comes from on-chain settlement), so these MUST be unbound, never
 bound/signed fields. Both are response-only — they are not on the request path and

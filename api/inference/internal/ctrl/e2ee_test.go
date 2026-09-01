@@ -1582,8 +1582,11 @@ func TestSealSSELine_RefusesWhatItCannotSeal(t *testing.T) {
 			if err == nil {
 				t.Fatalf("line was forwarded instead of refused; output: %q", out)
 			}
-			if tc.secret != "" && strings.Contains(out, tc.secret) {
-				t.Errorf("payload leaked: %q", out)
+			// The property is that nothing at all is handed back to be written: a
+			// "does out contain the secret" check would pass vacuously here, since a
+			// refusal always returns "".
+			if out != "" {
+				t.Errorf("a refused line still produced output to forward: %q", out)
 			}
 			var httpErr *brokererrors.HTTPError
 			if !errors.As(err, &httpErr) || httpErr.Status() != http.StatusBadGateway {
