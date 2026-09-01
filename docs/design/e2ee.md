@@ -143,6 +143,16 @@ output fields plus anything that is not on the cleartext allowlist, see
 request's `client_eph_pub` (`info = "0g-pc/v1/resp"`), leaving `usage`/`model`/
 `id` cleartext for router billing.
 
+One exception, deliberate and pinned by a test
+(`TestSealFrame_MessageStartAlsoSealsNestedModelAndUsage`): on the Anthropic
+streaming surface `message_start` nests `model` and `usage.input_tokens` inside
+`message`, and `message` is sealed as a whole, so those two do **not** stay
+cleartext there. Over-sealing is the safe direction — Ollama's `/api/chat` puts the
+completion under that same key — the broker meters `rawBody` rather than the sealed
+frame, and the router does not support sealed Anthropic streams today. A downstream
+meter reading only cleartext frames therefore sees no input tokens for a sealed
+Anthropic stream.
+
 - Non-streaming (`handleChargingResponse`): one frame via
   `maybeSealNonStreamResponse`, sealed after sanitization and before the write.
 - Streaming (`handleChargingStreamResponse`): a per-stream `responseFrameSealer`

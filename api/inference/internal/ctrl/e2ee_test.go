@@ -1140,7 +1140,7 @@ func TestSealNonStreamResponse_AnthropicContentSealed(t *testing.T) {
 // A non-streaming completion always carries output, so a body with no field we
 // recognise means we cannot identify the payload — fail closed rather than
 // forward it beside an injected empty array.
-func TestSealNonStreamResponse_UnknownShapeFailsClosed(t *testing.T) {
+func TestSealNonStreamResponse_UnknownShapeIsSealed(t *testing.T) {
 	f := newE2EEFixture(t)
 	ctx := newGinCtx()
 	ctx.Set(CtxKeyE2EESealed, true)
@@ -1624,6 +1624,30 @@ func TestSealSSELine_PassesPayloadFreeSSEFields(t *testing.T) {
 		}
 		if out != line+"\n" {
 			t.Errorf("payload-free SSE line was altered: %q -> %q", line, out)
+		}
+	}
+}
+
+// Every spacing variant of the done sentinel has to be recognised. isStreamDone is
+// a byte-exact compare on "data: [DONE]", and sanitizeStreamLine normalises the
+// "data:" spacing only for JSON payloads — so a variant used to reach the JSON
+// parse and be refused, which aborts the stream on its very last line: the loop
+// returns before the EOF branch, no final frame is emitted, and the client reads a
+// truncation it cannot distinguish from a dropped connection.
+func TestSealSSELine_RecognisesEveryDoneSpelling(t *testing.T) {
+	for _, line := range []string{"data: [DONE]", "data:[DONE]", "data:  [DONE]", "data: [DONE]  "} {
+		out, err := newTestFrameSealer(t).sealSSELine(line + "\n")
+		if err != nil {
+			t.Errorf("%q was refused, which truncates the stream at its last line: %v", line, err)
+			continue
+		}
+		// The synthetic final frame precedes the sentinel, so the client always gets
+		// exactly one completion marker.
+		if !strings.Contains(out, `"final":true`) {
+			t.Errorf("%q produced no final frame: %q", line, out)
+		}
+		if !strings.HasSuffix(out, line+"\n") {
+			t.Errorf("%q: the sentinel itself should still be forwarded, got %q", line, out)
 		}
 	}
 }

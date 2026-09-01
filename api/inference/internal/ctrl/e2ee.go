@@ -110,6 +110,11 @@ var e2eeSensitiveResponseFields = []string{
 	"delta",         // Anthropic streaming: content_block_delta, message_delta
 }
 
+// streamDoneSentinel is the payload of the OpenAI SSE terminator, compared after
+// the "data:" prefix is stripped and the payload trimmed so every spacing variant
+// an upstream might emit is recognised.
+const streamDoneSentinel = "[DONE]"
+
 // e2eeResponseControlFields are the keys a frame may carry while carrying no
 // model output. Everything here is transport, identity, routing or billing
 // metadata, and none of it is the completion.
@@ -388,13 +393,24 @@ func (c *Ctrl) maybeSealNonStreamResponse(ctx *gin.Context, body []byte) (out []
 	// beside an injected "choices":[]).
 	sealedFields := e2eeSealedFieldsFor(resp)
 	if len(sealedFields) == 0 {
-		// 502, not the default 400. The upstream answered 200 with a body this broker
-		// cannot identify, so the request is refused for a reason that is ours and the
-		// upstream's, never the caller's — and a 400 here would file a shape we failed
-		// to recognise (or an upstream returning {"error":…} under a 200, which some
-		// gateways do) under client error in the rejection and health accounting,
-		// which is exactly where nobody would look for it. errors.Response also logs
-		// 5xx at Error level, so an unrecognised surface is loud instead of silent.
+		// Reachable only when EVERY key is on the cleartext allowlist, e.g.
+		// {"id","model","usage"} — an unknown key is sealed now, not refused, so an
+		// unrecognised body shape no longer arrives here. What is left is a
+		// non-streaming completion that carries no output at all, which no upstream
+		// should ever produce.
+		//
+		// 502, not the default 400: the fault is ours and the upstream's, never the
+		// caller's, and a 400 would file it under client error in the rejection and
+		// health accounting, which is exactly where nobody would look for it.
+		// errors.Response also logs 5xx at Error level, so it is loud rather than
+		// silent.
+		//
+		// One consequence worth being deliberate about: a gateway that returns
+		// {"error":…} under a 200 is now sealed and delivered as a 200, because
+		// "error" is not on the cleartext allowlist (its text can quote the prompt).
+		// A client that only calls OpenResponse on completion-shaped bodies sees an
+		// opaque _e2ee blob where it used to read the message. Sealing it is still the
+		// right call — the alternative leaks — but the client has to open it.
 		return nil, true, respBindHash, errors.NewHTTPError(http.StatusBadGateway, fmt.Errorf(
 			"seal response: no sealable output field in response (looked for %v)", e2eeSensitiveResponseFields))
 	}
@@ -469,16 +485,11 @@ func (rs *responseFrameSealer) sealSSELine(line string) (string, error) {
 	if trimmed == "" {
 		return line, nil // preserve SSE event separators
 	}
-	if isStreamDone([]byte(trimmed)) {
-		final, err := rs.finalFrameLine()
-		if err != nil {
-			return "", err
-		}
-		return final + line, nil // synthetic final frame (if any) precedes [DONE]
-	}
-	// SSE lines that carry no payload: a comment (":" — also how keepalives are
-	// sent) and the event/id/retry fields. Forwarded as-is because there is nothing
-	// in them to hide.
+	// SSE lines that carry no payload: the event/id/retry fields, and a comment
+	// (":"). Forwarded as-is because there is nothing in them to hide. The comment
+	// case is belt-and-braces — sanitizeStreamLine already drops comments with
+	// forward=false, so this function never sees one on the live path — but a
+	// payload-free line must not be refused if that ever changes.
 	if strings.HasPrefix(trimmed, ":") ||
 		strings.HasPrefix(trimmed, "event:") ||
 		strings.HasPrefix(trimmed, "id:") ||
@@ -496,9 +507,24 @@ func (rs *responseFrameSealer) sealSSELine(line string) (string, error) {
 		return "", rs.refuseUnsealableLine("line is not an SSE field", trimmed)
 	}
 	payload := strings.TrimSpace(after)
+	// The done sentinel, decided from the payload rather than from a byte-exact
+	// compare of the whole line. isStreamDone only matches "data: [DONE]", and
+	// sanitizeStreamLine normalises the "data:" spacing only for JSON payloads — so
+	// an upstream emitting "data:[DONE]" or "data:  [DONE]" used to fall through to
+	// the JSON parse below and be refused, aborting the stream on its very last
+	// line: the stream loop returns before the EOF branch, so no final frame is ever
+	// emitted and the client reads a truncation. And by then the headers are flushed,
+	// so the 502 cannot even be delivered as a status.
+	if payload == streamDoneSentinel {
+		final, err := rs.finalFrameLine()
+		if err != nil {
+			return "", err
+		}
+		return final + line, nil // synthetic final frame (if any) precedes [DONE]
+	}
 	var frame wire.Response
 	if err := json.Unmarshal([]byte(payload), &frame); err != nil || frame == nil {
-		return "", rs.refuseUnsealableLine("data payload is not a JSON object", payload)
+		return "", rs.refuseUnsealableLine("data payload is neither a JSON object nor the done sentinel", payload)
 	}
 	return rs.sealFrame(frame, false)
 }
