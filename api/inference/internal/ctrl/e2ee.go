@@ -161,6 +161,15 @@ func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, reqBody []byte) ([]byte, err
 		return nil, err
 	}
 
+	// Sealing the payload is not sufficient on its own: a CLEARTEXT field can
+	// direct this enclave to publish the RESULT outside the sealed channel
+	// (SPEC §7.1). Checked here, pre-inference, so such a request never reaches
+	// the GPU. The reference client refuses to build one, but a third-party
+	// client is under no such obligation — same reasoning as the sealed-set check.
+	if err := c.verifyPinnedCleartextForServiceType(env); err != nil {
+		return nil, err
+	}
+
 	// Extract the client's response ephemeral key before opening, so the response
 	// path can seal even though the field lives in the (now consumed) envelope.
 	// Validate its length here, BEFORE the request is forwarded upstream: an
@@ -244,6 +253,48 @@ func (c *Ctrl) verifySealedFieldsForServiceType(sealedFields []string) error {
 		}
 	}
 	return fmt.Errorf("sealed %s request must seal %q (sealed_fields=%v)", c.Service.Type, required, sealedFields)
+}
+
+// verifyPinnedCleartextForServiceType enforces the cleartext fields a sealed
+// request of this endpoint may only carry one value for (SPEC §7.1).
+//
+// Today that is exactly one field: a sealed text-to-image request MUST carry an
+// explicit `response_format: "b64_json"`. url mode has this broker persist the
+// generated images and hand back broker-served URLs — plaintext images reachable
+// by anyone holding the chatKey, which includes the router, i.e. the party the
+// sealing exists to keep out.
+//
+// REQUIRED, not merely "not url": OpenAI's response_format defaults to `url` for
+// the DALL·E family, so an omitted field is a request to publish in the clear
+// spelled as silence. This broker happens not to honour that default today
+// (forceB64ResponseFormat reports "" for an absent field and the URL rewrite
+// tests for "url"), so an omitted value would currently be served as b64 anyway
+// — but that is incidental, one OpenAI-compat fix away from becoming a leak, so
+// it is rejected explicitly rather than left to hold by accident.
+//
+// Rejected rather than downgraded to b64: the caller asked for a format this
+// mode cannot honour and must learn that, not silently receive a different one.
+func (c *Ctrl) verifyPinnedCleartextForServiceType(env wire.Request) error {
+	if c.Service.Type != constant.ServiceTypeTextToImage {
+		return nil
+	}
+	const (
+		field = "response_format"
+		want  = "b64_json"
+	)
+	raw, ok := env[field]
+	if !ok {
+		return fmt.Errorf("sealed %s request must set %q to %q explicitly (an absent value takes the server default, which is %q for some models and would publish the images outside the sealed channel)",
+			c.Service.Type, field, want, "url")
+	}
+	var got string
+	if err := json.Unmarshal(raw, &got); err != nil {
+		return fmt.Errorf("sealed %s request field %q must be the JSON string %q: %w", c.Service.Type, field, want, err)
+	}
+	if got != want {
+		return fmt.Errorf("sealed %s request field %q must be %q, got %q", c.Service.Type, field, want, got)
+	}
+	return nil
 }
 
 // verifyEncKeyID checks that a request's key_id (base64url) selects this

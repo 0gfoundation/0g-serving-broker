@@ -5,7 +5,7 @@ go 1.24.0
 toolchain go1.24.9
 
 require (
-	github.com/0gfoundation/0g-pc-e2ee/protocol v0.0.0-20260901064911-60de53c18f12
+	github.com/0gfoundation/0g-pc-e2ee/protocol v0.0.0-20260901073904-f4970b98b5e4
 	github.com/0gfoundation/0g-storage-client v1.2.2
 	github.com/Dstack-TEE/dstack/sdk/go v0.0.0-20251023024755-9304e6d533e7
 	github.com/andybalholm/brotli v1.1.0

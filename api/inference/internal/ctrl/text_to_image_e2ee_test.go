@@ -335,3 +335,78 @@ func TestEnsureSealedFieldsPresent(t *testing.T) {
 		t.Fatalf("an existing sealed field must not be overwritten, got %s", frame["data"])
 	}
 }
+
+// The enclave half of the §7.1 pin: sealing the prompt does not stop a cleartext
+// response_format from telling this broker to publish the images from a plain
+// URL. Checked pre-inference, and required rather than merely "not url" — the
+// OpenAI default for the DALL·E family IS url, so silence is the leak.
+func TestMaybeUnsealImageRequestRequiresExplicitB64ResponseFormat(t *testing.T) {
+	tests := []struct {
+		name           string
+		responseFormat json.RawMessage // nil = field omitted entirely
+		wantErr        bool
+	}{
+		{"explicit b64_json", mustRawJSON(t, `"b64_json"`), false},
+		{"explicit url", mustRawJSON(t, `"url"`), true},
+		{"omitted — the server default is url", nil, true},
+		{"null", mustRawJSON(t, `null`), true},
+		{"non-string", mustRawJSON(t, `7`), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newE2EEFixture(t)
+			f.c.Service = config.Service{Type: constant.ServiceTypeTextToImage}
+
+			// Build the envelope, then set response_format on the CLEARTEXT half —
+			// it is not sealed, so this is exactly what a non-conforming client can
+			// put on the wire.
+			var env map[string]json.RawMessage
+			if err := json.Unmarshal(f.sealImageRequest(t, []string{"prompt"}), &env); err != nil {
+				t.Fatalf("unmarshal envelope: %v", err)
+			}
+			if tt.responseFormat == nil {
+				delete(env, "response_format")
+			} else {
+				env["response_format"] = tt.responseFormat
+			}
+			body, err := json.Marshal(env)
+			if err != nil {
+				t.Fatalf("marshal envelope: %v", err)
+			}
+
+			_, err = f.c.MaybeUnsealRequest(newGinCtx(), body)
+			if !tt.wantErr {
+				// Mutating a bound cleartext field breaks the AAD, so the only case
+				// that can succeed is the untouched b64_json one.
+				if err != nil {
+					t.Fatalf("a conforming sealed image request must unseal: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("expected the enclave to refuse this sealed image request")
+			}
+			if !strings.Contains(err.Error(), "response_format") {
+				t.Fatalf("expected the response_format pin to reject it, got: %v", err)
+			}
+		})
+	}
+}
+
+// Chat is unaffected: it has no pinned cleartext field, and a chat request
+// carrying its own response_format (JSON mode) must pass through.
+func TestMaybeUnsealChatRequestHasNoResponseFormatPin(t *testing.T) {
+	f := newE2EEFixture(t)
+	f.c.Service = config.Service{Type: constant.ServiceTypeChatbot}
+	if _, err := f.c.MaybeUnsealRequest(newGinCtx(), f.sealRequest(t, f.signerAddr)); err != nil {
+		t.Fatalf("a chat request without response_format must still unseal: %v", err)
+	}
+}
+
+func mustRawJSON(t *testing.T, s string) json.RawMessage {
+	t.Helper()
+	if !json.Valid([]byte(s)) {
+		t.Fatalf("invalid test JSON %q", s)
+	}
+	return json.RawMessage(s)
+}
