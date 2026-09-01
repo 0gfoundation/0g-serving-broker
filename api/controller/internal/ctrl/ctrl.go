@@ -244,10 +244,7 @@ func NewCtrl(fullConfig *config.Config, logger log.Logger) (*Ctrl, error) {
 	}
 
 	// Initialize admin addresses map
-	adminAddresses := make(map[string]bool)
-	for _, addr := range cfg.AdminAddresses {
-		adminAddresses[strings.ToLower(addr)] = true
-	}
+	adminAddresses := newAdminAddressSet(cfg.AdminAddresses)
 
 	// Initialize allowed IPs map
 	allowedIPs := make(map[string]bool)
@@ -313,6 +310,28 @@ func (c *Ctrl) Close() error {
 		c.servingContract.Close()
 	}
 	return c.dockerClient.Close()
+}
+
+// newAdminAddressSet builds the admin whitelist, lowercased for lookup and with
+// blank entries dropped.
+//
+// Dropping blanks is not tidiness. A stray "-" in the yaml list, or an env var
+// split on a trailing separator, would otherwise put "" in the set — and an empty
+// string is exactly what every signature path that fails to recover an address
+// produces. middleware.AuthMiddleware compares the recovered address against the
+// caller's OWN token field, so a "" entry here turns any such failure into a
+// match against an attacker-supplied empty address. Cheap to refuse at the
+// boundary; very hard to notice anywhere else.
+func newAdminAddressSet(addrs []string) map[string]bool {
+	set := make(map[string]bool, len(addrs))
+	for _, addr := range addrs {
+		addr = strings.TrimSpace(addr)
+		if addr == "" {
+			continue
+		}
+		set[strings.ToLower(addr)] = true
+	}
+	return set
 }
 
 // IsAdminAddress checks if an address is in the admin whitelist

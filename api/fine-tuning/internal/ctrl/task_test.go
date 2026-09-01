@@ -94,7 +94,9 @@ func signTask(t *testing.T, priv string, id uuid.UUID) (address, signature strin
 	if err != nil {
 		t.Fatalf("sign: %v", err)
 	}
-	// crypto.Sign uses recovery ID 0/1; validateSignature expects 27/28.
+	// crypto.Sign emits a raw 0/1. validateSignature now accepts that as well as
+	// 27/28; this still produces the Ethereum-facing form so the test covers the
+	// convention real clients send.
 	sig[64] += 27
 	return addr, hexutil.Encode(sig)
 }

@@ -145,7 +145,14 @@ func (*Ctrl) validateSignature(task *schema.Task) error {
 	if err != nil {
 		return err
 	}
-	if recoveredAddress.Hex() != task.UserAddress {
+	// Compare as addresses, not as strings. Hex() returns the EIP-55 mixed-case
+	// form while task.UserAddress is whatever the client put in the JSON body and
+	// is normalised nowhere on the path, so an all-lowercase address — valid, and
+	// what plenty of wallets emit — was rejected despite a valid signature. That is
+	// the same "correct signature refused over its representation" failure this
+	// change exists to remove, and the two sibling verifiers below already do it
+	// this way.
+	if recoveredAddress != common.HexToAddress(task.UserAddress) {
 		return errors.New("signature verification failed: address mismatch")
 	}
 
