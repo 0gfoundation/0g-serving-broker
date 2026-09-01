@@ -796,10 +796,11 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 			logPath = logPath[:idx]
 		}
 		p.logger.Infof("Whitelist user request: user=%s, service=%s, path=%s", userAddress, svcType, logPath)
-		// Label from the BOUNDED whitelist helper, never the raw body value:
-		// these counters record before allowlist validation, and raw user
-		// strings as label values are an unbounded-cardinality vector.
-		monitor.RecordWhitelistRequest(svcType, p.ctrl.WhitelistMetricModel(reqBody, ctx.Request.Header.Get("Content-Type")))
+		// Labels from the BOUNDED whitelist helper, never the raw body value or
+		// identity header: these counters record before allowlist validation, and
+		// raw user strings as label values are an unbounded-cardinality vector.
+		wlModel, wlUpstream := p.ctrl.WhitelistMetricLabels(ctx, reqBody, ctx.Request.Header.Get("Content-Type"))
+		monitor.RecordWhitelistRequest(svcType, wlModel, wlUpstream)
 		// Raw on purpose: the DB row records the user-requested id verbatim;
 		// only the metric label above goes through the bounded fold.
 		modelName := ctrl.ExtractModelName(reqBody, ctx.Request.Header.Get("Content-Type"))
