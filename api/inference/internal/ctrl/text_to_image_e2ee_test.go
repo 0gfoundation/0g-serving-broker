@@ -204,7 +204,7 @@ func TestSealedImageResponseHidesImagesAndPublishesBillableCount(t *testing.T) {
 	}
 
 	// The client recovers the images.
-	opened, err := wire.OpenResponse(f.clientEphSk, frame)
+	opened, err := wire.OpenResponseFor(wire.ProfileImage, f.clientEphSk, frame)
 	if err != nil {
 		t.Fatalf("client open: %v", err)
 	}
@@ -244,7 +244,7 @@ func TestSealedImageResponseDetectsTamperedBillableCount(t *testing.T) {
 		t.Fatalf("unmarshal frame: %v", err)
 	}
 	frame["usage"] = json.RawMessage(`{"output_images":99}`)
-	if _, err := wire.OpenResponse(f.clientEphSk, frame); err == nil {
+	if _, err := wire.OpenResponseFor(wire.ProfileImage, f.clientEphSk, frame); err == nil {
 		t.Fatal("an inflated usage.output_images must fail the client's Open")
 	}
 }
