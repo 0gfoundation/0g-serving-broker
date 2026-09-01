@@ -184,21 +184,30 @@ type RunningState struct {
 	// have received it. This package reports the set; the caller decides what it
 	// establishes.
 	Upstreams []Upstream
-	// UpstreamsRecorded says whether any upstream record appeared at all.
+	// UpstreamsState is UpstreamsUnrecorded, UpstreamsKnown or UpstreamsUnknown, and
+	// it is the single source of truth for which of the three this answer is.
 	//
-	// It exists because three states have to be told apart and a slice can express
-	// two. False means no record appeared — the deployment predates these records or
-	// never writes them, so it forwards according to a config no measurement covers
-	// and NOTHING here bounds where plaintext goes. True with an empty Upstreams is
-	// the opposite: a log that recorded destinations and then withdrew them all, which
-	// is a bound of zero.
+	// A string rather than a bool pair, and certainly rather than "is UpstreamsErr
+	// nil": this type is destined for the SDK, so it gets transported, and an `error`
+	// field marshals to `{}` under encoding/json. A verifier on the far side of that
+	// would render an unreplayable log as "records appeared, zero permitted
+	// destinations" — the fail-open direction the three states exist to prevent.
 	//
-	// Collapsing those two into "empty" would be worst once the set feeds the signing
+	//   UpstreamsUnrecorded  no record appeared. The deployment predates these
+	//                        records or never writes them, so it forwards according
+	//                        to a config no measurement covers and NOTHING here
+	//                        bounds where plaintext goes.
+	//   UpstreamsKnown       the set is Upstreams, possibly empty. Empty is the
+	//                        opposite of unrecorded: destinations were recorded and
+	//                        then withdrawn, which is a bound of zero.
+	//   UpstreamsUnknown     the records could not be replayed. Neither Upstreams nor
+	//                        UpstreamSetHash means anything; UpstreamsErr says why.
+	//
+	// Collapsing unrecorded and empty would be worst once the set feeds the signing
 	// key's derivation path: an unbounded deployment and one explicitly bounded to
 	// nothing would derive the same key.
-	UpstreamsRecorded bool
-	// UpstreamsErr is non-nil when the upstream records could not be replayed, and
-	// then the set is UNKNOWN — neither Upstreams nor UpstreamSetHash means anything.
+	UpstreamsState string
+	// UpstreamsErr says why the set is unknown, and is nil in the other two states.
 	//
 	// Unknown is reported rather than returned as a hard error because the rest of
 	// this answer does not depend on it: which image the broker runs and which keys
@@ -211,6 +220,25 @@ type RunningState struct {
 	// What is NOT done is reporting the members that happened to parse. A partial set
 	// understates where plaintext can go, which is the direction that misleads.
 	UpstreamsErr error
+	// UpstreamMoves names every upstream whose binding changed during this boot,
+	// in the order the changes were recorded, as "<name>: <old URL> -> <new URL>".
+	//
+	// It exists because a re-add is last-wins, so Upstreams and UpstreamSetHash — the
+	// two values a caller actually consumes — show only the final binding. Telling a
+	// caller to walk Events for the superseded record is not a mitigation: neither of
+	// the values they use does that.
+	//
+	// Why it matters: rewriting a name from an external vendor to something that looks
+	// like an in-CVM container makes a deployment appear to keep plaintext inside when
+	// it did not. That is the fail-open direction, and it is the one place in this
+	// ledger where last-wins has no cross-check to catch it — an image record's signer
+	// has to match the quote's report_data, and nothing yet ties an upstream record to
+	// anything outside the log.
+	//
+	// Empty is the ordinary case. A caller treating a non-empty value as suspicious is
+	// making a judgement this package does not make: a legitimate reconfiguration
+	// produces one too.
+	UpstreamMoves []string
 	// Events is the full runtime event sequence whose replay matched the quote.
 	Events []RuntimeEvent
 }
@@ -331,9 +359,13 @@ func ResolveRunningState(v VerifiedQuote, tcbInfoJSON []byte, brokerService stri
 			//
 			// Once unknown, stay unknown: a later record cannot repair a set whose earlier
 			// members are unreadable, and pretending otherwise would report a subset.
-			state.UpstreamsRecorded = true
-			if state.UpstreamsErr == nil {
-				state.UpstreamsErr = upstreams.apply(event.Event, string(event.Payload))
+			if state.UpstreamsState == UpstreamsUnrecorded {
+				state.UpstreamsState = UpstreamsKnown
+			}
+			if state.UpstreamsState == UpstreamsKnown {
+				if err := upstreams.apply(event.Event, string(event.Payload)); err != nil {
+					state.UpstreamsState, state.UpstreamsErr = UpstreamsUnknown, err
+				}
 			}
 		default:
 			return nil, fmt.Errorf("unrecognised %s event %q: this reader is older than the CVM that wrote the log, so it cannot say what is running", EventNamespace, event.Event)
@@ -345,8 +377,8 @@ func ResolveRunningState(v VerifiedQuote, tcbInfoJSON []byte, brokerService stri
 	if configErr != nil {
 		return nil, configErr
 	}
-	if state.UpstreamsErr == nil {
-		state.Upstreams = upstreams.list()
+	if state.UpstreamsState == UpstreamsKnown {
+		state.Upstreams, state.UpstreamMoves = upstreams.list(), upstreams.moves()
 	}
 
 	// A record wins over the compose pin, and the two are mutually exclusive.

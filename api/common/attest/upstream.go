@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -29,12 +30,27 @@ var upstreamNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,62}$`)
 // Changing either copy means changing both.
 var upstreamIdentityPattern = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 
+// The three states RunningState.UpstreamsState can hold. The zero value is
+// UpstreamsUnrecorded on purpose: a RunningState nobody filled in must not read as
+// "the set is known and empty".
+const (
+	UpstreamsUnrecorded = "" // no upstream record appeared
+	UpstreamsKnown      = "known"
+	UpstreamsUnknown    = "unknown" // records appeared and could not be replayed
+)
+
 // upstreamSet replays EventUpstreamAdd and EventUpstreamRemove into the set that is
-// permitted now, keeping the order names were first added so a caller can print the
-// set as the log built it. UpstreamSetHash does not use that order — see there.
+// permitted now, keeping the order names entered it so a caller can print the set as
+// the log built it. UpstreamSetHash does not use that order — see there.
 type upstreamSet struct {
 	byName map[string]Upstream
 	order  []string
+	// firstBinding holds what each name meant the first time this boot recorded it,
+	// and is never deleted — a name removed and added again has still been rebound.
+	firstBinding map[string]Upstream
+	// moved records every rebinding, because last-wins otherwise hides one from the
+	// values a caller consumes. See RunningState.UpstreamMoves.
+	moved []string
 }
 
 func newUpstreamSet() *upstreamSet {
@@ -67,8 +83,10 @@ func (s *upstreamSet) apply(event, payload string) error {
 // corrective record possible on an append-only log, leave the set unknown until the
 // next reboot.
 //
-// Last-wins matches how the image and config records already behave, and a reader
-// still learns of the move: the superseded record is right there above it.
+// Last-wins matches how the image and config records already behave. And the rebinding
+// is not left implicit: it is reported in RunningState.UpstreamMoves, because telling a
+// caller to find the superseded record in the raw events is no mitigation when neither
+// the set nor its hash does that.
 func (s *upstreamSet) add(payload string) error {
 	fields := strings.Fields(payload)
 	if len(fields) < 2 || len(fields) > 3 {
@@ -89,16 +107,41 @@ func (s *upstreamSet) add(payload string) error {
 		}
 		next.Identity = fields[2]
 	}
+	// A rebinding is recorded whether it happened as a bare re-add or as
+	// remove-then-add: both are invisible to the values a caller consumes, and both
+	// can turn an external destination into one that looks like an in-CVM container.
+	// Comparison is against the FIRST binding this boot, not the immediately previous
+	// one, so a name that was removed and brought back elsewhere still counts.
+	//
+	// Re-emitting the identical record is not a rebinding, which is what lets a writer
+	// re-publish its whole table at boot without every name looking moved.
+	if first, seen := s.firstBinding[name]; seen {
+		if first != next {
+			s.moved = append(s.moved, fmt.Sprintf("%s: %s -> %s", name, first.URL, next.URL))
+		}
+	} else {
+		if s.firstBinding == nil {
+			s.firstBinding = map[string]Upstream{}
+		}
+		s.firstBinding[name] = next
+	}
 	if _, ok := s.byName[name]; ok {
 		// Already present: overwrite in place and leave its position alone, so a boot
-		// re-emit does not reshuffle the reported order and a move keeps the slot the
-		// name has always had.
+		// re-emit does not reshuffle the reported order.
 		s.byName[name] = next
 		return nil
 	}
 	s.byName[name] = next
 	s.order = append(s.order, name)
 	return nil
+}
+
+// moves returns the rebindings recorded this boot, nil when there were none.
+func (s *upstreamSet) moves() []string {
+	if len(s.moved) == 0 {
+		return nil
+	}
+	return s.moved
 }
 
 // remove applies one EventUpstreamRemove payload: "<name>".
@@ -137,7 +180,7 @@ func (s *upstreamSet) remove(payload string) error {
 // while present keeps its position, and one removed and added again takes a new one
 // at the end.
 //
-// Nil for an empty set. That does NOT mean "no records" — RunningState.UpstreamsRecorded
+// Nil for an empty set. That does NOT mean "no records" — RunningState.UpstreamsState
 // is what separates a log that never mentioned upstreams from one that withdrew them
 // all, because a slice cannot express both.
 func (s *upstreamSet) list() []Upstream {
@@ -158,10 +201,18 @@ func (s *upstreamSet) list() []Upstream {
 // package does not know. That belongs to the caller. What is checked here is only
 // that the record names something a base URL could be, so a set built from it means
 // something at all.
+//
+// A note for whoever writes the writer: these rules are STRICTER than what
+// inference/config accepts for a targetUrl today. Config never trims a trailing
+// slash from the service-level targetUrl, and it accepts a bare "/" path, a default
+// port and an uppercase host. A writer that emits configured URLs verbatim will
+// therefore produce records this refuses, and the whole set goes unknown for a live,
+// valid deployment. Since readers must ship before writers, the writer cannot fix
+// that by relaxing this — it has to normalise before it emits, to exactly these
+// rules.
+// The caller splits the payload with strings.Fields, so raw never arrives with
+// surrounding whitespace and this does not check for it.
 func validUpstreamURL(raw string) error {
-	if raw != strings.TrimSpace(raw) {
-		return fmt.Errorf("base URL %q has surrounding whitespace", raw)
-	}
 	u, err := url.Parse(raw)
 	if err != nil {
 		return fmt.Errorf("base URL %q does not parse: %w", raw, err)
@@ -206,12 +257,40 @@ func validUpstreamURL(raw string) error {
 			return fmt.Errorf("base URL %q has a non-ASCII host; record it in ASCII so a look-alike cannot pass for another destination", raw)
 		}
 	}
-	// The rest are alternate spellings of one destination. Each is refused rather
-	// than normalised, because the set has to be a function of the recorded bytes:
-	// normalising here would mean two different records build the same set, and then
-	// the bytes in the log no longer determine the hash the derivation path binds.
-	if port := u.Port(); (u.Scheme == "http" && port == "80") || (u.Scheme == "https" && port == "443") {
-		return fmt.Errorf("base URL %q states the scheme's default port; record it without one", raw)
+	// The rest are alternate spellings of one destination, and each is refused rather
+	// than normalised.
+	//
+	// The property being protected is the reverse of what an earlier version of this
+	// comment claimed. The set is NOT a function of the log's raw bytes — the payload
+	// is split with strings.Fields, so a tab or a doubled space builds the same set —
+	// and it does not need to be. What must hold is the other direction: **one
+	// destination must have one spelling**, so that two deployments permitting the
+	// same destinations reach the same hash. Normalising here would satisfy that too,
+	// but refusing says so in the error rather than silently accepting a record whose
+	// stored URL differs from what was written.
+	// The scheme is checked on the RAW bytes, not on u.Scheme. url.Parse lowercases
+	// the scheme, but the record stores raw verbatim and the canonical text is built
+	// from it — so "HtTp://x/v1" would otherwise pass every check below and reach the
+	// hash as a second spelling of one destination.
+	if !strings.HasPrefix(raw, u.Scheme+"://") {
+		return fmt.Errorf("base URL %q does not spell its scheme in lowercase; record it as %q", raw, u.Scheme)
+	}
+	// The port is compared numerically, and an equivalent spelling of one is refused
+	// for the same reason: ":0080", ":01" and a bare ":" all denote what ":80" or no
+	// port denotes, and each would hash differently.
+	if port := u.Port(); port != "" {
+		if strings.HasPrefix(port, "0") {
+			return fmt.Errorf("base URL %q has a leading zero in its port; record it without one", raw)
+		}
+		n, err := strconv.Atoi(port)
+		if err != nil || n < 1 || n > 65535 {
+			return fmt.Errorf("base URL %q does not have a valid port", raw)
+		}
+		if (u.Scheme == "http" && n == 80) || (u.Scheme == "https" && n == 443) {
+			return fmt.Errorf("base URL %q states the scheme's default port; record it without one", raw)
+		}
+	} else if strings.HasSuffix(u.Host, ":") {
+		return fmt.Errorf("base URL %q has an empty port; record it without the colon", raw)
 	}
 	if strings.HasSuffix(u.Hostname(), ".") {
 		return fmt.Errorf("base URL %q has a trailing dot in its host; record it without one", raw)
@@ -229,11 +308,9 @@ func validUpstreamURL(raw string) error {
 		strings.HasSuffix(u.Path, "/..") || strings.HasSuffix(u.Path, "/.") {
 		return fmt.Errorf("base URL %q has a dot segment in its path; record the resolved path", raw)
 	}
-	// A trailing slash is refused rather than trimmed. The forward URL is base+route
-	// and the route starts with "/", so a base ending in one produces a double slash;
-	// and trimming here would make two records that differ in one byte build the same
-	// set, so the canonical text below — and therefore the set's identity — would no
-	// longer be a function of the bytes in the log.
+	// A trailing slash is refused rather than trimmed, for both reasons: the forward
+	// URL is base+route and the route starts with "/", so a base ending in one produces
+	// a double slash; and it is one more second spelling of a single destination.
 	if strings.HasSuffix(u.Path, "/") && u.Path != "/" {
 		return fmt.Errorf("base URL %q ends in a slash; record it without one", raw)
 	}
@@ -264,11 +341,14 @@ func validUpstreamURL(raw string) error {
 // This is the encoding writer and reader have to produce identically. It lives here
 // for the reason the event names do: one definition, or the two sides drift.
 func (r *RunningState) UpstreamSetHash() (string, error) {
-	if r.UpstreamsErr != nil {
+	switch r.UpstreamsState {
+	case UpstreamsUnknown:
 		return "", fmt.Errorf("the upstream set is unknown, so it has no hash: %w", r.UpstreamsErr)
-	}
-	if !r.UpstreamsRecorded {
+	case UpstreamsUnrecorded:
 		return "", fmt.Errorf("no %s or %s record appeared, so no set was recorded and there is nothing to hash", EventUpstreamAdd, EventUpstreamRemove)
+	case UpstreamsKnown:
+	default:
+		return "", fmt.Errorf("unrecognised UpstreamsState %q", r.UpstreamsState)
 	}
 	lines := make([]string, 0, len(r.Upstreams))
 	for _, u := range r.Upstreams {

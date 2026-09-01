@@ -54,6 +54,12 @@ func TestResolveWithoutUpstreamRecords(t *testing.T) {
 	if state.Upstreams != nil {
 		t.Fatalf("Upstreams = %+v, want nil when nothing was recorded", state.Upstreams)
 	}
+	if state.UpstreamsState != UpstreamsUnrecorded {
+		t.Fatalf("UpstreamsState = %q, want %q", state.UpstreamsState, UpstreamsUnrecorded)
+	}
+	if _, err := state.UpstreamSetHash(); err == nil {
+		t.Fatal("UpstreamSetHash() answered for an unrecorded set")
+	}
 }
 
 // An unreadable upstream record makes the SET unknown without taking the rest of the
@@ -109,8 +115,8 @@ func TestResolveReportsAnUnknownUpstreamSet(t *testing.T) {
 			if state.Upstreams != nil {
 				t.Errorf("Upstreams = %+v, want nil when the set is unknown — a partial set understates where plaintext can go", state.Upstreams)
 			}
-			if !state.UpstreamsRecorded {
-				t.Error("UpstreamsRecorded = false, want true: records did appear, they just could not be replayed")
+			if state.UpstreamsState != UpstreamsUnknown {
+				t.Errorf("UpstreamsState = %q, want %q: records did appear, they just could not be replayed", state.UpstreamsState, UpstreamsUnknown)
 			}
 			if _, err := state.UpstreamSetHash(); err == nil {
 				t.Error("UpstreamSetHash() returned a hash for an unknown set")
@@ -153,8 +159,8 @@ func TestResolveDistinguishesEmptiedFromUnrecorded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveRunningState() = %v", err)
 	}
-	if !emptied.UpstreamsRecorded {
-		t.Fatal("UpstreamsRecorded = false after records appeared")
+	if emptied.UpstreamsState != UpstreamsKnown {
+		t.Fatalf("UpstreamsState = %q, want %q after records appeared", emptied.UpstreamsState, UpstreamsKnown)
 	}
 	if emptied.Upstreams != nil {
 		t.Fatalf("Upstreams = %+v, want nil for an emptied set", emptied.Upstreams)
@@ -168,8 +174,8 @@ func TestResolveDistinguishesEmptiedFromUnrecorded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveRunningState() = %v", err)
 	}
-	if unrecorded.UpstreamsRecorded {
-		t.Fatal("UpstreamsRecorded = true with no records")
+	if unrecorded.UpstreamsState != UpstreamsUnrecorded {
+		t.Fatalf("UpstreamsState = %q, want %q with no records", unrecorded.UpstreamsState, UpstreamsUnrecorded)
 	}
 	if _, err := unrecorded.UpstreamSetHash(); err == nil {
 		t.Fatalf("an unrecorded set must not hash, got %q", emptiedHash)
