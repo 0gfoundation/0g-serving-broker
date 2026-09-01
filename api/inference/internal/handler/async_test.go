@@ -42,6 +42,18 @@ func (m *mockAsyncCtrl) IsAsyncEnabled() bool {
 	return m.asyncEnabled
 }
 
+// IsSealedRequest mirrors the real Ctrl's test: a JSON object with a top-level
+// "_e2ee" key. Reimplemented here rather than stubbed to false, so a test that
+// posts a real envelope exercises the gate rather than the mock's opinion of it.
+func (m *mockAsyncCtrl) IsSealedRequest(reqBody []byte) bool {
+	var env map[string]json.RawMessage
+	if err := json.Unmarshal(reqBody, &env); err != nil {
+		return false
+	}
+	_, ok := env["_e2ee"]
+	return ok
+}
+
 func (m *mockAsyncCtrl) ValidateSession(ctx *gin.Context) (string, error) {
 	return m.sessionUser, m.sessionErr
 }
@@ -690,5 +702,65 @@ func TestGetAsyncJob_EmptyJobID(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 for empty jobID, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// The async submit routes never reach MaybeUnsealRequest — they are separate gin
+// handlers, not proxy traffic — so before this gate a sealed envelope was
+// enqueued verbatim, had its cleartext rewritten by forceB64ResponseFormat
+// (invalidating the AAD), was forwarded upstream still sealed, had its result
+// served in plaintext, and was billed. The prompt stayed sealed, so little was
+// disclosed; what broke is that "a sealed request is fail-closed" became a
+// property of which route the client picked rather than of the enclave.
+func TestSubmitAsync_RejectsSealedRequest(t *testing.T) {
+	sealed := `{"_e2ee":{"v":1,"kem_id":"0x0020","key_id":"k","signer_addr":"0xabc","client_eph_pub":"p","enc":"e","sealed_fields":["prompt"],"ciphertext":"c"},"model":"z-image","response_format":"b64_json"}`
+
+	for _, tc := range []struct {
+		name string
+		path string
+	}{
+		{"images/generations", "/v1/async/images/generations"},
+		{"images/edits", "/v1/async/images/edits"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mock := &mockAsyncCtrl{asyncEnabled: true, sessionUser: "0xUser1", submitJobID: "job-1"}
+			h := newTestHandler(mock)
+			fn := h.SubmitAsyncImageGeneration
+			if tc.path == "/v1/async/images/edits" {
+				fn = h.SubmitAsyncImageEdit
+			}
+
+			w := performRequest(fn, "POST", tc.path, sealed,
+				map[string]string{"Content-Type": "application/json"})
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+			}
+			if !strings.Contains(w.Body.String(), "e2ee") {
+				t.Errorf("error should name e2ee, got: %s", w.Body.String())
+			}
+			// The job must never have been enqueued — that is the whole point.
+			if mock.capturedReqBody != nil {
+				t.Errorf("a sealed request must not be submitted, got body: %s", mock.capturedReqBody)
+			}
+		})
+	}
+}
+
+// The gate keys on a genuine top-level "_e2ee", not on the substring: a prompt
+// that merely mentions it is an ordinary request and must still be accepted.
+func TestSubmitAsync_E2EESubstringInPromptIsNotSealed(t *testing.T) {
+	mock := &mockAsyncCtrl{asyncEnabled: true, sessionUser: "0xUser1", submitJobID: "job-2"}
+	h := newTestHandler(mock)
+
+	w := performRequest(h.SubmitAsyncImageGeneration, "POST", "/v1/async/images/generations",
+		`{"prompt":"a diagram explaining the _e2ee envelope","n":1}`,
+		map[string]string{"Content-Type": "application/json"})
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d: %s", w.Code, w.Body.String())
+	}
+	if mock.capturedReqBody == nil {
+		t.Error("an ordinary request must still be enqueued")
 	}
 }

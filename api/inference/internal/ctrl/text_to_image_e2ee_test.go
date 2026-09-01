@@ -330,13 +330,13 @@ func TestWithImageUsage(t *testing.T) {
 // so a frame legitimately missing one (a usage-only chat chunk) still seals.
 func TestEnsureSealedFieldsPresent(t *testing.T) {
 	frame := wire.Response{"usage": json.RawMessage(`{}`)}
-	ensureSealedFieldsPresent(frame, e2eeChatResponseSealedFields)
+	ensureSealedFieldsPresent(frame, wire.DefaultResponseSealedFieldsFor(wire.ProfileChat))
 	if string(frame["choices"]) != "[]" {
 		t.Fatalf("choices = %s, want an injected empty array", frame["choices"])
 	}
 
 	frame = wire.Response{"data": json.RawMessage(`[{"b64_json":"x"}]`)}
-	ensureSealedFieldsPresent(frame, e2eeImageResponseSealedFields)
+	ensureSealedFieldsPresent(frame, wire.DefaultResponseSealedFieldsFor(wire.ProfileImage))
 	if string(frame["data"]) != `[{"b64_json":"x"}]` {
 		t.Fatalf("an existing sealed field must not be overwritten, got %s", frame["data"])
 	}

@@ -80,24 +80,38 @@ const (
 //   - "x_0g_trace": observability metadata the router injects downstream.
 var e2eeResponseUnboundFields = []string{"model", "x_0g_trace"}
 
-// Per-profile response sealed sets (0g-pc SPEC §7 / §7.1): the generated content
-// of each request family — "choices" for chat, "data" for image. Everything else
-// in the frame stays cleartext so the router bills without decrypting (`usage`
-// for chat, `usage.output_images` for image).
-//
-// Taken from the protocol package rather than spelled out here, so the field
-// names have exactly one definition shared with the client that opens them.
-var (
-	e2eeChatResponseSealedFields  = wire.DefaultResponseSealedFieldsFor(wire.ProfileChat)
-	e2eeImageResponseSealedFields = wire.DefaultResponseSealedFieldsFor(wire.ProfileImage)
-)
-
 // hasE2EEMarker is a cheap substring pre-check to skip the JSON parse on the vast
 // majority of (non-sealed) requests. A match is not proof of a sealed request —
 // the substring could appear inside message content — so MaybeUnsealRequest
 // confirms a genuine top-level "_e2ee" key before committing to fail-closed.
 func hasE2EEMarker(reqBody []byte) bool {
 	return bytes.Contains(reqBody, []byte(e2eeBodyMarker))
+}
+
+// IsSealedRequest reports whether reqBody is a sealed envelope (SPEC §5): a JSON
+// object with a top-level "_e2ee" key. It is the same test MaybeUnsealRequest
+// makes before committing to fail-closed, exposed for entry points that cannot
+// SERVE a sealed request and so must refuse it rather than forward it.
+//
+// The async submit routes are those entry points. They do not go through the
+// proxy, so they never reach MaybeUnsealRequest; without this, a sealed envelope
+// POSTed to /v1/async/images/generations was enqueued verbatim, had its
+// cleartext rewritten by forceB64ResponseFormat (which also invalidates the
+// AAD), was forwarded upstream still sealed, and had its result served in
+// plaintext — while the user was billed for the garbage job. The prompt stayed
+// sealed throughout, so little was disclosed; what broke is that "a sealed
+// request is fail-closed" stopped being a property of the enclave and became a
+// property of which route the client picked.
+func (c *Ctrl) IsSealedRequest(reqBody []byte) bool {
+	if !hasE2EEMarker(reqBody) {
+		return false
+	}
+	var env wire.Request
+	if err := json.Unmarshal(reqBody, &env); err != nil {
+		return false // not a JSON object → cannot be an envelope
+	}
+	_, ok := env[e2eeBodyMarker]
+	return ok
 }
 
 // MaybeUnsealRequest unseals a sealed E2EE request in-enclave and returns the
@@ -339,8 +353,16 @@ func (c *Ctrl) maybeSealNonStreamResponse(ctx *gin.Context, body []byte, profile
 // response context (SPEC §7). Frames are sealed in order; the client opens them
 // in the same order.
 type responseFrameSealer struct {
-	sealer       *wire.ResponseSealer
-	binder       *proof.StreamBinder
+	sealer *wire.ResponseSealer
+	binder *proof.StreamBinder
+	// sealedFields is the profile's response content set, resolved once from the
+	// service type. Held here rather than read from a package-level chat constant
+	// at each call site: the non-streaming path had exactly that shape and it let
+	// image responses seal through the chat profile — identical wire format, so
+	// the mix-up was invisible in the output. Only text-to-image (non-streaming)
+	// and chatbot are sealable today, so this path is chat-only in practice, but
+	// the next streaming profile must not have to rediscover that.
+	sealedFields []string
 	emittedFinal bool
 	frameCount   int
 }
@@ -352,10 +374,17 @@ func (c *Ctrl) newResponseFrameSealer(ctx *gin.Context) (*responseFrameSealer, e
 	if !sealed {
 		return nil, nil
 	}
+	// Same allowlist the request side used to decide this request was sealable at
+	// all, so the stream cannot be sealed under a profile whose rules were never
+	// applied to the request.
+	profile, sealable := profileForServiceType(c.Service.Type)
+	if !sealable {
+		return nil, fmt.Errorf("sealed responses are not supported for service type %q", c.Service.Type)
+	}
 	// Declare model + x_0g_trace unbound on every frame so the router may
 	// rewrite/inject them into the sealed stream downstream (SPEC §5.2). The whole
 	// stream shares one context, so the unbound set is fixed once here.
-	s, err := wire.NewResponseSealer(ephPub, e2eeResponseUnboundFields...)
+	s, err := wire.NewResponseSealerFor(profile, ephPub, e2eeResponseUnboundFields...)
 	if err != nil {
 		return nil, fmt.Errorf("set up response sealer: %w", err)
 	}
@@ -366,7 +395,11 @@ func (c *Ctrl) newResponseFrameSealer(ctx *gin.Context) (*responseFrameSealer, e
 	if !ok {
 		return nil, fmt.Errorf("e2ee stream: request binding hash missing from context")
 	}
-	return &responseFrameSealer{sealer: s, binder: proof.NewStreamBinderFromReqHash(reqBindHash)}, nil
+	return &responseFrameSealer{
+		sealer:       s,
+		binder:       proof.NewStreamBinderFromReqHash(reqBindHash),
+		sealedFields: wire.DefaultResponseSealedFieldsFor(profile),
+	}, nil
 }
 
 // sealSSELine transforms one already-sanitized SSE line into its sealed form
@@ -401,18 +434,26 @@ func (rs *responseFrameSealer) sealSSELine(line string) (string, error) {
 	if err := json.Unmarshal([]byte(payload), &frame); err != nil {
 		return "", fmt.Errorf("seal stream frame: %w", err)
 	}
-	ensureSealedFieldsPresent(frame, e2eeChatResponseSealedFields)
+	ensureSealedFieldsPresent(frame, rs.sealedFields)
 	return rs.sealFrame(frame, false)
 }
 
-// finalFrameLine returns a synthetic final SSE frame (empty choices) so the client
-// always receives exactly one completion marker (SPEC §7). It returns "" if a
-// final frame was already emitted, making it safe to call on both [DONE] and EOF.
+// finalFrameLine returns a synthetic final SSE frame so the client always
+// receives exactly one completion marker (SPEC §7). It returns "" if a final
+// frame was already emitted, making it safe to call on both [DONE] and EOF.
+//
+// The frame's sealed fields come from the profile rather than a literal
+// {"choices": []}: every v1 sealed field is a JSON array, so an empty one merges
+// to nothing on the client, but a hardcoded "choices" under a future streaming
+// profile would be a runtime seal failure ("sealed field not present in frame")
+// rather than anything the compiler catches.
 func (rs *responseFrameSealer) finalFrameLine() (string, error) {
 	if rs.emittedFinal {
 		return "", nil
 	}
-	return rs.sealFrame(wire.Response{"choices": json.RawMessage("[]")}, true)
+	frame := wire.Response{}
+	ensureSealedFieldsPresent(frame, rs.sealedFields)
+	return rs.sealFrame(frame, true)
 }
 
 // sealFrame seals one frame object and returns a self-contained SSE event:
@@ -425,7 +466,7 @@ func (rs *responseFrameSealer) finalFrameLine() (string, error) {
 // an abrupt EOF may omit); an extra blank line the upstream also sends is
 // harmless (ignored by SSE parsers).
 func (rs *responseFrameSealer) sealFrame(frame wire.Response, final bool) (string, error) {
-	out, err := rs.sealer.SealFrame(frame, e2eeChatResponseSealedFields, final)
+	out, err := rs.sealer.SealFrame(frame, rs.sealedFields, final)
 	if err != nil {
 		return "", fmt.Errorf("seal frame: %w", err)
 	}

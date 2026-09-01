@@ -232,6 +232,17 @@ func (c *Ctrl) handleTextToImageResponse(ctx *gin.Context, resp *http.Response, 
 	// case, which under sealing would ask the router to bill a number the enclave
 	// never verified. Refuse instead — the same shape as the undecodable-response
 	// guard directly below, which refuses for the url path for its own reason.
+	//
+	// This returns before UpdateRequestFeesAndCount, so the request is NOT billed,
+	// and that is deliberate rather than incidental. billableImageCount's fallback
+	// ("bill the requested count rather than nothing, else an unparseable response
+	// is free") applies when the broker still SERVES the response; here it serves
+	// nothing. Charging for a response the client never received, on the strength
+	// of a count nobody verified, is the worse of the two errors — and the guard
+	// below already sets that precedent for the url path. The cost lands on the
+	// provider, which is also who caused it: the failure is attributed upstream,
+	// so a provider cannot quietly absorb a degradation by emitting undecodable
+	// 200s.
 	if e2eeSealed && (extractErr != nil || len(images) == 0) {
 		ctx.Set("ignoreError", true)
 		// Undecodable 200 from the provider: an upstream fault, not a client one,
