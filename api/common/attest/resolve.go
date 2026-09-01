@@ -31,6 +31,17 @@ const (
 	// EventConfigUpdate carries hex(sha256(config file content)).
 	EventConfigUpdate = "zg-config-update"
 
+	// EventUpstreamAdd carries "<name> <base URL>" or "<name> <base URL> <identity>":
+	// one destination the broker may forward unsealed plaintext to. The set these
+	// records build is the complete list of places a request can end up, which is
+	// what a config mapping models onto names cannot itself establish — that mapping
+	// lives in the config file, and no measurement covers its content.
+	EventUpstreamAdd = "zg-upstream-add"
+	// EventUpstreamRemove carries "<name>": the destination stops being permitted.
+	// Present because RTMR3 only appends, so withdrawing one has to be its own
+	// record; a reader replays adds and removes in order to reach the current set.
+	EventUpstreamRemove = "zg-upstream-remove"
+
 	// EventNamespace prefixes every event this project writes. dstack already
 	// writes app-id, compose-hash and system-ready into RTMR3, and other
 	// components may add their own; an unprefixed "image-update" could collide
@@ -157,8 +168,38 @@ type RunningState struct {
 	// learns that the file changed and when, relative to the image records — not what it
 	// changed to.
 	ConfigSHA256 string
+	// Upstreams is the set of destinations the ledger currently permits, in the
+	// order they were first added.
+	//
+	// Nil means no upstream record appeared, which is not the same as "the broker
+	// forwards nowhere": a deployment that predates these records, or one that
+	// never writes them, forwards according to a config no measurement covers. So
+	// an empty set bounds nothing, and a caller must not read it as a guarantee.
+	//
+	// A non-empty set is a bound, and what that bound is worth depends on the
+	// provider: for a self-hosted deployment every entry is a container inside the
+	// CVM, so the set says the plaintext did not leave; for one forwarding to an
+	// external vendor the plaintext leaves by definition, and the set says which
+	// vendors could have received it. This package cannot tell those apart — it
+	// reports the set and the caller, which knows the provider type, decides what
+	// it establishes.
+	Upstreams []Upstream
 	// Events is the full runtime event sequence whose replay matched the quote.
 	Events []RuntimeEvent
+}
+
+// Upstream is one permitted destination for unsealed plaintext.
+type Upstream struct {
+	// Name is what the config's model mapping refers to. Unique within a set: a
+	// name that meant two different URLs during one boot would make the mapping
+	// unreadable, which is the whole point of recording the set.
+	Name string
+	// URL is the destination's base URL, exactly as recorded.
+	URL string
+	// Identity is the upstream's machine-key identity, empty when the record
+	// carried none. Only meaningful for upstreams outside this CVM, where it is
+	// what a routing proof attributes the request to.
+	Identity string
 }
 
 // ResolveRunningState answers "what is this CVM running", and only that.
@@ -239,6 +280,7 @@ func ResolveRunningState(v VerifiedQuote, tcbInfoJSON []byte, brokerService stri
 	// writer emitting it: refusing beats believing the record it replaced.
 	state := &RunningState{ComposeHash: composeHash, Events: events}
 	var imageErr, configErr error
+	upstreams := newUpstreamSet()
 	for _, event := range ledger {
 		if !strings.HasPrefix(event.Event, EventNamespace) {
 			continue
@@ -253,6 +295,19 @@ func ResolveRunningState(v VerifiedQuote, tcbInfoJSON []byte, brokerService stri
 				configErr = fmt.Errorf("%s payload %q is not a hex sha256", EventConfigUpdate, sum)
 			}
 			state.ConfigSHA256 = sum
+		case EventUpstreamAdd:
+			// Unlike the image records, EVERY upstream record matters, not just the last:
+			// the set is cumulative, so one unreadable record leaves the set unknown. And
+			// unknown must not degrade to "the ones I could parse" — that is the dangerous
+			// direction. It would report a smaller set than reality and so understate where
+			// plaintext can go, which is exactly the claim a caller leans on.
+			if err := upstreams.add(string(event.Payload)); err != nil {
+				return nil, err
+			}
+		case EventUpstreamRemove:
+			if err := upstreams.remove(string(event.Payload)); err != nil {
+				return nil, err
+			}
 		default:
 			return nil, fmt.Errorf("unrecognised %s event %q: this reader is older than the CVM that wrote the log, so it cannot say what is running", EventNamespace, event.Event)
 		}
@@ -263,6 +318,7 @@ func ResolveRunningState(v VerifiedQuote, tcbInfoJSON []byte, brokerService stri
 	if configErr != nil {
 		return nil, configErr
 	}
+	state.Upstreams = upstreams.list()
 
 	// A record wins over the compose pin, and the two are mutually exclusive.
 	//
