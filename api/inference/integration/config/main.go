@@ -914,23 +914,36 @@ func main() {
 	// Step 0.3: Ask about TEE node type early
 	var teeNodeType TeeNode
 	var verifierUrl string
+	// Phala is the default, and hardhat has to be asked for by number.
+	//
+	// Hardhat selects tee.Mock, whose signing and E2EE keys are a constant
+	// committed to this repository (see common/tee.ClientTypeForNetwork). The
+	// question just above this one picks mainnet or testnet, and neither answer
+	// changes network.url — so defaulting to hardhat meant a wizard run where the
+	// operator pressed enter twice produced a broker that publishes a publicly
+	// derivable key as its on-chain teeSignerAddress against a real chain. The
+	// broker refuses to start on that combination now; this keeps the common path
+	// from reaching it in the first place.
 	fmt.Print("\n🔒 Select TEE node type:\n")
-	fmt.Print("   1. Local Hardhat (for testing)\n")
+	fmt.Print("   1. Local Hardhat (test environment only — mock attestation, publicly known keys)\n")
 	fmt.Print("   2. Phala Network\n")
-	fmt.Print("Enter your choice [1-2] (default: 1): ")
+	fmt.Print("Enter your choice [1-2] (default: 2): ")
 	teeResponse, _ := reader.ReadString('\n')
 	teeChoice := strings.TrimSpace(teeResponse)
 
 	switch teeChoice {
-	case "2":
+	case "1":
+		teeNodeType = TeeNodeLocalHardhat
+		verifierUrl = ""
+		fmt.Println("   ✓ Local Hardhat selected (test environment)")
+		fmt.Println("   ⚠️  Mock attestation: the signing and E2EE keys are public constants.")
+		fmt.Println("      Only usable against a local hardhat node (chainID 31337); the broker")
+		fmt.Println("      refuses to start if network.chainID names a real chain.")
+	default:
 		teeNodeType = TeeNodePhala
 		verifierUrl = "https://github.com/Dstack-TEE/dstack/releases/tag/verifier-v0.5.4"
 		fmt.Println("   ✓ Phala Network selected")
 		fmt.Printf("   ✓ VerifierUrl set to: %s\n", verifierUrl)
-	default:
-		teeNodeType = TeeNodeLocalHardhat
-		verifierUrl = ""
-		fmt.Println("   ✓ Local Hardhat selected (test environment)")
 	}
 
 	// Step 0.5: Ask about LLM deployment
