@@ -222,6 +222,94 @@ func TestHandleEmbeddingResponse_DecentralizedSignsContent(t *testing.T) {
 		"the signed content hash must match the (unsanitized, decentralized) response body")
 }
 
+// TestHandleEmbeddingResponse_SignsBeforeFlush is the embedding analog of
+// TestHandleChargingResponse_SignsBeforeFlush (signature_race_test.go): the
+// response signature must be cached BEFORE the body is flushed to the client,
+// so that a client racing ZG-Res-Key straight into GET
+// /v1/proxy/signature/{chatID} cannot lose against a post-flush cache write
+// (issue #619). Uses the sigProbeWriter harness from that same test to observe
+// cache state at the instant the first body bytes go out, not just after the
+// handler returns. Decentralized/non-TargetSeparated so the switch takes the
+// signChatWithKey branch.
+func TestHandleEmbeddingResponse_SignsBeforeFlush(t *testing.T) {
+	c := newChatbotTestCtrl(t, config.Service{ProviderType: constant.ProviderTypeDecentralized})
+	c.reconciliationDB = &mockReconciliationDB{}
+
+	probe := &sigProbeWriter{}
+	var sigCachedAtFlush bool
+	var chatKeyAtFlush string
+	probe.onFirstWrite = func() {
+		chatKeyAtFlush = probe.Header().Get("ZG-Res-Key")
+		if chatKeyAtFlush == "" {
+			return
+		}
+		if _, err := c.GetChatSignature(chatKeyAtFlush); err == nil {
+			sigCachedAtFlush = true
+		}
+	}
+
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(probe)
+	ctx.Request = httptest.NewRequest("POST", "/v1/proxy/embeddings", nil)
+
+	respBody := []byte(`{"object":"list","data":[],"model":"m","usage":{"prompt_tokens":1,"total_tokens":1}}`)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{},
+		Body:       io.NopCloser(bytes.NewReader(respBody)),
+	}
+
+	reqModel := model.Request{IsWhitelisted: true, ServiceName: "embedding", RequestHash: "h"}
+	if err := c.handleEmbeddingResponse(ctx, resp, model.User{}, "0", []byte(`{"model":"m","input":"hi"}`), reqModel); err != nil {
+		t.Fatalf("handleEmbeddingResponse: %v", err)
+	}
+
+	if chatKeyAtFlush == "" {
+		t.Fatal("ZG-Res-Key was not set before the body flush")
+	}
+	if !sigCachedAtFlush {
+		t.Fatal("signature was not cached before the response body was flushed (issue #619 race)")
+	}
+	// Sanity: the same key still resolves after the handler returns.
+	if _, err := c.GetChatSignature(chatKeyAtFlush); err != nil {
+		t.Fatalf("GetChatSignature after handler: %v", err)
+	}
+}
+
+// TestHandleEmbeddingResponse_SignFailureFailsClosed pins the other half of the
+// fix: for a decentralized, non-TargetSeparated provider, a genuine signer
+// failure (crypto.Sign itself failing — simulated here via a nil
+// ProviderSigner and no remote signer, exactly what signChatWithKey's own doc
+// calls out as its only failure mode) must fail the request closed rather than
+// serve a 200 the client can never verify. This is deliberately NOT the same
+// policy as the IsCentralized() branch (TestHandleEmbeddingResponse_
+// SignsSanitizedBody's provider): a missing TLS fingerprint there is expected
+// and non-fatal, matching chatbot's signChatResponse exactly — see the comment
+// on the switch in handleEmbeddingResponse.
+func TestHandleEmbeddingResponse_SignFailureFailsClosed(t *testing.T) {
+	c := newChatbotTestCtrl(t, config.Service{ProviderType: constant.ProviderTypeDecentralized})
+	c.reconciliationDB = &mockReconciliationDB{}
+	c.teeService.ProviderSigner = nil // SignHash -> "provider signer not initialized"
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(w)
+	ctx.Request = httptest.NewRequest("POST", "/v1/proxy/embeddings", nil)
+
+	respBody := []byte(`{"object":"list","data":[],"model":"m","usage":{"prompt_tokens":1,"total_tokens":1}}`)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{},
+		Body:       io.NopCloser(bytes.NewReader(respBody)),
+	}
+
+	reqModel := model.Request{IsWhitelisted: true, ServiceName: "embedding", RequestHash: "h"}
+	err := c.handleEmbeddingResponse(ctx, resp, model.User{}, "0", []byte(`{"model":"m","input":"hi"}`), reqModel)
+	require.Error(t, err, "a genuine signer failure must fail the request closed")
+	assert.NotContains(t, w.Body.String(), `"object":"list"`,
+		"must never flush the unverifiable success body to the client")
+}
+
 // TestUpdateEmbeddingWithUsage_ZeroOrNegativePromptTokensFallsBack pins the
 // mutation-tested trigger for handleEmbeddingResponse's usage fallback:
 // `usage == nil || usage.PromptTokens <= 0`, not just `usage == nil`. A
@@ -306,4 +394,46 @@ func TestHandleEmbeddingResponse_WhitelistedStampsRateClass(t *testing.T) {
 	assert.NotEqual(t, "", mockDB.calls[0].RateClass,
 		"whitelisted embedding traffic must still stamp the applied tier as rate_class, like chatbot's decodeAndProcess does, so reconciliation can group it per-tier")
 	assert.Equal(t, "tier:unbounded", mockDB.calls[0].RateClass)
+}
+
+// TestSanitizeEmbeddingResponseBody_StripsTopLevelLeaksLeavesDataUntouched
+// covers both halves of sanitizeEmbeddingResponseBody's contract: (1) a
+// top-level #184 leak key is stripped exactly as the shared
+// sanitizeResponseBody would, and (2) `data` — carved out and reattached
+// rather than run through the general decode — survives byte-for-byte,
+// proving the vector payload was never decoded into Go's generic
+// interface{} tree (the O(vector) cost this function exists to avoid).
+func TestSanitizeEmbeddingResponseBody_StripsTopLevelLeaksLeavesDataUntouched(t *testing.T) {
+	c := newChatbotTestCtrl(t, config.Service{})
+
+	const rawData = `[{"object":"embedding","index":0,"embedding":[0.1,0.2,0.30000000001]}]`
+	body := []byte(`{"object":"list","data":` + rawData + `,"model":"m","usage":{"prompt_tokens":4,"total_tokens":4},"provider":"leaked-upstream"}`)
+
+	out, changed := c.sanitizeEmbeddingResponseBody(body)
+	require.True(t, changed, "the leaked provider field must trigger a change")
+
+	assert.NotContains(t, string(out), "leaked-upstream", "top-level leak key must be stripped")
+	assert.Contains(t, string(out), rawData, "data must survive byte-for-byte (never decoded/re-encoded)")
+
+	// Sanity: the result is still valid, complete JSON with the non-leak
+	// fields intact.
+	var parsed map[string]interface{}
+	require.NoError(t, json.Unmarshal(out, &parsed))
+	assert.Equal(t, "m", parsed["model"])
+	if _, ok := parsed["provider"]; ok {
+		t.Error("provider key must be entirely absent, not just emptied")
+	}
+}
+
+// TestSanitizeEmbeddingResponseBody_NoLeaksReturnsUnchanged covers the
+// no-op path: a clean response (nothing to strip) must report changed=false,
+// matching sanitizeResponseBody's own contract, so callers skip the
+// re-encode when there is nothing to fix.
+func TestSanitizeEmbeddingResponseBody_NoLeaksReturnsUnchanged(t *testing.T) {
+	c := newChatbotTestCtrl(t, config.Service{})
+
+	body := []byte(`{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.1]}],"model":"m","usage":{"prompt_tokens":1,"total_tokens":1}}`)
+	out, changed := c.sanitizeEmbeddingResponseBody(body)
+	assert.False(t, changed)
+	assert.Equal(t, body, out)
 }
