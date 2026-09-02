@@ -1205,9 +1205,13 @@ func (c *Ctrl) processOpenAIStream(ctx context.Context, lines [][]byte, outputPr
 		*output += chunkOutput
 	}
 
-	// No [DONE] marker — the stream was truncated/dropped or the upstream omitted
-	// it. The client already received the accumulated output, so bill it rather
-	// than serving free, logging loudly so the missing terminator is diagnosable.
-	c.logger.Errorf("OpenAI stream ended without a [DONE] marker for request %s; finalizing on accumulated usage/output", requestHash)
+	// No [DONE] marker — the stream was truncated/dropped, or the upstream simply
+	// never emits one. Some OpenAI-"compatible" gateways (e.g. MiniMax) end the
+	// stream on EOF after the final usage chunk and never send `data: [DONE]`, so
+	// this fires on every otherwise-successful request from such an upstream. The
+	// client already received the accumulated output and we finalize billing on it
+	// below, so this is not an error — log at WARN to stay diagnosable without
+	// drowning genuine errors (e.g. upstream 5xx) in the error stream.
+	c.logger.Warnf("OpenAI stream ended without a [DONE] marker for request %s; finalizing on accumulated usage/output", requestHash)
 	return c.finalizeChatStream(ctx, *output, *usage, outputPrice, requestHash, isWhitelisted)
 }
