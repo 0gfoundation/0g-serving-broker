@@ -772,6 +772,14 @@ func (rs *responseFrameSealer) sealSSELine(line string) (string, error) {
 			// dropping it is what makes the allowlist consistent; forwarding it left
 			// one line outside the AAD and the §8 binding. Reachable: LiteLLM's
 			// Anthropic passthrough emits it on some versions.
+			//
+			// finalFrameLine still runs first, and that is not a contradiction: the
+			// sentinel is not part of the GRAMMAR but it is still a reliable
+			// end-of-stream signal, and in the case that actually occurs the terminal
+			// event came first, so it returns "" and nothing is synthesized. It
+			// matters only for an upstream that sends the sentinel and no terminal
+			// event, where capping here rather than at EOF is the same frame a moment
+			// earlier.
 			rs.logger.Debugf("e2ee stream: dropping a %s sentinel, which is not part of the %q stream grammar", doneSentinel, rs.profile)
 			return final, nil
 		}
