@@ -556,7 +556,7 @@ func sealedFrameFrom(t *testing.T, out string) (wire.Response, bool) {
 // over N frames while the broker signed N+1: signature failure on a turn that
 // otherwise succeeded. So it is refused, and refused BEFORE sealing, which is
 // what keeps the binding equal to what the client received.
-func TestAnthropicStreamRefusesADataFrameAfterTheTerminalFrame(t *testing.T) {
+func TestAnthropicStreamHandlesADataFrameAfterTheTerminalFrame(t *testing.T) {
 	f := newE2EEFixture(t)
 	ctx := newAnthropicGinCtx()
 	if _, err := f.c.MaybeUnsealRequest(ctx, f.sealAnthropicRequest(t, []string{"messages", "system"})); err != nil {
@@ -587,22 +587,140 @@ func TestAnthropicStreamRefusesADataFrameAfterTheTerminalFrame(t *testing.T) {
 		}
 	}
 
-	// A data frame, however, is refused.
-	if _, err := sealer.sealSSELine(`data: {"type":"message_stop"}` + "\n"); err == nil {
-		t.Fatal("expected a data frame after the terminal frame to be refused")
+	// A data frame carrying no answer — a duplicate terminal event, or any shape
+	// that seals nothing — is DROPPED, not sealed and not failed. That is the case
+	// seen in the wild (a proxy that appends `message_stop` after `error`, or
+	// sends it twice), and the client already has a complete final frame. Failing
+	// would be worse than the quirk: the stream is committed and flushed, so the
+	// error path appends a JSON error body behind the sealed final frame and
+	// reports a fully delivered turn as a broker error.
+	for _, line := range []string{
+		`data: {"type":"message_stop"}` + "\n", // duplicate terminal event
+		`data: {"type":"ping"}` + "\n",         // seals nothing
+	} {
+		out, err := sealer.sealSSELine(line)
+		if err != nil {
+			t.Errorf("sealSSELine(%q) should be dropped, not fail the stream: %v", strings.TrimSpace(line), err)
+		}
+		if out != "" {
+			t.Errorf("sealSSELine(%q) must emit nothing, got %q", strings.TrimSpace(line), out)
+		}
 	}
 
-	// And the refusal left the §8 binding untouched, so the signature the broker
-	// caches is still the one the client can recompute.
+	// A frame CARRYING CONTENT behind the final one is the case where dropping
+	// loses data — an answer the client would never see — so the stream stops.
+	if _, err := sealer.sealSSELine(`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"late"}}` + "\n"); err == nil {
+		t.Error("a content frame after the terminal frame must fail the stream")
+	}
+	// So does one whose shape is unknown, since it might carry content.
+	if _, err := sealer.sealSSELine(`data: {"type":"thinking_block_delta","index":0}` + "\n"); err == nil {
+		t.Error("an unknown shape after the terminal frame must fail the stream")
+	}
+
+	// Whichever way it went, nothing after the final frame reached the §8
+	// binding, so the signature the broker caches is the one the client — which
+	// stopped at `final` — recomputes.
 	after, _, err := sealer.signedText()
 	if err != nil {
 		t.Fatalf("signedText: %v", err)
 	}
 	if sealer.frameCount != boundAtFinal {
-		t.Errorf("bound %d frames, want %d: the refused frame must not be folded into the binding", sealer.frameCount, boundAtFinal)
+		t.Errorf("bound %d frames, want %d: no post-final frame may be folded into the binding", sealer.frameCount, boundAtFinal)
 	}
 	if after != atFinal {
-		t.Errorf("the signed aggregate changed after the refusal:\n  at final: %s\n  after:    %s", atFinal, after)
+		t.Errorf("the signed aggregate changed after the final frame:\n  at final: %s\n  after:    %s", atFinal, after)
+	}
+}
+
+// The sealed set production actually produces on the non-streaming path. The
+// Messages API always returns a top-level `stop_sequence` on a `message`
+// response — null, or the custom string that stopped generation — so the
+// taxonomy's per-shape "seal if present" fires on virtually every real response
+// and the set is [content stop_sequence], not [content]. It is also the one
+// place the sealed set varies WITHIN a shape on the path the router bills, and
+// the value is the CALLER's own input echoed back, so it must not come back in
+// the clear to a request that sealed it.
+func TestAnthropicNonStreamResponseSealsStopSequenceWhenPresent(t *testing.T) {
+	const marker = "CLIENT-SECRET-MARKER"
+	tests := []struct {
+		name       string
+		stopFields string
+		wantSealed []string
+	}{
+		{
+			name:       "a matched custom stop string",
+			stopFields: `"stop_reason":"stop_sequence","stop_sequence":"` + marker + `",`,
+			wantSealed: []string{"content", "stop_sequence"},
+		},
+		{
+			// Present-but-null is what an ordinary turn returns, and JSON null is
+			// still PRESENT, so it is sealed too — which is why the production set
+			// is two fields whether or not a stop string matched.
+			name:       "present but null",
+			stopFields: `"stop_reason":"end_turn","stop_sequence":null,`,
+			wantSealed: []string{"content", "stop_sequence"},
+		},
+		{
+			// Absent — the shape this suite's other cases use, kept to pin that the
+			// rule is conditional rather than always-on.
+			name:       "absent",
+			stopFields: `"stop_reason":"end_turn",`,
+			wantSealed: []string{"content"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newE2EEFixture(t)
+			ctx := newAnthropicGinCtx()
+			if _, err := f.c.MaybeUnsealRequest(ctx, f.sealAnthropicRequest(t, []string{"messages", "system"})); err != nil {
+				t.Fatalf("unseal: %v", err)
+			}
+			provider := `{"id":"msg_1","type":"message","role":"assistant","model":"claude-x",` +
+				tt.stopFields +
+				`"usage":{"input_tokens":11,"output_tokens":20},` +
+				`"content":[{"type":"text","text":"the secret answer"}]}`
+
+			out, _, _, err := f.c.maybeSealNonStreamResponse(ctx, []byte(provider))
+			if err != nil {
+				t.Fatalf("seal response: %v", err)
+			}
+			if strings.Contains(string(out), marker) {
+				t.Errorf("the caller's own stop string rode back in the clear: %s", out)
+			}
+
+			var frame wire.Response
+			if err := json.Unmarshal(out, &frame); err != nil {
+				t.Fatalf("sealed frame: %v", err)
+			}
+			e2ee, err := frame.E2EE()
+			if err != nil {
+				t.Fatalf("read _e2ee: %v", err)
+			}
+			if !sameStrings(e2ee.SealedFields, tt.wantSealed) {
+				t.Errorf("sealed_fields = %v, want %v", e2ee.SealedFields, tt.wantSealed)
+			}
+			if _, ok := frame["stop_sequence"]; ok && len(tt.wantSealed) > 1 {
+				t.Error("`stop_sequence` must be sealed away, not left cleartext")
+			}
+			// `stop_reason` is model-produced with no caller input in it, and the
+			// router reads it, so it deliberately stays cleartext (§7.2 rule 6).
+			if _, ok := frame["stop_reason"]; !ok {
+				t.Error("`stop_reason` must stay cleartext for the router")
+			}
+
+			// And a conforming client gets both back.
+			opened, err := wire.OpenResponseFor(wire.ProfileAnthropic, f.clientEphSk, frame)
+			if err != nil {
+				t.Fatalf("OpenResponseFor: %v", err)
+			}
+			if !strings.Contains(string(opened["content"]), "the secret answer") {
+				t.Errorf("opened content = %s", opened["content"])
+			}
+			if len(tt.wantSealed) > 1 && !strings.Contains(string(opened["stop_sequence"]), "null") &&
+				!strings.Contains(string(opened["stop_sequence"]), marker) {
+				t.Errorf("opened stop_sequence = %s, want the sealed value merged back", opened["stop_sequence"])
+			}
+		})
 	}
 }
 

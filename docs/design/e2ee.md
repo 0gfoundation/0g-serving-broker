@@ -219,18 +219,33 @@ frame-typed profile's answer is a property of the frame.
   request up front instead of emitting a stream with no final frame, which is a
   truncation the client rejects wholesale and which EOF is too late to report.
   The EOF path logs a synthesis failure for the same reason.
-- **A data frame arriving BEHIND the final frame is refused**, and refused before
-  sealing. §7 puts the final frame last, and with a frame-typed profile a terminal
-  event can land mid-stream, so an upstream can send one (a proxy appending
-  `message_stop` after `error`, or duplicating it). It matters mostly for §8:
-  `sealFrame` folds every frame it seals into the streaming binding, and a client
-  stops consuming at the frame marked `final` — so a trailing frame would leave
-  the client recomputing the binding over N frames while the broker signed N+1,
-  failing verification on a turn that otherwise succeeded. Refusing before the
-  seal keeps the binding equal to what the client received; billing and signature
-  caching then run over the frames actually emitted (both are independent of the
-  stream error). Blank lines, `event:` lines and `[DONE]` still pass through — a
-  real stream ends its last event with a blank line.
+- **A data frame arriving BEHIND the final frame is never sealed.** §7 puts the
+  final frame last, and with a frame-typed profile a terminal event can land
+  mid-stream, so an upstream can send one (a proxy appending `message_stop` after
+  `error`, or duplicating it). It matters mostly for §8: `sealFrame` folds every
+  frame it seals into the streaming binding, and a client stops consuming at the
+  frame marked `final` — so a trailing frame would leave the client recomputing
+  the binding over N frames while the broker signed N+1, failing verification on
+  a turn that otherwise succeeded. Handling it before the seal is what keeps the
+  binding equal to what the client received.
+
+  What happens then depends on whether the frame carries an answer
+  (`handleFrameAfterFinal`):
+
+  - **Dropped, with a `Warn`**, when it carries none — a duplicate or trailing
+    terminal event, or any shape that seals nothing. That is the case actually
+    seen in the wild, and the client is unharmed: it already has a complete final
+    frame. Failing instead would be worse than the quirk, because the stream is
+    already committed and flushed — `handleBrokerError` ends in
+    `ctx.JSON(400, …)`, which appends a JSON error body behind the sealed final
+    frame and reports a fully delivered turn as a broker error.
+  - **Fails the stream**, when the shape declares a content field or is unknown
+    and so might. That is the one case where dropping loses data — an answer the
+    client would never see — and stopping is all the broker can do about it,
+    since the frame cannot be sealed without breaking the binding.
+
+  Blank lines, `event:` lines and `[DONE]` still pass through — a real stream ends
+  its last event with a blank line.
 
 `ensureSealedFieldsPresent(profile, frame, sealedFields)` injects an empty
 placeholder only for the sealed fields a frame of THAT PROFILE may legitimately

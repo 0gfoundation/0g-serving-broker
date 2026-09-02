@@ -22,6 +22,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 )
@@ -457,6 +458,10 @@ type responseFrameSealer struct {
 	synthFinal   synthFinalFrame
 	emittedFinal bool
 	frameCount   int
+	// logger reports what was dropped: a frame this broker declines to seal but
+	// does not fail the request over leaves no other trace, since the client sees
+	// a complete stream either way.
+	logger log.Logger
 }
 
 // newResponseFrameSealer returns a per-stream frame sealer when the request was
@@ -507,6 +512,7 @@ func (c *Ctrl) newResponseFrameSealer(ctx *gin.Context) (*responseFrameSealer, e
 		binder:     proof.NewStreamBinderFromReqHash(reqBindHash),
 		profile:    profile,
 		synthFinal: synthFinal,
+		logger:     c.logger,
 	}, nil
 }
 
@@ -590,31 +596,72 @@ func (rs *responseFrameSealer) sealSSELine(line string) (string, error) {
 	if !strings.HasPrefix(payload, "{") {
 		return line, nil
 	}
-	// §7 puts the final frame LAST, so a frame arriving behind it is refused
-	// rather than sealed. Two things would otherwise go wrong, and the second is
-	// the serious one: it would be sealed final=false behind a frame that already
-	// said final (no receiver-side check catches that — OpenFrame has no
-	// post-final rule), and sealFrame would fold it into the §8 streaming
-	// binding. A client stops consuming at the frame marked final, so it would
-	// recompute the binding over N frames while this broker signed N+1, and the
-	// signature would fail to verify on a turn that otherwise succeeded.
+	var frame wire.Response
+	if err := json.Unmarshal([]byte(payload), &frame); err != nil {
+		return "", fmt.Errorf("seal stream frame: %w", err)
+	}
+	// §7 puts the final frame LAST, so a frame arriving behind it is never
+	// SEALED. Two things would otherwise go wrong, and the second is the serious
+	// one: it would be sealed final=false behind a frame that already said final
+	// (no receiver-side check catches that — OpenFrame has no post-final rule),
+	// and sealFrame would fold it into the §8 streaming binding. A client stops
+	// consuming at the frame marked final, so it would recompute the binding over
+	// N frames while this broker signed N+1, and the signature would fail to
+	// verify on a turn that otherwise succeeded.
 	//
-	// Refusing HERE, before sealFrame, is what keeps the binding equal to what
-	// the client received; the caller then stops the stream, and billing and
-	// signature caching still run over the frames actually emitted.
+	// Handling it HERE, before sealFrame, is what keeps the binding equal to what
+	// the client received.
 	//
 	// This became reachable with frame-typed profiles: a chat stream can only
 	// emit its final frame at [DONE] or EOF, i.e. where nothing follows, but an
 	// Anthropic terminal event (`error`, or a `message_stop` an upstream appends
 	// anything to) can land mid-stream.
 	if rs.emittedFinal {
-		return "", fmt.Errorf("seal stream frame: upstream sent a data frame after the terminal frame; §7 requires the final frame to be last")
-	}
-	var frame wire.Response
-	if err := json.Unmarshal([]byte(payload), &frame); err != nil {
-		return "", fmt.Errorf("seal stream frame: %w", err)
+		return rs.handleFrameAfterFinal(frame)
 	}
 	return rs.sealFrame(frame, rs.isTerminal(frame))
+}
+
+// handleFrameAfterFinal decides what to do with a data frame that arrived behind
+// the final one. Either way it is not sealed and not bound; the question is only
+// whether the stream continues.
+//
+// It is DROPPED when it carries no answer: a duplicate or trailing terminal
+// event, or any shape that seals nothing. That is the case actually seen in the
+// wild — a proxy that appends `message_stop` after `error`, or sends it twice —
+// and the client is unharmed, having already received a complete final frame.
+// Failing the request instead would be worse than the quirk: the stream is
+// already committed and flushed, so the error path appends a JSON error body
+// behind the sealed final frame and reports a turn that fully delivered as a
+// broker error.
+//
+// It FAILS the stream when the shape declares a content field, or when the shape
+// is unknown and so might. That is the one case where dropping loses data: a
+// frame carrying an answer the client will never see, silently. Stopping is also
+// all this broker can do about it — the frame cannot be sealed without breaking
+// the §8 binding the client verifies.
+func (rs *responseFrameSealer) handleFrameAfterFinal(frame wire.Response) (string, error) {
+	const because = "§7 requires the final frame to be last, and sealing this one would break the §8 binding the client recomputes"
+	sealed, err := wire.ResponseSealedFieldsForFrame(rs.profile, frame)
+	if err != nil {
+		return "", fmt.Errorf("seal stream frame: upstream sent a frame of unknown shape after the terminal frame, which may carry content: %s: %w", because, err)
+	}
+	if terminal, terr := wire.IsTerminalResponseFrame(rs.profile, frame); len(sealed) == 0 || (terr == nil && terminal) {
+		rs.logger.Warnf("e2ee stream: dropping a %s frame that arrived after the terminal frame (it carries no answer); %s", frameShapeOf(frame), because)
+		return "", nil
+	}
+	return "", fmt.Errorf("seal stream frame: upstream sent a %s frame carrying content after the terminal frame: %s", frameShapeOf(frame), because)
+}
+
+// frameShapeOf names a frame's shape for a log or an error, or "untyped" when it
+// has no cleartext discriminator. It is for humans only — every decision reads
+// the shape through the wire package.
+func frameShapeOf(frame wire.Response) string {
+	var kind string
+	if err := json.Unmarshal(frame[anthropicFrameType], &kind); err != nil || kind == "" {
+		return "untyped"
+	}
+	return kind
 }
 
 // isTerminal reports whether this frame is an event that CLOSES this profile's
