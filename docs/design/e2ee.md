@@ -232,10 +232,15 @@ frame-typed profile's answer is a property of the frame.
   stream error). Blank lines, `event:` lines and `[DONE]` still pass through — a
   real stream ends its last event with a blank line.
 
-`ensureSealedFieldsPresent` injects an empty placeholder only for the sealed
-fields a frame may legitimately **omit** — `choices` (chat) and `data` (image),
-both arrays, so an empty one merges to nothing on the client. That is what lets a
-trailing usage-only chat chunk with no `choices` still seal.
+`ensureSealedFieldsPresent(profile, frame, sealedFields)` injects an empty
+placeholder only for the sealed fields a frame of THAT PROFILE may legitimately
+**omit** — `choices` (chat) and `data` (image), both arrays, so an empty one
+merges to nothing on the client. That is what lets a trailing usage-only chat
+chunk with no `choices` still seal. The permission is keyed on the profile, not
+the bare field name: the name alone does not carry the invariant, so a
+frame-typed profile with a content field that happened to be called `data` would
+otherwise inherit the image profile's permission and get a placeholder on a frame
+obliged to carry content.
 
 **Anthropic has no such field**, for two separate reasons. Its per-shape stream
 fields are OBJECTS (`delta`, `content_block`, `error`), where `[]` would be a type

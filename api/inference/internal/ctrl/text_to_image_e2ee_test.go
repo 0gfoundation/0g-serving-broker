@@ -423,15 +423,27 @@ func TestWithImageUsage(t *testing.T) {
 // so a frame legitimately missing one (a usage-only chat chunk) still seals.
 func TestEnsureSealedFieldsPresent(t *testing.T) {
 	frame := wire.Response{"usage": json.RawMessage(`{}`)}
-	ensureSealedFieldsPresent(frame, wire.DefaultResponseSealedFieldsFor(wire.ProfileChat))
+	ensureSealedFieldsPresent(wire.ProfileChat, frame, wire.DefaultResponseSealedFieldsFor(wire.ProfileChat))
 	if string(frame["choices"]) != "[]" {
 		t.Fatalf("choices = %s, want an injected empty array", frame["choices"])
 	}
 
 	frame = wire.Response{"data": json.RawMessage(`[{"b64_json":"x"}]`)}
-	ensureSealedFieldsPresent(frame, wire.DefaultResponseSealedFieldsFor(wire.ProfileImage))
+	ensureSealedFieldsPresent(wire.ProfileImage, frame, wire.DefaultResponseSealedFieldsFor(wire.ProfileImage))
 	if string(frame["data"]) != `[{"b64_json":"x"}]` {
 		t.Fatalf("an existing sealed field must not be overwritten, got %s", frame["data"])
+	}
+
+	// The permission belongs to (profile, field), not to the name: the same name
+	// under a profile that did not grant it gets no placeholder. `data` is the
+	// image profile's, and a frame-typed profile with a `data`-shaped content
+	// field must fail closed rather than inherit it.
+	frame = wire.Response{"type": json.RawMessage(`"content_block_delta"`)}
+	ensureSealedFieldsPresent(wire.ProfileAnthropic, frame, []string{"data", "delta"})
+	for _, f := range []string{"data", "delta"} {
+		if _, injected := frame[f]; injected {
+			t.Errorf("%q must not be placeholdered under the %q profile", f, wire.ProfileAnthropic)
+		}
 	}
 }
 

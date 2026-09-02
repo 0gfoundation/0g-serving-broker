@@ -143,6 +143,19 @@ func TestAnthropicNonStreamResponseSealsContentNotChoices(t *testing.T) {
 	if !e2ee.Final {
 		t.Error("a single-frame response must be marked final")
 	}
+
+	// A conforming client opens it and gets the answer back, with the cleartext
+	// the router billed on still in place.
+	opened, err := wire.OpenResponseFor(wire.ProfileAnthropic, f.clientEphSk, frame)
+	if err != nil {
+		t.Fatalf("OpenResponseFor: a conforming client must accept this response: %v", err)
+	}
+	if !strings.Contains(string(opened["content"]), "the secret answer") {
+		t.Errorf("opened content = %s, want the sealed answer merged back", opened["content"])
+	}
+	if !strings.Contains(string(opened["usage"]), `"input_tokens":11`) {
+		t.Errorf("opened usage = %s, want the cleartext token counts", opened["usage"])
+	}
 }
 
 // anthropicSSE is a real /v1/messages stream: `event:` line plus `data:` line per
@@ -264,6 +277,45 @@ func TestAnthropicStreamSealsPerFrameShape(t *testing.T) {
 	if !strings.Contains(string(frames[4]["usage"]), `"output_tokens":20`) {
 		t.Errorf("message_delta must keep the output token count readable: %s", frames[4]["usage"])
 	}
+
+	// And the half that actually matters: a CONFORMING CLIENT accepts every frame
+	// and recovers the answer. OpenFrame is where the receiver-side rules run —
+	// the per-shape sealed set, protected `message`, the sealed/cleartext
+	// collision check, the unbound-field rules — so without this the suite would
+	// pass on a stream the broker seals plausibly and a third-party client
+	// rejects.
+	assembled := openAnthropicStream(t, f, frames)
+	if !strings.Contains(assembled, "the secret answer") {
+		t.Errorf("the client must recover the delta text, assembled: %s", assembled)
+	}
+}
+
+// openAnthropicStream opens a sealed Anthropic stream the way a client does:
+// one opener seeded with the first frame, then every frame in order,
+// fail-closed. It returns the concatenation of the decrypted payloads.
+func openAnthropicStream(t *testing.T, f *e2eeTestFixture, frames []wire.Response) string {
+	t.Helper()
+	ro, err := wire.NewResponseOpenerFor(wire.ProfileAnthropic, f.clientEphSk, frames[0])
+	if err != nil {
+		t.Fatalf("NewResponseOpenerFor: %v", err)
+	}
+	var assembled strings.Builder
+	for i, fr := range frames {
+		opened, err := ro.OpenFrame(fr)
+		if err != nil {
+			t.Fatalf("OpenFrame[%d]: a conforming client must accept every frame this broker seals: %v", i, err)
+		}
+		// The cleartext half survives the merge, which is what the router read.
+		if _, ok := opened[anthropicFrameType]; !ok {
+			t.Errorf("OpenFrame[%d]: the opened frame lost its `type`", i)
+		}
+		for _, sealed := range []string{"content", "content_block", "delta", "error"} {
+			if v, ok := opened[sealed]; ok {
+				assembled.Write(v)
+			}
+		}
+	}
+	return assembled.String()
 }
 
 // An upstream that drops off without sending message_stop still has to leave the
@@ -372,6 +424,128 @@ func TestAnthropicStreamMarksAnErrorFrameFinal(t *testing.T) {
 	if tail, err := sealer.finalFrameLine(); err != nil || tail != "" {
 		t.Errorf("nothing may follow a terminal frame, got %q (%v)", tail, err)
 	}
+}
+
+// A tool-use turn is the shape combination the text-only stream never exercises:
+// the tool NAME and the model's arguments arrive in `content_block` and `delta`
+// of the same shapes, so both must be sealed and both must open — a tool call
+// leaking the function name and its arguments in the clear would be as bad as
+// leaking prose.
+func TestAnthropicStreamSealsAToolUseTurn(t *testing.T) {
+	f := newE2EEFixture(t)
+	ctx := newAnthropicGinCtx()
+	if _, err := f.c.MaybeUnsealRequest(ctx, f.sealAnthropicRequest(t, []string{"messages", "system"})); err != nil {
+		t.Fatalf("unseal: %v", err)
+	}
+	sealer, err := f.c.newResponseFrameSealer(ctx)
+	if err != nil {
+		t.Fatalf("newResponseFrameSealer: %v", err)
+	}
+
+	toolUseSSE := []string{
+		"event: message_start\n",
+		`data: {"type":"message_start","message":{"id":"msg_2","type":"message","role":"assistant","model":"claude-x","content":[],"usage":{"input_tokens":9,"output_tokens":1}}}` + "\n",
+		"event: content_block_start\n",
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"transfer_funds","input":{}}}` + "\n",
+		"event: content_block_delta\n",
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"to\":\"0xSECRET\""}}` + "\n",
+		"event: content_block_stop\n",
+		`data: {"type":"content_block_stop","index":0}` + "\n",
+		"event: message_delta\n",
+		`data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":14}}` + "\n",
+		"event: message_stop\n",
+		`data: {"type":"message_stop"}` + "\n",
+	}
+
+	var frames []wire.Response
+	var joined strings.Builder
+	for _, line := range toolUseSSE {
+		out, err := sealer.sealSSELine(line)
+		if err != nil {
+			t.Fatalf("sealSSELine(%q): %v", line, err)
+		}
+		joined.WriteString(out)
+		if fr, ok := sealedFrameFrom(t, out); ok {
+			frames = append(frames, fr)
+		}
+	}
+	for _, secret := range []string{"transfer_funds", "0xSECRET", "input_json_delta", "tool_use\"", "toolu_1"} {
+		if strings.Contains(joined.String(), secret) {
+			t.Errorf("%q rode in the clear:\n%s", secret, joined.String())
+		}
+	}
+	// `stop_reason: "tool_use"` is model-produced and deliberately NOT sealed
+	// (§7.2 rule 6 covers `stop_sequence`, the caller's own input), but it lives
+	// inside message_delta's sealed `delta`, so it is not readable here either.
+	assembled := openAnthropicStream(t, f, frames)
+	for _, want := range []string{"transfer_funds", "0xSECRET"} {
+		if !strings.Contains(assembled, want) {
+			t.Errorf("the client must recover %q, assembled: %s", want, assembled)
+		}
+	}
+}
+
+// The only path where the taxonomy's per-shape "seal if present" fires, and so
+// the only place the sealed set varies WITHIN one shape: a `message_delta`
+// echoing back a custom stop string the CALLER supplied in `stop_sequences`. It
+// rides inside the sealed `delta` here, which is what keeps a request that
+// deliberately sealed `stop_sequences` from getting the same value back in the
+// clear.
+func TestAnthropicStreamSealsANonNullStopSequence(t *testing.T) {
+	f := newE2EEFixture(t)
+	ctx := newAnthropicGinCtx()
+	if _, err := f.c.MaybeUnsealRequest(ctx, f.sealAnthropicRequest(t, []string{"messages", "system"})); err != nil {
+		t.Fatalf("unseal: %v", err)
+	}
+	sealer, err := f.c.newResponseFrameSealer(ctx)
+	if err != nil {
+		t.Fatalf("newResponseFrameSealer: %v", err)
+	}
+
+	const marker = "CLIENT-SECRET-MARKER"
+	lines := []string{
+		`data: {"type":"message_start","message":{"id":"msg_3","type":"message","role":"assistant","model":"claude-x","content":[],"usage":{"input_tokens":7,"output_tokens":1}}}` + "\n",
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}` + "\n",
+		`data: {"type":"message_delta","delta":{"stop_reason":"stop_sequence","stop_sequence":"` + marker + `"},"usage":{"output_tokens":3}}` + "\n",
+		`data: {"type":"message_stop"}` + "\n",
+	}
+	var frames []wire.Response
+	var joined strings.Builder
+	for _, line := range lines {
+		out, err := sealer.sealSSELine(line)
+		if err != nil {
+			t.Fatalf("sealSSELine(%q): %v", line, err)
+		}
+		joined.WriteString(out)
+		if fr, ok := sealedFrameFrom(t, out); ok {
+			frames = append(frames, fr)
+		}
+	}
+	if strings.Contains(joined.String(), marker) {
+		t.Errorf("the caller's own stop string rode back in the clear:\n%s", joined.String())
+	}
+	// The count the router bills on is still readable beside it.
+	if !strings.Contains(string(frames[2]["usage"]), `"output_tokens":3`) {
+		t.Errorf("message_delta must keep its cleartext usage: %s", frames[2]["usage"])
+	}
+	if got := openAnthropicStream(t, f, frames); !strings.Contains(got, marker) {
+		t.Errorf("the client must recover the stop string, assembled: %s", got)
+	}
+}
+
+// sealedFrameFrom parses the sealed frame out of one emitted SSE line, reporting
+// ok=false for a line that carries none (a passed-through `event:` or blank).
+func sealedFrameFrom(t *testing.T, out string) (wire.Response, bool) {
+	t.Helper()
+	payload, ok := strings.CutPrefix(strings.TrimSpace(out), "data:")
+	if !ok || !strings.HasPrefix(strings.TrimSpace(payload), "{") {
+		return nil, false
+	}
+	var fr wire.Response
+	if err := json.Unmarshal([]byte(strings.TrimSpace(payload)), &fr); err != nil {
+		t.Fatalf("sealed frame is not JSON: %v", err)
+	}
+	return fr, true
 }
 
 // §7 puts the final frame last, and with a frame-typed profile a terminal event

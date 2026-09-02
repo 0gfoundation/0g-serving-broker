@@ -411,7 +411,7 @@ func (c *Ctrl) maybeSealNonStreamResponse(ctx *gin.Context, body []byte) (out []
 	if err != nil {
 		return nil, true, respBindHash, fmt.Errorf("seal response: %w", err)
 	}
-	ensureSealedFieldsPresent(resp, sealedFields)
+	ensureSealedFieldsPresent(profile, resp, sealedFields)
 	// Declare model + x_0g_trace unbound so the router may rewrite/inject them
 	// downstream (SPEC §5.2).
 	frame, err := wire.SealResponseFor(profile, ephPub, resp, sealedFields, e2eeResponseUnboundFields...)
@@ -691,7 +691,7 @@ func (rs *responseFrameSealer) sealFrame(frame wire.Response, final bool) (strin
 	if err != nil {
 		return "", fmt.Errorf("seal frame: %w", err)
 	}
-	ensureSealedFieldsPresent(frame, sealedFields)
+	ensureSealedFieldsPresent(rs.profile, frame, sealedFields)
 	out, err := rs.sealer.SealFrame(frame, sealedFields, final)
 	if err != nil {
 		return "", fmt.Errorf("seal frame: %w", err)
@@ -725,14 +725,21 @@ func (rs *responseFrameSealer) signedText() (text string, ok bool, err error) {
 	return text, err == nil, err
 }
 
-// arraySealedFields are the sealed fields a legitimate frame can OMIT, and whose
-// value is a JSON array so that an empty one merges to nothing on the client. Both
-// halves are required to be listed here, and the first is the operative one: the
-// placeholder is for a frame that is well-formed WITHOUT the field, never for one
-// that should have carried it.
+// placeholderSealedFields are, PER PROFILE, the sealed fields a legitimate frame
+// of that profile can OMIT and whose value is a JSON array, so that an empty one
+// merges to nothing on the client. Both halves must hold to be listed, and the
+// first is the operative one: the placeholder is for a frame that is well-formed
+// WITHOUT the field, never for one that should have carried it.
 //
-// Only the chat and image streams have such a field. A trailing usage-only chat
-// chunk legitimately carries no `choices`, and that is what this exists for.
+// Keyed on the profile because that is what the invariant is a property of — the
+// field NAME alone does not carry it. A bare name set is correct only by
+// coincidence of vocabulary: a frame-typed profile with a shape whose content
+// field happened to be called `data` would inherit the image profile's
+// permission and get a placeholder on a frame obliged to carry content, which is
+// exactly the failure the Anthropic reasoning below rejects.
+//
+// Only chat and image have an entry. A trailing usage-only chat chunk
+// legitimately carries no `choices`, and that is what this exists for.
 //
 // Anthropic has NO entry, for two separate reasons:
 //   - its per-shape stream fields (`delta`, `content_block`, `error`) are OBJECTS,
@@ -746,25 +753,30 @@ func (rs *responseFrameSealer) signedText() (text string, ok bool, err error) {
 //
 // So a frame whose shape declares a field it does not carry fails closed here,
 // with the sealer's own "sealed field not present in frame".
-var arraySealedFields = map[string]struct{}{
-	"choices": {}, // chat
-	"data":    {}, // image
+var placeholderSealedFields = map[wire.Profile]map[string]struct{}{
+	wire.ProfileChat:  {"choices": {}},
+	wire.ProfileImage: {"data": {}},
 }
 
 // ensureSealedFieldsPresent guarantees every field of sealedFields that a frame
-// may legitimately omit (arraySealedFields) exists on it, so SealFrame — which
-// errors on a declared-but-absent sealed field — never fails on a frame that is
-// well-formed without one, e.g. a trailing usage-only chat chunk with no
-// "choices".
+// of THIS profile may legitimately omit (placeholderSealedFields) exists on it,
+// so SealFrame — which errors on a declared-but-absent sealed field — never
+// fails on a frame that is well-formed without one, e.g. a trailing usage-only
+// chat chunk with no "choices".
+//
+// The profile travels with the field list because the list alone cannot answer
+// the question; both callers resolved the list FROM a profile, so neither has to
+// go looking for it.
 //
 // This is a shape guard, not a content fallback: a path where a missing sealed
 // field would mean lost content must reject BEFORE sealing rather than rely on
 // this (the image path refuses an undecodable response for exactly that reason).
-// Anything not in arraySealedFields is left alone, so the sealer's own
+// Anything not listed for this profile is left alone, so the sealer's own
 // "sealed field not present in frame" is the answer for it.
-func ensureSealedFieldsPresent(frame wire.Response, sealedFields []string) {
+func ensureSealedFieldsPresent(profile wire.Profile, frame wire.Response, sealedFields []string) {
+	mayOmit := placeholderSealedFields[profile]
 	for _, f := range sealedFields {
-		if _, ok := arraySealedFields[f]; !ok {
+		if _, ok := mayOmit[f]; !ok {
 			continue
 		}
 		if _, ok := frame[f]; !ok {
