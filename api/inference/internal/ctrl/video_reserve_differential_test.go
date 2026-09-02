@@ -25,6 +25,9 @@ import (
 //	variant 2  a value past the broker's sizing cap counted as "the upstream named a duration"
 //	variant 3  the size came from the body while the upstream read the query
 //	variant 4  strict json.Unmarshal over a wide struct vs the upstream's json.Decoder over a narrow one
+//	variant 5  the same strictness gap in the MODEL reader, which decides the PRICE rather than the
+//	           duration — ExtractModelName was still on json.Unmarshal after variant 4 moved the
+//	           duration reader off it, so one trailing byte priced the default tier for a premium render
 //
 // A per-shape test per variant is a losing game — the axes are not enumerable by inspection. So this is
 // a differential sweep against the MECHANISMS the upstream actually uses, which are standard library:
@@ -301,6 +304,81 @@ func TestVideoReserveEveryTransportBranchIsExercised(t *testing.T) {
 			// remove, and it must not be reachable through any transport.
 			if n, convErr := strconv.ParseInt(fee, 10, 64); convErr != nil || n <= 0 {
 				t.Errorf("reserve = %q (parsed %d, err %v), want a positive fee", fee, n, convErr)
+			}
+		})
+	}
+}
+
+// upstreamModelJSON reproduces the upstream's read of `model` from a JSON create, through the
+// same struct upstreamSecondsJSON mirrors — the two fields come out of one Decode, so a body
+// whose model the upstream reads is a body whose duration it reads, and vice versa.
+func upstreamModelJSON(body string) (model string, decoded bool) {
+	var jr struct {
+		Model          string      `json:"model"`
+		Prompt         string      `json:"prompt"`
+		Seconds        json.Number `json:"seconds"`
+		Size           string      `json:"size"`
+		Seed           json.Number `json:"seed"`
+		InputReference *struct {
+			ImageURL string `json:"image_url"`
+			FileID   string `json:"file_id"`
+		} `json:"input_reference"`
+	}
+	if err := json.NewDecoder(bytes.NewReader([]byte(body))).Decode(&jr); err != nil {
+		return "", false
+	}
+	return jr.Model, true
+}
+
+// The fifth variant, on the axis the first four missed: the reader that decides the PRICE.
+//
+// ExtractModelName is a reader on this money path — the reserve resolves the pricing tier
+// through it (video.go), and so does ResolveModelForBilling at settlement — and it was still
+// on strict json.Unmarshal after variant 4 moved the duration reader off it. A body the
+// upstream reads fine therefore named no model here, "" means "use the default"
+// (c.Service.ModelType), and both the reserve and the bill priced the DEFAULT tier while the
+// vendor rendered the premium one. The video path forwards the body verbatim
+// (PrepareHTTPRequest rewrites only chatbot), so nothing downstream disagrees: the per-model
+// price and its allowlist are bypassed by appending one byte, and the provider eats the delta.
+//
+// The assertion is the same shape as the duration sweep's: whatever model the upstream's
+// reader yields for a body it accepts, the broker must have read the same one — because here
+// there is no conservative direction to fall back on. A wrong model is not "too low", it is
+// a different price list.
+func TestVideoModelReaderMatchesTheUpstream(t *testing.T) {
+	for _, body := range []string{
+		// The plain cases, so a fix that returns "" for everything cannot pass.
+		`{"model":"premium-4k","seconds":5}`,
+		`{"model":"premium-4k"}`,
+		`{"seconds":5}`,
+		`{}`,
+		// Variant 4's own triggers, on the model field. Each is read by the upstream.
+		`{"model":"premium-4k","seconds":5} `,
+		"{\"model\":\"premium-4k\",\"seconds\":5}\n",
+		`{"model":"premium-4k","seconds":5} x`,
+		`{"model":"premium-4k","seconds":5}{"model":"cheap"}`,
+		`{"model":"premium-4k","id":1}`,
+		`{"model":"premium-4k","metadata":{"anything":[1,2,3]}}`,
+		// And the shapes where the upstream itself fails, which the broker may read either way
+		// — the request 400s and no clip exists, so there is nothing to price.
+		`{"model":"premium-4k","seconds":`,
+		`{"model":5}`,
+		`["premium-4k"]`,
+		`not json at all`,
+		``,
+	} {
+		t.Run(body, func(t *testing.T) {
+			want, decoded := upstreamModelJSON(body)
+			got := ExtractModelName([]byte(body), "application/json")
+			if !decoded {
+				// The upstream rejects it; the broker's answer cannot be wrong about a clip that
+				// never exists. Recorded rather than asserted so the sweep does not manufacture
+				// a variant that is not there — the file's own defect class.
+				t.Logf("upstream rejects this body; broker read %q", got)
+				return
+			}
+			if got != want {
+				t.Errorf("broker read model %q, upstream reads %q: the reserve and the bill price a tier the vendor is not rendering", got, want)
 			}
 		})
 	}
