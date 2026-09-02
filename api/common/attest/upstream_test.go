@@ -7,187 +7,345 @@ import (
 	"testing"
 )
 
-// applyAll replays payloads through a fresh set, returning the first error.
-func applyAll(t *testing.T, steps ...string) (*upstreamSet, error) {
-	t.Helper()
-	s := newUpstreamSet()
-	for _, step := range steps {
-		var err error
-		if name, payload, ok := strings.Cut(step, "|"); ok && name == "remove" {
-			err = s.remove(payload)
-		} else {
-			err = s.add(strings.TrimPrefix(step, "add|"))
-		}
-		if err != nil {
-			return s, err
-		}
-	}
-	return s, nil
-}
-
-func TestUpstreamSetReplay(t *testing.T) {
+// A record is the whole set, so these are tests of one payload at a time. What
+// happens across several records — last-wins, repair, the change log — is
+// upstream_resolve_test.go, because it is the resolver that owns that.
+func TestParseUpstreamSet(t *testing.T) {
 	tests := []struct {
 		name    string
-		steps   []string
+		payload string
 		want    []Upstream
 		wantErr string
 	}{
 		{
-			name:  "add builds the set in insertion order",
-			steps: []string{"add|b http://engine-2:8000/v1", "add|a https://vendor.example/v1 0xabc"},
-			want: []Upstream{
-				{Name: "b", URL: "http://engine-2:8000/v1"},
-				{Name: "a", URL: "https://vendor.example/v1", Identity: "0xabc"},
-			},
+			name:    "one member without an identity",
+			payload: "engine1 http://engine-1:8000/v1",
+			want:    []Upstream{{Name: "engine1", URL: "http://engine-1:8000/v1"}},
 		},
 		{
-			name:  "remove withdraws one and keeps the rest in order",
-			steps: []string{"add|a http://x:1/v1", "add|b http://y:1/v1", "add|c http://z:1/v1", "remove|b"},
-			want: []Upstream{
-				{Name: "a", URL: "http://x:1/v1"},
-				{Name: "c", URL: "http://z:1/v1"},
-			},
+			name:    "one member with an identity",
+			payload: "vendor https://vendor.example/v1 0xabc",
+			want:    []Upstream{{Name: "vendor", URL: "https://vendor.example/v1", Identity: "0xabc"}},
 		},
 		{
-			name:  "re-adding an identical record is accepted, so a boot re-emit needs no diff",
-			steps: []string{"add|a http://x:1/v1 0xid", "add|a http://x:1/v1 0xid"},
-			want:  []Upstream{{Name: "a", URL: "http://x:1/v1", Identity: "0xid"}},
-		},
-		{
-			name:  "remove then add moves a name, and the move is in the log",
-			steps: []string{"add|a http://x:1/v1", "remove|a", "add|a http://y:1/v1"},
-			want:  []Upstream{{Name: "a", URL: "http://y:1/v1"}},
-		},
-		{
-			name:  "removing everything leaves nil, not an empty slice",
-			steps: []string{"add|a http://x:1/v1", "remove|a"},
-			want:  nil,
-		},
-		{
-			// Last wins, and the slot is kept: a re-emit must not reshuffle the order,
-			// and refusing here would trap a writer re-emitting its table at boot.
-			name:  "re-adding a name moves it in place",
-			steps: []string{"add|a http://x:1/v1", "add|b http://y:1/v1", "add|a http://z:1/v1"},
-			want: []Upstream{
-				{Name: "a", URL: "http://z:1/v1"},
-				{Name: "b", URL: "http://y:1/v1"},
-			},
-		},
-		{
-			name:  "re-adding with an added identity moves it too",
-			steps: []string{"add|a http://x:1/v1", "add|a http://x:1/v1 vendor"},
-			want:  []Upstream{{Name: "a", URL: "http://x:1/v1", Identity: "vendor"}},
-		},
-		{
-			// The two paths differ, and the doc says so: in-place keeps the slot,
-			// remove-then-add takes a new one. Locked down because the reported order is
-			// what a person reads the set by.
-			name:  "remove then re-add sends a name to the end",
-			steps: []string{"add|a http://x:1/v1", "add|b http://y:1/v1", "remove|a", "add|a http://x:1/v1"},
+			name:    "the members keep the order the record listed them in",
+			payload: "b http://y:1/v1\na http://x:1/v1",
 			want: []Upstream{
 				{Name: "b", URL: "http://y:1/v1"},
 				{Name: "a", URL: "http://x:1/v1"},
 			},
 		},
 		{
-			// A no-op, not an error: the set is the same either way, and refusing would
-			// trap a writer reconciling against a freshly cleared ledger.
-			name:  "removing a name that was never added changes nothing",
-			steps: []string{"add|a http://x:1/v1", "remove|b"},
-			want:  []Upstream{{Name: "a", URL: "http://x:1/v1"}},
+			// A writer that joins its members with "\n" produces a trailing one, and a
+			// blank line cannot hide a member, so neither is worth making a set unreadable
+			// over.
+			name:    "blank lines are ignored",
+			payload: "\n\na http://x:1/v1\n\nb http://y:1/v1\n",
+			want: []Upstream{
+				{Name: "a", URL: "http://x:1/v1"},
+				{Name: "b", URL: "http://y:1/v1"},
+			},
 		},
 		{
-			name:  "removing twice is idempotent",
-			steps: []string{"add|a http://x:1/v1", "remove|a", "remove|a"},
-			want:  nil,
+			name:    "fields may be separated by any whitespace",
+			payload: "a\thttp://x:1/v1   0xid",
+			want:    []Upstream{{Name: "a", URL: "http://x:1/v1", Identity: "0xid"}},
 		},
 		{
-			name:    "a remove naming something unparseable is still refused",
-			steps:   []string{"remove|NotAName"},
-			wantErr: "which is not a lowercase alphanumeric name",
+			name:    "the empty set is a set",
+			payload: "none",
+			want:    nil,
 		},
 		{
-			name:    "add with one field is refused",
-			steps:   []string{"add|onlyaname"},
-			wantErr: "want a name, a base URL",
+			name:    "the empty set tolerates surrounding whitespace",
+			payload: "  none\n",
+			want:    nil,
+		},
+		// The empty set has to be spelled out. Otherwise a writer that emits a record
+		// with an unfilled payload — a truncated write, an uninitialised buffer — would
+		// be making the strongest claim the set can make, that plaintext goes nowhere,
+		// by accident.
+		{
+			name:    "an empty payload is not the empty set",
+			payload: "",
+			wantErr: "names no member and is not \"none\"",
 		},
 		{
-			name:    "add with four fields is refused",
-			steps:   []string{"add|a http://x:1/v1 0xid extra"},
-			wantErr: "want a name, a base URL",
+			name:    "a whitespace-only payload is not the empty set",
+			payload: " \n\t\n",
+			wantErr: "names no member and is not \"none\"",
 		},
 		{
-			name:    "remove with two fields is refused",
-			steps:   []string{"add|a http://x:1/v1", "remove|a b"},
-			wantErr: "want just a name",
+			name:    "a lone name is not a member",
+			payload: "engine1",
+			wantErr: "has 1 fields",
 		},
 		{
-			name:    "an uppercase name is refused",
-			steps:   []string{"add|Ali http://x:1/v1"},
-			wantErr: "which is not a lowercase alphanumeric name",
+			name:    "a fourth field is refused rather than ignored",
+			payload: "a http://x:1/v1 0xid extra",
+			wantErr: "has 4 fields",
 		},
 		{
-			name:    "a name starting with a dash is refused",
-			steps:   []string{"add|-a http://x:1/v1"},
-			wantErr: "which is not a lowercase alphanumeric name",
+			// "none" beside members is caught by the field count, since a member needs a
+			// URL. Asserted so that a future change to the empty-set handling cannot make
+			// this a set of one.
+			name:    "the empty set cannot be mixed with members",
+			payload: "none\na http://x:1/v1",
+			wantErr: "has 1 fields",
 		},
 		{
-			name:    "an over-long name is refused",
-			steps:   []string{"add|" + strings.Repeat("a", 64) + " http://x:1/v1"},
-			wantErr: "which is not a lowercase alphanumeric name",
+			name:    "the empty set cannot follow members either",
+			payload: "a http://x:1/v1\nnone",
+			wantErr: "has 1 fields",
 		},
-		// The identity is held to the same shape inference/config enforces. It goes
-		// into the canonical text the derivation path will bind, so a value one side
-		// would normalise and the other would not is a key mismatch waiting to happen.
+		// A name that can be written two ways lets one name mean two things, and the
+		// name is what the config's model mapping resolves through.
 		{
-			name:  "a well-formed identity is accepted",
-			steps: []string{"add|a http://x:1/v1 open-router"},
-			want:  []Upstream{{Name: "a", URL: "http://x:1/v1", Identity: "open-router"}},
-		},
-		{
-			name:    "an uppercase identity is refused",
-			steps:   []string{"add|a http://x:1/v1 OpenRouter"},
-			wantErr: "which is not lowercase alphanumeric",
+			name:    "an uppercase name",
+			payload: "Engine1 http://x:1/v1",
+			wantErr: "not a lowercase alphanumeric name",
 		},
 		{
-			name:    "an identity with a path in it is refused",
-			steps:   []string{"add|a http://x:1/v1 ../../etc/passwd"},
-			wantErr: "which is not lowercase alphanumeric",
+			name:    "a name starting with a dash",
+			payload: "-engine http://x:1/v1",
+			wantErr: "not a lowercase alphanumeric name",
 		},
 		{
-			name:    "an identity with a trailing hyphen is refused",
-			steps:   []string{"add|a http://x:1/v1 vendor-"},
-			wantErr: "which is not lowercase alphanumeric",
+			name:    "a name with a dot",
+			payload: "engine.1 http://x:1/v1",
+			wantErr: "not a lowercase alphanumeric name",
+		},
+		{
+			name:    "a name of 64 bytes",
+			payload: strings.Repeat("a", 64) + " http://x:1/v1",
+			wantErr: "not a lowercase alphanumeric name",
+		},
+		{
+			name:    "a name of 63 bytes is the longest that passes",
+			payload: strings.Repeat("a", 63) + " http://x:1/v1",
+			want:    []Upstream{{Name: strings.Repeat("a", 63), URL: "http://x:1/v1"}},
+		},
+		// Two lines binding one name are equally current — there is no ordering inside a
+		// record to appeal to — so the mapping through that name would be unreadable.
+		{
+			name:    "a name bound twice in one set",
+			payload: "a http://x:1/v1\na http://y:1/v1",
+			wantErr: "twice",
+		},
+		{
+			name:    "a name bound twice to the same URL is still refused",
+			payload: "a http://x:1/v1\na http://x:1/v1",
+			wantErr: "twice",
+		},
+		// The URL rules live in validUpstreamURL and have their own test. What is
+		// asserted here is only that a member goes through them at all.
+		{
+			name:    "a member whose URL is not a URL",
+			payload: "a not-a-url",
+			wantErr: "not http or https",
+		},
+		{
+			name:    "a member whose URL carries credentials",
+			payload: "a http://user:pass@x:1/v1",
+			wantErr: "carries credentials",
+		},
+		{
+			name:    "a malformed identity",
+			payload: "a http://x:1/v1 NotAnIdentity",
+			wantErr: "not lowercase alphanumeric with optional hyphens",
+		},
+		{
+			name:    "an identity with a trailing hyphen",
+			payload: "a http://x:1/v1 vendor-",
+			wantErr: "not lowercase alphanumeric with optional hyphens",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s, err := applyAll(t, tt.steps...)
+			got, err := parseUpstreamSet(tt.payload)
 			if tt.wantErr != "" {
 				if err == nil {
-					t.Fatalf("want an error containing %q, got none", tt.wantErr)
+					t.Fatalf("parseUpstreamSet(%q) = %+v, want an error containing %q", tt.payload, got, tt.wantErr)
 				}
 				if !strings.Contains(err.Error(), tt.wantErr) {
-					t.Fatalf("want an error containing %q, got %v", tt.wantErr, err)
+					t.Fatalf("parseUpstreamSet(%q) = %v, want an error containing %q", tt.payload, err, tt.wantErr)
+				}
+				// A refused record must yield nothing. Half a set understates where
+				// plaintext can go, which is the direction that misleads.
+				if got != nil {
+					t.Fatalf("parseUpstreamSet(%q) returned %+v alongside its error", tt.payload, got)
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
+				t.Fatalf("parseUpstreamSet(%q) = %v", tt.payload, err)
 			}
-			got := s.list()
 			if len(got) != len(tt.want) {
-				t.Fatalf("set has %d entries, want %d: %+v", len(got), len(tt.want), got)
+				t.Fatalf("parseUpstreamSet(%q) = %+v, want %+v", tt.payload, got, tt.want)
 			}
-			if tt.want == nil && got != nil {
-				t.Fatalf("empty set should be nil, got %+v", got)
-			}
-			for i := range got {
+			for i := range tt.want {
 				if got[i] != tt.want[i] {
-					t.Errorf("entry %d = %+v, want %+v", i, got[i], tt.want[i])
+					t.Errorf("member %d = %+v, want %+v", i, got[i], tt.want[i])
 				}
 			}
 		})
+	}
+}
+
+// The empty set and an unreadable record must both come back as a nil slice, so that
+// nothing downstream can tell them apart by shape alone — UpstreamsState is the only
+// thing that separates them, and that is the point of it being the source of truth.
+func TestParseUpstreamSetDistinguishesEmptyFromRefusedOnlyByError(t *testing.T) {
+	empty, err := parseUpstreamSet(emptyUpstreamSet)
+	if err != nil {
+		t.Fatalf("the empty set must parse: %v", err)
+	}
+	if empty != nil {
+		t.Fatalf("the empty set = %+v, want nil", empty)
+	}
+	refused, err := parseUpstreamSet("")
+	if err == nil {
+		t.Fatal("an empty payload parsed")
+	}
+	if refused != nil {
+		t.Fatalf("a refused payload = %+v, want nil", refused)
+	}
+}
+
+func TestUpstreamChanges(t *testing.T) {
+	a1 := Upstream{Name: "a", URL: "http://x:1/v1"}
+	a2 := Upstream{Name: "a", URL: "http://y:1/v1"}
+	a1id := Upstream{Name: "a", URL: "http://x:1/v1", Identity: "vendor"}
+	b := Upstream{Name: "b", URL: "http://z:1/v1"}
+
+	tests := []struct {
+		name string
+		prev []Upstream
+		next []Upstream
+		want []string
+	}{
+		{
+			// The ordinary case, and the one that has to stay quiet: a writer re-emits its
+			// unchanged table on every boot, because RTMR3 is cleared while the config
+			// survives on disk.
+			name: "an unchanged set reports nothing",
+			prev: []Upstream{a1, b},
+			next: []Upstream{a1, b},
+		},
+		{
+			name: "reordering is not a change",
+			prev: []Upstream{a1, b},
+			next: []Upstream{b, a1},
+		},
+		{
+			name: "a new member",
+			prev: []Upstream{a1},
+			next: []Upstream{a1, b},
+			want: []string{"b: added as http://z:1/v1 (no identity)"},
+		},
+		{
+			name: "a rebound member",
+			prev: []Upstream{a1},
+			next: []Upstream{a2},
+			want: []string{"a: http://x:1/v1 (no identity) -> http://y:1/v1 (no identity)"},
+		},
+		{
+			// Gaining or losing an identity changes who a routing proof attributes the
+			// request to, so it is a change even though the URL did not move.
+			name: "an identity gained",
+			prev: []Upstream{a1},
+			next: []Upstream{a1id},
+			want: []string{"a: http://x:1/v1 (no identity) -> http://x:1/v1 (vendor)"},
+		},
+		{
+			name: "an identity lost",
+			prev: []Upstream{a1id},
+			next: []Upstream{a1},
+			want: []string{"a: http://x:1/v1 (vendor) -> http://x:1/v1 (no identity)"},
+		},
+		{
+			name: "a withdrawn member",
+			prev: []Upstream{a1, b},
+			next: []Upstream{a1},
+			want: []string{"b: http://z:1/v1 (no identity) -> withdrawn"},
+		},
+		{
+			name: "everything withdrawn",
+			prev: []Upstream{a1, b},
+			next: nil,
+			want: []string{
+				"a: http://x:1/v1 (no identity) -> withdrawn",
+				"b: http://z:1/v1 (no identity) -> withdrawn",
+			},
+		},
+		{
+			// The first record of a boot is the baseline, not a change, so the resolver
+			// does not call this with a nil prev — but a set appearing where none was is
+			// still spelled as additions rather than silence.
+			name: "everything added",
+			prev: nil,
+			next: []Upstream{a1, b},
+			want: []string{
+				"a: added as http://x:1/v1 (no identity)",
+				"b: added as http://z:1/v1 (no identity)",
+			},
+		},
+		{
+			name: "all three kinds at once",
+			prev: []Upstream{a1, b},
+			next: []Upstream{a2, {Name: "c", URL: "http://w:1/v1"}},
+			want: []string{
+				"a: http://x:1/v1 (no identity) -> http://y:1/v1 (no identity)",
+				"b: http://z:1/v1 (no identity) -> withdrawn",
+				"c: added as http://w:1/v1 (no identity)",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := upstreamChanges(tt.prev, tt.next)
+			if len(tt.want) == 0 {
+				if got != nil {
+					t.Fatalf("upstreamChanges() = %q, want nothing", got)
+				}
+				return
+			}
+			if len(got) != len(tt.want) {
+				t.Fatalf("upstreamChanges() = %q, want %q", got, tt.want)
+			}
+			for i := range tt.want {
+				if got[i] != tt.want[i] {
+					t.Errorf("line %d = %q, want %q", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+// The withdrawal lines come out of a map, so without the sort the same pair of
+// snapshots would report a different order on every run — and a caller diffing two
+// verifications, or logging the lines, would see changes that did not happen.
+func TestUpstreamChangesAreOrderedDeterministically(t *testing.T) {
+	prev := []Upstream{
+		{Name: "a", URL: "http://a:1/v1"},
+		{Name: "b", URL: "http://b:1/v1"},
+		{Name: "c", URL: "http://c:1/v1"},
+		{Name: "d", URL: "http://d:1/v1"},
+		{Name: "e", URL: "http://e:1/v1"},
+	}
+	first := upstreamChanges(prev, nil)
+	for range 50 {
+		got := upstreamChanges(prev, nil)
+		for i := range first {
+			if got[i] != first[i] {
+				t.Fatalf("the order varies between calls: %q then %q", first, got)
+			}
+		}
+	}
+	for i := 1; i < len(first); i++ {
+		if first[i-1] > first[i] {
+			t.Fatalf("the lines are not sorted: %q", first)
+		}
 	}
 }
 
@@ -269,55 +427,47 @@ func TestValidUpstreamURL(t *testing.T) {
 // The hash is what the signing key's derivation path will bind, so the properties
 // below are the contract between writer and reader, not incidental behaviour.
 func TestUpstreamSetHash(t *testing.T) {
-	hashOf := func(t *testing.T, steps ...string) string {
+	hashOf := func(t *testing.T, payload string) string {
 		t.Helper()
-		s, err := applyAll(t, steps...)
+		members, err := parseUpstreamSet(payload)
 		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
+			t.Fatalf("parseUpstreamSet(%q) = %v", payload, err)
 		}
-		sum, err := (&RunningState{Upstreams: s.list(), UpstreamsState: UpstreamsKnown}).UpstreamSetHash()
+		sum, err := (&RunningState{Upstreams: members, UpstreamsState: UpstreamsKnown}).UpstreamSetHash()
 		if err != nil {
 			t.Fatalf("UpstreamSetHash() = %v", err)
 		}
 		return sum
 	}
 
-	t.Run("insertion order does not change it", func(t *testing.T) {
-		a := hashOf(t, "add|a http://x:1/v1", "add|b http://y:1/v1")
-		b := hashOf(t, "add|b http://y:1/v1", "add|a http://x:1/v1")
+	t.Run("the order the record listed them in does not change it", func(t *testing.T) {
+		a := hashOf(t, "a http://x:1/v1\nb http://y:1/v1")
+		b := hashOf(t, "b http://y:1/v1\na http://x:1/v1")
 		if a != b {
 			t.Fatalf("order changed the hash: %s vs %s", a, b)
 		}
 	})
 
-	t.Run("history does not change it", func(t *testing.T) {
-		direct := hashOf(t, "add|a http://x:1/v1")
-		viaMoves := hashOf(t, "add|a http://y:1/v1", "remove|a", "add|a http://x:1/v1")
-		if direct != viaMoves {
-			t.Fatalf("history changed the hash: %s vs %s", direct, viaMoves)
-		}
-	})
-
 	t.Run("a different URL changes it", func(t *testing.T) {
-		if hashOf(t, "add|a http://x:1/v1") == hashOf(t, "add|a http://y:1/v1") {
+		if hashOf(t, "a http://x:1/v1") == hashOf(t, "a http://y:1/v1") {
 			t.Fatal("two different sets share a hash")
 		}
 	})
 
 	t.Run("a different identity changes it", func(t *testing.T) {
-		if hashOf(t, "add|a http://x:1/v1") == hashOf(t, "add|a http://x:1/v1 0xid") {
+		if hashOf(t, "a http://x:1/v1") == hashOf(t, "a http://x:1/v1 0xid") {
 			t.Fatal("adding an identity did not change the hash")
 		}
 	})
 
 	t.Run("a different name changes it", func(t *testing.T) {
-		if hashOf(t, "add|a http://x:1/v1") == hashOf(t, "b http://x:1/v1") {
+		if hashOf(t, "a http://x:1/v1") == hashOf(t, "b http://x:1/v1") {
 			t.Fatal("renaming did not change the hash")
 		}
 	})
 
 	t.Run("an extra member changes it", func(t *testing.T) {
-		if hashOf(t, "add|a http://x:1/v1") == hashOf(t, "add|a http://x:1/v1", "add|b http://y:1/v1") {
+		if hashOf(t, "a http://x:1/v1") == hashOf(t, "a http://x:1/v1\nb http://y:1/v1") {
 			t.Fatal("adding a member did not change the hash")
 		}
 	})
@@ -338,7 +488,16 @@ func TestUpstreamSetHash(t *testing.T) {
 		}
 	})
 
-	t.Run("a recorded-then-emptied set has a hash, and it is not the empty-string hash", func(t *testing.T) {
+	t.Run("an unrecognised state has no hash", func(t *testing.T) {
+		// Reachable by json.Unmarshal from anything, and the default branch is what keeps
+		// a state this reader does not know from being treated as a set.
+		st := &RunningState{UpstreamsState: "incomplete"}
+		if _, err := st.UpstreamSetHash(); err == nil {
+			t.Fatal("want an error for a state this reader does not define, got a hash")
+		}
+	})
+
+	t.Run("the explicitly empty set has a hash, and it is not the empty-string hash", func(t *testing.T) {
 		got, err := (&RunningState{UpstreamsState: UpstreamsKnown}).UpstreamSetHash()
 		if err != nil {
 			t.Fatalf("UpstreamSetHash() = %v", err)
@@ -353,14 +512,7 @@ func TestUpstreamSetHash(t *testing.T) {
 	})
 
 	t.Run("the prefix domain-separates the encoding", func(t *testing.T) {
-		s, err := applyAll(t, "add|a http://x:1/v1")
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		got, err := (&RunningState{Upstreams: s.list(), UpstreamsState: UpstreamsKnown}).UpstreamSetHash()
-		if err != nil {
-			t.Fatalf("UpstreamSetHash() = %v", err)
-		}
+		got := hashOf(t, "a http://x:1/v1")
 		unprefixed := sha256.Sum256([]byte("a http://x:1/v1 \n"))
 		if got == hex.EncodeToString(unprefixed[:]) {
 			t.Fatal("the hash matches the unprefixed lines, so the version prefix is absent")
@@ -371,17 +523,17 @@ func TestUpstreamSetHash(t *testing.T) {
 		// Sorting the canonical lines must not lose the pairing. Both sets hold the
 		// same two names and the same two URLs; only the pairing differs, and that is
 		// precisely what a model mapping resolves through.
-		ab := hashOf(t, "add|a http://x:1/v1", "add|b http://y:1/v1")
-		ba := hashOf(t, "add|a http://y:1/v1", "add|b http://x:1/v1")
+		ab := hashOf(t, "a http://x:1/v1\nb http://y:1/v1")
+		ba := hashOf(t, "a http://y:1/v1\nb http://x:1/v1")
 		if ab == ba {
 			t.Fatal("swapping the pairing did not change the hash")
 		}
 	})
 
 	// The encoding is space-delimited, so it is injective only while no field holds a
-	// space. The replay cannot produce such a member, but this type is transported, so a
-	// hand-built or unmarshalled state can. Refuse rather than return a hash that does
-	// not identify the set it claims to.
+	// space. parseUpstreamSet cannot produce such a member, but this type is
+	// transported, so a hand-built or unmarshalled state can. Refuse rather than return
+	// a hash that does not identify the set it claims to.
 	t.Run("a member with whitespace has no hash", func(t *testing.T) {
 		for _, bad := range []Upstream{
 			{Name: "a b", URL: "http://x:1/v1"},
@@ -409,11 +561,11 @@ func TestUpstreamSetHash(t *testing.T) {
 	})
 
 	t.Run("repeated calls agree", func(t *testing.T) {
-		s, err := applyAll(t, "add|a http://x:1/v1", "add|b http://y:1/v1 0xid")
+		members, err := parseUpstreamSet("a http://x:1/v1\nb http://y:1/v1 0xid")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		st := &RunningState{Upstreams: s.list(), UpstreamsState: UpstreamsKnown}
+		st := &RunningState{Upstreams: members, UpstreamsState: UpstreamsKnown}
 		first, err := st.UpstreamSetHash()
 		if err != nil {
 			t.Fatalf("UpstreamSetHash() = %v", err)
