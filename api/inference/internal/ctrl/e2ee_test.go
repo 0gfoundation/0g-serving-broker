@@ -700,6 +700,65 @@ func collectSealedFrames(t *testing.T, rs *responseFrameSealer, lines []string) 
 	return frames
 }
 
+// The chat path's own post-final case, and the reason the drop-vs-fail decision
+// reads what a frame CARRIES rather than what its shape may seal: chat's sealed
+// set is ["choices"] for every frame whatever it holds, and no chat frame is ever
+// terminal, so a shape-based test failed the stream on every chunk behind [DONE]
+// — including the trailing usage-only one that legitimately carries no `choices`
+// (the frame ensureSealedFieldsPresent exists to accommodate). Before this PR
+// that chunk was sealed and forwarded; failing it would append a JSON error body
+// behind the sealed final frame and report a fully delivered turn as an error.
+func TestStreamFrameSealer_ChatFrameAfterDone(t *testing.T) {
+	f := newE2EEFixture(t)
+	ctx := newGinCtx()
+	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEProfile, wire.ProfileChat)
+	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
+	sealer, err := f.c.newResponseFrameSealer(ctx)
+	if err != nil {
+		t.Fatalf("newResponseFrameSealer: %v", err)
+	}
+	for _, line := range []string{
+		`data: {"id":"a","choices":[{"delta":{"content":"hi"}}]}` + "\n",
+		"data: [DONE]\n", // emits the synthetic final frame
+	} {
+		if _, err := sealer.sealSSELine(line); err != nil {
+			t.Fatalf("sealSSELine(%q): %v", strings.TrimSpace(line), err)
+		}
+	}
+	atFinal, _, err := sealer.signedText()
+	if err != nil {
+		t.Fatalf("signedText: %v", err)
+	}
+	boundAtFinal := sealer.frameCount
+
+	// Carries no `choices` → dropped, not fatal.
+	out, err := sealer.sealSSELine(`data: {"id":"a","usage":{"total_tokens":3}}` + "\n")
+	if err != nil {
+		t.Errorf("a usage-only chunk after [DONE] must be dropped, not fail the stream: %v", err)
+	}
+	if out != "" {
+		t.Errorf("a dropped frame must emit nothing, got %q", out)
+	}
+
+	// Carries `choices` → still fatal: dropping it would lose an answer, and
+	// sealing it would break the binding.
+	if _, err := sealer.sealSSELine(`data: {"id":"a","choices":[{"delta":{"content":"late"}}]}` + "\n"); err == nil {
+		t.Error("a chunk carrying `choices` after [DONE] must fail the stream")
+	}
+
+	// Either way the §8 binding still covers exactly what the client received.
+	after, _, err := sealer.signedText()
+	if err != nil {
+		t.Fatalf("signedText: %v", err)
+	}
+	if sealer.frameCount != boundAtFinal || after != atFinal {
+		t.Errorf("the binding changed after the final frame: frames %d→%d\n  at final: %s\n  after:    %s",
+			boundAtFinal, sealer.frameCount, atFinal, after)
+	}
+}
+
 func assertExactlyOneFinalLast(t *testing.T, frames []wire.Response) {
 	t.Helper()
 	finalCount := 0

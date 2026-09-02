@@ -211,6 +211,24 @@ frame-typed profile's answer is a property of the frame.
   of the API (it seals nothing per §7.2) rather than a bare placeholder. It never
   synthesizes an `error`: there is no failure to report, only a truncation, and
   inventing one would attribute to the model something it did not produce.
+
+  > **The capped turn is INCOMPLETE, and a client integrator will see that.**
+  > Anthropic's grammar ends a turn `content_block_stop` → `message_delta`
+  > (carrying `stop_reason` and `usage.output_tokens`) → `message_stop`. A stream
+  > truncated mid-`content_block_delta` and capped here skips the first two, so an
+  > SDK accumulating it yields a `Message` with `stop_reason: null` and possibly an
+  > unclosed content block, and the router never sees an output-token count for
+  > that turn. The frame is legal; the SEQUENCE is one no complete turn produces —
+  > which is the honest signal, since the turn did not complete. Synthesizing a
+  > `message_delta` to fill the gap is deliberately NOT done: `stop_reason` and the
+  > token count would both be invented, and §8 signs whatever is sent, so the
+  > broker would be attesting numbers the model never produced. Treat a turn whose
+  > `stop_reason` is null as truncated. (The chat path is symmetric — its synthetic
+  > final frame carries empty `choices` and no `finish_reason` — it is only more
+  > visible here, because the Messages SDKs run a stricter state machine.
+  > Synthesizing the `content_block_stop` too, which seals nothing and would be
+  > safe, needs the sealer to track whether a block is open; not worth the state
+  > until something actually trips on it.)
   What to synthesize is the one per-profile literal left in `ctrl/e2ee.go`
   (`synthFinalFrameFor`), because "which event should a broker invent when the
   upstream sent none" is a serving decision rather than a wire rule. So

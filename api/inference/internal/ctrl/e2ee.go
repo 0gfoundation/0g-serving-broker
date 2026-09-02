@@ -540,6 +540,16 @@ type synthFinalFrame struct {
 // and inventing an `error` frame would attribute a failure to the model that the
 // model did not produce.
 //
+// The capped turn is INCOMPLETE, deliberately visibly so. Anthropic's grammar
+// ends a turn `content_block_stop` → `message_delta` (which carries `stop_reason`
+// and `usage.output_tokens`) → `message_stop`, and a stream truncated
+// mid-`content_block_delta` skips the first two: an SDK accumulating it gets a
+// message with `stop_reason: null`, and the router sees no output-token count.
+// Filling that gap with a synthesized `message_delta` would mean inventing both
+// values — and §8 signs whatever is sent, so the broker would be attesting
+// numbers the model never produced. A null `stop_reason` is the honest signal
+// that the turn did not complete.
+//
 // This is the one per-profile literal left in this file, and the profile that
 // needs it is the only one that can supply it: the wire package owns which
 // shapes END a stream, but "which event should a broker invent when the upstream
@@ -626,42 +636,61 @@ func (rs *responseFrameSealer) sealSSELine(line string) (string, error) {
 // the final one. Either way it is not sealed and not bound; the question is only
 // whether the stream continues.
 //
-// It is DROPPED when it carries no answer: a duplicate or trailing terminal
-// event, or any shape that seals nothing. That is the case actually seen in the
-// wild — a proxy that appends `message_stop` after `error`, or sends it twice —
-// and the client is unharmed, having already received a complete final frame.
-// Failing the request instead would be worse than the quirk: the stream is
-// already committed and flushed, so the error path appends a JSON error body
-// behind the sealed final frame and reports a turn that fully delivered as a
-// broker error.
+// It is DROPPED when the frame CARRIES no answer: a duplicate or trailing
+// terminal event, or any frame holding none of the fields its shape would seal.
+// That is the case actually seen in the wild — a proxy that appends
+// `message_stop` after `error` or sends it twice, and a chat upstream's trailing
+// usage-only chunk behind [DONE] — and the client is unharmed, having already
+// received a complete final frame. Failing instead would be worse than the
+// quirk: the stream is already committed and flushed, so the error path appends
+// a JSON error body behind the sealed final frame and reports a turn that fully
+// delivered as a broker error.
 //
-// It FAILS the stream when the shape declares a content field, or when the shape
-// is unknown and so might. That is the one case where dropping loses data: a
-// frame carrying an answer the client will never see, silently. Stopping is also
-// all this broker can do about it — the frame cannot be sealed without breaking
-// the §8 binding the client verifies.
+// It FAILS the stream when the frame does carry one of those fields, or when its
+// shape is unknown and so might. That is the one case where dropping loses data:
+// an answer the client will never see, silently. Stopping is also all this
+// broker can do about it — the frame cannot be sealed without breaking the §8
+// binding the client verifies.
+//
+// The decision is on what the frame HOLDS, not on what its shape may seal,
+// because for a single-shape profile those differ: chat's sealed set is
+// ["choices"] for every frame whatever it contains, and no chat frame is ever
+// terminal, so a shape-based test failed the stream on every post-[DONE] chunk —
+// including the usage-only one that legitimately carries no `choices` at all
+// (the frame ensureSealedFieldsPresent exists to accommodate). For a frame-typed
+// profile the two tests agree: a `content_block_delta` carries its `delta`, and
+// `ping` / `message_stop` carry nothing to begin with.
 func (rs *responseFrameSealer) handleFrameAfterFinal(frame wire.Response) (string, error) {
 	const because = "§7 requires the final frame to be last, and sealing this one would break the §8 binding the client recomputes"
 	sealed, err := wire.ResponseSealedFieldsForFrame(rs.profile, frame)
 	if err != nil {
 		return "", fmt.Errorf("seal stream frame: upstream sent a frame of unknown shape after the terminal frame, which may carry content: %s: %w", because, err)
 	}
-	if terminal, terr := wire.IsTerminalResponseFrame(rs.profile, frame); len(sealed) == 0 || (terr == nil && terminal) {
-		rs.logger.Warnf("e2ee stream: dropping a %s frame that arrived after the terminal frame (it carries no answer); %s", frameShapeOf(frame), because)
+	carriesAnswer := false
+	for _, f := range sealed {
+		if _, ok := frame[f]; ok {
+			carriesAnswer = true
+			break
+		}
+	}
+	if terminal, terr := wire.IsTerminalResponseFrame(rs.profile, frame); !carriesAnswer || (terr == nil && terminal) {
+		rs.logger.Warnf("e2ee stream: dropping a frame (%s) that arrived after the terminal frame and carries no answer; %s", frameDescriptionOf(frame, rs.profile), because)
 		return "", nil
 	}
-	return "", fmt.Errorf("seal stream frame: upstream sent a %s frame carrying content after the terminal frame: %s", frameShapeOf(frame), because)
+	return "", fmt.Errorf("seal stream frame: upstream sent a frame (%s) carrying %v after the terminal frame: %s", frameDescriptionOf(frame, rs.profile), sealed, because)
 }
 
-// frameShapeOf names a frame's shape for a log or an error, or "untyped" when it
-// has no cleartext discriminator. It is for humans only — every decision reads
-// the shape through the wire package.
-func frameShapeOf(frame wire.Response) string {
+// frameDescriptionOf names a frame for a log or an error: its shape for a
+// frame-typed profile, and just the profile for a single-shape one, whose frames
+// have no shape to name (calling a chat chunk "untyped" read as a defect rather
+// than as normal). It is for humans only — every decision reads the shape
+// through the wire package.
+func frameDescriptionOf(frame wire.Response, profile wire.Profile) string {
 	var kind string
 	if err := json.Unmarshal(frame[anthropicFrameType], &kind); err != nil || kind == "" {
-		return "untyped"
+		return fmt.Sprintf("%s profile", profile)
 	}
-	return kind
+	return fmt.Sprintf("%s %s", profile, kind)
 }
 
 // isTerminal reports whether this frame is an event that CLOSES this profile's
