@@ -455,7 +455,7 @@ type responseFrameSealer struct {
 	// so that question goes to wire.IsTerminalResponseFrame. Capping and
 	// recognizing coincide for a normal turn and diverge for a failed one, which
 	// is why they are separate.
-	synthFinal   synthFinalFrame
+	synthFinal   wire.Response
 	emittedFinal bool
 	frameCount   int
 	// logger reports what was dropped: a frame this broker declines to seal but
@@ -504,7 +504,7 @@ func (c *Ctrl) newResponseFrameSealer(ctx *gin.Context) (*responseFrameSealer, e
 	// fails for a frame-typed profile added without an entry, whose zero frame has
 	// no discriminator to resolve.
 	synthFinal := synthFinalFrameFor(profile)
-	if _, err := wire.ResponseSealedFieldsForFrame(profile, synthFinal.frame); err != nil {
+	if _, err := wire.ResponseSealedFieldsForFrame(profile, synthFinal); err != nil {
 		return nil, fmt.Errorf("e2ee stream: profile %q declares no synthetic terminal frame this broker can seal: %w", profile, err)
 	}
 	return &responseFrameSealer{
@@ -516,18 +516,13 @@ func (c *Ctrl) newResponseFrameSealer(ctx *gin.Context) (*responseFrameSealer, e
 	}, nil
 }
 
-// synthFinalFrame is the event a truncated stream is capped with: the plaintext
-// frame to seal, and the SSE `event:` name it has to be announced under. The two
-// travel together so that a profile is described in ONE place — they were
-// separate, and the event name was then a second per-profile literal sitting at
-// the emit site.
-type synthFinalFrame struct {
-	frame wire.Response // nil for a profile whose stream has no such event
-	event string        // "" for a profile whose stream carries no `event:` lines
-}
-
-// synthFinalFrameFor returns what to cap a truncated stream of this profile
-// with, or the zero value for a profile whose streams have no such event.
+// synthFinalFrameFor returns the plaintext frame to cap a truncated stream of
+// this profile with, or nil for a profile whose streams have no such event.
+//
+// It answers with the FRAME only, no event name beside it: sealFrame derives the
+// SSE `event:` line from whatever frame it is sealing, reading the frame's own
+// bound discriminator, so a synthesized event is announced exactly like a
+// forwarded one and the name is not a second per-profile literal anywhere.
 //
 // Anthropic's stream ends with a `message_stop` event rather than a `[DONE]`
 // sentinel, and that event is a legal frame of the profile — it seals nothing
@@ -558,14 +553,11 @@ type synthFinalFrame struct {
 // without an entry here therefore does not degrade quietly:
 // newResponseFrameSealer proves the entry can be sealed before the first frame
 // goes out, so the stream is refused up front rather than truncated at EOF.
-func synthFinalFrameFor(p wire.Profile) synthFinalFrame {
+func synthFinalFrameFor(p wire.Profile) wire.Response {
 	if p == wire.ProfileAnthropic {
-		return synthFinalFrame{
-			frame: wire.Response{anthropicFrameType: json.RawMessage(`"` + anthropicMessageStop + `"`)},
-			event: anthropicMessageStop,
-		}
+		return wire.Response{anthropicFrameType: json.RawMessage(`"` + anthropicMessageStop + `"`)}
 	}
-	return synthFinalFrame{}
+	return nil
 }
 
 // sealSSELine transforms one already-sanitized SSE line into its sealed form
@@ -597,6 +589,18 @@ func (rs *responseFrameSealer) sealSSELine(line string) (string, error) {
 			return "", err
 		}
 		return final + line, nil // synthetic final frame (if any) precedes [DONE]
+	}
+	// An upstream `event:` line is DROPPED, and this broker emits its own from the
+	// frame's bound `type` (see sealFrame). Forwarding it buys nothing and costs
+	// something: it sits outside the frame JSON and therefore outside the AAD, so
+	// §7.2 already requires a receiver to ignore it and rebuild the line from the
+	// bound discriminator — while everything a sealed frame's cleartext half may
+	// contain is checked by the profile taxonomy, and this line is checked by
+	// nothing. sanitizeStreamLine's leak-field stripping (#184) only inspects
+	// `data:` JSON too, so an upstream could write arbitrary text there and have
+	// the router read it in the clear on an otherwise sealed turn.
+	if _, isEvent := strings.CutPrefix(trimmed, "event:"); isEvent {
+		return "", nil
 	}
 	after, ok := strings.CutPrefix(trimmed, "data:")
 	if !ok {
@@ -637,7 +641,8 @@ func (rs *responseFrameSealer) sealSSELine(line string) (string, error) {
 // whether the stream continues.
 //
 // It is DROPPED when the frame CARRIES no answer: a duplicate or trailing
-// terminal event, or any frame holding none of the fields its shape would seal.
+// `message_stop`, a `ping`, or any frame holding none of the fields its shape
+// would seal.
 // That is the case actually seen in the wild — a proxy that appends
 // `message_stop` after `error` or sends it twice, and a chat upstream's trailing
 // usage-only chunk behind [DONE] — and the client is unharmed, having already
@@ -648,9 +653,11 @@ func (rs *responseFrameSealer) sealSSELine(line string) (string, error) {
 //
 // It FAILS the stream when the frame does carry one of those fields, or when its
 // shape is unknown and so might. That is the one case where dropping loses data:
-// an answer the client will never see, silently. Stopping is also all this
+// something the client will never see, silently. Stopping is also all this
 // broker can do about it — the frame cannot be sealed without breaking the §8
-// binding the client verifies.
+// binding the client verifies. Being TERMINAL is not an exemption: Anthropic's
+// `error` is terminal AND carries content, so a trailing one reports a real
+// downstream failure and must not be swallowed.
 //
 // The decision is on what the frame HOLDS, not on what its shape may seal,
 // because for a single-shape profile those differ: chat's sealed set is
@@ -666,18 +673,32 @@ func (rs *responseFrameSealer) handleFrameAfterFinal(frame wire.Response) (strin
 	if err != nil {
 		return "", fmt.Errorf("seal stream frame: upstream sent a frame of unknown shape after the terminal frame, which may carry content: %s: %w", because, err)
 	}
-	carriesAnswer := false
 	for _, f := range sealed {
 		if _, ok := frame[f]; ok {
-			carriesAnswer = true
-			break
+			// Carries an answer. Being TERMINAL does not exempt it: Anthropic's
+			// `error` is both terminal and content-bearing, so a "terminal frames
+			// are safe to drop" shortcut silently swallowed a downstream failure
+			// report that arrived behind a `message_stop` — the exact case this
+			// branch exists for. Whether a shape ends a stream says nothing about
+			// whether it carries something the client needs.
+			return "", fmt.Errorf("seal stream frame: upstream sent a frame (%s) carrying %q after the terminal frame: %s", frameDescriptionOf(frame, rs.profile), f, because)
 		}
 	}
-	if terminal, terr := wire.IsTerminalResponseFrame(rs.profile, frame); !carriesAnswer || (terr == nil && terminal) {
-		rs.logger.Warnf("e2ee stream: dropping a frame (%s) that arrived after the terminal frame and carries no answer; %s", frameDescriptionOf(frame, rs.profile), because)
-		return "", nil
+	rs.logger.Warnf("e2ee stream: dropping a frame (%s) that arrived after the terminal frame and carries no answer; %s", frameDescriptionOf(frame, rs.profile), because)
+	return "", nil
+}
+
+// frameKindOf returns a frame's bound discriminator value, or "" when it has
+// none (a single-shape profile's frames, which their API sends without an
+// `event:` line). It reads the same cleartext field the wire package keys its
+// per-shape rules off, which is why the line built from it is trustworthy in a
+// way the upstream's own line is not: this value is inside the AAD.
+func frameKindOf(frame wire.Response) string {
+	var kind string
+	if err := json.Unmarshal(frame[anthropicFrameType], &kind); err != nil {
+		return ""
 	}
-	return "", fmt.Errorf("seal stream frame: upstream sent a frame (%s) carrying %v after the terminal frame: %s", frameDescriptionOf(frame, rs.profile), sealed, because)
+	return kind
 }
 
 // frameDescriptionOf names a frame for a log or an error: its shape for a
@@ -686,11 +707,10 @@ func (rs *responseFrameSealer) handleFrameAfterFinal(frame wire.Response) (strin
 // than as normal). It is for humans only — every decision reads the shape
 // through the wire package.
 func frameDescriptionOf(frame wire.Response, profile wire.Profile) string {
-	var kind string
-	if err := json.Unmarshal(frame[anthropicFrameType], &kind); err != nil || kind == "" {
-		return fmt.Sprintf("%s profile", profile)
+	if kind := frameKindOf(frame); kind != "" {
+		return fmt.Sprintf("%s %s", profile, kind)
 	}
-	return fmt.Sprintf("%s %s", profile, kind)
+	return fmt.Sprintf("%s profile", profile)
 }
 
 // isTerminal reports whether this frame is an event that CLOSES this profile's
@@ -734,20 +754,12 @@ func (rs *responseFrameSealer) finalFrameLine() (string, error) {
 		return "", nil
 	}
 	frame := wire.Response{}
-	for k, v := range rs.synthFinal.frame {
+	for k, v := range rs.synthFinal {
 		frame[k] = v
 	}
-	out, err := rs.sealFrame(frame, true)
-	if err != nil {
-		return "", err
-	}
-	// A frame-typed profile's event needs its `event:` line to be a well-formed
-	// SSE event of that API, since this frame is synthesized here rather than
-	// forwarded from an upstream that would have sent one.
-	if rs.synthFinal.event != "" {
-		return "event: " + rs.synthFinal.event + "\n" + out, nil
-	}
-	return out, nil
+	// sealFrame builds the `event:` line from this frame's own bound `type`, so a
+	// synthesized event is announced exactly like a forwarded one.
+	return rs.sealFrame(frame, true)
 }
 
 // sealFrame seals one frame object and returns a self-contained SSE event:
@@ -772,6 +784,14 @@ func (rs *responseFrameSealer) sealFrame(frame wire.Response, final bool) (strin
 	if err != nil {
 		return "", fmt.Errorf("seal frame: %w", err)
 	}
+	// The SSE `event:` line, rebuilt from the frame's own BOUND discriminator —
+	// the upstream's was dropped (see sealSSELine), and this is the same
+	// derivation §7.2 requires of a receiver. A profile whose frames carry no
+	// discriminator (chat, image) gets no event line, which is what its API sends.
+	eventLine := ""
+	if kind := frameKindOf(frame); kind != "" {
+		eventLine = "event: " + kind + "\n"
+	}
 	// Fold the exact on-wire frame into the §8 streaming binding, in send order
 	// (the final frame last), so the signed aggregate matches what the client
 	// recomputes over the frames it receives.
@@ -786,7 +806,7 @@ func (rs *responseFrameSealer) sealFrame(frame wire.Response, final bool) (strin
 	if final {
 		rs.emittedFinal = true
 	}
-	return "data: " + string(b) + "\n\n", nil
+	return eventLine + "data: " + string(b) + "\n\n", nil
 }
 
 // signedText finalizes the §8 streaming binding and returns the scheme-tagged

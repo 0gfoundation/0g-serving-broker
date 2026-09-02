@@ -189,9 +189,19 @@ frame-typed profile's answer is a property of the frame.
 - Streaming (`handleChargingStreamResponse`): a per-stream `responseFrameSealer`
   seals each SSE frame under one HPKE context (sequence increments per frame).
   Each sealed frame is a self-contained SSE event (`\n\n` terminator) so it never
-  merges with the next frame or `[DONE]` in the client's SSE reader. Non-`data:`
-  lines pass through, which is what carries an Anthropic `event: <type>` line
-  through beside its sealed data line.
+  merges with the next frame or `[DONE]` in the client's SSE reader.
+- **The `event:` line is REBUILT from each frame's bound `type`, never
+  forwarded.** The upstream's line is dropped. It sits outside the frame JSON and
+  so outside the AAD — which is why §7.2 has a receiver ignore the received line
+  and rebuild it from the bound discriminator, and why an upstream must not be
+  able to write into it: everything a sealed frame's cleartext half may hold is
+  checked by the per-shape taxonomy, and this line is checked by nothing
+  (`sanitizeStreamLine`'s leak-field stripping only inspects `data:` JSON too).
+  Forwarding it would let an upstream hand the router arbitrary text in the clear
+  on an otherwise sealed turn, and buys nothing, since a conforming receiver
+  ignores it. `sealFrame` therefore derives it from the frame it is sealing, for
+  forwarded and synthesized frames alike — a chat or image stream gets no event
+  line, because those frames have no discriminator and their API sends none.
 - **Chat streams** (no terminal event of their own): every data frame is sealed as
   NON-final and exactly one synthetic final frame is emitted at stream end —
   before `[DONE]`, or on EOF-without-`[DONE]`. `final` is deliberately NOT derived
@@ -257,10 +267,13 @@ frame-typed profile's answer is a property of the frame.
     already committed and flushed — `handleBrokerError` ends in
     `ctx.JSON(400, …)`, which appends a JSON error body behind the sealed final
     frame and reports a fully delivered turn as a broker error.
-  - **Fails the stream**, when the shape declares a content field or is unknown
-    and so might. That is the one case where dropping loses data — an answer the
-    client would never see — and stopping is all the broker can do about it,
-    since the frame cannot be sealed without breaking the binding.
+  - **Fails the stream**, when the frame does carry one of them, or when its
+    shape is unknown and so might. That is the one case where dropping loses data
+    — something the client would never see — and stopping is all the broker can
+    do about it, since the frame cannot be sealed without breaking the binding.
+    Being TERMINAL is not an exemption: Anthropic's `error` is both terminal and
+    content-bearing, so a trailing one reports a real downstream failure and must
+    not be swallowed.
 
   Blank lines, `event:` lines and `[DONE]` still pass through — a real stream ends
   its last event with a blank line.

@@ -403,13 +403,13 @@ func TestAnthropicStreamMarksAnErrorFrameFinal(t *testing.T) {
 		t.Errorf("the error payload must be sealed, not readable: %s", sealedErr)
 	}
 
-	payload, ok := strings.CutPrefix(strings.TrimSpace(sealedErr), "data:")
+	// The event line this broker emits comes from the frame's own bound `type`.
+	if !strings.HasPrefix(sealedErr, "event: error\n") {
+		t.Errorf("the sealed error event must be announced as `event: error`, got %q", sealedErr)
+	}
+	frame, ok := sealedFrameFrom(t, sealedErr)
 	if !ok {
 		t.Fatalf("no data line in %q", sealedErr)
-	}
-	var frame wire.Response
-	if err := json.Unmarshal([]byte(strings.TrimSpace(payload)), &frame); err != nil {
-		t.Fatalf("sealed error frame: %v", err)
 	}
 	e2ee, err := frame.E2EE()
 	if err != nil {
@@ -423,6 +423,80 @@ func TestAnthropicStreamMarksAnErrorFrameFinal(t *testing.T) {
 	}
 	if tail, err := sealer.finalFrameLine(); err != nil || tail != "" {
 		t.Errorf("nothing may follow a terminal frame, got %q (%v)", tail, err)
+	}
+}
+
+// The SSE `event:` line is REBUILT from each frame's bound `type`, never
+// forwarded. It sits outside the frame JSON and so outside the AAD, which is why
+// §7.2 has a receiver ignore the received line and rebuild it — and why an
+// upstream must not be able to write into it: everything a sealed frame's
+// cleartext half may hold is checked by the profile taxonomy, and this line is
+// checked by nothing (sanitizeStreamLine's leak-field stripping also only
+// inspects `data:` JSON). Forwarding it would hand the router text in the clear
+// on an otherwise sealed turn, and buy nothing.
+func TestAnthropicStreamRebuildsTheEventLine(t *testing.T) {
+	f := newE2EEFixture(t)
+	ctx := newAnthropicGinCtx()
+	if _, err := f.c.MaybeUnsealRequest(ctx, f.sealAnthropicRequest(t, []string{"messages", "system"})); err != nil {
+		t.Fatalf("unseal: %v", err)
+	}
+	sealer, err := f.c.newResponseFrameSealer(ctx)
+	if err != nil {
+		t.Fatalf("newResponseFrameSealer: %v", err)
+	}
+
+	// An upstream event line — whatever it says — is dropped, not forwarded.
+	for _, line := range []string{
+		"event: SECRET-ON-THE-EVENT-LINE\n",
+		"event: content_block_delta\n", // even the correct one: it is not the source of truth
+	} {
+		out, err := sealer.sealSSELine(line)
+		if err != nil {
+			t.Errorf("sealSSELine(%q): %v", strings.TrimSpace(line), err)
+		}
+		if out != "" {
+			t.Errorf("an upstream `event:` line must not be forwarded, got %q", out)
+		}
+	}
+
+	// The one the client receives is derived from the frame's own bound `type`,
+	// so it is inside the AAD and cannot disagree with the frame.
+	out, err := sealer.sealSSELine(`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}` + "\n")
+	if err != nil {
+		t.Fatalf("sealSSELine: %v", err)
+	}
+	if !strings.HasPrefix(out, "event: content_block_delta\ndata: {") {
+		t.Errorf("the emitted event must be announced from its bound type, got %q", out)
+	}
+	frame, ok := sealedFrameFrom(t, out)
+	if !ok {
+		t.Fatalf("no sealed frame in %q", out)
+	}
+	var kind string
+	if err := json.Unmarshal(frame["type"], &kind); err != nil || "event: "+kind+"\n" != strings.SplitAfter(out, "\n")[0] {
+		t.Errorf("the event line and the bound type must agree: %q vs %q (%v)", out, kind, err)
+	}
+}
+
+// A chat stream carries no `event:` lines, because its API sends none — the line
+// is derived from a discriminator the chat profile's frames do not have.
+func TestStreamFrameSealerChatEmitsNoEventLine(t *testing.T) {
+	f := newE2EEFixture(t)
+	ctx := newGinCtx()
+	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEProfile, wire.ProfileChat)
+	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
+	sealer, err := f.c.newResponseFrameSealer(ctx)
+	if err != nil {
+		t.Fatalf("newResponseFrameSealer: %v", err)
+	}
+	out, err := sealer.sealSSELine(`data: {"id":"a","choices":[{"delta":{"content":"hi"}}]}` + "\n")
+	if err != nil {
+		t.Fatalf("sealSSELine: %v", err)
+	}
+	if !strings.HasPrefix(out, "data: {") {
+		t.Errorf("a chat frame must be emitted without an `event:` line, got %q", out)
 	}
 }
 
@@ -533,19 +607,23 @@ func TestAnthropicStreamSealsANonNullStopSequence(t *testing.T) {
 	}
 }
 
-// sealedFrameFrom parses the sealed frame out of one emitted SSE line, reporting
-// ok=false for a line that carries none (a passed-through `event:` or blank).
+// sealedFrameFrom parses the sealed frame out of one emitted SSE event, which is
+// an `event:` line plus a `data:` line for a frame-typed profile — hence the line
+// scan. ok=false for output that carries no frame at all (a dropped line).
 func sealedFrameFrom(t *testing.T, out string) (wire.Response, bool) {
 	t.Helper()
-	payload, ok := strings.CutPrefix(strings.TrimSpace(out), "data:")
-	if !ok || !strings.HasPrefix(strings.TrimSpace(payload), "{") {
-		return nil, false
+	for _, line := range strings.Split(out, "\n") {
+		payload, ok := strings.CutPrefix(strings.TrimSpace(line), "data:")
+		if !ok || !strings.HasPrefix(strings.TrimSpace(payload), "{") {
+			continue
+		}
+		var fr wire.Response
+		if err := json.Unmarshal([]byte(strings.TrimSpace(payload)), &fr); err != nil {
+			t.Fatalf("sealed frame is not JSON: %v", err)
+		}
+		return fr, true
 	}
-	var fr wire.Response
-	if err := json.Unmarshal([]byte(strings.TrimSpace(payload)), &fr); err != nil {
-		t.Fatalf("sealed frame is not JSON: %v", err)
-	}
-	return fr, true
+	return nil, false
 }
 
 // §7 puts the final frame last, and with a frame-typed profile a terminal event
@@ -608,9 +686,18 @@ func TestAnthropicStreamHandlesADataFrameAfterTheTerminalFrame(t *testing.T) {
 	}
 
 	// A frame CARRYING CONTENT behind the final one is the case where dropping
-	// loses data — an answer the client would never see — so the stream stops.
-	if _, err := sealer.sealSSELine(`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"late"}}` + "\n"); err == nil {
-		t.Error("a content frame after the terminal frame must fail the stream")
+	// loses data — something the client would never see — so the stream stops.
+	// Being TERMINAL is not an exemption: `error` is both terminal and
+	// content-bearing, and a trailing one reports a real downstream failure that
+	// must not be swallowed (a "terminal frames are droppable" shortcut did
+	// exactly that, and logged that it "carries no answer").
+	for _, line := range []string{
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"late"}}` + "\n",
+		`data: {"type":"error","error":{"type":"overloaded_error","message":"downstream died"}}` + "\n",
+	} {
+		if _, err := sealer.sealSSELine(line); err == nil {
+			t.Errorf("a content-bearing frame after the terminal frame must fail the stream: %q", strings.TrimSpace(line))
+		}
 	}
 	// So does one whose shape is unknown, since it might carry content.
 	if _, err := sealer.sealSSELine(`data: {"type":"thinking_block_delta","index":0}` + "\n"); err == nil {

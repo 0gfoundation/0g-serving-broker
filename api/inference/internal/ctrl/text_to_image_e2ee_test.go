@@ -194,7 +194,7 @@ func TestEverySealableProfileHasASealableSyntheticFinalFrame(t *testing.T) {
 			}
 			seen[profile] = true
 			synth := synthFinalFrameFor(profile)
-			if _, err := wire.ResponseSealedFieldsForFrame(profile, synth.frame); err != nil {
+			if _, err := wire.ResponseSealedFieldsForFrame(profile, synth); err != nil {
 				t.Errorf("profile %q (%s on the %q surface) has no synthetic terminal frame it can seal: %v",
 					profile, svcType, surface, err)
 			}
