@@ -310,8 +310,15 @@ type Upstream struct {
 	// somewhere else. Both live in the compose, so a caller reviewing the manifest sees
 	// them; this field says only that the name is declared as a service.
 	ComposeService string
-	// PinnedImage is the image reference the compose pins for ComposeService, empty
-	// when there is no matching service or the service names no image.
+	// PinnedImage is the image reference the compose pins for ComposeService. It is set
+	// exactly when ComposeService is, never one without the other.
+	//
+	// An earlier version of this said "or the service names no image", which describes a
+	// state the code cannot reach and would have had a caller writing a dead branch:
+	// PinnedImages drops an imageless service from its map entirely, so such a service
+	// never enters composeServiceLookup and BOTH fields come back empty — which is what
+	// TestResolveLeavesAnImagelessServiceUnclassified asserts. That is also the third
+	// thing an empty ComposeService covers, alongside the two its own doc names.
 	//
 	// It is what the deployment BOOTED with, not a statement about what runs there now.
 	// Nothing records a non-broker container's image change: zg-image-update carries
