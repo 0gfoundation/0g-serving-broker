@@ -261,7 +261,12 @@ frame-typed profile's answer is a property of the frame.
   (`handleFrameAfterFinal`):
 
   - **Dropped, with a `Warn`**, when it carries none — a duplicate or trailing
-    terminal event, or any shape that seals nothing. That is the case actually
+    terminal event, or a frame holding none of the fields its shape would seal,
+    where EMPTY counts as absent (`choices: []`, `{}`, `null`). That last part is
+    load-bearing rather than pedantic: OpenAI's trailing usage-only chunk carries
+    `"choices": []`, so a presence-only test failed the very frame this branch
+    exists for — and `[]` is how this file itself writes "nothing here", since
+    `ensureSealedFieldsPresent` manufactures exactly that as its placeholder. That is the case actually
     seen in the wild, and the client is unharmed: it already has a complete final
     frame. Failing instead would be worse than the quirk, because the stream is
     already committed and flushed — `handleBrokerError` ends in
@@ -275,8 +280,13 @@ frame-typed profile's answer is a property of the frame.
     content-bearing, so a trailing one reports a real downstream failure and must
     not be swallowed.
 
-  Blank lines, `event:` lines and `[DONE]` still pass through — a real stream ends
-  its last event with a blank line.
+  Blank lines and `[DONE]` still pass through — a real stream ends its last event
+  with a blank line, and `[DONE]` is a sentinel rather than content.
+- **A `data:` payload that is neither `[DONE]` nor a JSON object fails closed.**
+  There is no frame to seal, and nothing that could check it: the same hole as a
+  forwarded `event:` line, one branch away, except that clients RENDER `data:`
+  payloads. Passing it through would hand arbitrary text to the client and every
+  intermediary in the clear on an otherwise sealed turn.
 
 `ensureSealedFieldsPresent(profile, frame, sealedFields)` injects an empty
 placeholder only for the sealed fields a frame of THAT PROFILE may legitimately

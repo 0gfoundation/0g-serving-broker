@@ -608,7 +608,12 @@ func (rs *responseFrameSealer) sealSSELine(line string) (string, error) {
 	}
 	payload := strings.TrimSpace(after)
 	if !strings.HasPrefix(payload, "{") {
-		return line, nil
+		// Not [DONE] (handled above) and not a JSON object, so there is no frame to
+		// seal and nothing that could check it — the same hole as the `event:`
+		// line, one branch away, except that clients RENDER `data:` payloads. A
+		// sealed stream fails closed rather than passing arbitrary text through to
+		// the client and every intermediary in the clear.
+		return "", fmt.Errorf("seal stream frame: upstream sent a `data:` payload that is neither [DONE] nor a JSON object, so it cannot be sealed")
 	}
 	var frame wire.Response
 	if err := json.Unmarshal([]byte(payload), &frame); err != nil {
@@ -642,7 +647,11 @@ func (rs *responseFrameSealer) sealSSELine(line string) (string, error) {
 //
 // It is DROPPED when the frame CARRIES no answer: a duplicate or trailing
 // `message_stop`, a `ping`, or any frame holding none of the fields its shape
-// would seal.
+// would seal — EMPTY counting as absent, since `choices: []` is how this file
+// itself writes "nothing here" (ensureSealedFieldsPresent manufactures exactly
+// that as its placeholder). OpenAI's trailing usage-only chunk is the case that
+// makes the distinction load-bearing: it carries `"choices": []`, so a
+// presence-only test failed the very frame this branch was written for.
 // That is the case actually seen in the wild — a proxy that appends
 // `message_stop` after `error` or sends it twice, and a chat upstream's trailing
 // usage-only chunk behind [DONE] — and the client is unharmed, having already
@@ -674,18 +683,43 @@ func (rs *responseFrameSealer) handleFrameAfterFinal(frame wire.Response) (strin
 		return "", fmt.Errorf("seal stream frame: upstream sent a frame of unknown shape after the terminal frame, which may carry content: %s: %w", because, err)
 	}
 	for _, f := range sealed {
-		if _, ok := frame[f]; ok {
-			// Carries an answer. Being TERMINAL does not exempt it: Anthropic's
-			// `error` is both terminal and content-bearing, so a "terminal frames
-			// are safe to drop" shortcut silently swallowed a downstream failure
-			// report that arrived behind a `message_stop` — the exact case this
-			// branch exists for. Whether a shape ends a stream says nothing about
-			// whether it carries something the client needs.
-			return "", fmt.Errorf("seal stream frame: upstream sent a frame (%s) carrying %q after the terminal frame: %s", frameDescriptionOf(frame, rs.profile), f, because)
+		v, ok := frame[f]
+		if !ok || isEmptyJSONValue(v) {
+			continue
 		}
+		// Carries an answer. Being TERMINAL does not exempt it: Anthropic's
+		// `error` is both terminal and content-bearing, so a "terminal frames are
+		// safe to drop" shortcut silently swallowed a downstream failure report
+		// that arrived behind a `message_stop` — the exact case this branch exists
+		// for. Whether a shape ends a stream says nothing about whether it carries
+		// something the client needs.
+		return "", fmt.Errorf("seal stream frame: upstream sent a frame (%s) carrying %q after the terminal frame: %s", frameDescriptionOf(frame, rs.profile), f, because)
 	}
 	rs.logger.Warnf("e2ee stream: dropping a frame (%s) that arrived after the terminal frame and carries no answer; %s", frameDescriptionOf(frame, rs.profile), because)
 	return "", nil
+}
+
+// isEmptyJSONValue reports whether a raw JSON value carries nothing: `null`, an
+// empty array, object or string. It is the counterpart of the empty-array
+// placeholder ensureSealedFieldsPresent injects — a field holding `[]` and a
+// field that is absent mean the same thing on this wire, so they must take the
+// same branch wherever "does this frame carry an answer" is asked.
+func isEmptyJSONValue(v json.RawMessage) bool {
+	var decoded any
+	if err := json.Unmarshal(v, &decoded); err != nil {
+		return false // undecodable: treat as content rather than assume it is empty
+	}
+	switch t := decoded.(type) {
+	case nil:
+		return true
+	case []any:
+		return len(t) == 0
+	case map[string]any:
+		return len(t) == 0
+	case string:
+		return t == ""
+	}
+	return false
 }
 
 // frameKindOf returns a frame's bound discriminator value, or "" when it has

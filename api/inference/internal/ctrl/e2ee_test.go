@@ -700,6 +700,42 @@ func collectSealedFrames(t *testing.T, rs *responseFrameSealer, lines []string) 
 	return frames
 }
 
+// A `data:` payload that is neither [DONE] nor a JSON object has no frame to
+// seal and nothing that could check it — the same hole as a forwarded `event:`
+// line, except that clients RENDER `data:` payloads. A sealed stream fails
+// closed rather than passing arbitrary text to the client and every
+// intermediary in the clear.
+func TestStreamFrameSealer_NonObjectDataLineFailsClosed(t *testing.T) {
+	f := newE2EEFixture(t)
+	ctx := newGinCtx()
+	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEProfile, wire.ProfileChat)
+	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
+	sealer, err := f.c.newResponseFrameSealer(ctx)
+	if err != nil {
+		t.Fatalf("newResponseFrameSealer: %v", err)
+	}
+	for _, line := range []string{
+		`data: "SECRET-IN-A-BARE-STRING"` + "\n",
+		"data: 42\n",
+		`data: [{"not":"an object"}]` + "\n",
+	} {
+		out, err := sealer.sealSSELine(line)
+		if err == nil {
+			t.Errorf("sealSSELine(%q) must fail closed, got %q", strings.TrimSpace(line), out)
+		}
+		if out != "" {
+			t.Errorf("sealSSELine(%q) must emit nothing on failure, got %q", strings.TrimSpace(line), out)
+		}
+	}
+	// [DONE] is still the one non-object payload that passes: it is a sentinel,
+	// not content, and the client needs it.
+	if out, err := sealer.sealSSELine("data: [DONE]\n"); err != nil || !strings.Contains(out, "[DONE]") {
+		t.Errorf("[DONE] must still pass through, got %q (%v)", out, err)
+	}
+}
+
 // The chat path's own post-final case, and the reason the drop-vs-fail decision
 // reads what a frame CARRIES rather than what its shape may seal: chat's sealed
 // set is ["choices"] for every frame whatever it holds, and no chat frame is ever
@@ -733,13 +769,24 @@ func TestStreamFrameSealer_ChatFrameAfterDone(t *testing.T) {
 	}
 	boundAtFinal := sealer.frameCount
 
-	// Carries no `choices` → dropped, not fatal.
-	out, err := sealer.sealSSELine(`data: {"id":"a","usage":{"total_tokens":3}}` + "\n")
-	if err != nil {
-		t.Errorf("a usage-only chunk after [DONE] must be dropped, not fail the stream: %v", err)
-	}
-	if out != "" {
-		t.Errorf("a dropped frame must emit nothing, got %q", out)
+	// Carries no answer → dropped, not fatal. The FIRST of these is the shape
+	// OpenAI actually sends: `choices` present but EMPTY. A presence-only test
+	// failed exactly the frame this branch was written for — and `[]` is how this
+	// file itself writes "nothing here" (ensureSealedFieldsPresent manufactures
+	// that very placeholder), so an empty field and an absent one must take the
+	// same branch.
+	for _, line := range []string{
+		`data: {"id":"a","object":"chat.completion.chunk","choices":[],"usage":{"total_tokens":3}}` + "\n",
+		`data: {"id":"a","usage":{"total_tokens":3}}` + "\n",
+		`data: {"id":"a","choices":null}` + "\n",
+	} {
+		out, err := sealer.sealSSELine(line)
+		if err != nil {
+			t.Errorf("a usage-only chunk after [DONE] must be dropped, not fail the stream: %q: %v", strings.TrimSpace(line), err)
+		}
+		if out != "" {
+			t.Errorf("a dropped frame must emit nothing, got %q", out)
+		}
 	}
 
 	// Carries `choices` → still fatal: dropping it would lose an answer, and
