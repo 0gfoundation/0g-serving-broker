@@ -734,6 +734,9 @@ func TestAnthropicStreamHandlesADataFrameAfterTheTerminalFrame(t *testing.T) {
 	for _, line := range []string{
 		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"late"}}` + "\n",
 		`data: {"type":"error","error":{"type":"overloaded_error","message":"downstream died"}}` + "\n",
+		// A failure report is caught even when its shape seals nothing, so the
+		// check cannot depend on the taxonomy naming `error` for that shape.
+		`data: {"type":"ping","error":{"type":"overloaded_error","message":"downstream died"}}` + "\n",
 	} {
 		if _, err := sealer.sealSSELine(line); err == nil {
 			t.Errorf("a content-bearing frame after the terminal frame must fail the stream: %q", strings.TrimSpace(line))

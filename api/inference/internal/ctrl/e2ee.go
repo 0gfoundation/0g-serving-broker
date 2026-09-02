@@ -58,6 +58,14 @@ const (
 	anthropicFrameType   = "type"
 	anthropicMessageStop = "message_stop"
 
+	// failureField is the field an upstream reports a mid-stream failure in, on
+	// both surfaces this broker serves — Anthropic's `error` shape carries it as
+	// its content field, and an OpenAI-compatible stream sends a bare
+	// `{"error": …}` chunk. Named here because "does this frame report a failure"
+	// cannot be answered from a profile's sealed set alone: chat's is only
+	// ["choices"], so its error chunk is content the taxonomy does not name.
+	failureField = "error"
+
 	// doneSentinel is the OpenAI-style stream terminator, as it appears in a
 	// `data:` line's payload — matched after the payload is parsed out, because
 	// SSE makes the space after the colon optional and `data:[DONE]` is the same
@@ -750,13 +758,16 @@ func (rs *responseFrameSealer) sealSSELine(line string) (string, error) {
 // a JSON error body behind the sealed final frame and reports a turn that fully
 // delivered as a broker error.
 //
-// It FAILS the stream when the frame does carry one of those fields, or when its
-// shape is unknown and so might. That is the one case where dropping loses data:
+// It FAILS the stream when the frame does carry one of those fields, when it
+// reports a FAILURE (a non-empty `error`, which is content on either surface
+// even where the profile's sealed set does not name it), or when its shape is
+// unknown and so might carry either. That is the one case where dropping loses data:
 // something the client will never see, silently. Stopping is also all this
 // broker can do about it — the frame cannot be sealed without breaking the §8
 // binding the client verifies. Being TERMINAL is not an exemption: Anthropic's
 // `error` is terminal AND carries content, so a trailing one reports a real
-// downstream failure and must not be swallowed.
+// downstream failure and must not be swallowed — and neither may chat's, which
+// is why the failure check does not go through the sealed set.
 //
 // The decision is on what the frame HOLDS, not on what its shape may seal,
 // because for a single-shape profile those differ: chat's sealed set is
@@ -784,6 +795,17 @@ func (rs *responseFrameSealer) handleFrameAfterFinal(frame wire.Response) (strin
 		// for. Whether a shape ends a stream says nothing about whether it carries
 		// something the client needs.
 		return "", fmt.Errorf("seal stream frame: upstream sent a frame (%s) carrying %q after the terminal frame: %s", frameDescriptionOf(frame, rs.profile), f, because)
+	}
+	// A failure REPORT is content too, whatever the profile's sealed set says.
+	// The sealed-set loop above catches Anthropic's, because `error` is that
+	// profile's content field for the `error` shape — but chat's sealed set is
+	// only ["choices"], so an OpenAI-style `{"error": …}` behind [DONE] fell
+	// through to the drop below and the client saw a normally-completed turn. The
+	// asymmetry was accidental (a vocabulary difference, not a decision), and it
+	// lands on exactly the frame this branch exists to protect: the one telling
+	// the caller its turn did not really succeed.
+	if errField, ok := frame[failureField]; ok && !isEmptyJSONValue(errField) {
+		return "", fmt.Errorf("seal stream frame: upstream sent a frame (%s) carrying %q after the terminal frame: %s", frameDescriptionOf(frame, rs.profile), failureField, because)
 	}
 	// One Warn per stream, not per frame: the actionable signal is "this upstream
 	// sends frames after the terminal one", which the first occurrence carries in

@@ -296,8 +296,14 @@ frame-typed profile's answer is a property of the frame.
     already committed and flushed — `handleBrokerError` ends in
     `ctx.JSON(400, …)`, which appends a JSON error body behind the sealed final
     frame and reports a fully delivered turn as a broker error.
-  - **Fails the stream**, when the frame does carry one of them, or when its
-    shape is unknown and so might. That is the one case where dropping loses data
+  - **Fails the stream**, when the frame does carry one of them, when it reports
+    a FAILURE (a non-empty `error`), or when its shape is unknown and so might
+    carry either. The failure check deliberately does NOT go through the sealed
+    set: `error` is Anthropic's content field for its `error` shape, but chat's
+    sealed set is only `choices`, so an OpenAI-style `{"error": …}` chunk behind
+    `[DONE]` would otherwise be dropped and leave the client believing the turn
+    completed — the same swallowed downstream failure, missed only because the
+    two APIs name it differently. That is the one case where dropping loses data
     — something the client would never see — and stopping is all the broker can
     do about it, since the frame cannot be sealed without breaking the binding.
     Being TERMINAL is not an exemption: Anthropic's `error` is both terminal and

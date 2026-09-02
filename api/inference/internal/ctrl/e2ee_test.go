@@ -748,14 +748,34 @@ func TestStreamFrameSealer_ChatFrameDescriptionCarriesNoUpstreamText(t *testing.
 		t.Errorf("the client-visible error must carry no upstream text and no line break: %v", err)
 	}
 
-	// And the drop path logs once per stream, not once per frame.
+	// A trailing FAILURE report fails the stream on this profile too. chat's
+	// sealed set is only ["choices"], so an OpenAI-style `{"error": …}` behind
+	// [DONE] used to take the drop branch and leave the client believing the turn
+	// completed — the same swallowed downstream failure the Anthropic `error` case
+	// guards against, missed only because the taxonomy does not name chat's.
+	if _, err := sealer.sealSSELine(`data: {"id":"a","error":{"type":"server_error","message":"upstream aborted"}}` + "\n"); err == nil {
+		t.Error("a trailing error report must fail the stream, not be dropped")
+	}
+	// An empty or null one is not a report and stays droppable.
+	for _, line := range []string{
+		`data: {"id":"a","error":null}` + "\n",
+		`data: {"id":"a","error":{}}` + "\n",
+	} {
+		if _, err := sealer.sealSSELine(line); err != nil {
+			t.Errorf("sealSSELine(%q) reports no failure, so it must be dropped: %v", strings.TrimSpace(line), err)
+		}
+	}
+
+	// And the drop path logs once per stream, not once per frame — every drop is
+	// still counted, which is what logDroppedAfterFinal reports at stream end.
+	before := sealer.droppedAfterFinal
 	for i := 0; i < 5; i++ {
 		if _, err := sealer.sealSSELine(`data: {"type":"ping","choices":[]}` + "\n"); err != nil {
 			t.Fatalf("drop %d: %v", i, err)
 		}
 	}
-	if sealer.droppedAfterFinal != 5 {
-		t.Errorf("droppedAfterFinal = %d, want 5: every drop must be counted even though only the first is logged", sealer.droppedAfterFinal)
+	if got := sealer.droppedAfterFinal - before; got != 5 {
+		t.Errorf("droppedAfterFinal advanced by %d, want 5: every drop must be counted even though only the first is logged", got)
 	}
 }
 
