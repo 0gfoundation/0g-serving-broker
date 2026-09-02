@@ -45,24 +45,39 @@ func TestSameUser(t *testing.T) {
 	}
 }
 
-// Guards the one way this could go wrong: HexToAddress silently truncates or
-// pads, so two DIFFERENT malformed strings must not collapse onto one address and
-// hand someone else's task over. schema.Task.Bind rejects these at the body
-// ingress, but the path parameter is not validated, so the comparison itself has
-// to hold.
-func TestSameUserDoesNotCollapseMalformedInput(t *testing.T) {
-	const real = "0x1111111111111111111111111111111111111111"
-
-	// The traversal payload decodes to the same 20 bytes as the bare address —
-	// that is exactly why it passed the signature checks — so sameUser MUST NOT be
-	// used as a validator. This test records that: it is a comparison only, and
-	// IsHexAddress at the ingress is what rejects the string.
-	if !sameUser(real, real+"/../..") {
-		t.Log("note: HexToAddress no longer truncates; the Bind-side IsHexAddress check is still what rejects it")
+// The way this went wrong. common.HexToAddress is not a parser: it pads,
+// truncates and gives up on the first bad nibble, so every malformed string maps
+// to the zero address. The first version of sameUser compared through it
+// unconditionally, which made any two unparseable strings the same account — and
+// broke TestCtrl_GetLoRAModel_StatusDisambiguation, whose "wrong owner" case
+// seeds "0xOther" and queries with a real address, expecting 403.
+//
+// The earlier version of this test only t.Log'd that collapse instead of failing
+// on it, so it documented the bug rather than catching it.
+func TestSameUserDoesNotCollapseUnparseableInput(t *testing.T) {
+	// Both map to the zero address through HexToAddress. They are not the same
+	// account, and an auth check must not say they are.
+	collapsing := [][2]string{
+		{"0xOther", "0xSomeoneElse"},
+		{"0xOther", "0x1F0E3DA33725B7f0CF427B0Fb2b9F1Ce76b230A4"},
+		{"", "0xnot-hex"},
+		{"0x", "garbage"},
+		// The traversal payload from #683: it decodes to the same 20 bytes as the
+		// bare address, which is why it passed the signature checks. sameUser must
+		// not be the thing that lets it through either.
+		{"0x1111111111111111111111111111111111111111", "0x1111111111111111111111111111111111111111/../.."},
+	}
+	for _, p := range collapsing {
+		if sameUser(p[0], p[1]) {
+			t.Errorf("sameUser(%q, %q) = true; these are not the same account", p[0], p[1])
+		}
 	}
 
-	// Different accounts must stay different however they are spelled.
-	if sameUser(real, "0x2222222222222222222222222222222222222222") {
-		t.Error("two distinct addresses compared equal")
+	// An unparseable owner still matches itself, so a row written before
+	// schema.Task.Bind validated addresses stays reachable by its owner.
+	for _, s := range []string{"0xOther", "legacy-owner", ""} {
+		if !sameUser(s, s) {
+			t.Errorf("sameUser(%q, %q) = false; an unparseable owner must still match itself", s, s)
+		}
 	}
 }
