@@ -99,7 +99,7 @@ func (dashScope) Duration() DurationSpec {
 // does not name. Pixel dimensions DO select a tier (by the threshold above).
 func (dashScope) Resolution() ResolutionSpec {
 	return ResolutionSpec{
-		Tiers:     copyTokens(dashScopeResolutionTokens),
-		PixelSize: PixelSizeSelectsTier,
+		RecognizedTiers: copyTokens(dashScopeResolutionTokens),
+		PixelSize:       PixelSizeSelectsTier,
 	}
 }

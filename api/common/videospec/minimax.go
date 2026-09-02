@@ -146,8 +146,8 @@ func (miniMax) Duration() DurationSpec {
 // 2K-default model gets, and pays for, a 2K clip.
 func (miniMax) Resolution() ResolutionSpec {
 	return ResolutionSpec{
-		Tiers:     copyTokens(miniMaxResolutionTokens),
-		Default:   MiniMaxDefaultTier,
-		PixelSize: PixelSizeAspectRatioOnly,
+		RecognizedTiers: copyTokens(miniMaxResolutionTokens),
+		Default:         MiniMaxDefaultTier,
+		PixelSize:       PixelSizeAspectRatioOnly,
 	}
 }

@@ -71,11 +71,11 @@ const (
 // presence, not the value. OutOfRange says so too: a vendor with no bounds
 // reports OutOfRangePassThrough, so the two can never be read as contradicting.
 type DurationSpec struct {
-	Min         int64  `json:"min,omitempty"`
-	Max         int64  `json:"max,omitempty"`
-	OutOfRange  string `json:"out_of_range"`
-	Unspecified string `json:"unspecified"`
-	Rounding    string `json:"rounding"`
+	Min         int64
+	Max         int64
+	OutOfRange  string
+	Unspecified string
+	Rounding    string
 }
 
 // ResolutionSpec is one vendor's rules for the "size" request field.
@@ -83,9 +83,19 @@ type DurationSpec struct {
 // Default is omitted when the vendor applies its own default rather than one
 // this integration names — again a presence question, not a value question.
 type ResolutionSpec struct {
-	Tiers     []string `json:"tiers,omitempty"`
-	Default   string   `json:"default,omitempty"`
-	PixelSize string   `json:"pixel_size"`
+	// RecognizedTiers is the vendor's tier VOCABULARY — the tokens its reader
+	// treats as a tier rather than as pixel dimensions. It is NOT the set a given
+	// model serves, and the two differ: miniMaxResolutionTokens carries 768P and
+	// 1080P precisely so H3 REFUSES them loudly instead of silently rendering at
+	// the deployment's own tier. Publishing this as "what you may send" would ship
+	// a menu whose entries 400.
+	//
+	// A caller that needs the servable set must intersect this with what the
+	// deployment actually prices — which is config the vendor cannot see, so it
+	// cannot be done here.
+	RecognizedTiers []string
+	Default         string
+	PixelSize       string
 }
 
 // copyTokens hands out a COPY of a vendor's tier list. The originals are read by

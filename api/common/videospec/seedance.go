@@ -283,8 +283,8 @@ func (seedance) Duration() DurationSpec {
 // select a tier here (nearest by longer side), unlike MiniMax.
 func (seedance) Resolution() ResolutionSpec {
 	return ResolutionSpec{
-		Tiers:     copyTokens(seedanceResolutionTokens),
-		Default:   SeedanceDefaultTier,
-		PixelSize: PixelSizeSelectsTier,
+		RecognizedTiers: copyTokens(seedanceResolutionTokens),
+		Default:         SeedanceDefaultTier,
+		PixelSize:       PixelSizeSelectsTier,
 	}
 }

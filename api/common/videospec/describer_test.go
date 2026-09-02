@@ -34,19 +34,19 @@ func TestDescriber_Values(t *testing.T) {
 		{
 			vendor: VendorSeedance,
 			dur:    DurationSpec{Min: 4, Max: 30, OutOfRange: OutOfRangeClamp, Unspecified: UnspecifiedVendorDefault, Rounding: RoundingCeil},
-			res:    ResolutionSpec{Tiers: []string{"480p", "720p", "1080p"}, Default: "720p", PixelSize: PixelSizeSelectsTier},
+			res:    ResolutionSpec{RecognizedTiers: []string{"480p", "720p", "1080p"}, Default: "720p", PixelSize: PixelSizeSelectsTier},
 		},
 		{
 			vendor: VendorMiniMax,
 			dur:    DurationSpec{Min: 4, Max: 15, OutOfRange: OutOfRangeClamp, Unspecified: UnspecifiedMin, Rounding: RoundingCeil},
-			res:    ResolutionSpec{Tiers: []string{"512P", "720P", "768P", "1080P", "2K", "4K"}, Default: "2K", PixelSize: PixelSizeAspectRatioOnly},
+			res:    ResolutionSpec{RecognizedTiers: []string{"512P", "720P", "768P", "1080P", "2K", "4K"}, Default: "2K", PixelSize: PixelSizeAspectRatioOnly},
 		},
 		{
 			// No floor, no ceiling, no named default — the three absences are the
 			// point: read as zeros they would claim a 0s duration range.
 			vendor: VendorDashScope,
 			dur:    DurationSpec{OutOfRange: OutOfRangePassThrough, Unspecified: UnspecifiedVendorDefault, Rounding: RoundingCeil},
-			res:    ResolutionSpec{Tiers: []string{"720P", "1080P"}, PixelSize: PixelSizeSelectsTier},
+			res:    ResolutionSpec{RecognizedTiers: []string{"720P", "1080P"}, PixelSize: PixelSizeSelectsTier},
 		},
 	}
 
@@ -60,12 +60,12 @@ func TestDescriber_Values(t *testing.T) {
 			if res.Default != tt.res.Default || res.PixelSize != tt.res.PixelSize {
 				t.Errorf("Resolution() = %+v, want %+v", res, tt.res)
 			}
-			if len(res.Tiers) != len(tt.res.Tiers) {
-				t.Fatalf("Resolution().Tiers = %v, want %v", res.Tiers, tt.res.Tiers)
+			if len(res.RecognizedTiers) != len(tt.res.RecognizedTiers) {
+				t.Fatalf("Resolution().RecognizedTiers = %v, want %v", res.RecognizedTiers, tt.res.RecognizedTiers)
 			}
-			for i := range res.Tiers {
-				if res.Tiers[i] != tt.res.Tiers[i] {
-					t.Errorf("Resolution().Tiers = %v, want %v", res.Tiers, tt.res.Tiers)
+			for i := range res.RecognizedTiers {
+				if res.RecognizedTiers[i] != tt.res.RecognizedTiers[i] {
+					t.Errorf("Resolution().RecognizedTiers = %v, want %v", res.RecognizedTiers, tt.res.RecognizedTiers)
 					break
 				}
 			}
@@ -124,10 +124,10 @@ func TestDescriber_AgreesWithNormalizeSeconds(t *testing.T) {
 				t.Fatalf("unknown unspecified %q", dur.Unspecified)
 			}
 
-			// Every published tier must be one the vendor actually recognises —
-			// a tier printed on a page but not forwarded is a priced request the
-			// caller cannot make.
-			for _, tier := range d.Resolution().Tiers {
+			// Every token in the vocabulary must be one the vendor's own reader
+			// resolves — that is what "recognised" means, and a token that fails
+			// here would be read as pixel dimensions instead.
+			for _, tier := range d.Resolution().RecognizedTiers {
 				if spec.Tier(tier) == "" {
 					t.Errorf("published tier %q resolves to no tier", tier)
 				}
@@ -142,14 +142,14 @@ func TestDescriber_TiersAreCopies(t *testing.T) {
 	for _, v := range describedVendors {
 		t.Run(string(v), func(t *testing.T) {
 			d := describerFor(t, v)
-			first := d.Resolution().Tiers
+			first := d.Resolution().RecognizedTiers
 			if len(first) == 0 {
 				t.Skip("vendor publishes no tiers")
 			}
 			original := first[0]
 			first[0] = "mutated"
-			if again := d.Resolution().Tiers; again[0] != original {
-				t.Errorf("Resolution().Tiers[0] = %q after caller mutation, want %q", again[0], original)
+			if again := d.Resolution().RecognizedTiers; again[0] != original {
+				t.Errorf("Resolution().RecognizedTiers[0] = %q after caller mutation, want %q", again[0], original)
 			}
 		})
 	}

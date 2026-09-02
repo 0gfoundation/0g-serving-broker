@@ -1899,16 +1899,21 @@ func TestVideoPriceUnit(t *testing.T) {
 // videoCapabilitiesConfig builds a one-entry multi-model video service pointed at
 // the named vendor. Capabilities ride the multi-model path because that is the
 // only shape carrying a per-model billing block (and therefore a vendor).
-func videoCapabilitiesConfig(t *testing.T, serviceType, vendor string) config.Service {
+func videoCapabilitiesConfig(t *testing.T, serviceType, vendor, providerType string, multipliers map[string]float64) config.Service {
 	t.Helper()
 	svcCfg := config.Service{
-		ModelType: "vid-1",
-		Type:      serviceType,
+		ModelType:    "vid-1",
+		Type:         serviceType,
+		ProviderType: providerType,
 		ModelPricing: []config.ModelPricingEntry{{
 			Model:       "vid-1",
 			InputPrice:  "0",
 			OutputPrice: "100",
-			Billing:     &config.BillingConfig{Mode: config.BillingModePerVideoSecond, Vendor: vendor},
+			Billing: &config.BillingConfig{
+				Mode:                  config.BillingModePerVideoSecond,
+				Vendor:                vendor,
+				ResolutionMultipliers: multipliers,
+			},
 		}},
 	}
 	if err := svcCfg.BuildModelPricingMap(); err != nil {
@@ -1917,20 +1922,84 @@ func videoCapabilitiesConfig(t *testing.T, serviceType, vendor string) config.Se
 	return svcCfg
 }
 
+func getModelsCapabilities(t *testing.T, svcCfg config.Service, serviceType string) *ModelCapabilities {
+	t.Helper()
+	mock := &mockModelsCtrl{
+		service:       model.Service{ModelType: "vid-1", Type: serviceType},
+		serviceConfig: svcCfg,
+	}
+	h := newModelsTestHandler(mock)
+	w := performRequest(h.GetModels, "GET", "/v1/models", "", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp ModelListResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+	if len(resp.Data) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(resp.Data))
+	}
+	return resp.Data[0].Capabilities
+}
+
 func TestGetModels_VideoCapabilities(t *testing.T) {
+	// MiniMax prices two of the six tokens its reader recognises.
+	pricedTwo := map[string]float64{"720P": 1.0, "2K": 2.0}
+
 	tests := []struct {
-		name        string
-		serviceType string
-		vendor      string
-		want        *ModelCapabilities
+		name         string
+		serviceType  string
+		vendor       string
+		providerType string
+		multipliers  map[string]float64
+		want         *ModelCapabilities
 	}{
 		{
-			name:        "described vendor publishes its own bounds",
+			name:        "described vendor publishes its own bounds and its priced tiers",
 			serviceType: "video-generation",
 			vendor:      "minimax",
+			multipliers: pricedTwo,
 			want: &ModelCapabilities{
-				Duration:   &videospec.DurationSpec{Min: 4, Max: 15, OutOfRange: videospec.OutOfRangeClamp, Unspecified: videospec.UnspecifiedMin, Rounding: videospec.RoundingCeil},
-				Resolution: &videospec.ResolutionSpec{Tiers: []string{"512P", "720P", "768P", "1080P", "2K", "4K"}, Default: "2K", PixelSize: videospec.PixelSizeAspectRatioOnly},
+				Duration:   &CapabilityDuration{Min: 4, Max: 15, OutOfRange: videospec.OutOfRangeClamp, Unspecified: videospec.UnspecifiedMin, Rounding: videospec.RoundingCeil},
+				Resolution: &CapabilityResolution{Tiers: []string{"720P", "2K"}, Default: "2K", PixelSize: videospec.PixelSizeAspectRatioOnly},
+			},
+		},
+		{
+			// Uniform pricing sells no tier menu, and the vendor's vocabulary is
+			// not a support claim: 768P/1080P are in it so H3 REFUSES them.
+			name:        "flat pricing publishes no tier list",
+			serviceType: "video-generation",
+			vendor:      "minimax",
+			multipliers: nil,
+			want: &ModelCapabilities{
+				Duration:   &CapabilityDuration{Min: 4, Max: 15, OutOfRange: videospec.OutOfRangeClamp, Unspecified: videospec.UnspecifiedMin, Rounding: videospec.RoundingCeil},
+				Resolution: &CapabilityResolution{Default: "2K", PixelSize: videospec.PixelSizeAspectRatioOnly},
+			},
+		},
+		{
+			// The default is dropped when it is not among the published tiers:
+			// naming an unpriced tier points a caller at the baseline-rate path
+			// the filter exists to keep them off.
+			name:        "default is dropped when it is not priced",
+			serviceType: "video-generation",
+			vendor:      "minimax",
+			multipliers: map[string]float64{"720P": 1.0},
+			want: &ModelCapabilities{
+				Duration:   &CapabilityDuration{Min: 4, Max: 15, OutOfRange: videospec.OutOfRangeClamp, Unspecified: videospec.UnspecifiedMin, Rounding: videospec.RoundingCeil},
+				Resolution: &CapabilityResolution{Tiers: []string{"720P"}, PixelSize: videospec.PixelSizeAspectRatioOnly},
+			},
+		},
+		{
+			// A table naming only tokens this vendor reads as pixel dimensions is
+			// a config fault; it must not become an advertised menu.
+			name:        "tiers the vendor does not recognise publish no list",
+			serviceType: "video-generation",
+			vendor:      "minimax",
+			multipliers: map[string]float64{"1280x720": 1.0},
+			want: &ModelCapabilities{
+				Duration:   &CapabilityDuration{Min: 4, Max: 15, OutOfRange: videospec.OutOfRangeClamp, Unspecified: videospec.UnspecifiedMin, Rounding: videospec.RoundingCeil},
+				Resolution: &CapabilityResolution{Default: "2K", PixelSize: videospec.PixelSizeAspectRatioOnly},
 			},
 		},
 		{
@@ -1939,6 +2008,7 @@ func TestGetModels_VideoCapabilities(t *testing.T) {
 			name:        "unknown vendor publishes nothing",
 			serviceType: "video-generation",
 			vendor:      "no-such-vendor",
+			multipliers: pricedTwo,
 			want:        nil,
 		},
 		{
@@ -1946,29 +2016,15 @@ func TestGetModels_VideoCapabilities(t *testing.T) {
 			name:        "non-video service publishes nothing",
 			serviceType: "chatbot",
 			vendor:      "minimax",
+			multipliers: pricedTwo,
 			want:        nil,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mock := &mockModelsCtrl{
-				service:       model.Service{ModelType: "vid-1", Type: tt.serviceType},
-				serviceConfig: videoCapabilitiesConfig(t, tt.serviceType, tt.vendor),
-			}
-			h := newModelsTestHandler(mock)
-			w := performRequest(h.GetModels, "GET", "/v1/models", "", nil)
-			if w.Code != http.StatusOK {
-				t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
-			}
-			var resp ModelListResponse
-			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-				t.Fatalf("failed to parse response: %v", err)
-			}
-			if len(resp.Data) != 1 {
-				t.Fatalf("expected 1 row, got %d", len(resp.Data))
-			}
-			got := resp.Data[0].Capabilities
+			svcCfg := videoCapabilitiesConfig(t, tt.serviceType, tt.vendor, "", tt.multipliers)
+			got := getModelsCapabilities(t, svcCfg, tt.serviceType)
 			if tt.want == nil {
 				if got != nil {
 					t.Fatalf("capabilities = %+v, want omitted", got)
@@ -1985,5 +2041,24 @@ func TestGetModels_VideoCapabilities(t *testing.T) {
 				t.Errorf("capabilities.resolution = %+v, want %+v", got.Resolution, tt.want.Resolution)
 			}
 		})
+	}
+}
+
+// TestGetModels_VideoCapabilitiesHiddenForStandard: the block is a vendor
+// fingerprint — 4-15s with a 2K default is MiniMax and nothing else — and a
+// standard provider hides its upstream from every external surface. Publishing
+// it would name the vendor that providerIdentity and servingDomain are both
+// withheld to keep unnamed.
+func TestGetModels_VideoCapabilitiesHiddenForStandard(t *testing.T) {
+	priced := map[string]float64{"720P": 1.0, "2K": 2.0}
+
+	centralized := videoCapabilitiesConfig(t, "video-generation", "minimax", "centralized", priced)
+	if got := getModelsCapabilities(t, centralized, "video-generation"); got == nil {
+		t.Fatal("centralized: capabilities omitted, want a block")
+	}
+
+	standard := videoCapabilitiesConfig(t, "video-generation", "minimax", "standard", priced)
+	if got := getModelsCapabilities(t, standard, "video-generation"); got != nil {
+		t.Errorf("standard: capabilities = %+v, want omitted — it fingerprints the hidden upstream", got)
 	}
 }
