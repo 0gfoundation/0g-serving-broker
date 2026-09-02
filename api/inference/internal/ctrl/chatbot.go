@@ -474,6 +474,13 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 	// upstreams for the same model, so model_name alone no longer says WHICH one
 	// stalled — and saying which is this instrument's entire purpose.
 	//
+	// It reads c.metricUpstream(ctx), not reqModel.Upstream, so the string is
+	// byte-identical to the label #691 puts on every model-scoped metric. The two
+	// agree in the ordinary case, but metricUpstream carries the fallback chain
+	// the metrics use, and a log field that can disagree with the metric label is
+	// a log field you cannot join to the metric — which is the only reason to
+	// print it.
+	//
 	// disconnected is only observable from a failed write, so it would read false
 	// for a client that left BEFORE the first write: gin's Stream checks
 	// CloseNotify up front and skips the step entirely, printing lines=0 and
@@ -487,7 +494,7 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 	c.logger.Infof("stream timing: %s chat_key=%s model_name=%q upstream=%q request_hash=%s disconnected=%t",
 		timing, chatKey,
 		truncateForLog([]byte(reqModel.ModelName), 80),
-		truncateForLog([]byte(reqModel.Upstream), 80),
+		truncateForLog([]byte(c.metricUpstream(ctx)), 80),
 		reqModel.RequestHash,
 		clientDisconnected || (timing.lines == 0 && ctx.Request.Context().Err() != nil))
 
