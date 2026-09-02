@@ -464,6 +464,10 @@ type responseFrameSealer struct {
 	synthFinal   wire.Response
 	emittedFinal bool
 	frameCount   int
+	// droppedAfterFinal counts the frames refused by handleFrameAfterFinal's drop
+	// branch. Only the first is logged as it happens; the total is reported once,
+	// so a chatty upstream cannot turn one stream into unbounded log volume.
+	droppedAfterFinal int
 	// logger reports what was dropped: a frame this broker declines to seal but
 	// does not fail the request over leaves no other trace, since the client sees
 	// a complete stream either way.
@@ -781,8 +785,26 @@ func (rs *responseFrameSealer) handleFrameAfterFinal(frame wire.Response) (strin
 		// something the client needs.
 		return "", fmt.Errorf("seal stream frame: upstream sent a frame (%s) carrying %q after the terminal frame: %s", frameDescriptionOf(frame, rs.profile), f, because)
 	}
-	rs.logger.Warnf("e2ee stream: dropping a frame (%s) that arrived after the terminal frame and carries no answer; %s", frameDescriptionOf(frame, rs.profile), because)
+	// One Warn per stream, not per frame: the actionable signal is "this upstream
+	// sends frames after the terminal one", which the first occurrence carries in
+	// full. The rest are counted and reported once by logDroppedAfterFinal, so an
+	// upstream emitting many of them cannot amplify into unbounded log volume —
+	// this path returns ("", nil) and the caller keeps reading.
+	rs.droppedAfterFinal++
+	if rs.droppedAfterFinal == 1 {
+		rs.logger.Warnf("e2ee stream: dropping a frame (%s) that arrived after the terminal frame and carries no answer; %s", frameDescriptionOf(frame, rs.profile), because)
+	}
 	return "", nil
+}
+
+// logDroppedAfterFinal reports, once, how many frames this stream dropped behind
+// its terminal frame. Called by the caller after the stream loop, beside
+// signedText: the first drop is logged as it happens, and this is what keeps the
+// rest from being either silent or unbounded.
+func (rs *responseFrameSealer) logDroppedAfterFinal() {
+	if rs.droppedAfterFinal > 1 {
+		rs.logger.Warnf("e2ee stream: dropped %d frames that arrived after the terminal frame (only the first is logged in full)", rs.droppedAfterFinal)
+	}
 }
 
 // isEmptyJSONValue reports whether a raw JSON value carries nothing: `null`, an
@@ -823,12 +845,26 @@ func frameKindOf(frame wire.Response) string {
 
 // frameDescriptionOf names a frame for a log or an error: its shape for a
 // frame-typed profile, and just the profile for a single-shape one, whose frames
-// have no shape to name (calling a chat chunk "untyped" read as a defect rather
-// than as normal). It is for humans only — every decision reads the shape
+// have no shape to name. It is for humans only — every decision reads the shape
 // through the wire package.
+//
+// Gated on the same predicate as the `event:` line, and for the same reason. On a
+// single-shape profile `type` is an ordinary cleartext field the wire package has
+// no rule about, so it is arbitrary, unbounded upstream text — and these strings
+// reach a broker log line and, on the fail path, an error that
+// handleBrokerError hands to the CLIENT. That let an upstream write forged lines
+// into the log ("chat FORGED\nERROR broker: …") and choose the text of a
+// broker-attributed error. On a frame-typed profile the value is already
+// validated: ResponseSealedFieldsForFrame refuses any shape outside the taxonomy
+// before either caller reaches here.
+//
+// The gate is also the more accurate description: on chat a `type` field is not
+// a shape name at all.
 func frameDescriptionOf(frame wire.Response, profile wire.Profile) string {
-	if kind := frameKindOf(frame); kind != "" {
-		return fmt.Sprintf("%s %s", profile, kind)
+	if profileHasFrameDiscriminator(profile) {
+		if kind := frameKindOf(frame); kind != "" {
+			return fmt.Sprintf("%s %s", profile, kind)
+		}
 	}
 	return fmt.Sprintf("%s profile", profile)
 }

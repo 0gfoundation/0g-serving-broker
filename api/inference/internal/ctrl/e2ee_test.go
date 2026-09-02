@@ -700,6 +700,65 @@ func collectSealedFrames(t *testing.T, rs *responseFrameSealer, lines []string) 
 	return frames
 }
 
+// Neither the log line nor the client-visible error may carry upstream text. On
+// the chat profile `type` is an ordinary cleartext field the wire package has no
+// rule about, so it is arbitrary and unbounded — and it reached a broker Warn and
+// an error that handleBrokerError hands to the client, letting an upstream write
+// forged lines into the log and choose the text of a broker-attributed error.
+func TestStreamFrameSealer_ChatFrameDescriptionCarriesNoUpstreamText(t *testing.T) {
+	forged := "FORGED\nERROR broker: something alarming"
+	frame := wire.Response{
+		"type":    mustRaw(t, forged),
+		"choices": mustRaw(t, []any{}),
+	}
+	if got := frameDescriptionOf(frame, wire.ProfileChat); got != "chat profile" {
+		t.Errorf("frameDescriptionOf = %q, want %q: a chat `type` is not a validated shape name", got, "chat profile")
+	}
+	// On a frame-typed profile the value IS validated before either caller reaches
+	// the description, so naming the shape there is both safe and useful.
+	anth := wire.Response{"type": mustRaw(t, "content_block_delta")}
+	if got := frameDescriptionOf(anth, wire.ProfileAnthropic); got != "anthropic content_block_delta" {
+		t.Errorf("frameDescriptionOf = %q, want the shape named", got)
+	}
+
+	// End to end: the error the client would see names no upstream text.
+	f := newE2EEFixture(t)
+	ctx := newGinCtx()
+	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEProfile, wire.ProfileChat)
+	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
+	sealer, err := f.c.newResponseFrameSealer(ctx)
+	if err != nil {
+		t.Fatalf("newResponseFrameSealer: %v", err)
+	}
+	for _, line := range []string{
+		`data: {"id":"a","choices":[{"delta":{"content":"hi"}}]}` + "\n",
+		"data: [DONE]\n",
+	} {
+		if _, err := sealer.sealSSELine(line); err != nil {
+			t.Fatalf("sealSSELine(%q): %v", strings.TrimSpace(line), err)
+		}
+	}
+	_, err = sealer.sealSSELine(`data: {"type":"X\nY-CLIENT-VISIBLE","choices":[{"delta":{"content":"late"}}]}` + "\n")
+	if err == nil {
+		t.Fatal("a content frame after the terminal frame must fail the stream")
+	}
+	if strings.Contains(err.Error(), "Y-CLIENT-VISIBLE") || strings.Contains(err.Error(), "\n") {
+		t.Errorf("the client-visible error must carry no upstream text and no line break: %v", err)
+	}
+
+	// And the drop path logs once per stream, not once per frame.
+	for i := 0; i < 5; i++ {
+		if _, err := sealer.sealSSELine(`data: {"type":"ping","choices":[]}` + "\n"); err != nil {
+			t.Fatalf("drop %d: %v", i, err)
+		}
+	}
+	if sealer.droppedAfterFinal != 5 {
+		t.Errorf("droppedAfterFinal = %d, want 5: every drop must be counted even though only the first is logged", sealer.droppedAfterFinal)
+	}
+}
+
 // The space after an SSE field's colon is OPTIONAL, so the sentinel has to be
 // recognized from the parsed payload. It was matched against the raw line, which
 // meant `data:[DONE]` fell through to the fail-closed branch and destroyed a turn

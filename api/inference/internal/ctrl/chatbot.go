@@ -415,6 +415,7 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 	// stream, so we skip caching a signature rather than bind sha256("").
 	var e2eeSignedText string
 	if frameSealer != nil {
+		frameSealer.logDroppedAfterFinal()
 		if text, ok, terr := frameSealer.signedText(); terr != nil {
 			c.logger.Errorf("e2ee stream signing text: %v", terr)
 		} else if ok {
