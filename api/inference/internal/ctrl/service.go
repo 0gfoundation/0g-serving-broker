@@ -357,7 +357,7 @@ const CtxKeyResolvedIdentity = monitor.CtxKeyResolvedIdentity
 
 // boundedModelLabel folds a model id into the bounded metric-label set —
 // {enumerated pricing ids} ∪ {configured ModelType, "*"} — the SINGLE place
-// the bound is defined; metricModel and WhitelistMetricModel both delegate
+// the bound is defined; metricModel and WhitelistMetricLabels both delegate
 // here so the request counter and the token counters can never disagree on
 // what the bound is. validated says the id already passed allowlist
 // validation (resolved-model path); unvalidated ids nothing admits fold to
@@ -411,14 +411,58 @@ func (c *Ctrl) metricModel(ctx context.Context) string {
 	return c.Service.ModelType
 }
 
-// WhitelistMetricModel derives the bounded label for the whitelist request
-// counters, which record before model resolution runs: body-extracted model
-// folded through boundedModelLabel (unvalidated). Raw user input must never
-// reach a label value. NOTE: requests later rejected by the allowlist are
-// still counted, folded to the configured model — documented in
+// metricUpstream returns the BOUNDED provider-identity label for this request's
+// metrics: which upstream, among the several a canonical model may be served by,
+// handled it. Memoized under monitor.CtxKeyMetricUpstream by PrepareHTTPRequest
+// for the same reason metricModel is — every reader shares ONE value, so the
+// request counter and the token counters can never attribute one request to two
+// upstreams. Before the stamp it resolves from the same (resolved model,
+// resolved identity) pair the forward path used to pick the target URL.
+//
+// The result is always config-sourced: UpstreamForModel returns a configured
+// providerIdentity or the constant.UpstreamSelf sentinel, never the raw
+// router-supplied header, so no bounding step of its own is needed.
+func (c *Ctrl) metricUpstream(ctx context.Context) string {
+	if ginCtx, ok := ctx.(*gin.Context); ok {
+		if v, exists := ginCtx.Get(monitor.CtxKeyMetricUpstream); exists {
+			if s, ok := v.(string); ok && s != "" {
+				return s
+			}
+		}
+		if v, exists := ginCtx.Get(CtxKeyResolvedModel); exists {
+			if s, ok := v.(string); ok && s != "" {
+				return c.UpstreamForModel(s, resolvedIdentity(ginCtx))
+			}
+		}
+	}
+	// No resolved model (bare context, or a path that never reached model
+	// resolution): mirror metricModel's fallback exactly — it labels with the
+	// configured ModelType, so resolve THAT model's upstream rather than an empty
+	// one, which would short-circuit to the service-level identity and split the
+	// pair across two series. metricModel already logs the broken invariant, so
+	// stay quiet here rather than double-reporting the same request.
+	return c.UpstreamForModel(c.Service.ModelType, "")
+}
+
+// WhitelistMetricLabels derives the bounded (model, provider identity) pair for
+// the whitelist request counter, which records BEFORE model resolution runs:
+// body-extracted model folded through boundedModelLabel (unvalidated), paired
+// with the upstream that model plus the request's identity header resolves to.
+// Raw user input must never reach a label value — neither the model string nor
+// the router-supplied identity, which UpstreamForModel launders through the
+// pricing config. NOTE: requests later rejected by the allowlist are still
+// counted, folded to the configured model — documented in
 // doc/metrics-model-labels.md.
-func (c *Ctrl) WhitelistMetricModel(reqBody []byte, contentType string) string {
-	return c.boundedModelLabel(ExtractModelName(reqBody, contentType), false)
+func (c *Ctrl) WhitelistMetricLabels(ctx *gin.Context, reqBody []byte, contentType string) (model, upstream string) {
+	// Resolve the upstream from the FOLDED model, not the raw extracted one:
+	// the fold maps a body that names no model to the configured ModelType and a
+	// wildcard-admitted string to "*", and EffectiveProviderIdentityFor answers
+	// differently for those than for "" (which short-circuits to the
+	// service-level identity). Deriving both halves from one value is what keeps
+	// this counter on the same series as the post-resolution token counters for
+	// the same request.
+	folded := c.boundedModelLabel(ExtractModelName(reqBody, contentType), false)
+	return folded, c.UpstreamForModel(folded, UpstreamIdentity(ctx))
 }
 
 // GetBillingPrices resolves the correct input and output prices for billing.
@@ -494,7 +538,7 @@ func (c *Ctrl) resolveModelPricing(ctx context.Context) *config.ModelPricingEntr
 	// Bill the EXACT entry the router selected: when one canonical model is served
 	// by several upstreams, the resolved model string alone is ambiguous — pair it
 	// with the stashed identity. Empty identity (single-entry / non-multi-upstream)
-	// resolves identically to GetModelPricing (first-entry/wildcard).
+	// resolves identically to GetModelPricing (cheapest-entry/wildcard).
 	entry := c.Service.GetModelPricingFor(modelStr, resolvedIdentity(ginCtx))
 	if entry == nil {
 		c.logger.Errorf("GetBillingPrices: resolvedModel %q passed the allowlist but has no pricing entry; billing at on-chain max price", modelStr)

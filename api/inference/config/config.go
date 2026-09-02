@@ -298,11 +298,21 @@ func (s *Service) ModelExpiration(model string) (time.Time, bool) {
 }
 
 // ModelExpirationFor is ModelExpiration keyed to a specific upstream identity
-// (config.UpstreamIdentityHeader). When identity is non-empty it selects the
-// EXACT same-model entry the router named, so an expired multi-upstream model is
-// still gated (the bare, identity-less lookup resolves ambiguous and would
-// otherwise fail OPEN). identity="" reproduces the original single-entry
-// behavior byte-for-byte.
+// (config.UpstreamIdentityHeader). A non-empty identity selects the EXACT
+// same-model entry the router named, so retiring one upstream of a multi-upstream
+// model gates exactly that upstream.
+//
+// identity="" answers for the model's CHEAPEST entry — the one an identity-less
+// request is served by — which cuts both ways on a multi-upstream model:
+//
+//   - an expired DEARER sibling does not gate a header-less request (it is not
+//     the entry serving it), and
+//   - an expired CHEAPEST entry gates the public id for every header-less caller
+//     even while the dearer sibling is live and still published in /v1/models.
+//
+// validateModelPricing warns at config load about the second case. For a
+// single-entry model there is one entry and this is the original behavior
+// byte-for-byte.
 func (s *Service) ModelExpirationFor(model, identity string) (time.Time, bool) {
 	mi := s.ModelInfo
 	if s.HasMultiModelPricing() {
@@ -311,7 +321,7 @@ func (s *Service) ModelExpirationFor(model, identity string) (time.Time, bool) {
 		// SAME expiration gate as the canonical id — GetModelPricing alone would
 		// miss aliases and let an alias bypass a model's 410-expiry.
 		// With identity present the selected entry is authoritative; without it a
-		// model with several upstreams resolves ambiguous → "no per-model metadata".
+		// model with several upstreams answers for its cheapest entry.
 		entry, _, err := s.ResolveRequestedModel(model, identity)
 		if err != nil || entry == nil {
 			return time.Time{}, false
@@ -342,13 +352,13 @@ func (s *Service) EffectiveModelInfo(model string) *ModelInfo {
 // identity (config.UpstreamIdentityHeader). When identity is non-empty it
 // selects the EXACT same-model entry the router named, so per-model ModelInfo
 // (max_tokens capping, reasoning translation) applies to the selected upstream
-// instead of being silently dropped on an ambiguous multi-upstream resolve.
+// instead of being silently taken from the cheapest entry on a multi-upstream model.
 // identity="" reproduces the original single-entry behavior byte-for-byte.
 func (s *Service) EffectiveModelInfoFor(model, identity string) *ModelInfo {
 	mi := s.ModelInfo
 	if s.HasMultiModelPricing() {
 		// With identity present the selected entry is authoritative; without it a
-		// model with several upstreams resolves ambiguous → "no per-model metadata".
+		// model with several upstreams answers for its cheapest entry.
 		entry, _, err := s.ResolveRequestedModel(model, identity)
 		if err != nil || entry == nil {
 			return nil
@@ -369,9 +379,9 @@ func (s *Service) EffectiveModelInfoFor(model, identity string) *ModelInfo {
 // identity is the upstream that selected the entry (config.UpstreamIdentityHeader):
 // when a canonical model is served by several upstreams with DIFFERENT
 // supportedFormats, it picks the surface set of the upstream the router named,
-// instead of the ambiguous-resolve "no metadata" nil. identity=="" reproduces the
-// original single-entry behavior byte-for-byte (EffectiveModelInfoFor delegates to
-// the same nil-on-ambiguous resolution).
+// instead of the cheapest entry's set. identity=="" reproduces the bare call
+// (EffectiveModelInfoFor delegates to the same cheapest-entry resolution), which
+// is byte-identical for a single-entry model.
 func (s *Service) SupportedFormatsFor(model, identity string) []string {
 	mi := s.EffectiveModelInfoFor(model, identity)
 	if mi == nil {
@@ -530,9 +540,6 @@ type Service struct {
 	// at different upstreams. Effective identity is the per-model providerIdentity
 	// or, when empty, the service-level one (see EffectiveProviderIdentity).
 	modelPricingByIdentity map[string]*ModelPricingEntry `yaml:"-"`
-	// modelEntryCount counts entries per canonical model id, so resolution can tell
-	// a single-upstream model (resolve with no identity) from an ambiguous one.
-	modelEntryCount map[string]int `yaml:"-"`
 
 	// InjectBodyFields, when set, are top-level key/value pairs merged into the
 	// JSON request body forwarded to a chatbot targetUrl. It lets an operator set
@@ -1494,7 +1501,7 @@ func (s *Service) EffectiveStripBodyFields(model string) []string {
 
 // EffectiveStripBodyFieldsFor is EffectiveStripBodyFields keyed by the upstream
 // identity that selected the entry, so a canonical model served by several
-// upstreams strips ITS upstream's per-entry fields, not the first entry's.
+// upstreams strips ITS upstream's per-entry fields, not the cheapest entry's.
 // identity=="" is identical to EffectiveStripBodyFields (single-entry / legacy
 // paths): GetModelPricingFor with an empty identity resolves exactly as
 // GetModelPricing.
@@ -1542,7 +1549,7 @@ func (s *Service) EffectiveInjectBodyFields(model string) map[string]interface{}
 // EffectiveInjectBodyFieldsFor is EffectiveInjectBodyFields keyed by the upstream
 // identity that selected the entry, so a canonical model served by several
 // upstreams deep-merges ITS upstream's per-entry fields on top of the service
-// level, not the first entry's. identity=="" is identical to
+// level, not the cheapest entry's. identity=="" is identical to
 // EffectiveInjectBodyFields (single-entry / legacy paths): GetModelPricingFor with
 // an empty identity resolves exactly as GetModelPricing.
 func (s *Service) EffectiveInjectBodyFieldsFor(model, identity string) map[string]interface{} {
@@ -1590,7 +1597,7 @@ func (s *Service) EffectiveAdditionalSecret(model string) map[string]string {
 
 // EffectiveAdditionalSecretFor is EffectiveAdditionalSecret keyed by the upstream
 // identity that selected the entry, so a canonical model served by several
-// upstreams gets ITS upstream's credential, not the first entry's. identity=="" is
+// upstreams gets ITS upstream's credential, not the cheapest entry's. identity=="" is
 // identical to EffectiveAdditionalSecret (single-entry / pre-multi-upstream paths).
 func (s *Service) EffectiveAdditionalSecretFor(model, identity string) map[string]string {
 	if model != "" {
@@ -1633,7 +1640,7 @@ func (s *Service) EffectiveTargetURL(model string) string {
 
 // EffectiveTargetURLFor is EffectiveTargetURL keyed by the upstream identity that
 // selected the entry, so a canonical model served by several upstreams routes to
-// ITS upstream, not the first entry's. identity=="" is identical to
+// ITS upstream, not the cheapest entry's. identity=="" is identical to
 // EffectiveTargetURL (single-entry / pre-multi-upstream paths).
 func (s *Service) EffectiveTargetURLFor(model, identity string) string {
 	if model != "" {
@@ -1657,7 +1664,7 @@ func (s *Service) EffectiveProviderIdentity(model string) string {
 // EffectiveProviderIdentityFor is EffectiveProviderIdentity keyed by the upstream
 // identity that selected the entry, so the routing proof and reconciliation rollup
 // bind the upstream a request TRULY hit when a canonical model has several
-// upstreams — not the first entry's. identity=="" is identical to
+// upstreams — not the cheapest entry's. identity=="" is identical to
 // EffectiveProviderIdentity (single-entry / pre-multi-upstream paths).
 func (s *Service) EffectiveProviderIdentityFor(model, identity string) string {
 	if model != "" {

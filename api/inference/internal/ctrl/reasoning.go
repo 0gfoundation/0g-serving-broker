@@ -165,7 +165,7 @@ func (c *Ctrl) nativeReasoningParam(model string) string {
 
 // nativeReasoningParamFor is nativeReasoningParam keyed to the router-named
 // upstream identity (config.UpstreamIdentityHeader), so a multi-upstream model
-// reads the selected entry's supportedParameters instead of resolving ambiguous.
+// reads the selected entry's supportedParameters instead of the cheapest entry's.
 func (c *Ctrl) nativeReasoningParamFor(model, identity string) string {
 	mi := c.Service.EffectiveModelInfoFor(model, identity)
 	if mi == nil {
@@ -289,7 +289,7 @@ func (c *Ctrl) TranslateReasoning(body []byte, model string) ([]byte, error) {
 // TranslateReasoningFor is TranslateReasoning keyed to the router-named upstream
 // identity (config.UpstreamIdentityHeader), so a multi-upstream model's per-entry
 // supportedParameters drive the translation for the selected upstream rather than
-// being dropped on an ambiguous resolve. identity="" is identical to the bare call.
+// being taken from the cheapest entry. identity="" is identical to the bare call.
 func (c *Ctrl) TranslateReasoningFor(body []byte, model, identity string) ([]byte, error) {
 	if len(body) == 0 {
 		return body, nil

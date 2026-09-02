@@ -20,10 +20,6 @@ import (
 // empty identity → today's single-entry resolution.
 const UpstreamIdentityHeader = "X-0G-Upstream"
 
-// ErrAmbiguousUpstream is returned by ResolveRequestedModel when a model has
-// more than one upstream entry and the request supplied no identity to pick one.
-var ErrAmbiguousUpstream = errors.New("ambiguous upstream: this model is served by multiple upstreams; set the X-0G-Upstream identity header")
-
 // ErrModelNotFound is returned by ResolveRequestedModel when the requested
 // model (optionally with identity) is not in the allowlist.
 var ErrModelNotFound = errors.New("model not found")
@@ -840,7 +836,9 @@ func (s *Service) HasMultiModelPricing() bool {
 // GetModelPricing returns the pricing entry for a specific model. Resolution
 // order: exact match first, then the wildcard ("*") entry if configured, else
 // nil. This mirrors IsModelAllowed so a model that passes the allowlist always
-// resolves to a pricing entry.
+// resolves to a pricing entry. On a model served by several upstreams the exact
+// match is the cheapest entry (see BuildModelPricingMap) — callers that need a
+// specific upstream must go through GetModelPricingFor with its identity.
 func (s *Service) GetModelPricing(model string) *ModelPricingEntry {
 	if s.modelPricingMap == nil {
 		return nil
@@ -861,10 +859,11 @@ func (s *Service) GetModelPricing(model string) *ModelPricingEntry {
 // identity — single-entry models, decentralized/single-upstream providers, and
 // every path predating multi-upstream — falls through to GetModelPricing, so its
 // behavior is byte-identical to before. A non-empty identity that matches no
-// entry also falls back to GetModelPricing (first-entry/wildcard): the request
-// path only reaches here after ResolveRequestedModel already admitted the
-// (model, identity) pair, so a miss is an invariant break, and the first-entry
-// fallback is overcharge-safe (same as the pre-identity behavior).
+// entry also falls back to GetModelPricing (cheapest-entry/wildcard): the
+// request path only reaches here after ResolveRequestedModel already admitted
+// the (model, identity) pair, so a miss is an invariant break, and the
+// cheapest-entry fallback bills at the lowest BASE output price among the
+// model's entries (see cheaperThan for what that does and does not bound).
 func (s *Service) GetModelPricingFor(model, identity string) *ModelPricingEntry {
 	if identity != "" && s.modelPricingByIdentity != nil {
 		if e, ok := s.modelPricingByIdentity[model+"\x00"+identity]; ok {
@@ -887,18 +886,16 @@ func (s *Service) GetModelPricingFor(model, identity string) *ModelPricingEntry 
 func (s *Service) BuildModelPricingMap() error {
 	m := make(map[string]*ModelPricingEntry, len(s.ModelPricing))
 	byIdentity := make(map[string]*ModelPricingEntry, len(s.ModelPricing))
-	counts := make(map[string]int, len(s.ModelPricing))
 	for i := range s.ModelPricing {
 		entry := &s.ModelPricing[i]
-		// Effective identity: per-model providerIdentity, else service-level (same
-		// rule as EffectiveProviderIdentity, inlined to avoid reading the half-built
-		// map). Reject only a TRUE duplicate of the same (model, identity) pair, so
+		// Effective identity via the ONE helper cheaperThan's tie-break also uses:
+		// that tie-break is only a total order while the string it compares is the
+		// same string this duplicate check rejects on. Two copies drifting would let
+		// two siblings pass here yet tie there, and the pick would silently revert to
+		// yaml order. Reject only a TRUE duplicate of the same (model, identity), so
 		// existing unique-model configs still reject same-id dups byte-identically,
 		// while two same-model entries at distinct upstreams are allowed.
-		eff := entry.ProviderIdentity
-		if eff == "" {
-			eff = s.ProviderIdentity
-		}
+		eff := s.effectiveIdentityOf(entry)
 		key := entry.Model + "\x00" + eff
 		if _, ok := byIdentity[key]; ok {
 			if eff == "" {
@@ -907,11 +904,21 @@ func (s *Service) BuildModelPricingMap() error {
 			return fmt.Errorf("duplicate model %q with providerIdentity %q in modelPricing", entry.Model, eff)
 		}
 		byIdentity[key] = entry
-		counts[entry.Model]++
-		// Keep the first entry as the model-only lookup (GetModelPricing, allowlist,
-		// wildcard checks): identical to today for single-entry models; deterministic
-		// first-wins for the identity-agnostic callers on a multi-entry model.
-		if _, ok := m[entry.Model]; !ok {
+		// The model-only lookup (GetModelPricing, the allowlist, wildcard checks,
+		// and the identity-less resolution path) holds the CHEAPEST entry. For a
+		// single-entry model that is the entry, byte-identical to before. For a
+		// multi-entry model it is what lets a request that names no upstream be
+		// SERVED rather than rejected: no OpenAI-compatible client knows to send
+		// X-0G-Upstream, so a direct caller could otherwise never reach a model
+		// its provider happens to serve from two hosts. Because every
+		// identity-agnostic accessor reads this one map — price, targetUrl,
+		// additionalSecret, providerIdentity — such a request is billed at, routed
+		// to, and labeled with the SAME entry.
+		//
+		// Cheapest rather than first-wins so the pick cannot change silently when
+		// an operator reorders the yaml. "Cheapest" is by base price only — see
+		// cheaperThan for the tier/cache/crossing-price cases it does not cover.
+		if cur, ok := m[entry.Model]; !ok || s.cheaperThan(entry, cur) {
 			m[entry.Model] = entry
 		}
 	}
@@ -937,9 +944,159 @@ func (s *Service) BuildModelPricingMap() error {
 	}
 	s.modelPricingMap = m
 	s.modelPricingByIdentity = byIdentity
-	s.modelEntryCount = counts
 	s.modelAliasMap = aliases
 	return nil
+}
+
+// cheaperThan reports whether candidate should replace incumbent as the entry an
+// identity-less request resolves to. Ordering is (outputPrice, inputPrice,
+// effective providerIdentity) ascending. Output leads because it dominates the
+// bill in the modalities that can have several upstreams (chatbot generation,
+// speech-to-text transcripts).
+//
+// The identity tie-break is what makes the ordering total. Equal-priced siblings
+// are the natural capacity fan-out config — two hosts of one vendor at one price —
+// and that is exactly where an operator reorders the yaml. Falling back to config
+// order there would silently move all header-less traffic, its targetUrl, its
+// upstream credential and its provider_identity label to the other host, which is
+// the failure this pick exists to prevent. BuildModelPricingMap rejects duplicate
+// (model, identity) pairs, so two siblings can never tie on identity too.
+//
+// An entry whose price does not parse never wins, and never keeps a parseable
+// entry out either — so the pick among the parseable ones is the same whatever
+// order an unparseable neighbour sits in. loadConfig validates every price before
+// BuildModelPricingMap runs, so this only covers Services built directly (tests,
+// partially-built configs); it is not a state a deployment reaches.
+//
+// WHAT THIS DOES NOT PROMISE. It ranks the entries' BASE per-token prices, and
+// that is not always the cheapest actual bill:
+//
+//   - Tiers are ignored. An entry with a lower base output price and a 2x
+//     long-context tier multiplier is picked over a sibling with a higher base and
+//     no multiplier, and then bills more on a long prompt.
+//   - CacheTokenBilling is ignored, so a cache-heavy workload can be cheaper on
+//     the entry with the higher base price.
+//   - Crossing pairs (one cheaper on output, dearer on input) bill an input-heavy
+//     request above what the sibling would have. No single scalar fixes that: the
+//     token counts are not known at admission time.
+//
+// Differing billing.mode is NOT a hazard here even though it would make the
+// numbers incomparable (neuron-per-second vs neuron-per-token): mode is
+// video-generation-only, and validateModelUpstream rejects a per-model
+// providerIdentity on video, so two entries of one video model cannot coexist —
+// they collide on (model, "") and fail config load.
+//
+// What the ordering does buy is a pick that does not depend on yaml ordering, so
+// reordering the config can never silently move traffic or change what a request
+// costs.
+func (s *Service) cheaperThan(candidate, incumbent *ModelPricingEntry) bool {
+	cOut, cIn := s.entryPriceRats(candidate)
+	if cOut == nil {
+		return false
+	}
+	iOut, iIn := s.entryPriceRats(incumbent)
+	if iOut == nil {
+		// Incumbent is unparseable and the candidate is not: the candidate wins, so
+		// an unparseable entry cannot hold the slot just by being earlier.
+		return true
+	}
+	if cmp := cOut.Cmp(iOut); cmp != 0 {
+		return cmp < 0
+	}
+	// Both input prices present: compare them. One present beats one absent. BOTH
+	// absent falls through to the identity tie-break rather than returning false in
+	// each direction, which would put the pick back on config order and make this
+	// ordering non-total.
+	switch {
+	case cIn != nil && iIn != nil:
+		if cmp := cIn.Cmp(iIn); cmp != 0 {
+			return cmp < 0
+		}
+	case cIn == nil && iIn != nil:
+		return false
+	case cIn != nil && iIn == nil:
+		return true
+	}
+	return s.effectiveIdentityOf(candidate) < s.effectiveIdentityOf(incumbent)
+}
+
+// modelEntriesPerModel counts configured entries per public model id. Built on
+// demand at config load rather than stored on the Service: the only reader is the
+// load-time warning below, and a stored counterpart (modelEntryCount) already
+// outlived its single reader once.
+func (s *Service) modelEntriesPerModel() map[string]int {
+	counts := make(map[string]int, len(s.ModelPricing))
+	for i := range s.ModelPricing {
+		counts[s.ModelPricing[i].Model]++
+	}
+	return counts
+}
+
+// effectiveModelInfoOf is the entry's own ModelInfo, falling back to the
+// service-level one — the same rule ModelExpirationFor and EffectiveModelInfoFor
+// apply, so a load-time check reasoning about the gate sees what the gate sees.
+func (s *Service) effectiveModelInfoOf(e *ModelPricingEntry) *ModelInfo {
+	if e.ModelInfo != nil {
+		return e.ModelInfo
+	}
+	return s.ModelInfo
+}
+
+// hasSiblingOutliving reports whether another entry for the same model would
+// still be servable once mi's expiry has passed — no expiry of its own, or a
+// later one. mi is cheapest's EFFECTIVE ModelInfo: a sibling with no ModelInfo of
+// its own inherits the same service-level expiry, so it does NOT outlive the
+// cheapest entry, and treating "no per-entry ModelInfo" as "no expiry" would warn
+// on a whole-id retirement.
+//
+// Dates come from ModelInfo.expiresAt, parsed once by ModelInfo.Validate in the
+// per-entry loop that runs before this — no second parser, and no unparseable
+// case to handle. A zero expiresAt is "no expiry".
+func (s *Service) hasSiblingOutliving(cheapest *ModelPricingEntry, mi *ModelInfo) bool {
+	deadline := mi.expiresAt
+	if deadline.IsZero() {
+		return false
+	}
+	for i := range s.ModelPricing {
+		sib := &s.ModelPricing[i]
+		if sib == cheapest || sib.Model != cheapest.Model {
+			continue
+		}
+		sibMI := s.effectiveModelInfoOf(sib)
+		if sibMI == nil || sibMI.expiresAt.IsZero() || sibMI.expiresAt.After(deadline) {
+			return true
+		}
+	}
+	return false
+}
+
+// effectiveIdentityOf is the entry's providerIdentity, falling back to the
+// service-level one — the same rule BuildModelPricingMap keys its composite index
+// by, so the values it returns are unique per (model, entry) and make cheaperThan
+// a total order.
+func (s *Service) effectiveIdentityOf(e *ModelPricingEntry) string {
+	if e.ProviderIdentity != "" {
+		return e.ProviderIdentity
+	}
+	return s.ProviderIdentity
+}
+
+// entryPriceRats parses an entry's (output, input) prices in whichever
+// denomination the service is configured for. big.Rat reads both the NATIVE
+// integer neuron strings and the USD decimal strings, so one parser covers both.
+// A nil component means unset or unparseable, which makes cheaperThan treat the
+// entry as never-cheapest. In a deployment that never happens: loadConfig
+// validates every price, and derives a USD video entry's USD fields, in the
+// per-entry loop that runs BEFORE BuildModelPricingMap. It is reachable only for
+// a Service built directly in a test.
+func (s *Service) entryPriceRats(e *ModelPricingEntry) (out, in *big.Rat) {
+	outStr, inStr := e.OutputPrice, e.InputPrice
+	if s.IsUSDDenominated() {
+		outStr, inStr = e.OutputPriceUSDPerMillionTokens, e.InputPriceUSDPerMillionTokens
+	}
+	out, _ = new(big.Rat).SetString(outStr)
+	in, _ = new(big.Rat).SetString(inStr)
+	return out, in
 }
 
 // ResolveRequestedModel maps a client-supplied model id to its pricing entry.
@@ -954,9 +1111,9 @@ func (s *Service) BuildModelPricingMap() error {
 //
 // identity disambiguates two entries sharing one canonical model id at different
 // upstreams (the router sends it via UpstreamIdentityHeader): non-empty selects
-// the (model, identity) entry (miss → ErrModelNotFound); empty keeps today's
-// behavior for a single-entry model, but returns ErrAmbiguousUpstream when the
-// model has more than one entry. err is nil on success.
+// the (model, identity) entry (miss → ErrModelNotFound); empty selects the entry
+// with the lowest BASE price for the model (see cheaperThan), so a caller that
+// names no upstream is served rather than rejected. err is nil on success.
 func (s *Service) ResolveRequestedModel(requested, identity string) (entry *ModelPricingEntry, resolved string, err error) {
 	if !s.HasMultiModelPricing() {
 		return nil, requested, nil
@@ -979,18 +1136,26 @@ func (s *Service) ResolveRequestedModel(requested, identity string) (entry *Mode
 		}
 		return nil, requested, ErrModelNotFound
 	}
-	// Empty identity: today's path. An exact model with several upstreams is
-	// ambiguous without an identity.
+	// Empty identity: the model-keyed map, which holds the cheapest entry when a
+	// model has several upstreams (see BuildModelPricingMap).
 	if e, hit := s.modelPricingMap[requested]; hit {
-		if s.modelEntryCount[requested] > 1 {
-			return nil, requested, ErrAmbiguousUpstream
-		}
 		return e, e.Model, nil
 	}
-	if e, hit := s.modelAliasMap[requested]; hit {
-		if s.modelEntryCount[e.Model] > 1 {
-			return nil, requested, ErrAmbiguousUpstream
-		}
+	// An alias resolves to its canonical id and then through the SAME map — the
+	// shape the identity branch above already uses — NOT to the entry that
+	// declared it. Returning the declaring entry would break the one invariant
+	// this whole mechanism rests on: every identity-agnostic accessor
+	// (GetModelPricingFor, EffectiveTargetURLFor, EffectiveAdditionalSecretFor,
+	// EffectiveProviderIdentityFor, EffectiveModelInfoFor, ModelExpirationFor)
+	// re-resolves from the canonical id via this map, so a declaring entry that is
+	// not the cheapest sibling would be admitted and have its upstreamModel
+	// forwarded, while the route, the credential and the price came from the other
+	// host. For a single-entry model — every alias config that exists today — the
+	// two are the same entry and this is byte-identical.
+	// BuildModelPricingMap inserts every entry's Model, and an alias is only
+	// indexed from an entry in the slice, so this lookup always hits.
+	if a, hit := s.modelAliasMap[requested]; hit {
+		e := s.modelPricingMap[a.Model]
 		return e, e.Model, nil
 	}
 	if e, hit := s.modelPricingMap[ModelWildcard]; hit {
@@ -1309,10 +1474,16 @@ func validateModelPricing(cfg *Config) error {
 	// A per-entry upstreamModel must not be ambiguous with the public allowlist.
 	// If it equals ANOTHER entry's public Model id (or a configured alias), a
 	// request for that entry would be forwarded under a different entry's public
-	// name — confusing mis-routing the operator never intended. (Equaling its OWN
-	// Model id is a harmless no-op.) Two entries deliberately sharing one
-	// upstreamModel is allowed but warned: it collapses two priced public ids onto
-	// a single upstream model, so the client picks the price purely by public id.
+	// name — confusing mis-routing the operator never intended. Equaling its own
+	// public Model id is a harmless no-op, and so is equaling a SIBLING entry that
+	// shares that id (a same-model multi-upstream pair): the forwarded name is the
+	// one the client already asked for either way. The comparison is therefore on
+	// Model, not on pointer identity — a pointer test would resolve through
+	// modelPricingMap, which holds only one of the siblings, making the check
+	// depend on which one that is and rejecting a config that loads today. Two
+	// entries deliberately sharing one upstreamModel is allowed but warned: it
+	// collapses two priced public ids onto a single upstream model, so the client
+	// picks the price purely by public id.
 	upstreamOwners := make(map[string]string, len(svc.ModelPricing))
 	for i := range svc.ModelPricing {
 		entry := &svc.ModelPricing[i]
@@ -1320,17 +1491,55 @@ func validateModelPricing(cfg *Config) error {
 		if up == "" {
 			continue
 		}
-		if other, ok := svc.modelPricingMap[up]; ok && other != entry {
+		if other, ok := svc.modelPricingMap[up]; ok && other.Model != entry.Model {
 			return fmt.Errorf("invalid config: service.modelPricing[%d].upstreamModel %q collides with the public model id of another entry; a request would be forwarded under the wrong public id", i, up)
 		}
 		if _, ok := svc.modelAliasMap[up]; ok {
 			return fmt.Errorf("invalid config: service.modelPricing[%d].upstreamModel %q collides with a configured model alias", i, up)
 		}
-		if prev, dup := upstreamOwners[up]; dup {
+		// Siblings of ONE public id sharing an upstreamModel is the natural
+		// same-model fan-out (two hosts of one vendor, one upstream id) and is what
+		// the collision relaxation above legalizes — there are not "two priced
+		// public ids" to warn about, and nothing for the operator to act on.
+		if prev, dup := upstreamOwners[up]; dup && prev != entry.Model {
 			log.Printf("[CONFIG] service.modelPricing entries %q and %q share upstreamModel %q: two priced public ids map to one upstream model — ensure this is intentional (clients select the price by public id).", prev, entry.Model, up)
 		} else {
 			upstreamOwners[up] = entry.Model
 		}
+	}
+
+	// An identity-less request resolves to the CHEAPEST entry, and so does the
+	// expiry gate — so retiring the cheap sibling by back-dating its
+	// expirationDate takes the public id away from every caller that sends no
+	// X-0G-Upstream, even though the dearer sibling is live and still published in
+	// GET /v1/models. That is a silent outage for direct (OpenAI-compatible)
+	// clients, so say it at load time.
+	//
+	// Warn only when a sibling would still be SERVABLE: on a single-entry model an
+	// expirationDate is exactly the retirement the operator intends, and when every
+	// sibling shares the date the whole id is being retired — which is what the
+	// message tells them to do, so firing on it would train them to ignore it.
+	for model, entries := range svc.modelEntriesPerModel() {
+		if entries < 2 {
+			continue
+		}
+		cheapest := svc.modelPricingMap[model]
+		if cheapest == nil {
+			continue
+		}
+		// The gate reads the entry's ModelInfo when it has one and the SERVICE-level
+		// one otherwise (ModelExpirationFor), so checking only the per-entry field
+		// would miss the shape that produces this outage most easily: a
+		// service-level expirationDate with no modelInfo on the cheapest entry.
+		mi := svc.effectiveModelInfoOf(cheapest)
+		if mi == nil || mi.ExpirationDate == "" {
+			continue
+		}
+		if !svc.hasSiblingOutliving(cheapest, mi) {
+			continue
+		}
+		log.Printf("[CONFIG] service.modelPricing model %q is served by %d upstreams and its CHEAPEST entry (providerIdentity %q) carries expirationDate %q: past that date every request without an X-0G-Upstream header gets 410 for this model, including from clients that cannot send that header, even though the other upstream(s) stay live and advertised. Retire the whole id instead, or make the retiring entry not the cheapest.",
+			model, entries, svc.effectiveIdentityOf(cheapest), mi.ExpirationDate)
 	}
 	// service.model is forwarded upstream verbatim for model-less requests, so it
 	// must be a concrete id — never the "*" pricing sentinel.

@@ -3,9 +3,21 @@ services:
     image: mysql:8.0
     container_name: 0g-fine-tune-broker-db
     ports:
-      - "33060:3306"
+      # Bound to the loopback interface, not 0.0.0.0. A bare "33060:3306"
+      # publishes MySQL on every interface of the host, so anything that can
+      # route to it reaches the database directly with the credentials below.
+      # Nothing needs it published: services on this compose network reach the
+      # database by service name, and the checked-in local DSNs use
+      # localhost:33060, which still resolves through a loopback binding.
+      - "127.0.0.1:33060:3306"
     environment:
-      - MYSQL_ROOT_PASSWORD=123456
+      # Required, with no default: a missing value must fail the deploy rather
+      # than silently install a password that is published in this repository.
+      # It has to match the DSN in the operator-supplied config mounted at
+      # /etc/config.yaml (see the volumes below) — the broker does not expand
+      # environment variables inside that file, so the password appears there as
+      # a literal and the two must be set together.
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD is required}
       - MYSQL_DATABASE=fineTune
     volumes:
       - mysql-data:/var/lib/mysql
@@ -26,7 +38,6 @@ services:
       - PORT=3080
       - CONFIG_FILE=/etc/config.yaml
       - NVIDIA_VISIBLE_DEVICES=all
-      - TOKEN=PHALA@2025
     ports:
       - "#PORT#:3080"
     volumes:

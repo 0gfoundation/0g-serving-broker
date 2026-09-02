@@ -19,15 +19,18 @@ var (
 	// UniqueUsersTotal tracks the number of unique users per day
 	UniqueUsersTotal prometheus.Gauge
 
-	// InputTokensTotal tracks cumulative input token count, labeled by service_type.
+	// InputTokensTotal tracks cumulative input token count, labeled by service_type,
+	// model and provider identity.
 	InputTokensTotal *prometheus.CounterVec
-	// OutputTokensTotal tracks cumulative output token count, labeled by service_type.
+	// OutputTokensTotal tracks cumulative output token count, labeled by service_type,
+	// model and provider identity.
 	OutputTokensTotal *prometheus.CounterVec
 	// AudioSecondsTotal tracks cumulative audio duration (in seconds) for
 	// duration-billed services like whisper. Kept separate from token counters
 	// so dashboards/alerts don't mix orders of magnitude across units.
 	AudioSecondsTotal *prometheus.CounterVec
-	// TokensPerSecond records per-request output token generation rate as a histogram, labeled by service_type.
+	// TokensPerSecond records per-request output token generation rate as a histogram,
+	// labeled by service_type, model and provider identity.
 	TokensPerSecond *prometheus.HistogramVec
 
 	// All-time cumulative gauges (queried from database, survive restarts)
@@ -151,12 +154,15 @@ var (
 	//   - model:  the bounded metric model (see CtxKeyMetricModel); "" when the
 	//     request failed before model resolution (e.g. an early rate-limit gate).
 	//   - status: HTTP status text.
+	//   - provider_identity: which upstream served the model (see
+	//     CtxKeyMetricUpstream); "" on the same early paths as model.
 	//
 	// It supersedes broker_requests_errors_total (which has no source/model and
 	// drops client-caused 4xx via ignoreError) and complements
 	// broker_requests_rejected_total (broker-only, no status/model); both remain
-	// for dashboard back-compat. The provider_address const label is on every
-	// series, so provider attribution needs no extra label here.
+	// for dashboard back-compat. The provider_address const label identifies the
+	// BROKER; provider_identity identifies which upstream behind it served the
+	// request, so the two are complementary, not redundant.
 	FailureCount *prometheus.CounterVec
 )
 
@@ -201,7 +207,7 @@ const CtxKeyFailureSource = "failureSource"
 
 // Rejection reason label values for RequestRejectedTotal. These are the only
 // strings ever passed to RecordRejection, keeping the metric's cardinality
-// bounded. Group: admission gates (rate/tpm/ipm/concurrency/model_mismatch),
+// bounded. Group: admission gates (rate/tpm/ipm/concurrency/global_concurrency/model_mismatch/model_expired),
 // billing gates (insufficient_balance/not_acknowledged/account_not_exist), and
 // the upstream_error catch-all for validation failures whose specific cause
 // isn't classified. Every constant here has a live emit site — a reason is not
@@ -218,6 +224,11 @@ const (
 	RejectionAccountNotExist = "account_not_exist"
 	RejectionUpstreamError   = "upstream_error"
 	RejectionModelExpired    = "model_expired"
+
+	// RejectionGlobalConcurrency is the global maxGlobalConcurrent cap, as
+	// distinct from RejectionConcurrency above, which is the PER-USER one. Both
+	// shed for capacity; only this one is broker-wide.
+	RejectionGlobalConcurrency = "global_concurrency"
 )
 
 // CtxKeyRejectionReason is the gin context key under which a request handler
@@ -255,10 +266,10 @@ func PrometheusInit(serverName, providerAddress string) {
 	RequestCount = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_requests_total",
-			Help:        "Total number of HTTP requests processed, labeled by path, status and model.",
+			Help:        "Total number of HTTP requests processed, labeled by path, status, model and provider identity.",
 			ConstLabels: constLabels,
 		},
-		[]string{"path", "status", "model"},
+		[]string{"path", "status", "model", "provider_identity"},
 	)
 
 	ErrorCount = prometheus.NewCounterVec(
@@ -273,11 +284,11 @@ func PrometheusInit(serverName, providerAddress string) {
 	RequestDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:        "broker_request_duration_seconds",
-			Help:        "Histogram of request latencies.",
+			Help:        "Histogram of request latencies, labeled by path, model and provider identity.",
 			Buckets:     prometheus.DefBuckets, // or customize the buckets according to your needs
 			ConstLabels: constLabels,
 		},
-		[]string{"path"},
+		[]string{"path", "model", "provider_identity"},
 	)
 
 	UniqueUsersTotal = prometheus.NewGauge(
@@ -291,38 +302,38 @@ func PrometheusInit(serverName, providerAddress string) {
 	InputTokensTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_input_tokens_total",
-			Help:        "Cumulative input token count.",
+			Help:        "Cumulative input token count, labeled by service_type, model and provider identity.",
 			ConstLabels: constLabels,
 		},
-		[]string{"service_type", "model"},
+		[]string{"service_type", "model", "provider_identity"},
 	)
 
 	OutputTokensTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_output_tokens_total",
-			Help:        "Cumulative output token count.",
+			Help:        "Cumulative output token count, labeled by service_type, model and provider identity.",
 			ConstLabels: constLabels,
 		},
-		[]string{"service_type", "model"},
+		[]string{"service_type", "model", "provider_identity"},
 	)
 
 	AudioSecondsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_audio_seconds_total",
-			Help:        "Cumulative input audio duration in seconds for duration-billed services (e.g. whisper).",
+			Help:        "Cumulative input audio duration in seconds for duration-billed services (e.g. whisper), labeled by service_type, model and provider identity.",
 			ConstLabels: constLabels,
 		},
-		[]string{"service_type", "model"},
+		[]string{"service_type", "model", "provider_identity"},
 	)
 
 	TokensPerSecond = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:        "broker_tokens_per_second",
-			Help:        "Per-request output token generation rate (output_tokens / request_duration_seconds).",
+			Help:        "Per-request output token generation rate (output_tokens / request_duration_seconds), labeled by service_type, model and provider identity.",
 			Buckets:     []float64{1, 5, 10, 20, 30, 50, 75, 100, 150, 200, 500},
 			ConstLabels: constLabels,
 		},
-		[]string{"service_type", "model"},
+		[]string{"service_type", "model", "provider_identity"},
 	)
 
 	AllTimeRequests = prometheus.NewGauge(prometheus.GaugeOpts{
@@ -352,37 +363,37 @@ func PrometheusInit(serverName, providerAddress string) {
 	WhitelistRequestsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_whitelist_requests_total",
-			Help:        "Total number of requests from whitelisted (internal) users, labeled by service_type and model.",
+			Help:        "Total number of requests from whitelisted (internal) users, labeled by service_type, model and provider identity.",
 			ConstLabels: constLabels,
 		},
-		[]string{"service_type", "model"},
+		[]string{"service_type", "model", "provider_identity"},
 	)
 
 	WhitelistInputTokensTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_whitelist_input_tokens_total",
-			Help:        "Cumulative input token count from whitelisted (internal) users.",
+			Help:        "Cumulative input token count from whitelisted (internal) users, labeled by service_type, model and provider identity.",
 			ConstLabels: constLabels,
 		},
-		[]string{"service_type", "model"},
+		[]string{"service_type", "model", "provider_identity"},
 	)
 
 	WhitelistOutputTokensTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_whitelist_output_tokens_total",
-			Help:        "Cumulative output token count from whitelisted (internal) users.",
+			Help:        "Cumulative output token count from whitelisted (internal) users, labeled by service_type, model and provider identity.",
 			ConstLabels: constLabels,
 		},
-		[]string{"service_type", "model"},
+		[]string{"service_type", "model", "provider_identity"},
 	)
 
 	WhitelistAudioSecondsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_whitelist_audio_seconds_total",
-			Help:        "Cumulative input audio duration in seconds from whitelisted (internal) users.",
+			Help:        "Cumulative input audio duration in seconds from whitelisted (internal) users, labeled by service_type, model and provider identity.",
 			ConstLabels: constLabels,
 		},
-		[]string{"service_type", "model"},
+		[]string{"service_type", "model", "provider_identity"},
 	)
 
 	prometheus.MustRegister(RequestCount)
@@ -451,7 +462,7 @@ func PrometheusInit(serverName, providerAddress string) {
 	RequestRejectedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_requests_rejected_total",
-			Help:        "Total number of requests rejected before reaching the upstream, labeled by reason (rate_limit, tpm_limit, ipm_limit, concurrency, model_mismatch, insufficient_balance, not_acknowledged, account_not_exist, upstream_error).",
+			Help:        "Total number of requests rejected before reaching the upstream, labeled by reason (rate_limit, tpm_limit, ipm_limit, concurrency, global_concurrency, model_mismatch, model_expired, insufficient_balance, not_acknowledged, account_not_exist, upstream_error). global_concurrency is the broker-wide capacity cap and is the only reason an UNAUTHENTICATED caller can drive: it aborts ahead of session validation, so it carries no user attribution.",
 			ConstLabels: constLabels,
 		},
 		[]string{"reason"},
@@ -460,10 +471,10 @@ func PrometheusInit(serverName, providerAddress string) {
 	FailureCount = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_request_failures_total",
-			Help:        "Total failed requests (HTTP status >= 400), labeled by source (broker|upstream|client), code (Rejection* reason or empty), model, and status. Unified failure-attribution counter; see FailureCount doc.",
+			Help:        "Total failed requests (HTTP status >= 400), labeled by source (broker|upstream|client), code (Rejection* reason or empty), model, status, and provider identity. Unified failure-attribution counter; see FailureCount doc.",
 			ConstLabels: constLabels,
 		},
-		[]string{"source", "code", "model", "status"},
+		[]string{"source", "code", "model", "status", "provider_identity"},
 	)
 
 	prometheus.MustRegister(WhitelistRequestsTotal)
@@ -586,6 +597,16 @@ const CtxKeyResolvedIdentity = "resolvedIdentity"
 // raw user strings can never mint series.
 const CtxKeyMetricModel = "metricModel"
 
+// CtxKeyMetricUpstream carries the BOUNDED provider-identity label for the
+// request: which upstream, among the several a single canonical model may be
+// served by, actually handled it. ctrl computes it from the resolved
+// (model, identity) pair via ctrl.UpstreamForModel — whose result is always a
+// configured providerIdentity or the "self" sentinel, never the raw
+// router-supplied header — and stores it in PrepareHTTPRequest, so the monitor
+// package can label without pricing-config access and a forged
+// config.UpstreamIdentityHeader can never mint series.
+const CtxKeyMetricUpstream = "metricUpstream"
+
 // modelFromGinContext returns the bounded metric model recorded under
 // CtxKeyMetricModel, or "" when the request path didn't set one (paths that
 // never reach PrepareHTTPRequest). An empty label value is dropped by
@@ -593,6 +614,22 @@ const CtxKeyMetricModel = "metricModel"
 // single-model convention) backfill it.
 func modelFromGinContext(c *gin.Context) string {
 	if v, exists := c.Get(CtxKeyMetricModel); exists {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
+// upstreamFromGinContext returns the bounded provider identity recorded under
+// CtxKeyMetricUpstream, or "" when the request path didn't set one (paths that
+// never reach PrepareHTTPRequest — the same paths that carry model=""). Every
+// stamped request carries a NON-empty value: ctrl.UpstreamForModel falls back to
+// the service-level identity and then to the "self" sentinel, so adding this
+// label is a one-time series switch on every deployment, not only multi-upstream
+// ones. See doc/metrics-model-labels.md.
+func upstreamFromGinContext(c *gin.Context) string {
+	if v, exists := c.Get(CtxKeyMetricUpstream); exists {
 		if s, ok := v.(string); ok {
 			return s
 		}
@@ -714,17 +751,22 @@ func TrackMetrics() gin.HandlerFunc {
 
 		ignoreError := c.GetBool("ignoreError")
 
+		// The model and provider-identity labels are read AFTER c.Next(), so they
+		// carry whatever the request path resolved ("" for non-inference paths and
+		// unresolved requests). Latency, request counts and failures share the same
+		// two reads, so a (model, upstream) pair selected on a dashboard filters all
+		// of them consistently.
+		model := modelFromGinContext(c)
+		upstream := upstreamFromGinContext(c)
+
 		// Track request duration
 		duration := time.Since(startTime).Seconds()
-		RequestDuration.WithLabelValues(path).Observe(duration)
+		RequestDuration.WithLabelValues(path, model, upstream).Observe(duration)
 
-		// Track request count and errors. The model label is read AFTER c.Next(),
-		// so it carries whatever the request path resolved ("" for non-inference
-		// paths and unresolved requests).
+		// Track request count and errors.
 		status := c.Writer.Status()
 		statusText := http.StatusText(status)
-		model := modelFromGinContext(c)
-		RequestCount.WithLabelValues(path, statusText, model).Inc()
+		RequestCount.WithLabelValues(path, statusText, model, upstream).Inc()
 		if !ignoreError && status >= 400 {
 			ErrorCount.WithLabelValues(path, statusText).Inc()
 		}
@@ -736,23 +778,29 @@ func TrackMetrics() gin.HandlerFunc {
 		// and status.
 		if status >= 400 {
 			code := failureCodeFromGinContext(c)
-			RecordFailure(resolveFailureSource(c, status, code, ignoreError), code, model, statusText)
+			RecordFailure(resolveFailureSource(c, status, code, ignoreError), code, model, statusText, upstream)
 		}
 	}
 }
 
 // RecordTokens increments the cumulative input and output token counters.
 // model is the per-request BOUNDED model label ("" lets a deployment-level
-// external label backfill — see CtxKeyMetricModel).
-func RecordTokens(serviceType, model string, inputTokens, outputTokens int64) {
+// external label backfill — see CtxKeyMetricModel); upstream is the BOUNDED
+// provider identity that served it (see CtxKeyMetricUpstream). Both are ""
+// only on paths that never reach PrepareHTTPRequest — a stamped request always
+// carries a non-empty identity, "self" at the far end of the fallback chain, so
+// do not query for provider_identity="" to mean "single upstream". Every
+// Record* below takes the same pair, so no two counters can attribute the same
+// request to different upstreams.
+func RecordTokens(serviceType, model, upstream string, inputTokens, outputTokens int64) {
 	if InputTokensTotal == nil || OutputTokensTotal == nil {
 		return
 	}
 	if inputTokens > 0 {
-		InputTokensTotal.WithLabelValues(serviceType, model).Add(float64(inputTokens))
+		InputTokensTotal.WithLabelValues(serviceType, model, upstream).Add(float64(inputTokens))
 	}
 	if outputTokens > 0 {
-		OutputTokensTotal.WithLabelValues(serviceType, model).Add(float64(outputTokens))
+		OutputTokensTotal.WithLabelValues(serviceType, model, upstream).Add(float64(outputTokens))
 	}
 }
 
@@ -760,19 +808,19 @@ func RecordTokens(serviceType, model string, inputTokens, outputTokens int64) {
 // duration-billed services. This is intentionally separate from RecordTokens —
 // accumulating seconds into broker_input_tokens_total would skew the metric
 // by orders of magnitude versus token-billed services on the same dashboard.
-func RecordAudioSeconds(serviceType, model string, seconds int64) {
+func RecordAudioSeconds(serviceType, model, upstream string, seconds int64) {
 	if AudioSecondsTotal == nil || seconds <= 0 {
 		return
 	}
-	AudioSecondsTotal.WithLabelValues(serviceType, model).Add(float64(seconds))
+	AudioSecondsTotal.WithLabelValues(serviceType, model, upstream).Add(float64(seconds))
 }
 
 // RecordWhitelistAudioSeconds mirrors RecordAudioSeconds for whitelisted users.
-func RecordWhitelistAudioSeconds(serviceType, model string, seconds int64) {
+func RecordWhitelistAudioSeconds(serviceType, model, upstream string, seconds int64) {
 	if WhitelistAudioSecondsTotal == nil || seconds <= 0 {
 		return
 	}
-	WhitelistAudioSecondsTotal.WithLabelValues(serviceType, model).Add(float64(seconds))
+	WhitelistAudioSecondsTotal.WithLabelValues(serviceType, model, upstream).Add(float64(seconds))
 }
 
 // RecordVideoBillingSkipped increments the counter of video requests served
@@ -921,47 +969,47 @@ func RecordRejection(reason string) {
 // FailureSource* constant and code a Rejection* constant or "" so the metric
 // stays bounded. Safe to call before PrometheusInit (no-op when monitoring is
 // disabled). Normally called only from TrackMetrics' single emit site.
-func RecordFailure(source, code, model, status string) {
+func RecordFailure(source, code, model, status, upstream string) {
 	if FailureCount == nil {
 		return
 	}
-	FailureCount.WithLabelValues(source, code, model, status).Inc()
+	FailureCount.WithLabelValues(source, code, model, status, upstream).Inc()
 }
 
 // RecordWhitelistRequest increments the whitelist request counter for the given
 // service type and model.
-func RecordWhitelistRequest(serviceType, model string) {
+func RecordWhitelistRequest(serviceType, model, upstream string) {
 	if WhitelistRequestsTotal == nil {
 		return
 	}
-	WhitelistRequestsTotal.WithLabelValues(serviceType, model).Inc()
+	WhitelistRequestsTotal.WithLabelValues(serviceType, model, upstream).Inc()
 }
 
 // RecordWhitelistTokens increments the whitelist input and output token counters.
-func RecordWhitelistTokens(serviceType, model string, inputTokens, outputTokens int64) {
+func RecordWhitelistTokens(serviceType, model, upstream string, inputTokens, outputTokens int64) {
 	if WhitelistInputTokensTotal == nil || WhitelistOutputTokensTotal == nil {
 		return
 	}
 	if inputTokens > 0 {
-		WhitelistInputTokensTotal.WithLabelValues(serviceType, model).Add(float64(inputTokens))
+		WhitelistInputTokensTotal.WithLabelValues(serviceType, model, upstream).Add(float64(inputTokens))
 	}
 	if outputTokens > 0 {
-		WhitelistOutputTokensTotal.WithLabelValues(serviceType, model).Add(float64(outputTokens))
+		WhitelistOutputTokensTotal.WithLabelValues(serviceType, model, upstream).Add(float64(outputTokens))
 	}
 }
 
 // RecordTPS records the per-request output tokens per second as a histogram observation.
-func RecordTPS(serviceType, model string, tps float64) {
+func RecordTPS(serviceType, model, upstream string, tps float64) {
 	if TokensPerSecond == nil || tps <= 0 {
 		return
 	}
-	TokensPerSecond.WithLabelValues(serviceType, model).Observe(tps)
+	TokensPerSecond.WithLabelValues(serviceType, model, upstream).Observe(tps)
 }
 
 // RecordTPSFromContext calculates TPS from the request start time stored in context
 // and records it. This is a convenience wrapper combining start-time extraction,
 // duration calculation, and TPS recording.
-func RecordTPSFromContext(ctx context.Context, serviceType, model string, outputTokens int64) {
+func RecordTPSFromContext(ctx context.Context, serviceType, model, upstream string, outputTokens int64) {
 	if outputTokens <= 0 {
 		return
 	}
@@ -971,6 +1019,6 @@ func RecordTPSFromContext(ctx context.Context, serviceType, model string, output
 	}
 	duration := time.Since(startTime).Seconds()
 	if duration > 0 {
-		RecordTPS(serviceType, model, float64(outputTokens)/duration)
+		RecordTPS(serviceType, model, upstream, float64(outputTokens)/duration)
 	}
 }

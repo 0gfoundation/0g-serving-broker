@@ -221,11 +221,15 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 		}
 	}
 
-	// Stamp the BOUNDED metric label for TrackMetrics: the monitor package
+	// Stamp the BOUNDED metric labels for TrackMetrics: the monitor package
 	// has no pricing-config access, and CtxKeyResolvedModel holds RAW user
 	// strings on wildcard deployments — they must never become label values
-	// (unbounded series). metricModel folds them to "*".
+	// (unbounded series). metricModel folds them to "*". metricUpstream names
+	// which upstream served the model, resolved from the same (model, identity)
+	// pair used just above to pick the target URL, so the label always agrees
+	// with the host the request was actually forwarded to.
 	ctx.Set(monitor.CtxKeyMetricModel, c.metricModel(ctx))
+	ctx.Set(monitor.CtxKeyMetricUpstream, c.metricUpstream(ctx))
 
 	// For text-to-image and image-editing: store the original client body (used for
 	// signing) and rewrite response_format to b64_json so the broker always receives
@@ -877,8 +881,17 @@ func (c *Ctrl) handleServiceError(ctx *gin.Context, resp *http.Response) {
 	//
 	// URI rather than RequestURI: the path without the query string, which is where a
 	// caller's own credential would sit.
+	//
+	// model is the per-request label, not the service's registered model. A
+	// provider serves many models behind one service, and neither this line's
+	// request fields nor a vendor's error body names which one a failure
+	// belongs to — leaving an upstream incident attributable only by matching
+	// error text against each model's configured quota. metricModel is the
+	// same bounded value TrackMetrics labels with, so a log line and its
+	// broker_request_failures_total series name the same model.
 	if !strings.Contains(ctx.Request.RequestURI, "/api/event_logging/batch") {
-		c.logger.Errorf("Service returned error response: %s, Incoming request: method=%s, path=%s, RemoteAddr=%s,",
+		c.logger.Errorf("Service returned error response: model=%s, %s, Incoming request: method=%s, path=%s, RemoteAddr=%s,",
+			c.metricModel(ctx),
 			truncateForLog([]byte(c.redactUpstreamSecrets(decodedBody)), maxUpstreamErrorBodyLog),
 			ctx.Request.Method, ctx.Request.URL.Path, ctx.Request.RemoteAddr)
 	}
@@ -1495,9 +1508,6 @@ func (c *Ctrl) ValidateModelAllowlist(ctx *gin.Context, body []byte, userAddr st
 
 	entry, resolved, err := c.Service.ResolveRequestedModel(requestModel, UpstreamIdentity(ctx))
 	if err != nil {
-		if errors.Is(err, config.ErrAmbiguousUpstream) {
-			return nil, err
-		}
 		c.recordModelMismatch(userAddr, requestModel)
 		return nil, fmt.Errorf("model not supported: '%s' is not available for this service", requestModel)
 	}
@@ -1598,9 +1608,6 @@ func (c *Ctrl) ResolveModelForBilling(ctx *gin.Context, body []byte, contentType
 	}
 	_, resolved, err := c.Service.ResolveRequestedModel(requestModel, UpstreamIdentity(ctx))
 	if err != nil {
-		if errors.Is(err, config.ErrAmbiguousUpstream) {
-			return err
-		}
 		c.recordModelMismatch(userAddr, requestModel)
 		return fmt.Errorf("model not supported: '%s' is not available for this service", requestModel)
 	}

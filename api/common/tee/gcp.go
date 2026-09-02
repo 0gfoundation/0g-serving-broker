@@ -2,10 +2,6 @@ package tee
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 
 	"github.com/google/go-tdx-guest/client"
@@ -14,6 +10,20 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/errors"
 )
 
+// GCP TDX client. RETAINED but NOT WIRED IN, on the same terms as AliCloudClient:
+// no ClientType selects it and no NETWORK value reaches it.
+//
+// DeriveKey WAS DELETED. It ignored its path argument and minted a fresh
+// ecdsa.GenerateKey on every call, so the keys did not collide but nothing was
+// reproducible: a restart silently invalidated both the signer address published
+// on chain and the enc_pub clients had already fetched, with no error raised. Its
+// absence means this type no longer satisfies tee.TappdClient, so it cannot be
+// wired back in without writing a derivation first.
+//
+// TDX offers no local sealing primitive, so a correct derivation here needs an
+// attestation-gated KMS release rather than anything this file can do alone.
+//
+// See doc/removed-tee-backends.md.
 type GcpTappdClient struct{}
 
 func (c *GcpTappdClient) TdxQuote(ctx context.Context, reportData []byte, nvQuote bool) (string, error) {
@@ -50,14 +60,4 @@ func (c *GcpTappdClient) TdxQuote(ctx context.Context, reportData []byte, nvQuot
 	}
 
 	return string(jsonData), nil
-}
-
-func (c *GcpTappdClient) DeriveKey(ctx context.Context, path string) (string, error) {
-	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return "", errors.Wrap(err, "Failed to generate ECDSA private key")
-	}
-
-	dHex := hex.EncodeToString(privateKey.D.Bytes())
-	return dHex, nil
 }

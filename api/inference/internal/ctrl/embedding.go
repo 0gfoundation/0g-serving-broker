@@ -142,8 +142,9 @@ func (c *Ctrl) handleEmbeddingResponse(ctx *gin.Context, resp *http.Response, _ 
 
 	if reqModel.IsWhitelisted {
 		metricModel := c.metricModel(ctx)
-		monitor.RecordTokens(embeddingMetricLabel, metricModel, int64(usage.PromptTokens), 0)
-		monitor.RecordWhitelistTokens(embeddingMetricLabel, metricModel, int64(usage.PromptTokens), 0)
+		metricUpstream := c.metricUpstream(ctx)
+		monitor.RecordTokens(embeddingMetricLabel, metricModel, metricUpstream, int64(usage.PromptTokens), 0)
+		monitor.RecordWhitelistTokens(embeddingMetricLabel, metricModel, metricUpstream, int64(usage.PromptTokens), 0)
 		// Stamp the applied input-length tier so whitelisted embedding traffic (unbilled
 		// by the broker, but still billed by the vendor at the tiered rate) reconciles
 		// per-tier like billable traffic — mirrors decodeAndProcess's identical stamp for
@@ -195,8 +196,7 @@ func (c *Ctrl) updateEmbeddingWithUsage(ctx *gin.Context, usage *EmbeddingUsage,
 		return errors.Wrap(err, "update request with embedding usage")
 	}
 
-	metricModel := c.metricModel(ctx)
-	monitor.RecordTokens(embeddingMetricLabel, metricModel, int64(usage.PromptTokens), 0)
+	monitor.RecordTokens(embeddingMetricLabel, c.metricModel(ctx), c.metricUpstream(ctx), int64(usage.PromptTokens), 0)
 
 	c.consumeEmbeddingLimiter(ctx, usage.PromptTokens)
 	return nil

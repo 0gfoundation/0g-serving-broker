@@ -3,7 +3,13 @@ services:
     image: mysql:8.0
     container_name: 0g-fine-tune-broker-db
     ports:
-      - "33060:3306"
+      # Bound to the loopback interface, not 0.0.0.0. A bare "33060:3306"
+      # publishes MySQL on every interface of the host, so anything that can
+      # route to it reaches the database directly with the credentials below.
+      # Nothing needs it published: services on this compose network reach the
+      # database by service name, and the checked-in local DSNs use
+      # localhost:33060, which still resolves through a loopback binding.
+      - "127.0.0.1:33060:3306"
     environment:
       - MYSQL_ROOT_PASSWORD=123456
       - MYSQL_DATABASE=fineTune

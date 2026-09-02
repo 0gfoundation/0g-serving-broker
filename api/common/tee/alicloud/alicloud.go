@@ -4,10 +4,6 @@ package alicloud
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -20,6 +16,29 @@ import (
 	pb "github.com/0glabs/0g-serving-broker/common/tee/alicloud/proto"
 )
 
+// AliCloud TAPP client. RETAINED but NOT WIRED IN: no ClientType selects it and no
+// NETWORK value reaches it, so nothing in the broker can construct or call it
+// today. It is kept so re-integrating AliCloud is a matter of adding the wiring
+// back rather than rewriting the gRPC component, and the generated bindings under
+// proto/ are the bulk of that component.
+//
+// DeriveKey WAS DELETED, and must not be restored in its old form. It ignored its
+// path argument and returned a single cached secret from /data/tee_key for every
+// path, which made the secp256k1 provider signer and the X25519 HPKE recipient key
+// the SAME secret: disclosing either disclosed the other, and with it every prompt
+// ever sealed to that enclave. enckey.go states their independence as a MUST
+// (0g-pc SPEC §4.1). Because AliCloudClient no longer has DeriveKey it no longer
+// satisfies tee.TappdClient, which is deliberate — the type cannot be wired back in
+// by accident, only by someone writing a derivation first.
+//
+// What a correct derivation would use is already in this service and was never
+// called: GetAppKey / GetAppSecretKey carry a kbs_resource_uri and an
+// additional_data binding field, so a Key Broker Service releases material only
+// after verifying an attestation and additional_data can carry the derivation path
+// for domain separation. The deleted implementation used neither; it read a plain
+// file, which is why the key was reproducible on an unattested machine.
+//
+// See doc/removed-tee-backends.md.
 type AliCloudClient struct{}
 
 func (c *AliCloudClient) TdxQuote(ctx context.Context, reportData []byte, nvQuote bool) (string, error) {
@@ -105,21 +124,4 @@ func (c *AliCloudClient) TdxQuote(ctx context.Context, reportData []byte, nvQuot
 	}
 
 	return string(jsonBytes), nil
-}
-
-func (c *AliCloudClient) DeriveKey(ctx context.Context, path string) (string, error) {
-	keyFilePath := "/data/tee_key"
-	if data, err := os.ReadFile(keyFilePath); err == nil && len(data) > 0 {
-		return string(data), nil
-	}
-
-	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return "", errors.Wrap(err, "failed to generate ECDSA private key")
-	}
-	dHex := hex.EncodeToString(privateKey.D.Bytes())
-
-	_ = os.WriteFile(keyFilePath, []byte(dHex), 0600)
-
-	return dHex, nil
 }

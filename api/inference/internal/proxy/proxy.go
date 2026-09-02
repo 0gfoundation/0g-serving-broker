@@ -218,12 +218,33 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 	// Apply global concurrency limiting to all service types.
 	// This caps total in-flight requests to match backend GPU capacity,
 	// preventing queue buildup that degrades throughput.
-	p.serviceGroup.Use(middleware.ConcurrencyLimitMiddleware(p.concurrencyLimiter))
+	p.serviceGroup.Use(p.globalConcurrencyMiddleware())
 
 	// Apply request size limit middleware (32MB)
 	p.serviceGroup.Use(middleware.RequestSizeLimitMiddleware(middleware.MaxRequestSize))
 
 	return p
+}
+
+// globalConcurrencyMiddleware wires the global concurrency cap to the rejection
+// recorder. Both New() and its test build the middleware through here, so the
+// wiring cannot be correct in one and silently absent in the other — passing a
+// nil callback, or the per-user RejectionConcurrency constant instead of the
+// global one, functionally reverts this gate to an unattributed broker 5xx, and
+// both mutations previously left the whole suite green.
+//
+// The recorder does all three things this gate needs: stamps the reason on the
+// context, counts broker_requests_rejected_total, and emits a bounded periodic
+// summary rather than one line per shed request (#542). It is what every sibling
+// admission gate already uses, so the global cap appears on the same operator
+// panel as the rest.
+//
+// The user address is empty because the cap aborts before ValidateSession
+// resolves one; record() treats "" as "count the total, attribute to no user".
+func (p *Proxy) globalConcurrencyMiddleware() gin.HandlerFunc {
+	return middleware.ConcurrencyLimitMiddleware(p.concurrencyLimiter, func(c *gin.Context) {
+		p.rejections.record(c, monitor.RejectionGlobalConcurrency, "")
+	})
 }
 
 // buildPerUserOverrides converts the operator-supplied per-address override
@@ -750,7 +771,8 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	// Identity-aware: a same-model entry carries its own expiry, so gate against
 	// the upstream the router named (X-0G-Upstream, read at admission — this runs
 	// before PrepareHTTPRequest sets CtxKeyResolvedIdentity). Without it a
-	// multi-upstream model resolves ambiguous and an EXPIRED one would fail OPEN.
+	// multi-upstream model answers for its CHEAPEST entry, so an expired cheapest
+	// entry gates the model even when a dearer sibling is still live.
 	if exp, ok := p.ctrl.Service.ModelExpirationFor(modelForExpiry, ctrl.UpstreamIdentity(ctx)); ok && time.Now().After(exp) {
 		ctx.Set("ignoreError", true)
 		// record stamps CtxKeyRejectionReason for the unified failure metric.
@@ -775,10 +797,11 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 			logPath = logPath[:idx]
 		}
 		p.logger.Infof("Whitelist user request: user=%s, service=%s, path=%s", userAddress, svcType, logPath)
-		// Label from the BOUNDED whitelist helper, never the raw body value:
-		// these counters record before allowlist validation, and raw user
-		// strings as label values are an unbounded-cardinality vector.
-		monitor.RecordWhitelistRequest(svcType, p.ctrl.WhitelistMetricModel(reqBody, ctx.Request.Header.Get("Content-Type")))
+		// Labels from the BOUNDED whitelist helper, never the raw body value or
+		// identity header: these counters record before allowlist validation, and
+		// raw user strings as label values are an unbounded-cardinality vector.
+		wlModel, wlUpstream := p.ctrl.WhitelistMetricLabels(ctx, reqBody, ctx.Request.Header.Get("Content-Type"))
+		monitor.RecordWhitelistRequest(svcType, wlModel, wlUpstream)
 		// Raw on purpose: the DB row records the user-requested id verbatim;
 		// only the metric label above goes through the bounded fold.
 		modelName := ctrl.ExtractModelName(reqBody, ctx.Request.Header.Get("Content-Type"))

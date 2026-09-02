@@ -270,8 +270,9 @@ func (c *Ctrl) handleImageEditingResponse(ctx *gin.Context, resp *http.Response,
 	// count the images into the reconciliation rollup (they hit the upstream).
 	if reqModel.IsWhitelisted {
 		metricModel := c.metricModel(ctx)
-		monitor.RecordTokens("image-editing", metricModel, 0, reqModel.OutputCount)
-		monitor.RecordWhitelistTokens("image-editing", metricModel, 0, reqModel.OutputCount)
+		metricUpstream := c.metricUpstream(ctx)
+		monitor.RecordTokens("image-editing", metricModel, metricUpstream, 0, reqModel.OutputCount)
+		monitor.RecordWhitelistTokens("image-editing", metricModel, metricUpstream, 0, reqModel.OutputCount)
 		c.recordWhitelistedUsage(reqModel, 0, reqModel.OutputCount, 0, 0, "")
 		return nil
 	}
@@ -296,7 +297,7 @@ func (c *Ctrl) handleImageEditingResponse(ctx *gin.Context, resp *http.Response,
 		return errors.Wrap(err, "update request fees and count in database")
 	}
 
-	monitor.RecordTokens("image-editing", c.metricModel(ctx), 0, imageNum)
+	monitor.RecordTokens("image-editing", c.metricModel(ctx), c.metricUpstream(ctx), 0, imageNum)
 
 	// Update IPM limiter with actual image consumption
 	if ipmLimiter, exists := ctx.Get("ipmLimiter"); exists {

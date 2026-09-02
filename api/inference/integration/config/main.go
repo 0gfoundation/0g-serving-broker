@@ -297,23 +297,20 @@ type TeeNode string
 const (
 	TeeNodeLocalHardhat TeeNode = "hardhat"
 	TeeNodePhala        TeeNode = "phala"
-	TeeNodeAliCloud     TeeNode = "alicloud"
 )
 
 // Deployment configuration
 type DeploymentConfig struct {
-	UseGPU         bool
-	DeployLLM      bool    // Whether to deploy LLM service container
-	LLMModel       string  // LLM model to deploy (e.g., "Qwen/Qwen2.5-7B")
-	TeeNode        TeeNode // TEE node selection (replaces UseTest)
-	UseMonitoring  bool
-	UseNginx       bool
-	ConfigFile     string // Local config file name
-	ConfigPath     string // Source path in TEE node (e.g., /dstack/user_config.yml)
-	Ports          PortConfig
-	ProjectName    string // Docker Compose project name for isolation
-	TappServiceURL string // TAPP service URL for AliCloud mode
-	TappAppID      string // TAPP AppID for AliCloud mode
+	UseGPU        bool
+	DeployLLM     bool    // Whether to deploy LLM service container
+	LLMModel      string  // LLM model to deploy (e.g., "Qwen/Qwen2.5-7B")
+	TeeNode       TeeNode // TEE node selection (replaces UseTest)
+	UseMonitoring bool
+	UseNginx      bool
+	ConfigFile    string // Local config file name
+	ConfigPath    string // Source path in TEE node (e.g., /dstack/user_config.yml)
+	Ports         PortConfig
+	ProjectName   string // Docker Compose project name for isolation
 	// Controller configuration
 	UseController bool // Whether to deploy controller service
 	// Where the controller serves quotes and signatures once it holds dstack's socket
@@ -334,38 +331,6 @@ type DeploymentConfig struct {
 // Docker compose template
 const dockerComposeTemplate = `services:
 {{- if .DeployLLM}}
-{{- if and (eq .TeeNode "alicloud") .DeployLLM }}
-  vllm:
-    image: egs-registry.cn-hangzhou.cr.aliyuncs.com/egs/vllm:0.8.5-pytorch2.6-cu124-20250429
-    container_name: vllm
-    shm_size: "10.24gb"
-    volumes:
-      - /data/models:/root/.cache/huggingface
-    command: >
-      python3 -m vllm.entrypoints.openai.api_server
-      --model {{.LLMModel}}
-      --served-model-name {{.LLMModel}}
-    runtime: nvidia
-    environment:
-      - NVIDIA_VISIBLE_DEVICES=all
-      - HF_ENDPOINT=https://hf-mirror.com
-    # Present because the broker declares depends_on: vllm: condition: service_healthy whenever
-    # an LLM is deployed, and compose refuses to start at all against a target that has none.
-    # The non-alicloud vllm below has always had one; this block did not, so alicloud with an
-    # LLM rendered a file docker rejects.
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 600s
-    restart: always
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "100m"
-        max-file: "5"
-{{- else }}
   vllm:
     image: vllm/vllm-openai:v0.6.3.post1
     container_name: vllm
@@ -392,7 +357,6 @@ const dockerComposeTemplate = `services:
       timeout: 10s
       retries: 5
       start_period: 120s
-{{- end}}
 
 {{- end}}
 {{- if eq .TeeNode "hardhat"}}
@@ -412,7 +376,11 @@ const dockerComposeTemplate = `services:
   mysql:
     image: mysql:8.0
     ports:
-      - "{{.Ports.MySQL}}:3306"
+      # Loopback-bound: a bare "PORT:3306" publishes MySQL on every interface of
+      # the host, reachable by anything that can route to it with the credentials
+      # below. Services on this compose network reach the database by service
+      # name, so nothing needs it published beyond local debugging.
+      - "127.0.0.1:{{.Ports.MySQL}}:3306"
     restart: unless-stopped
     environment:
       - MYSQL_ROOT_PASSWORD=123456
@@ -515,7 +483,7 @@ const dockerComposeTemplate = `services:
     environment:
       - PORT=3080
       - CONFIG_FILE=/etc/config.yaml
-{{- if and .UseController (ne .TeeNode "hardhat") (ne .TeeNode "alicloud")}}
+{{- if and .UseController (ne .TeeNode "hardhat")}}
       # What this container reports on-chain as the image it runs. The controller rewrites
       # both whenever it recreates this container on a new digest, so the pair moves with
       # the image; a recreated container inherits the old environment, and without them the
@@ -531,12 +499,6 @@ const dockerComposeTemplate = `services:
       - NETWORK=hardhat
 {{- else if eq .TeeNode "phala"}}
       - NETWORK=phala
-{{- else if eq .TeeNode "alicloud"}}
-      - NETWORK=alicloud
-      - TAPP_SERVICE_URL={{.TappServiceURL}}
-{{- if .TappAppID }}
-      - TAPP_APP_ID={{.TappAppID}}
-{{- end}}
 {{- end}}
     volumes:
       # Read-only, so the only writer of this file is the controller — which is what
@@ -547,14 +509,11 @@ const dockerComposeTemplate = `services:
       # verifiability and no record would exist, so "no config record" would mean
       # nothing at all.
       - {{.ConfigPath}}:/etc/config.yaml:ro
-{{- if eq .TeeNode "alicloud"}}
-      - tee-key-data:/data
-{{- end}}
 {{- if .EnableFileLog}}
       - ./logs/broker:/var/log/inference
       - ./logs/event:/var/log/event
 {{- end}}
-{{- if and (ne .TeeNode "hardhat") (ne .TeeNode "alicloud")}}
+{{- if ne .TeeNode "hardhat"}}
 {{- if .UseController}}
       # Neither dstack's socket nor docker's. That is the point, and it is the only part
       # of this file that provides a property rather than describing one:
@@ -601,7 +560,7 @@ const dockerComposeTemplate = `services:
 {{- end}}
     restart: unless-stopped
     depends_on:
-{{- if and .UseController (ne .TeeNode "hardhat") (ne .TeeNode "alicloud")}}
+{{- if and .UseController (ne .TeeNode "hardhat")}}
       # With TEE_SOCKET set this container cannot finish starting until the controller answers
       # /SignerAddress, and it panics rather than falling back to a local key. service_started
       # (not service_healthy) and only in this direction — the controller has no reverse
@@ -633,7 +592,7 @@ const dockerComposeTemplate = `services:
     image: {{.BrokerImage}}
     environment:
       - CONFIG_FILE=/etc/config.yaml
-{{- if and .UseController (ne .TeeNode "hardhat") (ne .TeeNode "alicloud")}}
+{{- if and .UseController (ne .TeeNode "hardhat")}}
       - IMAGE_REPO={{.ImageRepo}}
       - IMAGE_DIGEST={{.ImageDigest}}
       - TEE_SOCKET={{.AttestSocketPath}}
@@ -642,12 +601,6 @@ const dockerComposeTemplate = `services:
       - NETWORK=hardhat
 {{- else if eq .TeeNode "phala"}}
       - NETWORK=phala
-{{- else if eq .TeeNode "alicloud"}}
-      - NETWORK=alicloud
-      - TAPP_SERVICE_URL={{.TappServiceURL}}
-{{- if .TappAppID }}
-      - TAPP_APP_ID={{.TappAppID}}
-{{- end}}
 {{- end}}
     volumes:
       # Read-only, so the only writer of this file is the controller — which is what
@@ -658,13 +611,10 @@ const dockerComposeTemplate = `services:
       # verifiability and no record would exist, so "no config record" would mean
       # nothing at all.
       - {{.ConfigPath}}:/etc/config.yaml:ro
-{{- if eq .TeeNode "alicloud"}}
-      - tee-key-data:/data
-{{- end}}
 {{- if .EnableFileLog}}
       - ./logs/event:/var/log/inference
 {{- end}}
-{{- if and (ne .TeeNode "hardhat") (ne .TeeNode "alicloud")}}
+{{- if ne .TeeNode "hardhat"}}
 {{- if .UseController}}
       # Same reasoning as the broker: this container runs the same image and signs with the
       # same key, so handing it dstack's socket would undo the arrangement just as completely.
@@ -689,7 +639,7 @@ const dockerComposeTemplate = `services:
         max-file: "5"
     restart: unless-stopped
     depends_on:
-{{- if and .UseController (ne .TeeNode "hardhat") (ne .TeeNode "alicloud")}}
+{{- if and .UseController (ne .TeeNode "hardhat")}}
       0g-controller:
         condition: service_started
 {{- end}}
@@ -711,7 +661,7 @@ const dockerComposeTemplate = `services:
     environment:
       - PORT=3090
       - CONFIG_FILE=/etc/config.yaml
-{{- if and (ne .TeeNode "hardhat") (ne .TeeNode "alicloud")}}
+{{- if ne .TeeNode "hardhat"}}
       # Serving this makes the broker's missing dstack mount survivable: quotes and
       # signatures are answered here, on an allowlist that forwards GetQuote and Info and
       # nothing else, and answers Sign / SignerAddress / GetEncKey itself without ever
@@ -721,7 +671,7 @@ const dockerComposeTemplate = `services:
     volumes:
       - {{.ConfigPath}}:/etc/config.yaml
       - /var/run/docker.sock:/var/run/docker.sock
-{{- if and (ne .TeeNode "hardhat") (ne .TeeNode "alicloud")}}
+{{- if ne .TeeNode "hardhat"}}
       # The only container that gets it. It writes the RTMR3 record before every change it
       # makes, and derives the per-image signing key, so it is also the only container whose
       # image being reviewed matters — nothing records the controller's own image.
@@ -738,7 +688,7 @@ const dockerComposeTemplate = `services:
       retries: 3
       start_period: 10s
     restart: unless-stopped
-{{- if or (eq .TeeNode "hardhat") (eq .TeeNode "alicloud")}}
+{{- if eq .TeeNode "hardhat"}}
     # Only where the broker does not wait on this container in turn. With the attestation
     # proxy in play the broker cannot finish starting until this serves /SignerAddress, so
     # waiting on the broker's health here would make the two wait for each other forever.
@@ -838,7 +788,7 @@ const dockerComposeTemplate = `services:
 {{- end}}
 volumes:
   mysql-data:
-{{- if and .UseController (ne .TeeNode "hardhat") (ne .TeeNode "alicloud")}}
+{{- if and .UseController (ne .TeeNode "hardhat")}}
   # Carries the controller's attestation socket to the broker and the event service. Nothing
   # else may mount it: anything that can reach that socket can have the broker's signing key
   # applied to a hash of its choosing.
@@ -846,9 +796,6 @@ volumes:
 {{- end}}
 {{- if .UseMonitoring}}
   prometheus-config:
-{{- end}}
-{{- if eq .TeeNode "alicloud"}}
-  tee-key-data:
 {{- end}}
 
 networks:
@@ -869,8 +816,6 @@ type TemplateData struct {
 	Ports                PortConfig
 	ProjectName          string
 	EnableFileLog        bool
-	TappServiceURL       string
-	TappAppID            string
 	UseController        bool
 	AttestSocketDir      string
 	AttestSocketPath     string
@@ -972,8 +917,7 @@ func main() {
 	fmt.Print("\n🔒 Select TEE node type:\n")
 	fmt.Print("   1. Local Hardhat (for testing)\n")
 	fmt.Print("   2. Phala Network\n")
-	fmt.Print("   3. Alibaba Cloud\n")
-	fmt.Print("Enter your choice [1-3] (default: 1): ")
+	fmt.Print("Enter your choice [1-2] (default: 1): ")
 	teeResponse, _ := reader.ReadString('\n')
 	teeChoice := strings.TrimSpace(teeResponse)
 
@@ -983,10 +927,6 @@ func main() {
 		verifierUrl = "https://github.com/Dstack-TEE/dstack/releases/tag/verifier-v0.5.4"
 		fmt.Println("   ✓ Phala Network selected")
 		fmt.Printf("   ✓ VerifierUrl set to: %s\n", verifierUrl)
-	case "3":
-		teeNodeType = TeeNodeAliCloud
-		verifierUrl = ""
-		fmt.Println("   ✓ Alibaba Cloud selected")
 	default:
 		teeNodeType = TeeNodeLocalHardhat
 		verifierUrl = ""
@@ -1766,36 +1706,6 @@ func promptEnvironmentConfig(deployLLM bool, teeNodeType TeeNode, useMonitoring 
 		}
 	}
 
-	// If AliCloud was selected earlier, ask for TAPP service URL
-	if config.TeeNode == TeeNodeAliCloud {
-		// Ask for TAPP service URL for AliCloud (required)
-		for {
-			fmt.Print("\n🔗 Enter TAPP service URL for AliCloud (e.g., https://172.16.1.100:50051): ")
-			response, _ = reader.ReadString('\n')
-			tappURL := strings.TrimSpace(response)
-			if tappURL == "" {
-				fmt.Printf("❌ TAPP service URL is required for AliCloud mode!\n")
-				continue
-			}
-			config.TappServiceURL = tappURL
-			fmt.Printf("   ✓ TAPP service URL set to: %s\n", config.TappServiceURL)
-			break
-		}
-		// Ask for TAPP AppID for AliCloud (required)
-		for {
-			fmt.Print("🆔 Enter TAPP AppID for AliCloud: ")
-			appidResp, _ := reader.ReadString('\n')
-			appid := strings.TrimSpace(appidResp)
-			if appid == "" {
-				fmt.Printf("❌ TAPP AppID is required for AliCloud mode!\n")
-				continue
-			}
-			config.TappAppID = appid
-			fmt.Printf("   ✓ TAPP AppID set to: %s\n", config.TappAppID)
-			break
-		}
-	}
-
 	// Ask about nginx proxy
 	fmt.Print("\n🌐 Do you want to use Nginx as a proxy? [y/N]: ")
 	response, _ = reader.ReadString('\n')
@@ -1950,8 +1860,6 @@ func generateDeploymentFiles(config *DeploymentConfig) error {
 		Ports:                config.Ports,
 		ProjectName:          config.ProjectName,
 		EnableFileLog:        true, // Always enable file logging
-		TappServiceURL:       config.TappServiceURL,
-		TappAppID:            config.TappAppID,
 		UseController:        config.UseController,
 		AttestSocketDir:      config.AttestSocketDir,
 		AttestSocketPath:     config.AttestSocketPath,

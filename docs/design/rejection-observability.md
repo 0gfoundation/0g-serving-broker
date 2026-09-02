@@ -13,11 +13,15 @@ A request can be rejected at several points before it ever reaches the upstream 
 ```
 POST /chat/completions
   │
+  ├─ global concurrency cap        → reject (global_concurrency)
+  │     runs FIRST, as middleware, before the session is even validated,
+  │     so it resolves no user address and attributes to none
   ├─ per-user RPM limit            → reject (rate_limit)
   ├─ per-user TPM limit            → reject (tpm_limit)
   ├─ per-user IPM limit            → reject (ipm_limit)
   ├─ per-user concurrency limit    → reject (concurrency)
   ├─ model-mismatch block          → reject (model_mismatch)
+  ├─ model past its retirement date → reject (model_expired)
   ├─ billing / balance gate ───────┐
   │     ├─ account not on contract → reject (account_not_exist)
   │     ├─ provider not acknowledged → reject (not_acknowledged)
@@ -44,7 +48,9 @@ A single counter, labeled only by a **bounded** `reason`:
 broker_requests_rejected_total{reason="rate_limit"}
 broker_requests_rejected_total{reason="tpm_limit"}
 broker_requests_rejected_total{reason="ipm_limit"}
-broker_requests_rejected_total{reason="concurrency"}
+broker_requests_rejected_total{reason="concurrency"}        # per-user concurrency cap
+broker_requests_rejected_total{reason="global_concurrency"} # broker-wide maxGlobalConcurrent cap
+broker_requests_rejected_total{reason="model_expired"}      # model past its retirement date
 broker_requests_rejected_total{reason="model_mismatch"}
 broker_requests_rejected_total{reason="insufficient_balance"}
 broker_requests_rejected_total{reason="not_acknowledged"}
@@ -73,6 +79,31 @@ sum by (reason) (rate(broker_requests_rejected_total[5m]))
 > (`broker_requests_total`, `broker_requests_errors_total`) so it sits alongside them
 > on existing dashboards. Issue #542 referenced it as `inference_request_rejected_total`;
 > the `broker_` prefix was chosen for consistency.
+
+### Capacity shedding is NOT a broker fault
+
+The global cap's 503 is attributed `source="broker"` in
+`broker_request_failures_total`, because `resolveFailureSource` keeps every 5xx
+out of the client bucket. That is correct as attribution — the broker, not the
+caller or the upstream, produced the response — but it is misleading as an
+alert: `maxGlobalConcurrent` is a configured ceiling, so a provider whose traffic
+doubles sheds correctly and pages an on-call engineer who finds nothing broken.
+
+Exclude it explicitly. Before this reason existed the shed was
+indistinguishable from a genuine internal 5xx (both `code=""`), so this is the
+first time the exclusion is expressible:
+
+```promql
+# broker faults, excluding deliberate capacity shedding
+rate(broker_request_failures_total{source="broker", code!="global_concurrency"}[5m])
+
+# capacity pressure, tracked on its own
+rate(broker_requests_rejected_total{reason="global_concurrency"}[5m])
+```
+
+Sustained `global_concurrency` means raise the cap or add capacity, not debug the
+broker. Note it counts unauthenticated traffic too — the cap runs before session
+validation.
 
 ### Why `reason` is the only label
 
