@@ -65,6 +65,10 @@ func TestEstimateEmbeddingUsageFromRequest(t *testing.T) {
 		// string (which would floor to 1 regardless of the real batch size).
 		{"flat token-ID array", []byte(`{"model":"m","input":[1,2,3,4,5,6,7,8]}`), 8},
 		{"batch of token-ID arrays", []byte(`{"model":"m","input":[[1,2,3],[4,5]]}`), 5},
+		// Chinese has no inter-word spaces, so strings.Fields sees the whole
+		// 28-character line as ONE "word" (words*2 -> 2) without the
+		// rune-count floor. 28 runes / 3 = 9.
+		{"chinese text (no spaces)", []byte(`{"model":"m","input":"风急天高猿啸哀渚清沙白鸟飞回无边落木萧萧下不尽长江滚滚来"}`), 9},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -80,6 +84,25 @@ func TestEstimateEmbeddingUsageFromRequest(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestEstimateEmbeddingUsageFromRequest_LongChineseText guards the rune-count
+// floor at a scale where the collapse (see the "chinese text (no spaces)"
+// case in TestEstimateEmbeddingUsageFromRequest above) would otherwise be
+// most severe: a ~4,800-character passage would floor to 2 tokens under a
+// pure words*2 estimate (the whole thing is ONE "word" with no spaces to
+// split on), versus a real tokenizer's ~1,600+. Mirrors 0g-router's
+// embedding_handler_test.go test of the same name — MUST stay in sync (see
+// the sync comment on estimateEmbeddingUsageFromRequest).
+func TestEstimateEmbeddingUsageFromRequest_LongChineseText(t *testing.T) {
+	line := "风急天高猿啸哀渚清沙白鸟飞回无边落木萧萧下不尽长江滚滚来"
+	text := strings.Repeat(line, 170) // ~4,930 runes
+	reqBody, err := json.Marshal(map[string]string{"model": "m", "input": text})
+	require.NoError(t, err)
+
+	usage := estimateEmbeddingUsageFromRequest(reqBody)
+	assert.Greater(t, usage.PromptTokens, 1000,
+		"a long CJK passage must not collapse to a word-count floor of ~1-2 tokens")
 }
 
 // TestEmbeddingTieredInputPrice is the regression guard for a real bug:
@@ -350,6 +373,50 @@ func TestHandleEmbeddingResponse_NonPositivePromptTokensFallsBack(t *testing.T) 
 				"a non-positive provider-reported prompt_tokens must trigger the request-body fallback estimate, not bill the bogus value")
 		})
 	}
+}
+
+// TestHandleEmbeddingResponse_MissingPromptTokensField_UsesTotalTokens is the
+// regression guard for the review-round finding on 0g-router#753 /
+// 0g-serving-broker: this handler used to discard the WHOLE usage block and
+// fall to the request-body word-count estimate whenever prompt_tokens was
+// missing or <=0, even when the provider reported a real, positive
+// total_tokens — throwing away a real number in favor of a guess, and (worse)
+// drifting from 0g-router's embedding_handler.go, which already preferred
+// total_tokens in this exact case. A provider omitting prompt_tokens entirely
+// (not just reporting it as 0) is the realistic shape this hits:
+// {"total_tokens":50} decodes PromptTokens to Go's zero value with no
+// prompt_tokens key present at all. Embedding has no completion side, so
+// total_tokens IS the prompt count.
+func TestHandleEmbeddingResponse_MissingPromptTokensField_UsesTotalTokens(t *testing.T) {
+	c := newChatbotTestCtrl(t, config.Service{ProviderType: constant.ProviderTypeDecentralized})
+	mockDB := &mockReconciliationDB{}
+	c.reconciliationDB = mockDB
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(w)
+	ctx.Request = httptest.NewRequest("POST", "/v1/proxy/embeddings", nil)
+
+	// prompt_tokens key is entirely absent — not "prompt_tokens":0.
+	respBody := []byte(`{"object":"list","data":[],"model":"m","usage":{"total_tokens":50}}`)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{},
+		Body:       io.NopCloser(bytes.NewReader(respBody)),
+	}
+
+	// If this fell through to the word-count estimate instead, five words
+	// would bill 10 tokens (see TestEstimateEmbeddingUsageFromRequest) — a
+	// completely different number from the provider's real total_tokens=50,
+	// which is exactly the drift this test pins closed.
+	reqBody := []byte(`{"model":"m","input":"one two three four five"}`)
+	reqModel := model.Request{IsWhitelisted: true, ServiceName: "embedding", RequestHash: "h"}
+	err := c.handleEmbeddingResponse(ctx, resp, model.User{}, "0", reqBody, reqModel)
+	require.NoError(t, err)
+
+	require.Len(t, mockDB.calls, 1)
+	assert.Equal(t, int64(50), mockDB.calls[0].InputCount,
+		"prompt_tokens missing but a positive total_tokens present must bill on total_tokens, not fall to a word-count guess")
 }
 
 // TestHandleEmbeddingResponse_WhitelistedStampsRateClass is the regression

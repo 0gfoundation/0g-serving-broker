@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -136,8 +137,24 @@ func (c *Ctrl) handleEmbeddingResponse(ctx *gin.Context, resp *http.Response, _ 
 	// estimate, and <=0 (not just ==0) also catches a misbehaving provider
 	// reporting negative usage, which would otherwise flow into a negative
 	// fee below.
+	//
+	// MUST stay in sync with 0g-router's embedding_handler.go handleResponse:
+	// broker's number decides what the router pays THIS provider on
+	// settlement, router's decides what it bills the end user for the same
+	// request, and a drift between the two is a silent margin error in
+	// whichever direction they diverge (review round on 0g-router#753 /
+	// 0g-serving-broker found exactly this drift once already).
 	if usage == nil || usage.PromptTokens <= 0 {
-		usage = estimateEmbeddingUsageFromRequest(reqBody)
+		if usage != nil && usage.TotalTokens > 0 {
+			// Provider reported a total but didn't break out prompt_tokens
+			// (e.g. {"total_tokens":50} with no prompt_tokens field, which
+			// decodes PromptTokens to Go's zero value 0). Embedding has no
+			// completion side, so the total IS the prompt count — a real
+			// provider-reported number beats any request-side guess.
+			usage = &EmbeddingUsage{PromptTokens: usage.TotalTokens, TotalTokens: usage.TotalTokens}
+		} else {
+			usage = estimateEmbeddingUsageFromRequest(reqBody)
+		}
 	}
 
 	if reqModel.IsWhitelisted {
@@ -292,6 +309,24 @@ func estimateEmbeddingUsageFromRequest(reqBody []byte) *EmbeddingUsage {
 		if words > 0 {
 			estimatedTokens = words * 2
 		}
+	}
+
+	// strings.Fields splits on whitespace, so a language written without
+	// inter-word spaces (Chinese, Japanese, ...) collapses an entire block of
+	// text into a single "word" — a 4,800-character Chinese passage measures
+	// 1 word here, floor to 2 tokens, versus a real tokenizer's ~1,600+. Qwen
+	// (this integration's actual model family) is heavily used for Chinese
+	// input, so this isn't a corner case. A rune-count-derived floor (~3
+	// characters/token is conservative for CJK; real Chinese tokenizers
+	// average closer to 1.5-2) fixes the collapse without changing anything
+	// for space-delimited text, where words*2 is already the larger (and
+	// still-dominant) term.
+	//
+	// MUST stay in sync with 0g-router's embedding_handler.go
+	// estimateEmbeddingUsageFromRequest — same reason as the TotalTokens
+	// branch in handleEmbeddingResponse above.
+	if runes := utf8.RuneCountInString(text); runes > 0 {
+		estimatedTokens = max(estimatedTokens, runes/3)
 	}
 
 	return &EmbeddingUsage{PromptTokens: estimatedTokens, TotalTokens: estimatedTokens}
