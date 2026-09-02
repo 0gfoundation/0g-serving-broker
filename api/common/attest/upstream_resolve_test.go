@@ -2,16 +2,30 @@ package attest
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
 
-// upstreamSet(members...) builds an EventUpstreamSet record the way a writer would.
-func upstreamSetEvent(lines ...string) RuntimeEvent {
-	if len(lines) == 0 {
-		return RuntimeEvent{Event: EventUpstreamSet, Payload: []byte(emptyUpstreamSet)}
+// upstreamSetEvent builds an EventUpstreamSet record the way a writer would: the
+// header naming how many members follow, then the members. No arguments is the empty
+// set, which is count=0 and has no other spelling.
+func upstreamSetEvent(members ...string) RuntimeEvent {
+	payload := fmt.Sprintf("%s%d", upstreamCountPrefix, len(members))
+	for _, m := range members {
+		payload += "\n" + m
 	}
-	return RuntimeEvent{Event: EventUpstreamSet, Payload: []byte(strings.Join(lines, "\n"))}
+	return RuntimeEvent{Event: EventUpstreamSet, Payload: []byte(payload)}
+}
+
+// miscountedUpstreamSetEvent builds a record whose header disagrees with its members —
+// what a writer that gave up mid-build emits, and what a truncated payload becomes.
+func miscountedUpstreamSetEvent(want int, members ...string) RuntimeEvent {
+	payload := fmt.Sprintf("%s%d", upstreamCountPrefix, want)
+	for _, m := range members {
+		payload += "\n" + m
+	}
+	return RuntimeEvent{Event: EventUpstreamSet, Payload: []byte(payload)}
 }
 
 // upstream_test.go exercises one payload in isolation. These go through
@@ -142,7 +156,29 @@ func TestResolveReportsAnUnknownUpstreamSet(t *testing.T) {
 		{
 			name:    "an empty payload",
 			event:   RuntimeEvent{Event: EventUpstreamSet, Payload: nil},
-			wantErr: "names no member",
+			wantErr: "is empty",
+		},
+		{
+			// The truncation case: a payload whose tail was lost still spells a complete,
+			// internally consistent set, and only the header refuses it.
+			name:    "a header that promises more members than it spells",
+			event:   miscountedUpstreamSetEvent(2, "engine1 http://engine-1:8000/v1"),
+			wantErr: "is not the set it lists",
+		},
+		{
+			name:    "a header that promises fewer members than it spells",
+			event:   miscountedUpstreamSetEvent(1, "engine1 http://engine-1:8000/v1", "vendor https://vendor.example/v1"),
+			wantErr: "is not the set it lists",
+		},
+		{
+			name:    "a payload with no header at all",
+			event:   RuntimeEvent{Event: EventUpstreamSet, Payload: []byte("engine1 http://engine-1:8000/v1")},
+			wantErr: "want a header",
+		},
+		{
+			name:    "a header that is not a number",
+			event:   RuntimeEvent{Event: EventUpstreamSet, Payload: []byte("count=lots\nengine1 http://engine-1:8000/v1")},
+			wantErr: "does not name a member count",
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
