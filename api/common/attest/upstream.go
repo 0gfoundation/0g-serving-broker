@@ -40,6 +40,24 @@ const (
 	UpstreamsUnknown    = "unknown" // the deciding record could not be read
 )
 
+// maxUpstreamMembers bounds how many members one set may hold.
+//
+// It exists because the line cap below bounds each line and nothing bounded their NUMBER.
+// Measured on a 4 MiB payload of distinct, valid member lines: 143 MB allocated, 34x — and
+// the same 143 MB when the header says count=0, because the tally that refuses the record
+// runs after the loop that builds every member. The count was validated 4 MiB earlier and
+// the loop ignored it.
+//
+// So the count is checked against this before the loop, and the members against the count
+// inside it, which together bound the loop at min(want, maxUpstreamMembers). Both are
+// needed: the first refuses an honest payload that is simply too large, the second refuses
+// one that understates itself.
+//
+// 1024 against a real set of at most a few dozen — the largest per-model configuration in
+// production names 13 destinations. Three orders of magnitude of headroom, and it holds the
+// members at tens of kilobytes rather than hundreds of megabytes.
+const maxUpstreamMembers = 1024
+
 // maxUpstreamLine bounds one line of an EventUpstreamSet payload.
 //
 // It exists so the REFUSALS are bounded, not the parse. Every error below quotes the text
@@ -55,10 +73,15 @@ const (
 // to this — nginx allows 8k for a whole request line — so the cap refuses what was never a
 // member while leaving a wide margin over what is.
 //
-// Capping the line rather than truncating each message is what makes this hold everywhere:
-// name, identity and the URL all come out of a line, so one guard bounds every quote
-// downstream of it, including validUpstreamURL's. A truncating helper at each %q would have
-// to be remembered at each new one.
+// Capping the line rather than truncating each message is what makes this hold for every
+// refusal in THIS parse: name, identity and the URL all come out of a line, so one guard
+// bounds every quote downstream of it, including validUpstreamURL's, and a truncating
+// helper at each %q would have to be remembered at each new one.
+//
+// It does not extend to the sibling records. imageRecord and the config-hash check in
+// resolve.go's same switch still quote their whole payload, from the same untrusted source;
+// their errors are returned rather than retained on the state, which is why they are a
+// smaller problem and not this change's.
 const maxUpstreamLine = 4096
 
 // upstreamCountPrefix opens the one header line every EventUpstreamSet payload
@@ -177,6 +200,9 @@ func parseUpstreamSet(payload string) ([]Upstream, error) {
 			if err != nil || n < 0 {
 				return nil, fmt.Errorf("%s payload header %q does not name a member count", EventUpstreamSet, fields[0])
 			}
+			if n > maxUpstreamMembers {
+				return nil, fmt.Errorf("%s payload says %s%d, over the %d-member limit; a set names the destinations one deployment permits", EventUpstreamSet, upstreamCountPrefix, n, maxUpstreamMembers)
+			}
 			want = n
 			continue
 		}
@@ -208,6 +234,13 @@ func parseUpstreamSet(payload string) ([]Upstream, error) {
 			member.Identity = fields[2]
 		}
 		members = append(members, member)
+		// The tally below is the same check, and running it here as well is what makes it
+		// cheap: past this point the record is already refused, so continuing to build
+		// members spends memory on an answer that has been decided. Before this, a payload
+		// declaring count=0 and spelling 200,000 members cost 143 MB to reject.
+		if len(members) > want {
+			return nil, upstreamTallyError(want, len(members))
+		}
 	}
 	if want < 0 {
 		// The length, not the content: reaching here means no non-blank line was seen, so
@@ -219,7 +252,7 @@ func parseUpstreamSet(payload string) ([]Upstream, error) {
 	// disagrees with what the payload spells means the writer and this reader do not
 	// have the same set, and neither of them can say which is right — so no set.
 	if len(members) != want {
-		return nil, fmt.Errorf("%s payload says %s%d and spells %d member(s), so the set it names is not the set it lists", EventUpstreamSet, upstreamCountPrefix, want, len(members))
+		return nil, upstreamTallyError(want, len(members))
 	}
 	if len(members) == 0 {
 		// Distinguished from a set only by UpstreamsState, never by this slice — see the
@@ -228,6 +261,16 @@ func parseUpstreamSet(payload string) ([]Upstream, error) {
 		return nil, nil
 	}
 	return members, nil
+}
+
+// upstreamTallyError is the refusal for a count that disagrees with the members, shared by
+// the two places that can see the disagreement: inside the loop, as soon as the members
+// exceed the count, and after it, when they fall short. One message so the two cannot
+// describe the same condition differently.
+//
+// It quotes only numbers, which is why it needs no bounding — see maxUpstreamLine.
+func upstreamTallyError(want, got int) error {
+	return fmt.Errorf("%s payload says %s%d and spells %d member(s), so the set it names is not the set it lists", EventUpstreamSet, upstreamCountPrefix, want, got)
 }
 
 // upstreamChanges reports how the set moved from prev to next, one line per name that

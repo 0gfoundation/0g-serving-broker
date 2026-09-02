@@ -139,8 +139,13 @@ func TestTheMemberCountNeverSizesAnAllocation(t *testing.T) {
 			if err == nil {
 				t.Fatalf("parseUpstreamSet(%q) = %+v, want the tally to refuse it", payload, members)
 			}
-			if !strings.Contains(err.Error(), "is not the set it lists") {
-				t.Errorf("parseUpstreamSet(%q) = %v, want the tally check to be what refuses it", payload, err)
+			// The member limit refuses these now, which is strictly better than the tally
+			// did: it fires on the header rather than after a loop, and it names the
+			// actual problem. What this test is about has not changed — nothing was sized
+			// from the count — and that is carried by the absence of a panic above plus
+			// the budget test's two member-loop shapes.
+			if !strings.Contains(err.Error(), "over the") && !strings.Contains(err.Error(), "is not the set it lists") {
+				t.Errorf("parseUpstreamSet(%q) = %v, want the member limit or the tally to refuse it", payload, err)
 			}
 		})
 	}
