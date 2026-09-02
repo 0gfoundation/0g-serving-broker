@@ -700,6 +700,87 @@ func collectSealedFrames(t *testing.T, rs *responseFrameSealer, lines []string) 
 	return frames
 }
 
+// An upstream error message can quote the request that produced it, so a
+// mid-stream `{"error": …}` chunk is content — but only the Anthropic taxonomy
+// says so. chat's sealed set is ["choices"] whatever the frame holds, so the
+// message used to ride in the frame's cleartext half, reaching every intermediary
+// on an otherwise sealed turn. A sealed superset is legal, so it is sealed.
+func TestStreamFrameSealer_ChatMidStreamErrorIsSealed(t *testing.T) {
+	f := newE2EEFixture(t)
+	ctx := newGinCtx()
+	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEProfile, wire.ProfileChat)
+	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
+	sealer, err := f.c.newResponseFrameSealer(ctx)
+	if err != nil {
+		t.Fatalf("newResponseFrameSealer: %v", err)
+	}
+
+	const secret = "upstream said: TOP SECRET PROMPT ECHO"
+	out, err := sealer.sealSSELine(`data: {"error":{"message":"` + secret + `","code":429}}` + "\n")
+	if err != nil {
+		t.Fatalf("sealSSELine: %v", err)
+	}
+	if strings.Contains(out, "TOP SECRET") {
+		t.Fatalf("the error message must not ride in the cleartext half:\n%s", out)
+	}
+
+	payload, ok := strings.CutPrefix(strings.TrimSpace(out), "data:")
+	if !ok {
+		t.Fatalf("no data line in %q", out)
+	}
+	var frame wire.Response
+	if err := json.Unmarshal([]byte(strings.TrimSpace(payload)), &frame); err != nil {
+		t.Fatalf("sealed frame: %v", err)
+	}
+	if _, cleartext := frame[failureField]; cleartext {
+		t.Error("`error` must be sealed away, not left cleartext")
+	}
+	e2ee, err := frame.E2EE()
+	if err != nil {
+		t.Fatalf("read _e2ee: %v", err)
+	}
+	if !sameStrings(e2ee.SealedFields, []string{"choices", "error"}) {
+		t.Errorf("sealed_fields = %v, want [choices error]", e2ee.SealedFields)
+	}
+
+	// And a conforming client still opens it and gets the message back.
+	opener, err := wire.NewResponseOpenerFor(wire.ProfileChat, f.clientEphSk, frame)
+	if err != nil {
+		t.Fatalf("NewResponseOpenerFor: %v", err)
+	}
+	opened, err := opener.OpenFrame(frame)
+	if err != nil {
+		t.Fatalf("OpenFrame: a conforming client must accept this frame: %v", err)
+	}
+	if !strings.Contains(string(opened[failureField]), secret) {
+		t.Errorf("opened error = %s, want the sealed message merged back", opened[failureField])
+	}
+
+	// An empty or absent `error` adds nothing: the sealed set stays the profile's.
+	for _, line := range []string{
+		`data: {"choices":[{"delta":{"content":"hi"}}]}` + "\n",
+		`data: {"choices":[],"error":null}` + "\n",
+	} {
+		out, err := sealer.sealSSELine(line)
+		if err != nil {
+			t.Fatalf("sealSSELine(%q): %v", strings.TrimSpace(line), err)
+		}
+		fr, ok := sealedFrameFrom(t, out)
+		if !ok {
+			t.Fatalf("no sealed frame in %q", out)
+		}
+		e, err := fr.E2EE()
+		if err != nil {
+			t.Fatalf("read _e2ee: %v", err)
+		}
+		if !sameStrings(e.SealedFields, []string{"choices"}) {
+			t.Errorf("sealed_fields = %v for %q, want [choices]", e.SealedFields, strings.TrimSpace(line))
+		}
+	}
+}
+
 // Neither the log line nor the client-visible error may carry upstream text. On
 // the chat profile `type` is an ordinary cleartext field the wire package has no
 // rule about, so it is arbitrary and unbounded — and it reached a broker Warn and

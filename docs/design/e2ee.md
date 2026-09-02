@@ -319,6 +319,18 @@ frame-typed profile's answer is a property of the frame.
   `data:` line carries no frame and no content, so it is dropped rather than
   failed.
 
+**A failure report is sealed even where the profile's own set does not name it.**
+An upstream error message can quote the request that produced it, so `error` is
+content on either surface — but only the Anthropic taxonomy says so: chat's
+sealed set is `["choices"]` whatever the frame holds, so an OpenAI-style
+`{"error": …}` chunk mid-stream used to carry its message in the frame's
+cleartext half. `prepareFrameForSealing` adds `error` to the sealed set for a
+profile with no discriminator (a sealed SUPERSET is legal — only the profile's
+required set is mandated — and it opens on a conforming client). A frame-typed
+profile is left alone, because it already governs the field and disagrees about
+where it belongs: its `error` shape seals `error`, carrying it on any other shape
+is refused outright, and adding it to a shape that seals nothing is refused too.
+
 `ensureSealedFieldsPresent(profile, frame, sealedFields)` injects an empty
 placeholder only for the sealed fields a frame of THAT PROFILE may legitimately
 **omit** — `choices` (chat) and `data` (image), both arrays, so an empty one

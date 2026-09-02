@@ -14,6 +14,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	pccrypto "github.com/0gfoundation/0g-pc-e2ee/protocol/crypto"
@@ -64,6 +65,12 @@ const (
 	// `{"error": …}` chunk. Named here because "does this frame report a failure"
 	// cannot be answered from a profile's sealed set alone: chat's is only
 	// ["choices"], so its error chunk is content the taxonomy does not name.
+	//
+	// Two places act on it, for the two things that can go wrong with a report:
+	// prepareFrameForSealing SEALS it where a single-shape profile would have left
+	// it cleartext (an error message can quote the request), and
+	// handleFrameAfterFinal FAILS the stream on one arriving behind the final
+	// frame (dropping it would tell the client its turn succeeded).
 	failureField = "error"
 
 	// doneSentinel is the OpenAI-style stream terminator, as it appears in a
@@ -571,10 +578,32 @@ func dryRunSealFinalFrame(profile wire.Profile, clientEphPub pccrypto.PublicKey,
 // placeholders a frame of this profile may legitimately omit, returning the
 // sealed set to hand SealFrame. Shared by the real seal path and the dry run, so
 // the dry run cannot drift from what it is meant to predict.
+//
+// It also SEALS A FAILURE REPORT the profile's own set does not name. `error` is
+// content on either surface — an upstream error message can quote the request
+// that produced it — but only the Anthropic taxonomy says so: chat's sealed set
+// is ["choices"] whatever the frame holds, so an OpenAI-style `{"error": …}`
+// chunk mid-stream had its message ride in the frame's cleartext half, reaching
+// every intermediary on an otherwise sealed turn. Adding it is legal (a sealed
+// SUPERSET is permitted; only the profile's required set is mandated) and it
+// opens on a conforming client, verified end to end.
+//
+// Only for a profile with no discriminator, because a frame-typed one already
+// governs the field and disagrees about where it belongs: its `error` shape
+// seals `error` itself, and carrying it on any other shape is refused outright
+// ("it is generated content under some frame shape, so a frame may carry it only
+// by sealing it") — while adding it to a shape that seals nothing is refused
+// too ("must seal nothing"). So there the taxonomy is both sufficient and the
+// only correct answer.
 func prepareFrameForSealing(profile wire.Profile, frame wire.Response) ([]string, error) {
 	sealedFields, err := wire.ResponseSealedFieldsForFrame(profile, frame)
 	if err != nil {
 		return nil, err
+	}
+	if !profileHasFrameDiscriminator(profile) {
+		if v, ok := frame[failureField]; ok && !isEmptyJSONValue(v) && !slices.Contains(sealedFields, failureField) {
+			sealedFields = append(slices.Clone(sealedFields), failureField)
+		}
 	}
 	ensureSealedFieldsPresent(profile, frame, sealedFields)
 	return sealedFields, nil
