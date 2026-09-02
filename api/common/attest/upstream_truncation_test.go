@@ -100,3 +100,68 @@ func TestWhatTheCountDoesNotCatch(t *testing.T) {
 		t.Fatal("no prefix parses, so either the residual is now closed or the fixture changed; update the reasoning above rather than deleting the test")
 	}
 }
+
+// The count is a number the described party chose, so nothing may be sized from it.
+//
+// It is validated only for being non-negative and is checked against the members at the END
+// of the parse, so a pre-allocation taken from it is an allocation of any size the writer
+// likes — from a payload of sixteen bytes, for a record that was always going to be refused.
+// Every verifier and SDK client that resolves such a CVM would get an out-of-memory or a
+// panic in makeslice instead of an answer, which turns "this record is unreadable" (a fact
+// the reader is designed to report) into "the reader cannot run".
+//
+// How the regression manifests, measured rather than predicted: sizing from the count again
+// does NOT produce a recoverable panic on these inputs. It produces `fatal error: runtime:
+// out of memory` and the test binary dies. That is caught — the run fails — but it is worth
+// stating, because the recover() below will not be what catches it, and because it is exactly
+// the production symptom: the reader does not report "this record is unreadable", it stops
+// existing. The recover() is kept for the platforms and element sizes where the runtime
+// refuses the capacity instead (`makeslice: cap out of range`), so the assertion holds either
+// way.
+//
+// In the fixed state none of these allocates anything: the tally refuses them.
+func TestTheMemberCountNeverSizesAnAllocation(t *testing.T) {
+	for _, payload := range []string{
+		"count=9223372036854775807\nengine1 http://engine-1:8000/v1",
+		"count=9223372036854775807",
+		// Just inside the range Atoi accepts, and far outside anything a set can hold.
+		"count=4611686018427387904\nengine1 http://engine-1:8000/v1",
+		// And the shape without members at all, so the empty-set path is covered too.
+		"count=2147483647",
+	} {
+		t.Run(payload[:min(len(payload), 40)], func(t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("parseUpstreamSet panicked on %q: %v — something is sized from the payload's own count", payload, r)
+				}
+			}()
+			members, err := parseUpstreamSet(payload)
+			if err == nil {
+				t.Fatalf("parseUpstreamSet(%q) = %+v, want the tally to refuse it", payload, members)
+			}
+			if !strings.Contains(err.Error(), "is not the set it lists") {
+				t.Errorf("parseUpstreamSet(%q) = %v, want the tally check to be what refuses it", payload, err)
+			}
+		})
+	}
+}
+
+// A count past what Atoi can represent is refused before anything else looks at it.
+func TestAnUnrepresentableMemberCountIsRefused(t *testing.T) {
+	for _, payload := range []string{
+		"count=99999999999999999999999999",
+		"count=9223372036854775808", // MaxInt64 + 1
+		"count=-1",
+		"count=1e9",
+		"count=0x10",
+	} {
+		got, err := parseUpstreamSet(payload)
+		if err == nil {
+			t.Errorf("parseUpstreamSet(%q) = %+v, want a refusal", payload, got)
+			continue
+		}
+		if !strings.Contains(err.Error(), "does not name a member count") {
+			t.Errorf("parseUpstreamSet(%q) = %v, want the header check to refuse it", payload, err)
+		}
+	}
+}
