@@ -1,6 +1,7 @@
 package attest
 
 import (
+	"fmt"
 	"runtime"
 	"strings"
 	"testing"
@@ -37,6 +38,28 @@ import (
 // this test a tripwire for unrelated allocation changes; it is asserting that the cost does
 // not scale with the payload. Both mistakes above blow through it by two to five orders of
 // magnitude.
+const (
+	manyValidMembersHonestCount = "many valid members, honest count"
+	manyValidMembersLyingCount  = "many valid members, count says zero"
+)
+
+// manyValidMembers builds a payload of distinct, well-formed member lines — the only shape
+// that reaches the member loop, since every other refusal fires on the first line or two.
+// Distinct names matter: repeating one is caught by the duplicate check at member two, which
+// is why an earlier attempt at this fixture measured nothing.
+func manyValidMembers(t *testing.T, honest bool) string {
+	t.Helper()
+	var body strings.Builder
+	for i := 0; body.Len() < 4<<20; i++ {
+		fmt.Fprintf(&body, "n%d http://x:1/v1\n", i)
+	}
+	count := 0
+	if honest {
+		count = strings.Count(body.String(), "\n")
+	}
+	return fmt.Sprintf("%s%d\n%s", upstreamCountPrefix, count, body.String())
+}
+
 func TestParseAllocationDoesNotScaleWithThePayload(t *testing.T) {
 	const budget = 1 << 20 // 1 MiB, against 4 MiB payloads
 
@@ -69,6 +92,21 @@ func TestParseAllocationDoesNotScaleWithThePayload(t *testing.T) {
 			// reaches the messages quoting a NAME or an identity rather than the line.
 			name:    "one enormous field",
 			payload: "count=1\nname " + strings.Repeat("a", 4<<20),
+		},
+		{
+			// Every line VALID, and the count honest about how many there are — the only
+			// shape that reaches the member loop at all. The four above refuse on the
+			// first line or two, which is why they missed this: the loop built every
+			// member and the tally refused afterwards, for 143 MB on 4 MiB.
+			name:    manyValidMembersHonestCount,
+			payload: manyValidMembers(t, true),
+		},
+		{
+			// The same, with the count claiming zero. The count was validated before the
+			// loop, so from the second member the record is already refused — and it still
+			// cost the same 143 MB to find that out.
+			name:    manyValidMembersLyingCount,
+			payload: manyValidMembers(t, false),
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
