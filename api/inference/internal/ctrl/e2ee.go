@@ -661,23 +661,37 @@ func (rs *responseFrameSealer) signedText() (text string, ok bool, err error) {
 	return text, err == nil, err
 }
 
-// arraySealedFields are the sealed fields whose value is a JSON array, and so
-// the only ones an empty-array placeholder fits: an empty one merges to nothing
-// on the client. Anthropic's per-shape content fields (`delta`, `content_block`,
-// `error`) are OBJECTS, where `[]` would not be a placeholder but a type error
-// shipped to the client — and a frame whose shape declares such a field while not
-// carrying it is a malformed upstream frame, which should fail closed rather than
-// be papered over.
+// arraySealedFields are the sealed fields a legitimate frame can OMIT, and whose
+// value is a JSON array so that an empty one merges to nothing on the client. Both
+// halves are required to be listed here, and the first is the operative one: the
+// placeholder is for a frame that is well-formed WITHOUT the field, never for one
+// that should have carried it.
+//
+// Only the chat and image streams have such a field. A trailing usage-only chat
+// chunk legitimately carries no `choices`, and that is what this exists for.
+//
+// Anthropic has NO entry, for two separate reasons:
+//   - its per-shape stream fields (`delta`, `content_block`, `error`) are OBJECTS,
+//     where `[]` would not be a placeholder but a type error shipped to a client;
+//   - its non-streaming `content` IS an array, but the Messages API always returns
+//     it on a `message` response (an empty array at worst), so a placeholder there
+//     could only ever fire on a broken upstream — and it would then seal, sign and
+//     mark final a frame containing an empty answer, while the router bills the
+//     output tokens the same response reported. Nothing would report a problem:
+//     exactly the silent failure this profile's rules exist to remove.
+//
+// So a frame whose shape declares a field it does not carry fails closed here,
+// with the sealer's own "sealed field not present in frame".
 var arraySealedFields = map[string]struct{}{
 	"choices": {}, // chat
 	"data":    {}, // image
-	"content": {}, // anthropic, non-streaming
 }
 
-// ensureSealedFieldsPresent guarantees every ARRAY-valued field in sealedFields
-// exists on the frame, so SealFrame (which errors on a declared-but-absent sealed
-// field) never fails on a frame that legitimately omits one — e.g. a trailing
-// usage-only chat chunk with no "choices".
+// ensureSealedFieldsPresent guarantees every field of sealedFields that a frame
+// may legitimately omit (arraySealedFields) exists on it, so SealFrame — which
+// errors on a declared-but-absent sealed field — never fails on a frame that is
+// well-formed without one, e.g. a trailing usage-only chat chunk with no
+// "choices".
 //
 // This is a shape guard, not a content fallback: a path where a missing sealed
 // field would mean lost content must reject BEFORE sealing rather than rely on

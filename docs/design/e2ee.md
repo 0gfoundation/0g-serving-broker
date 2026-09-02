@@ -202,12 +202,20 @@ frame-typed profile's answer is a property of the frame.
   synthesizes an `error`: there is no failure to report, only a truncation, and
   inventing one would attribute to the model something it did not produce.
 
-`ensureSealedFieldsPresent` injects an empty placeholder only for **array-valued**
-sealed fields (`choices`, `data`, `content`), so a usage-only chat chunk with no
-`choices` still seals. Anthropic's per-shape content fields are OBJECTS (`delta`,
-`content_block`, `error`): `[]` there would be a type error shipped to the client,
-and a frame whose shape declares such a field while not carrying it is a
-malformed upstream frame, so it fails closed instead.
+`ensureSealedFieldsPresent` injects an empty placeholder only for the sealed
+fields a frame may legitimately **omit** — `choices` (chat) and `data` (image),
+both arrays, so an empty one merges to nothing on the client. That is what lets a
+trailing usage-only chat chunk with no `choices` still seal.
+
+**Anthropic has no such field**, for two separate reasons. Its per-shape stream
+fields are OBJECTS (`delta`, `content_block`, `error`), where `[]` would be a type
+error shipped to the client rather than a placeholder. And its non-streaming
+`content` is an array but is never legitimately absent — the Messages API always
+returns it on a `message` response, an empty array at worst — so a placeholder
+there could only fire on a broken upstream, and would then seal, sign and mark
+final a frame carrying an empty answer while the router bills the output tokens
+that same response reported, with nothing reporting a problem. So a frame whose
+shape declares a field it does not carry fails closed.
 
 Billing is unaffected: it reads the raw upstream bytes, not the sealed copy.
 

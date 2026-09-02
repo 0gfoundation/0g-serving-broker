@@ -374,6 +374,40 @@ func TestAnthropicStreamMarksAnErrorFrameFinal(t *testing.T) {
 	}
 }
 
+// The non-streaming shape's `content` IS an array, which makes it the one
+// Anthropic field an empty-array placeholder would technically fit — and it must
+// still fail closed. The Messages API always returns `content` on a `message`
+// response (an empty array at worst), so a placeholder could only ever fire on a
+// broken upstream, and it would then seal, sign and mark final a frame carrying
+// an empty answer while the router bills the output tokens that same response
+// reported. Nothing anywhere would report a problem.
+func TestAnthropicNonStreamResponseFailsClosedWithoutContent(t *testing.T) {
+	f := newE2EEFixture(t)
+	ctx := newAnthropicGinCtx()
+	if _, err := f.c.MaybeUnsealRequest(ctx, f.sealAnthropicRequest(t, []string{"messages", "system"})); err != nil {
+		t.Fatalf("unseal: %v", err)
+	}
+
+	// A well-formed-looking response that reports 20 output tokens and carries no
+	// content at all.
+	const provider = `{"id":"msg_1","type":"message","role":"assistant","model":"claude-x",` +
+		`"stop_reason":"end_turn","usage":{"input_tokens":11,"output_tokens":20}}`
+
+	out, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, []byte(provider))
+	if !isSealed {
+		t.Fatal("expected isSealed=true for a sealed request")
+	}
+	if err == nil {
+		t.Fatalf("expected a malformed response to fail closed, got a sealed frame: %s", out)
+	}
+	if out != nil {
+		t.Error("a failed seal must return no body: the caller must not forward plaintext")
+	}
+	if !strings.Contains(err.Error(), "content") {
+		t.Errorf("error should name the field that was missing, got: %v", err)
+	}
+}
+
 // A frame whose shape declares a content field it does not carry is a malformed
 // upstream frame. It must fail closed rather than be papered over with an empty
 // placeholder: `delta` is an OBJECT, so `[]` there would be a type error shipped
