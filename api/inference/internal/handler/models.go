@@ -142,13 +142,16 @@ func videoCapabilities(vendor string, billing *config.BillingConfig) *ModelCapab
 		Resolution: &CapabilityResolution{PixelSize: res.PixelSize},
 	}
 	out.Resolution.Tiers = videoResolutionTiers(res.RecognizedTiers, billing)
-	// The vendor's default is only worth naming when it is one of the tiers being
-	// published; naming an unpriced one points a caller at the mispriced path this
-	// filter exists to keep them off. With no tier list published there is nothing
-	// to be inconsistent with, so it stands as the vendor states it.
-	if len(out.Resolution.Tiers) == 0 || containsFold(out.Resolution.Tiers, res.Default) {
-		out.Resolution.Default = res.Default
-	}
+	// The default is published whether or not it appears in Tiers, and the two
+	// answer different questions: Tiers is what a caller may SEND, Default is what
+	// the vendor renders when they send nothing. Withholding a default that is
+	// absent from Tiers was tried and is backwards — the vendor applies it no
+	// matter what this catalog says, so hiding it does not steer anyone off that
+	// tier, it only removes the warning that omitting `size` lands there. On a
+	// MiniMax deployment pricing 720p alone, a caller who reads the list, assumes
+	// 720p and omits `size` gets 2K at the unpriced baseline rate; the published
+	// default is the one thing that would have told them.
+	out.Resolution.Default = res.Default
 	return out
 }
 
@@ -196,21 +199,6 @@ func videoResolutionTiers(recognized []string, billing *config.BillingConfig) []
 		}
 	}
 	return out
-}
-
-// containsFold reports whether want is in list, matching the way every other
-// resolution comparison in this repo does (case- and space-insensitive).
-func containsFold(list []string, want string) bool {
-	w := strings.ToLower(strings.TrimSpace(want))
-	if w == "" {
-		return false
-	}
-	for _, s := range list {
-		if strings.ToLower(strings.TrimSpace(s)) == w {
-			return true
-		}
-	}
-	return false
 }
 
 // ModelRateLimits exposes per-user rate limit configuration so clients/SDKs

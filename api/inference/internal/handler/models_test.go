@@ -1978,16 +1978,17 @@ func TestGetModels_VideoCapabilities(t *testing.T) {
 			},
 		},
 		{
-			// The default is dropped when it is not among the published tiers:
-			// naming an unpriced tier points a caller at the baseline-rate path
-			// the filter exists to keep them off.
-			name:        "default is dropped when it is not priced",
+			// The default is published even when it is not among the priced tiers.
+			// The vendor renders it for a request that names no size no matter what
+			// this catalog says, so it is the warning that omitting `size` lands on
+			// an unpriced tier — withholding it only removes the warning.
+			name:        "default is published even when it is not priced",
 			serviceType: "video-generation",
 			vendor:      "minimax",
 			multipliers: map[string]float64{"720P": 1.0},
 			want: &ModelCapabilities{
 				Duration:   &CapabilityDuration{Min: 4, Max: 15, OutOfRange: videospec.OutOfRangeClamp, Unspecified: videospec.UnspecifiedMin, Rounding: videospec.RoundingCeil},
-				Resolution: &CapabilityResolution{Tiers: []string{"720P"}, PixelSize: videospec.PixelSizeAspectRatioOnly},
+				Resolution: &CapabilityResolution{Tiers: []string{"720P"}, Default: "2K", PixelSize: videospec.PixelSizeAspectRatioOnly},
 			},
 		},
 		{
