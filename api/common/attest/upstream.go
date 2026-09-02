@@ -316,6 +316,85 @@ func upstreamChanges(prev, next []Upstream) []string {
 	return lines
 }
 
+// classifyUpstreams says, for each member, whether the destination is a container the
+// deployment declares — which is what separates a self-deployed upstream from an
+// external one.
+//
+// The record cannot answer that, and should not try. A record claiming "this one is
+// internal" would be a claim by the party being described, checkable against nothing;
+// the compose file is a claim checkable against the quote, because tcb_info's
+// app_compose has to hash to the compose hash in the signed report body before
+// ResolveRunningState will look at it. So the answer is derived from the compose and
+// never read out of the record, and a writer needs no convention for it.
+//
+// The match is on the URL's HOST, not on the member's name. The name is a config key —
+// whoever writes the record chooses it, so matching on it would let an external
+// destination be named after an in-CVM container and pass for one. The host is what
+// decides where the plaintext actually goes, and inside a compose project a service
+// name is what its own DNS resolves to a container.
+//
+// A host that is not a service name — an IP literal, or a public hostname — comes back
+// unclassified rather than as an error. It is not malformed; it is a destination the
+// compose says nothing about, which is exactly the answer.
+//
+// services is PinnedImages' output: service name to image reference.
+func classifyUpstreams(members []Upstream, services map[string]string) []Upstream {
+	if len(members) == 0 {
+		return members
+	}
+	lookup := composeServiceLookup(services)
+	out := make([]Upstream, len(members))
+	copy(out, members)
+	for i := range out {
+		u, err := url.Parse(out[i].URL)
+		if err != nil {
+			// Unreachable through the resolver: validUpstreamURL parsed this same string
+			// already. Left as a skip rather than a panic because this function is also
+			// reachable from a test or a future caller with a hand-built member, and a
+			// member the compose cannot speak about is the honest answer for one.
+			continue
+		}
+		service, ok := lookup[u.Hostname()]
+		if !ok {
+			continue
+		}
+		out[i].ComposeService, out[i].PinnedImage = service.name, service.image
+	}
+	return out
+}
+
+// composeService is one entry of the host-to-service lookup: the service's name as the
+// compose spells it, and the image it pins.
+type composeService struct {
+	name  string
+	image string
+}
+
+// composeServiceLookup keys the compose's services by the host that would resolve to
+// them, which is the service name lowercased — DNS is case-insensitive, so a service
+// spelled "Engine1" answers to the "engine1" that a recorded URL must carry
+// (validUpstreamURL refuses an uppercase host).
+//
+// A name that two services share once lowercased is dropped instead of resolved by
+// last-wins. The lookup's whole output is a statement about which container sees the
+// plaintext, and picking one of two candidates would make that statement up.
+func composeServiceLookup(services map[string]string) map[string]composeService {
+	lookup := make(map[string]composeService, len(services))
+	ambiguous := make(map[string]bool)
+	for name, image := range services {
+		host := strings.ToLower(name)
+		if _, seen := lookup[host]; seen {
+			ambiguous[host] = true
+			continue
+		}
+		lookup[host] = composeService{name: name, image: image}
+	}
+	for host := range ambiguous {
+		delete(lookup, host)
+	}
+	return lookup
+}
+
 // looksNumeric says whether a host is written as digits and dots only — the shape of
 // an IPv4 literal, whatever it parses to.
 func looksNumeric(host string) bool {

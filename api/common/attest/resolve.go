@@ -285,6 +285,52 @@ type Upstream struct {
 	// carried none. Only meaningful for upstreams outside this CVM, where it is
 	// what a routing proof attributes the request to.
 	Identity string
+
+	// The two fields below are NOT from the record. They are what the deployment's own
+	// compose file says about the destination the record names, filled in by
+	// ResolveRunningState — see classifyUpstreams. A hand-built Upstream has them empty,
+	// and neither enters UpstreamSetHash: the compose is already bound to the quote by
+	// its own hash, and folding it into the set hash would make two deployments that
+	// permit the same destinations disagree because they pin different image versions.
+
+	// ComposeService is the compose service whose name the URL's host matches, empty
+	// when no service matches. It is what separates a self-deployed upstream from an
+	// external one, and it is a fact rather than a judgement: non-empty means the host
+	// resolves through the compose's own service DNS, so the destination is a container
+	// this deployment declares and the plaintext does not leave the measured boundary
+	// to reach it.
+	//
+	// Empty covers two different things, and the caller has to tell them apart itself:
+	// a genuine external vendor, and a host that happens not to be a service name —
+	// an IP literal, say, which bypasses service DNS entirely, so the compose cannot
+	// say which container (if any) it addresses.
+	//
+	// What is NOT established here is that nothing in the compose redirects the name
+	// outward: an extra_hosts entry or a custom dns: could point a service name
+	// somewhere else. Both live in the compose, so a caller reviewing the manifest sees
+	// them; this field says only that the name is declared as a service.
+	ComposeService string
+	// PinnedImage is the image reference the compose pins for ComposeService. It is set
+	// exactly when ComposeService is, never one without the other.
+	//
+	// An earlier version of this said "or the service names no image", which describes a
+	// state the code cannot reach and would have had a caller writing a dead branch:
+	// PinnedImages drops an imageless service from its map entirely, so such a service
+	// never enters composeServiceLookup and BOTH fields come back empty — which is what
+	// TestResolveLeavesAnImagelessServiceUnclassified asserts. That is also the third
+	// thing an empty ComposeService covers, alongside the two its own doc names.
+	//
+	// It is what the deployment BOOTED with, not a statement about what runs there now.
+	// Nothing records a non-broker container's image change: zg-image-update carries
+	// the broker's signer and enc_pub, so it describes the broker, and the compose only
+	// pins an initial digest. Anything holding the docker socket can therefore replace
+	// an engine's image without leaving a record, and this field would still name the
+	// pinned one. Closing that is a separate change.
+	//
+	// Whether the reference pins a digest at all is left to the caller, for the reason
+	// PinnedImages leaves it: "mysql:8.0" is a truthful answer to what the compose says,
+	// and only the caller knows whether a tag is good enough for what it concludes.
+	PinnedImage string
 }
 
 // ResolveRunningState answers "what is this CVM running", and only that.
@@ -428,6 +474,35 @@ func ResolveRunningState(v VerifiedQuote, tcbInfoJSON []byte, brokerService stri
 	if configErr != nil {
 		return nil, configErr
 	}
+	// Which members are containers this deployment declares, and what it pinned for them.
+	//
+	// Here rather than after the branch below, because the event path returns from inside
+	// it — an upgraded deployment is the normal case, and it needs this as much as one
+	// still on its pinned image.
+	//
+	// Guarded on a non-empty set, which keeps this from being able to fail any call that
+	// succeeds today: nothing writes upstream records yet, so every live deployment takes
+	// the skip. That matters because PinnedImages CAN fail on a compose whose hash is
+	// perfectly good — an app_compose that is not a docker-compose manifest, or a compose
+	// file whose YAML does not parse — and the compose path below already returns that
+	// error rather than working around it.
+	//
+	// Failing is right for it here too, and it is the one place in the upstream handling
+	// that does fail rather than report. The distinction is where the input comes from: an
+	// upstream record is written by the party being described, so an unreadable one is a
+	// fact about that party and gets reported. The compose is a trusted input this
+	// function already verified against the signed report body — if it cannot be read,
+	// the function's own premise is gone. And the alternative is worse than an error:
+	// leaving every member unclassified would report a set in which nothing is inside the
+	// boundary, which is a claim, and a false one.
+	if state.UpstreamsState == UpstreamsKnown && len(state.Upstreams) > 0 {
+		images, err := PinnedImages(tcbInfoJSON)
+		if err != nil {
+			return nil, fmt.Errorf("the ledger records upstreams, so the compose has to say which of them are containers it declares: %w", err)
+		}
+		state.Upstreams = classifyUpstreams(state.Upstreams, images)
+	}
+
 	// A record wins over the compose pin, and the two are mutually exclusive.
 	//
 	// Redundant today, deliberately: digestOfImageRef cannot answer with an empty digest and no
