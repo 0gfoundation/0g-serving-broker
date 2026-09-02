@@ -334,7 +334,11 @@ frame-typed profile's answer is a property of the frame.
   matching the raw line meant the spaceless form fell through to the fail-closed
   branch and destroyed a turn that had already delivered every content frame.
 
-**A failure report is sealed even where the profile's own set does not name it.**
+**A failure report inside a 200 response is sealed even where the profile's own
+set does not name it.** (An HTTP-level failure — a non-200 from the upstream — is
+a different path and is NOT sealed; see "An upstream HTTP error body is not
+sealed" below. This rule is about the `error` field of a response the upstream
+returned 200 for, which is how both APIs report a mid-turn failure.)
 An upstream error message can quote the request that produced it, so `error` is
 content on either surface — but only the Anthropic taxonomy says so: chat's
 sealed set is `["choices"]` whatever the frame holds, so an OpenAI-style
@@ -432,8 +436,45 @@ frames as-is (whole-frame plaintext concatenation). The exact canonicalization
 MUST be reconciled with the client verify implementation before streaming E2EE
 signatures are relied upon. Tracked in `#552` and `0g-pc-e2ee#7`.
 
+### An upstream HTTP error body is NOT sealed
+
+Everything above is about a response the upstream returned **200** for. When the
+upstream returns a **non-200**, `ProcessHTTPRequest` hands off to
+`handleServiceError` and returns *before* the charging handlers run — so no seal
+path is reached, and the upstream's error body goes to the client, through the
+router, **in the clear**, on a request whose payload was sealed.
+
+This is a real and deliberate gap, not an oversight to read past:
+
+- **It is the same content class the rule above seals.** The argument for sealing
+  a 200 response's `error` field — an upstream error message can quote the
+  request that produced it — applies verbatim to a 4xx/5xx body, which is usually
+  a richer quote of the request than any in-band `error` frame.
+- **Why it is not closed here.** The seal path seals a *conforming response frame
+  of a profile*: `wire.ResponseSealedFieldsForFrame` asks what shape this frame
+  is and what that shape must hide. An upstream 500 with an arbitrary body is not
+  a frame of any profile, so there is nothing for the taxonomy to answer.
+  Sealing it needs a wire-level shape for "the request failed at the HTTP layer"
+  (a sealed error envelope with its own §7 rules), which is a `0g-pc-e2ee`
+  protocol addition and a cross-repo change — not something to improvise inside
+  the broker, because a client that cannot recognize the shape gets a body it
+  cannot open on the one path where it most needs to read the reason.
+- **What does apply today.** For forwarder services the body is leak-sanitized
+  before re-emission (`sanitizeResponseBody`, #184) so it cannot name the
+  upstream, and the broker's own log of it is secret-redacted and truncated
+  (`redactUpstreamSecrets`). Neither is confidentiality: both are aimed at a
+  different threat, and the vendor's message text — request quote included —
+  survives both by design.
+
+So: **a sealed turn hides the request and the answer, and does not hide why an
+HTTP-level failure happened.** Treat that as the current boundary. Closing it is
+protocol work; tracked below.
+
 ## Out of scope (tracked elsewhere)
 
 Client-side attestation verify (`0g-pc-e2ee#7`); router acceptance of sealed requests
 (`0g-router#618`); candidate scoring; finalized streaming signature format
-(`#552`); §4.2 `report_data` binding of `enc_pub` (deferred follow-up, see above).
+(`#552`); §4.2 `report_data` binding of `enc_pub` (deferred follow-up, see above);
+a sealed shape for an upstream **HTTP error body** (see the section directly
+above — needs a `0g-pc-e2ee` wire shape first, so today a non-200 upstream body
+reaches the client in the clear on a sealed turn).

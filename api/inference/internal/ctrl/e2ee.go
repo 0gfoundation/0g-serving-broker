@@ -602,6 +602,15 @@ func dryRunSealFinalFrame(profile wire.Profile, clientEphPub pccrypto.PublicKey,
 // by sealing it") — while adding it to a shape that seals nothing is refused
 // too ("must seal nothing"). So there the taxonomy is both sufficient and the
 // only correct answer.
+//
+// Its reach ends at the response body: nothing here runs when the upstream
+// returns a NON-200, because ProcessHTTPRequest hands that to handleServiceError
+// and returns before any charging handler. Such a body reaches the client in the
+// clear on a sealed turn — the same content class this rule seals, on a path
+// where the taxonomy has nothing to say (an upstream 500 body is not a frame of
+// any profile), so closing it needs a wire shape for an HTTP-level failure
+// rather than an improvised seal here. Boundary documented in
+// docs/design/e2ee.md ("An upstream HTTP error body is NOT sealed").
 func prepareFrameForSealing(profile wire.Profile, frame wire.Response) ([]string, error) {
 	sealedFields, err := wire.ResponseSealedFieldsForFrame(profile, frame)
 	if err != nil {
