@@ -47,46 +47,79 @@ func canonicalAddressDir(userAddress string) string {
 	return strings.ToLower(common.HexToAddress(userAddress).Hex())
 }
 
-// ResolveDatasetDir returns the directory to read an account's uploaded datasets from:
-// DatasetDir, unless the only directory that exists is one written before DatasetDir did
-// the folding, in which case that one.
+// hfDatasetSuffix marks the pre-converted HuggingFace form of an uploaded dataset, which
+// sits beside the raw JSONL under the same hash. Task setup prefers it; both count as the
+// dataset being present.
+const hfDatasetSuffix = "_hf"
+
+// ResolveDatasetPath returns the base path of one uploaded dataset: DatasetDir's folded
+// directory joined with the hash, unless the dataset is actually sitting in a directory
+// written before the folding, in which case that one.
 //
-// The legacy directory cannot be found BY NAME, and an earlier version of this tried to:
-// the spelling it was written under is the one the UPLOAD carried, while the only spelling
-// available here is the one the task body carried, and those differing is the entire
-// defect. Looking up the caller's own spelling only ever finds the case that already
-// worked. So the directory is found by folding what is on disk instead.
+// It takes the HASH, and that is the whole point. The first version of this resolved the
+// DIRECTORY alone — canonical if it existed, else a scan — and that is broken in two
+// ordinary ways, because a directory existing says nothing about whether the dataset being
+// asked for is in it:
 //
-// The scan is one os.ReadDir per task setup, bounded by the number of accounts that have
-// ever uploaded. It exists because the dataset hash is a DURABLE handle — a client can
-// upload once and create tasks from it days later — so uploads sitting on disk when the
-// folding ships are not a narrow window, and orphaning them would be the same failure
-// this function is fixing, pointed the other way. It can go once no unconsumed upload
-// predates the change.
+//   - SaveDataset creates the canonical directory before it validates the upload, so any
+//     attempt at all — including one rejected for not being JSONL — makes the canonical
+//     directory exist. From then on every legacy dataset for that account is unreachable.
+//   - Worse, no new upload is needed. The premise of the folding is that a client uploads
+//     under wallet.address one day and signer.address.toLowerCase() the next, so such an
+//     account ALREADY has two legacy directories — and one of them is the lowercase name,
+//     which is the canonical one. It wins, and everything in the other is lost.
 //
-// Entries are validated with common.IsHexAddress before being folded. HexToAddress is not
-// a validator: it truncates and pads, so an unrelated directory name would fold to the
-// zero address and could match an account that happens to be it.
-func ResolveDatasetDir(userAddress string) string {
+// Resolving against the dataset that is wanted has neither problem: an empty canonical
+// directory does not match, and two legacy directories are each found for the hashes they
+// hold. A directory counts as holding the dataset if either the raw file or its _hf form is
+// there, matching what setup then looks for.
+//
+// The scan cannot be replaced by a lookup: the spelling a legacy directory was written
+// under is the one the UPLOAD carried, while the only spelling available here is the one
+// the task body carried, and those differing is the entire defect. It is one os.ReadDir per
+// task setup, bounded by the accounts that have ever uploaded, and it exists because the
+// dataset hash is a durable handle — a client can upload once and create tasks from it days
+// later — so orphaning what is already on disk would be this same failure pointed the other
+// way. It can go once no unconsumed upload predates the folding.
+//
+// Entries are checked with common.IsHexAddress before being folded, because HexToAddress
+// truncates and pads: an unrelated directory name would fold to the zero address.
+func ResolveDatasetPath(userAddress, datasetHash string) string {
 	canonical := DatasetDir(userAddress)
-	if _, err := os.Stat(canonical); err == nil {
-		return canonical
+	if holdsDataset(canonical, datasetHash) {
+		return filepath.Join(canonical, datasetHash)
 	}
 	base := filepath.Join(GetDataDir(), datasetsDirName)
 	entries, err := os.ReadDir(base)
 	if err != nil {
 		// Nothing uploaded yet, or the directory is unreadable. Either way the canonical
 		// path is what a "not found" message should name.
-		return canonical
+		return filepath.Join(canonical, datasetHash)
 	}
 	want := canonicalAddressDir(userAddress)
 	for _, entry := range entries {
 		if !entry.IsDir() || !common.IsHexAddress(entry.Name()) {
 			continue
 		}
-		if canonicalAddressDir(entry.Name()) == want {
-			return filepath.Join(base, entry.Name())
+		if canonicalAddressDir(entry.Name()) != want {
+			continue
+		}
+		if dir := filepath.Join(base, entry.Name()); holdsDataset(dir, datasetHash) {
+			return filepath.Join(dir, datasetHash)
 		}
 	}
-	return canonical
+	// Not found anywhere. The canonical path is returned so the caller's message names
+	// where a new upload would have put it, rather than a legacy spelling nothing writes.
+	return filepath.Join(canonical, datasetHash)
+}
+
+// holdsDataset says whether a directory contains the named dataset in either of the two
+// forms task setup accepts.
+func holdsDataset(dir, datasetHash string) bool {
+	path := filepath.Join(dir, datasetHash)
+	if _, err := os.Stat(path + hfDatasetSuffix); err == nil {
+		return true
+	}
+	_, err := os.Stat(path)
+	return err == nil
 }
