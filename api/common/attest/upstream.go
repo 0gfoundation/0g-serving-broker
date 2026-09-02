@@ -96,44 +96,55 @@ const upstreamCountPrefix = "count="
 // can print the set the way it was written. UpstreamSetHash does not use that order —
 // see there.
 func parseUpstreamSet(payload string) ([]Upstream, error) {
-	lines := strings.Split(payload, "\n")
-	// The header must be the first line that holds anything. Not "somewhere in the
-	// payload": a reader that went looking for it would accept a payload whose real
-	// header was truncated away and a member line's tail happened to spell another one.
-	var i int
-	for ; i < len(lines) && len(strings.Fields(lines[i])) == 0; i++ {
-	}
-	if i == len(lines) {
-		return nil, fmt.Errorf("%s payload %q is empty; even the empty set is written out, as %s0, so that an unwritten payload is not read as a bound of zero", EventUpstreamSet, payload, upstreamCountPrefix)
-	}
-	header := strings.Fields(lines[i])
-	if len(header) != 1 || !strings.HasPrefix(header[0], upstreamCountPrefix) {
-		return nil, fmt.Errorf("%s payload starts with %q, want a header %s<n> naming how many members follow", EventUpstreamSet, lines[i], upstreamCountPrefix)
-	}
-	want, err := strconv.Atoi(strings.TrimPrefix(header[0], upstreamCountPrefix))
-	if err != nil || want < 0 {
-		return nil, fmt.Errorf("%s payload header %q does not name a member count", EventUpstreamSet, header[0])
-	}
-
-	// Sized from the LINES, never from want. want is a number the party being described
-	// chose, and it is checked against the members only at the end of this loop — so
-	// pre-allocating from it hands that party an allocation of any size it likes. The
-	// 16-byte payload "count=1000000000" would ask for a billion Upstreams here, and every
-	// verifier and SDK client that resolves this CVM would take an out-of-memory or a panic
-	// in makeslice instead of an answer, from a record that was going to be refused two
-	// dozen lines below anyway.
+	// Nothing here is sized from the payload, and every part of that sentence was a
+	// separate bug.
 	//
-	// len(lines) is bounded by the payload, which is bounded by the event log the caller
-	// already holds, and it is an upper bound on the members a payload can spell.
-	members := make([]Upstream, 0, len(lines))
-	seen := make(map[string]struct{}, len(lines))
-	for _, line := range lines[i+1:] {
+	// First the member count was: `make([]Upstream, 0, want)` let the 16-byte payload
+	// "count=1000000000" ask for a billion Upstreams, and a verifier resolving that CVM
+	// took `fatal error: runtime: out of memory` instead of the refusal the tally was
+	// about to give it. That was fixed by sizing from the LINE COUNT instead — which was
+	// the same bug with a smaller constant. A line count is an upper bound on members but
+	// not a tight one: a payload of bare newlines is one line per byte, and each line
+	// reserved a 48-byte Upstream slot plus a map slot. Measured: a 4 MiB payload of
+	// newlines allocated 492 MB, 117x, before being refused.
+	//
+	// So the lines are iterated rather than materialised, and neither the slice nor the map
+	// is pre-sized. Growth now tracks the members that actually parse, which is what the
+	// tally then checks. strings.SplitSeq rather than strings.Split for the same reason —
+	// Split alone was about 16x the payload.
+	//
+	// The rule this settles: the size of anything allocated here must come from what has
+	// been VALIDATED, never from what was merely received. Nothing in this function can
+	// validate a count before the loop that counts.
+	var members []Upstream
+	seen := map[string]struct{}{}
+	// want stays negative until the header is read, which is what makes "no header at
+	// all" distinguishable from "count=0". A header of count=-1 is refused below, so a
+	// non-negative want always means the header was seen.
+	want := -1
+	for line := range strings.SplitSeq(payload, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) == 0 {
 			// A blank line is skipped rather than refused: a writer that joins members with
 			// "\n" produces a trailing one, and that is not worth making a set unreadable
 			// over. It cannot hide a member, since a member needs two fields — and it cannot
 			// hide one from the count either, which is what actually guards the tally.
+			continue
+		}
+		if want < 0 {
+			// The header is the first line that holds anything. Not "somewhere in the
+			// payload": a reader that went looking for it would accept a payload whose real
+			// header was truncated away and a member line's tail happened to spell another
+			// one. A second count= line later is therefore just a member line, and fails the
+			// field count below.
+			if len(fields) != 1 || !strings.HasPrefix(fields[0], upstreamCountPrefix) {
+				return nil, fmt.Errorf("%s payload starts with %q, want a header %s<n> naming how many members follow", EventUpstreamSet, line, upstreamCountPrefix)
+			}
+			n, err := strconv.Atoi(strings.TrimPrefix(fields[0], upstreamCountPrefix))
+			if err != nil || n < 0 {
+				return nil, fmt.Errorf("%s payload header %q does not name a member count", EventUpstreamSet, fields[0])
+			}
+			want = n
 			continue
 		}
 		if len(fields) < 2 || len(fields) > 3 {
@@ -164,6 +175,9 @@ func parseUpstreamSet(payload string) ([]Upstream, error) {
 			member.Identity = fields[2]
 		}
 		members = append(members, member)
+	}
+	if want < 0 {
+		return nil, fmt.Errorf("%s payload %q is empty; even the empty set is written out, as %s0, so that an unwritten payload is not read as a bound of zero", EventUpstreamSet, payload, upstreamCountPrefix)
 	}
 	// The check the rest of this function exists to make possible. A count that
 	// disagrees with what the payload spells means the writer and this reader do not
