@@ -350,12 +350,13 @@ func TestSealNonStreamResponse_RoundTrip(t *testing.T) {
 	ctx := newGinCtx()
 	// Mark the context sealed as MaybeUnsealRequest would.
 	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEProfile, wire.ProfileChat)
 	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
 	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
 
 	respBody := []byte(`{"id":"chatcmpl-x","model":"gpt-4o","usage":{"total_tokens":30},"choices":[{"index":0,"message":{"role":"assistant","content":"hi"}}]}`)
 
-	sealed, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, respBody, wire.ProfileChat)
+	sealed, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, respBody)
 	if err != nil {
 		t.Fatalf("maybeSealNonStreamResponse: %v", err)
 	}
@@ -419,11 +420,12 @@ func TestSealNonStreamResponse_UnboundTraceInjectable(t *testing.T) {
 	f := newE2EEFixture(t)
 	ctx := newGinCtx()
 	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEProfile, wire.ProfileChat)
 	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
 	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
 
 	respBody := []byte(`{"id":"x","model":"gpt-4o","usage":{"total_tokens":3},"choices":[{"message":{"content":"hi"}}]}`)
-	sealed, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, respBody, wire.ProfileChat)
+	sealed, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, respBody)
 	if err != nil || !isSealed {
 		t.Fatalf("maybeSealNonStreamResponse: sealed=%v err=%v", isSealed, err)
 	}
@@ -470,6 +472,7 @@ func TestStreamFrameSealer_UnboundTrace(t *testing.T) {
 	f := newE2EEFixture(t)
 	ctx := newGinCtx()
 	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEProfile, wire.ProfileChat)
 	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
 	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
 
@@ -516,7 +519,7 @@ func TestSealNonStreamResponse_NotSealed(t *testing.T) {
 	f := newE2EEFixture(t)
 	ctx := newGinCtx() // not marked sealed
 	body := []byte(`{"choices":[]}`)
-	out, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, body, wire.ProfileChat)
+	out, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, body)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -532,6 +535,7 @@ func TestStreamFrameSealer_RoundTrip(t *testing.T) {
 	f := newE2EEFixture(t)
 	ctx := newGinCtx()
 	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEProfile, wire.ProfileChat)
 	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
 	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
 
@@ -615,6 +619,7 @@ func TestStreamFrameSealer_SyntheticFinalOnDone(t *testing.T) {
 	f := newE2EEFixture(t)
 	ctx := newGinCtx()
 	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEProfile, wire.ProfileChat)
 	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
 	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
 
@@ -719,6 +724,7 @@ func TestStreamFrameSealer_ExactlyOneFinal(t *testing.T) {
 	f := newE2EEFixture(t)
 	ctx := newGinCtx()
 	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEProfile, wire.ProfileChat)
 	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
 	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
 
@@ -764,6 +770,7 @@ func TestStreamFrameSealer_FinalFrameLineIdempotent(t *testing.T) {
 	f := newE2EEFixture(t)
 	ctx := newGinCtx()
 	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEProfile, wire.ProfileChat)
 	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
 	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
 
@@ -790,12 +797,13 @@ func TestSealNonStreamResponse_NullBodyFailsClosed(t *testing.T) {
 	f := newE2EEFixture(t)
 	ctx := newGinCtx()
 	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEProfile, wire.ProfileChat)
 	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
 	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
 
 	// A literal JSON null unmarshals to a nil map without error — must fail closed,
 	// not panic.
-	_, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, []byte("null"), wire.ProfileChat)
+	_, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, []byte("null"))
 	if !isSealed {
 		t.Fatal("expected isSealed=true for a sealed request")
 	}
@@ -866,6 +874,7 @@ func TestStreamFrameSealer_EventsBlankLineDelimited(t *testing.T) {
 	f := newE2EEFixture(t)
 	ctx := newGinCtx()
 	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEProfile, wire.ProfileChat)
 	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
 	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
 

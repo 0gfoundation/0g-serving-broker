@@ -101,28 +101,42 @@ func TestMaybeUnsealImageRequestRejectsSealedSetWithoutPrompt(t *testing.T) {
 // and which endpoints accept a sealed request at all. The RULE each profile
 // then applies lives in the protocol package (wire.ValidateSealedFieldsFor,
 // reached via wire.OpenRequestFor) — this only decides which rule to apply.
-func TestProfileForServiceType(t *testing.T) {
+//
+// The key is (service type, API SURFACE), not the service type alone: one
+// chatbot service answers on both /v1/chat/completions and /v1/messages, whose
+// payload and response shapes differ, so keyed on the type alone an Anthropic
+// sealed request resolved to the chat profile and its content rode in the clear.
+func TestProfileForRequest(t *testing.T) {
 	tests := []struct {
 		name         string
 		svcType      string
+		surface      string
 		wantProfile  wire.Profile
 		wantSealable bool
 	}{
-		{"chatbot", constant.ServiceTypeChatbot, wire.ProfileChat, true},
-		{"text-to-image", constant.ServiceTypeTextToImage, wire.ProfileImage, true},
+		{"chatbot on the openai surface", constant.ServiceTypeChatbot, config.APIFormatOpenAI, wire.ProfileChat, true},
+		{"chatbot on the anthropic surface", constant.ServiceTypeChatbot, config.APIFormatAnthropic, wire.ProfileAnthropic, true},
+		// An unrecognized path on the chatbot service is chat's own case: the
+		// surface only distinguishes the two chat APIs.
+		{"chatbot on an unrecognized path", constant.ServiceTypeChatbot, "", wire.ProfileChat, true},
+		{"chatbot on a surface that does not exist yet", constant.ServiceTypeChatbot, "some-future-format", "", false},
+		// The image endpoint is not a chat surface at all, so the surface is
+		// whatever the path happened to be and must not change the answer.
+		{"text-to-image", constant.ServiceTypeTextToImage, "", wire.ProfileImage, true},
+		{"text-to-image on a chat path", constant.ServiceTypeTextToImage, config.APIFormatOpenAI, wire.ProfileImage, true},
 		// An ALLOWLIST, not a switch with a default. The multipart shapes cannot
 		// be envelopes at all; video-generation and anything added later simply
 		// have no profile specified, and guessing one would apply the wrong rule
 		// to a request shape nobody has analyzed.
-		{"speech-to-text", constant.ServiceTypeSpeechToText, "", false},
-		{"image-editing", constant.ServiceTypeImageEditing, "", false},
-		{"video-generation", constant.ServiceTypeVideoGeneration, "", false},
-		{"a service type that does not exist yet", "some-future-type", "", false},
-		{"unset", "", "", false},
+		{"speech-to-text", constant.ServiceTypeSpeechToText, "", "", false},
+		{"image-editing", constant.ServiceTypeImageEditing, "", "", false},
+		{"video-generation", constant.ServiceTypeVideoGeneration, "", "", false},
+		{"a service type that does not exist yet", "some-future-type", "", "", false},
+		{"unset", "", "", "", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotProfile, gotSealable := profileForServiceType(tt.svcType)
+			gotProfile, gotSealable := profileForRequest(tt.svcType, tt.surface)
 			if gotSealable != tt.wantSealable {
 				t.Fatalf("sealable = %v, want %v", gotSealable, tt.wantSealable)
 			}
@@ -174,7 +188,7 @@ func TestSealedImageResponseHidesImagesAndPublishesBillableCount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("withImageUsage: %v", err)
 	}
-	out, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, withUsage, wire.ProfileImage)
+	out, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, withUsage)
 	if err != nil || !isSealed {
 		t.Fatalf("seal image response: sealed=%v err=%v", isSealed, err)
 	}
@@ -232,7 +246,7 @@ func TestSealedImageResponseDetectsTamperedBillableCount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("withImageUsage: %v", err)
 	}
-	out, _, _, err := f.c.maybeSealNonStreamResponse(ctx, withUsage, wire.ProfileImage)
+	out, _, _, err := f.c.maybeSealNonStreamResponse(ctx, withUsage)
 	if err != nil {
 		t.Fatalf("seal: %v", err)
 	}
@@ -454,7 +468,7 @@ func TestSealedImageResponseWithoutBillableCountIsRefused(t *testing.T) {
 
 	// withImageUsage was skipped (or the count could not be determined).
 	noCount := []byte(`{"created":1700000000,"data":[{"b64_json":"aW1hZ2VieXRlcw"}]}`)
-	out, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, noCount, wire.ProfileImage)
+	out, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, noCount)
 	if err == nil {
 		t.Fatal("an image response with no billable count must not be sealed")
 	}

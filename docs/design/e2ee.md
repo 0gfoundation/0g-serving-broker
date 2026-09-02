@@ -19,6 +19,11 @@ enclave**. The router routes on the cleartext fields (`model`, sampling params,
 `stream`) but cannot read the prompt. The enclave decrypts inside the TEE, runs
 inference, and seals the response (`choices`) back to a client ephemeral key.
 
+Which fields those are is the **wire profile**'s answer, not a constant: `chat`
+seals `messages`/`tools` → `choices`, `image` seals `prompt` → `data`, and
+`anthropic` seals `messages` plus a top-level `system` → a field per response
+event shape (SPEC §7.2). See "Profile resolution" below.
+
 ## Crypto suite (SPEC §3)
 
 HPKE (RFC 9180), base mode: DHKEM(X25519, HKDF-SHA256) / HKDF-SHA256 /
@@ -135,24 +140,66 @@ mismatch) stay **400** fail-closed — re-fetching a key would not help. Detecti
 uses the `ctrl.ErrE2EEKeyMismatch` sentinel; the router must key off the
 `e2ee_key_mismatch` token (coordinate with `0g-router#618`).
 
+## Profile resolution (SPEC §5.1)
+
+`profileForRequest(serviceType, surface)` in `ctrl/e2ee.go` is an **allowlist**
+keyed on the service type AND the API surface the request arrived on
+(`apiFormatForPath`); anything absent is refused rather than guessed, since a
+request shape nobody has analyzed would otherwise get some other profile's rule
+applied silently.
+
+| Service type | Surface | Profile |
+|---|---|---|
+| `chatbot` | `/v1/chat/completions` (or an unrecognized path) | `chat` |
+| `chatbot` | `/v1/messages` | `anthropic` |
+| `text-to-image` | any | `image` |
+| everything else | any | refused |
+
+**The surface is half the key, not decoration.** One chatbot service answers on
+both chat paths, so keyed on the service type alone an Anthropic sealed request
+resolved to `chat`: the response path then sealed an injected empty `choices`
+while the real `content`/`delta` rode in the frame's cleartext half — no error
+anywhere, since the wire format is identical and the frames look plausible.
+
+`MaybeUnsealRequest` resolves it once and stashes it on the gin context
+(`CtxKeyE2EEProfile`); every seal path reads it back rather than re-deriving or
+taking a constant from its call site, so a response cannot be sealed under rules
+that were never applied to its request.
+
 ## Response seal (SPEC §7)
 
-`ctrl/e2ee.go` seals the sensitive response fields (v1 default: `choices`) to the
-request's `client_eph_pub` (`info = "0g-pc/v1/resp"`), leaving `usage`/`model`/
-`id` cleartext for router billing.
+`ctrl/e2ee.go` seals the response's sensitive fields to the request's
+`client_eph_pub` (`info = "0g-pc/v1/resp"`), leaving `usage`/`model`/`id`
+cleartext for router billing. What to seal comes from
+`wire.ResponseSealedFieldsForFrame(profile, frame)` — resolved per frame, since a
+frame-typed profile's answer is a property of the frame.
 
 - Non-streaming (`handleChargingResponse`): one frame via
   `maybeSealNonStreamResponse`, sealed after sanitization and before the write.
 - Streaming (`handleChargingStreamResponse`): a per-stream `responseFrameSealer`
   seals each SSE frame under one HPKE context (sequence increments per frame).
-  Every data frame is sealed as NON-final and exactly one synthetic final frame is
-  emitted at stream end — before `[DONE]`, or on EOF-without-`[DONE]` — so the
-  client always gets exactly one completion marker. `final` is deliberately NOT
-  derived from per-frame `usage` (empty `usage:{}` chunks and vLLM
+  Each sealed frame is a self-contained SSE event (`\n\n` terminator) so it never
+  merges with the next frame or `[DONE]` in the client's SSE reader. Non-`data:`
+  lines pass through, which is what carries an Anthropic `event: <type>` line
+  through beside its sealed data line.
+- **Chat streams** (no terminal event of their own): every data frame is sealed as
+  NON-final and exactly one synthetic final frame is emitted at stream end —
+  before `[DONE]`, or on EOF-without-`[DONE]`. `final` is deliberately NOT derived
+  from per-frame `usage` (empty `usage:{}` chunks and vLLM
   `continuous_usage_stats` would otherwise mark a non-terminal frame final and
-  truncate the stream). Each sealed frame is a self-contained SSE event (`\n\n`
-  terminator) so it never merges with the next frame or `[DONE]` in the client's
-  SSE reader.
+  truncate the stream).
+- **Anthropic streams** end with `message_stop`, which is guaranteed last, so it
+  is sealed AS the final frame and nothing synthetic follows it. On an upstream
+  that drops off first, `finalFrameLine` synthesizes one — a full
+  `event: message_stop` + sealed data event, a legal frame of the API (it seals
+  nothing per §7.2) rather than a bare placeholder.
+
+`ensureSealedFieldsPresent` injects an empty placeholder only for **array-valued**
+sealed fields (`choices`, `data`, `content`), so a usage-only chat chunk with no
+`choices` still seals. Anthropic's per-shape content fields are OBJECTS (`delta`,
+`content_block`, `error`): `[]` there would be a type error shipped to the client,
+and a frame whose shape declares such a field while not carrying it is a
+malformed upstream frame, so it fails closed instead.
 
 Billing is unaffected: it reads the raw upstream bytes, not the sealed copy.
 
@@ -165,6 +212,18 @@ served model back to the alias the client requested) and attaches `x_0g_trace`
 (an observability trace) to the sealed response on the way back. Because they are
 unbound, the router's rewrite/injection does not break the client's `Open`, while
 every bound field (`choices` sealed, `usage`/`id` cleartext) stays tamper-evident.
+
+> ⚠️ On an **Anthropic stream** the `model` alias has nowhere to be rewritten:
+> there is no top-level `model` on those frames — it lives at `message.model`
+> inside message_start, which is BOUND (it has to be: the router's input token
+> count is in the same object, and §7.2 keeps `message` cleartext-and-bound so
+> that count is authenticated). Declaring `model` unbound is therefore a no-op
+> there. The router's alias substitution has to skip an Anthropic sealed stream,
+> or accept that the served model name is what appears; making `message` unbound
+> to allow it is NOT an option — it would unauthenticate the token count and void
+> the §7.2 `message.content` check. Non-streaming Anthropic responses do carry a
+> top-level `model` and are unaffected. Coordinate with `0g-router`.
+
 Per the §8 corollary a router-injected value is not cryptographically trusted
 (trust comes from on-chain settlement), so these MUST be unbound, never
 bound/signed fields. Both are response-only — they are not on the request path and
