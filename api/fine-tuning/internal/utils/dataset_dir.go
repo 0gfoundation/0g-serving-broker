@@ -1,8 +1,10 @@
 package utils
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -47,6 +49,30 @@ func canonicalAddressDir(userAddress string) string {
 	return strings.ToLower(common.HexToAddress(userAddress).Hex())
 }
 
+// datasetHashPattern is what a dataset hash may be: exactly what SaveDataset produces,
+// which is "0x" plus the lowercase hex of a sha256.
+//
+// It exists because the hash is a PATH ELEMENT and was the only one never checked.
+// DatasetDir's doc above explains at length why UserAddress has to pass
+// common.IsHexAddress before it can be a directory name; the hash sits beside it in the
+// same filepath.Join and had nothing — schema.Task.Bind validates UserAddress and copies
+// DatasetHash through untouched. filepath.Join cleans "..", so a hash of
+// "../0xVICTIM/0x<their hash>" resolved under another account's directory, holdsDataset
+// found it, and setup's useLocalDataset symlinked it as the training dataset with no
+// containment check of its own. The attacker signs only their own fields, so the signature
+// is no barrier, and prepareData runs before verifySignature regardless. The result was a
+// LoRA trained on someone else's uploaded data.
+//
+// Deliberately exact rather than "no separators": this resolver can only ever find what
+// SaveDataset wrote, so accepting a second spelling — uppercase digits, a "0X" prefix —
+// would invent a hash that names a file nothing writes, which is the same two-spellings
+// defect the address folding above exists to fix.
+//
+// A hash that does not match is not necessarily hostile: a 0G Storage root hash spelled
+// some other way reaches here too. That case is unaffected in the end — the caller records
+// the refusal as an uploaded-source error and the 0G Storage step still runs.
+var datasetHashPattern = regexp.MustCompile(`^0x[0-9a-f]{64}$`)
+
 // hfDatasetSuffix marks the pre-converted HuggingFace form of an uploaded dataset, which
 // sits beside the raw JSONL under the same hash. Task setup prefers it; both count as the
 // dataset being present.
@@ -84,17 +110,23 @@ const hfDatasetSuffix = "_hf"
 //
 // Entries are checked with common.IsHexAddress before being folded, because HexToAddress
 // truncates and pads: an unrelated directory name would fold to the zero address.
-func ResolveDatasetPath(userAddress, datasetHash string) string {
+func ResolveDatasetPath(userAddress, datasetHash string) (string, error) {
+	// Before anything is joined. An error rather than a best-effort path, because a
+	// function that returns a path it is not sure about is the shape that produced the
+	// traversal: every caller then has to remember to re-check what it got back.
+	if !datasetHashPattern.MatchString(datasetHash) {
+		return "", fmt.Errorf("dataset hash %q is not a dataset name; it must be \"0x\" and 64 lowercase hex digits", datasetHash)
+	}
 	canonical := DatasetDir(userAddress)
 	if holdsDataset(canonical, datasetHash) {
-		return filepath.Join(canonical, datasetHash)
+		return filepath.Join(canonical, datasetHash), nil
 	}
 	base := filepath.Join(GetDataDir(), datasetsDirName)
 	entries, err := os.ReadDir(base)
 	if err != nil {
 		// Nothing uploaded yet, or the directory is unreadable. Either way the canonical
 		// path is what a "not found" message should name.
-		return filepath.Join(canonical, datasetHash)
+		return filepath.Join(canonical, datasetHash), nil
 	}
 	want := canonicalAddressDir(userAddress)
 	for _, entry := range entries {
@@ -105,12 +137,12 @@ func ResolveDatasetPath(userAddress, datasetHash string) string {
 			continue
 		}
 		if dir := filepath.Join(base, entry.Name()); holdsDataset(dir, datasetHash) {
-			return filepath.Join(dir, datasetHash)
+			return filepath.Join(dir, datasetHash), nil
 		}
 	}
 	// Not found anywhere. The canonical path is returned so the caller's message names
 	// where a new upload would have put it, rather than a legacy spelling nothing writes.
-	return filepath.Join(canonical, datasetHash)
+	return filepath.Join(canonical, datasetHash), nil
 }
 
 // holdsDataset says whether a directory contains the named dataset in either of the two
