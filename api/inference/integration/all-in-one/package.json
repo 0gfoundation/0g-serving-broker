@@ -7,12 +7,16 @@
     "install-deps": "npm install"
   },
   "dependencies": {
-    "@0glabs/0g-serving-broker": "0.3.1",
+    "@0glabs/0g-serving-broker": "0.7.8",
     "ethers": "^6.13.1",
     "openai": "^5.8.2"
   },
   "devDependencies": {},
   "engines": {
     "node": ">=16.0.0"
+  },
+  "overrides": {
+    "ws": "^8.21.0",
+    "adm-zip": "^0.6.0"
   }
 }
