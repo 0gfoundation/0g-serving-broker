@@ -35,6 +35,25 @@ func (h *Handler) submitAsyncJob(ctx *gin.Context, svcType string) {
 		handleBrokerError(ctx, err, "read request body")
 		return
 	}
+	// E2EE (0g-pc SPEC §1/§5): the async routes cannot serve a sealed request —
+	// they enqueue the body, a worker forwards it later, and the result is served
+	// from a store in plaintext, so there is no point at which the response could
+	// be sealed to the client's ephemeral key or signed under §8. Forwarding one
+	// anyway is worse than useless: forceB64ResponseFormat rewrites the envelope's
+	// cleartext (invalidating the AAD), the provider receives a request it cannot
+	// read, and the user is billed for the result.
+	//
+	// Refuse, so "a sealed request is fail-closed" is a property of the enclave
+	// rather than of which route the client happened to pick. The synchronous
+	// proxy reaches the same conclusion via MaybeUnsealRequest; these routes never
+	// touch it, which is exactly how they came to be a hole.
+	if h.asyncCtrl.IsSealedRequest(reqBody) {
+		ctx.Set("ignoreError", true)
+		ctx.JSON(http.StatusBadRequest, gin.H{
+			"error": "e2ee: sealed requests are not supported on the async endpoints; use the synchronous endpoint",
+		})
+		return
+	}
 	if len(reqBody) == 0 {
 		ctx.JSON(http.StatusBadRequest, gin.H{
 			"error": "request body is required",

@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/0gfoundation/0g-pc-e2ee/protocol/proof"
+	"github.com/0gfoundation/0g-pc-e2ee/protocol/wire"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
@@ -68,6 +70,69 @@ func billableImageCount(requested int64, decoded int, extractErr error) int64 {
 	return requested
 }
 
+// withImageUsage returns body with a top-level `usage.output_images` set to
+// imageNum, the count of images the enclave actually delivered (SPEC §7.1).
+//
+// It exists for the sealed path: with data[] sealed the router cannot count the
+// images, so the billable count has to ride alongside as a cleartext field. It
+// stays BOUND (not in unbound_fields), so it is covered by the seal AAD and the
+// §8 signature — the router reads it without decrypting, and a count that does
+// not match the images fails the client's verify.
+//
+// It sits inside `usage` (that is where a billed quantity belongs) under the
+// OpenAI `input_`/`output_` convention rather than a bare "images", which would
+// squat an unqualified word in a vendor-defined object and read ambiguously once
+// image-editing — which has INPUT images — gets a profile.
+//
+// Any usage object the upstream already sent is preserved (a token-billed model
+// such as gpt-image-1 populates it); only "output_images" is overridden, since
+// the broker's decoded count is the authority (an upstream may report the
+// requested n rather than what it clamped to).
+func withImageUsage(body []byte, imageNum int64) ([]byte, error) {
+	var resp map[string]json.RawMessage
+	if err := json.Unmarshal(body, &resp); err != nil || resp == nil {
+		return nil, fmt.Errorf("attach usage.output_images: image response is not a JSON object: %w", err)
+	}
+
+	// Adopt the upstream's usage only when it decodes to an actual object.
+	// Anything else — a string, a number, or `null` — is replaced rather than
+	// failing the request: the field is the broker's to publish here, and the
+	// image count is what matters.
+	//
+	// `null` is the case worth naming. Unmarshalling it into a map sets the map to
+	// its ZERO VALUE and returns NO error, so decoding in place would leave a nil
+	// map that the write below panics on ("assignment to entry in nil map") — and
+	// the inference engine runs without gin.Recovery(), so that panic kills the
+	// connection rather than producing an error: truncated response, no billing,
+	// no failure attribution. Providers that always serialize `usage` emit exactly
+	// this. Decoding into a separate variable makes the nil unreachable by
+	// construction rather than something a later edit has to remember.
+	usage := map[string]json.RawMessage{}
+	if raw, ok := resp["usage"]; ok {
+		var upstream map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &upstream); err == nil && upstream != nil {
+			usage = upstream
+		}
+	}
+	count, err := json.Marshal(imageNum)
+	if err != nil {
+		return nil, fmt.Errorf("attach usage.output_images: encode count: %w", err)
+	}
+	usage["output_images"] = count
+
+	merged, err := json.Marshal(usage)
+	if err != nil {
+		return nil, fmt.Errorf("attach usage.output_images: encode usage: %w", err)
+	}
+	resp["usage"] = merged
+
+	out, err := json.Marshal(resp)
+	if err != nil {
+		return nil, fmt.Errorf("attach usage.output_images: encode response: %w", err)
+	}
+	return out, nil
+}
+
 // GetTextToImageInputFeeAndImageNum gets input fee and imageNum for text-to-image generation
 func (c *Ctrl) GetTextToImageInputFeeAndImageNum(reqBody []byte) (string, int64, error) {
 	var request map[string]interface{}
@@ -106,8 +171,13 @@ func (c *Ctrl) handleTextToImageResponse(ctx *gin.Context, resp *http.Response, 
 	// signed (broker-in-network or centralized routing proof). A standard/
 	// TargetSeparated provider produces no signature, so emitting ZG-Res-Key would
 	// point clients at a signature endpoint that only 404s.
+	//
+	// E2EE sealed is the third case (mirroring handleChargingResponse): the broker
+	// TEE always signs the §8 ciphertext binding, so the client can fetch the
+	// signature even from a TargetSeparated provider.
 	chatKey := uuid.NewString()
-	if !c.Service.TargetSeparated || c.Service.IsCentralized() {
+	_, e2eeSealed := e2eeSealedRequest(ctx)
+	if !c.Service.TargetSeparated || c.Service.IsCentralized() || e2eeSealed {
 		ctx.Writer.Header().Set("ZG-Res-Key", chatKey)
 	}
 
@@ -144,6 +214,60 @@ func (c *Ctrl) handleTextToImageResponse(ctx *gin.Context, resp *http.Response, 
 	// Determine what the client originally asked for.
 	originalFormat, _ := ctx.Get("clientResponseFormat")
 	wantURL := originalFormat == "url"
+
+	// E2EE (SPEC §7.1): url mode has the broker persist the images and hand back
+	// broker-served URLs, which puts the plaintext images OUTSIDE the sealed
+	// channel — anyone who can reach the URL reads them, defeating the point of
+	// sealing. Refuse rather than silently downgrading to b64: the client asked
+	// for a format this mode cannot honour, and it must learn that.
+	//
+	// Belt and braces, not the primary enforcement. `response_format` is a pinned
+	// cleartext field of the image profile, so wire.OpenRequestFor already refused
+	// this request at unseal time, in the proxy, before it ever reached a
+	// provider — which is where a leak is PREVENTED rather than caught after the
+	// images exist. By the time clientResponseFormat is read here it was taken
+	// from the reconstructed plaintext, so for a sealed request it is "b64_json"
+	// and this branch is unreachable. It stays because the two live in different
+	// packages and nothing but this comment ties them together: if the pin is ever
+	// relaxed, this is what keeps the images out of the clear.
+	// Attributed to the client (via ignoreError), unlike the guards below: asking
+	// for a format this mode cannot honour is the caller's error, not upstream's.
+	if e2eeSealed && wantURL {
+		ctx.Set("ignoreError", true)
+		err := fmt.Errorf("e2ee: response_format=url is not supported for sealed requests (the images would be served in the clear); use b64_json")
+		c.handleBrokerError(ctx, err, "sealed image response")
+		return err
+	}
+
+	// E2EE: with data[] sealed the router cannot count the images, so the billable
+	// count travels as cleartext usage.output_images (SPEC §7.1) and MUST be the
+	// count actually delivered. If the response cannot be decoded there is no honest
+	// count to publish — the plaintext path bills the requested count in that
+	// case, which under sealing would ask the router to bill a number the enclave
+	// never verified. Refuse instead — the same shape as the undecodable-response
+	// guard directly below, which refuses for the url path for its own reason.
+	//
+	// This returns before UpdateRequestFeesAndCount, so the request is NOT billed,
+	// and that is deliberate rather than incidental. billableImageCount's fallback
+	// ("bill the requested count rather than nothing, else an unparseable response
+	// is free") applies when the broker still SERVES the response; here it serves
+	// nothing. Charging for a response the client never received, on the strength
+	// of a count nobody verified, is the worse of the two errors — and the guard
+	// below already sets that precedent for the url path. The cost lands on the
+	// provider, which is also who caused it: the failure is attributed upstream,
+	// so a provider cannot quietly absorb a degradation by emitting undecodable
+	// 200s.
+	if e2eeSealed && (extractErr != nil || len(images) == 0) {
+		ctx.Set("ignoreError", true)
+		// Undecodable 200 from the provider: an upstream fault, not a client one,
+		// so override the client default ignoreError implies — same attribution as
+		// the undecodable-response guard below, and deliberately NOT the same as
+		// the sealed-url guard above, where the client is at fault.
+		ctx.Set(monitor.CtxKeyFailureSource, monitor.FailureSourceUpstream)
+		err := fmt.Errorf("e2ee: provider returned no decodable b64 images, refusing to seal a response with no verifiable image count: %w", extractErr)
+		c.handleBrokerError(ctx, err, "sealed image response")
+		return err
+	}
 
 	// If the client asked for url but the provider returned something we can't
 	// decode (non-b64 envelope, empty array), refuse the response rather than
@@ -196,8 +320,51 @@ func (c *Ctrl) handleTextToImageResponse(ctx *gin.Context, resp *http.Response, 
 		}
 	}
 
+	// Bill by the number of images actually delivered, not the requested count, so
+	// a provider that returns fewer than requested (silent n clamp) does not
+	// over-charge the user (router#354). Computed here rather than after the flush
+	// because the sealed path publishes it to the router as cleartext
+	// usage.output_images.
+	imageNum := billableImageCount(reqModel.OutputCount, len(images), extractErr)
+
+	// E2EE (SPEC §7 / §7.1): seal data[] to the client's ephemeral key and publish
+	// the billable count as cleartext usage.output_images, so the router bills
+	// without holding the images. clientBody stays PLAINTEXT for billing below; the §8
+	// signature binds the on-wire aad‖ciphertext of the sealed frame instead.
+	outBody := clientBody
+	if e2eeSealed {
+		withUsage, usageErr := withImageUsage(clientBody, imageNum)
+		if usageErr != nil {
+			c.handleBrokerError(ctx, usageErr, "sealed image response")
+			return usageErr
+		}
+		sealed, _, respBindHash, sealErr := c.maybeSealNonStreamResponse(ctx, withUsage, wire.ProfileImage)
+		if sealErr != nil {
+			// Fail-closed: never forward plaintext images for a sealed request.
+			c.handleBrokerError(ctx, sealErr, "seal image response")
+			return sealErr
+		}
+		outBody = sealed
+
+		reqBindHash, ok := e2eeReqBindHash(ctx)
+		if !ok {
+			err := fmt.Errorf("e2ee image response: request binding hash missing from context")
+			c.handleBrokerError(ctx, err, "sign image response")
+			return err
+		}
+		// Cache the signature BEFORE flushing, so a client that reads ZG-Res-Key and
+		// immediately fetches GET /v1/proxy/signature/{chatKey} does not race the
+		// cache write (issue #619). The plaintext path below keeps its existing
+		// sign-after-write order; only the sealed path is reordered.
+		e2eeSignedText := proof.SignedTextE2EEFromHashes(reqBindHash, respBindHash)
+		if err := c.signChatResponse(ctx, sigReqBody, outBody, chatKey, e2eeSignedText, reqModel.Upstream); err != nil {
+			c.handleBrokerError(ctx, errors.Internal(err), "sign image response")
+			return err
+		}
+	}
+
 	// Attempt to return image to client. If client disconnected, continue to billing.
-	if _, writeErr := ctx.Writer.Write(clientBody); writeErr != nil {
+	if _, writeErr := ctx.Writer.Write(outBody); writeErr != nil {
 		if c.isClientDisconnectError(writeErr) {
 			ctx.Set("ignoreError", true)
 			c.logger.Warnf("Client disconnected during text-to-image response, billing for completed response (%d bytes)", len(body))
@@ -207,6 +374,9 @@ func (c *Ctrl) handleTextToImageResponse(ctx *gin.Context, resp *http.Response, 
 	}
 
 	// TEE signing is a function of the trust model, not the response shape:
+	//   - E2EE sealed: already signed above (§8 ciphertext binding), before the
+	//     flush. Signing again here would overwrite that cached signature with one
+	//     over plaintext the client never received.
 	//   - Centralized: broker cannot attest to OpenAI's content; it can only
 	//     attest to the TLS path it took. Use routing proof (binds TLS cert
 	//     fingerprint + provider identity + req/resp hashes).
@@ -215,6 +385,7 @@ func (c *Ctrl) handleTextToImageResponse(ctx *gin.Context, resp *http.Response, 
 	//   - Decentralized, TargetSeparated: the remote TEE signs its own output;
 	//     the broker does not duplicate.
 	switch {
+	case e2eeSealed:
 	case c.Service.IsCentralized():
 		fingerprint := ctx.GetString(CtxKeyUpstreamCertFingerprint)
 		c.logger.Debug("Centralized provider, signing text-to-image routing proof")
@@ -237,11 +408,6 @@ func (c *Ctrl) handleTextToImageResponse(ctx *gin.Context, resp *http.Response, 
 			}
 		}
 	}
-
-	// Bill by the number of images actually delivered, not the requested count,
-	// so a provider that returns fewer than requested (silent n clamp) does not
-	// over-charge the user (router#354).
-	imageNum := billableImageCount(reqModel.OutputCount, len(images), extractErr)
 
 	// Skip billing for whitelisted users, but record whitelist traffic metrics and
 	// count the images into the reconciliation rollup (they hit the upstream).

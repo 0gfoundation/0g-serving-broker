@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"github.com/0glabs/0g-serving-broker/inference/config"
+	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -143,8 +145,12 @@ func newE2EEFixture(t *testing.T) *e2eeTestFixture {
 	}
 
 	c := &Ctrl{
-		logger:              &testAsyncLoggerImpl{},
-		teeService:          ts,
+		logger:     &testAsyncLoggerImpl{},
+		teeService: ts,
+		// The sealed-request path is gated on the service type (only the profiles
+		// SPEC §1 covers are sealable), so the fixture has to say which endpoint
+		// it is standing in for. These are chat tests.
+		Service:             config.Service{Type: constant.ServiceTypeChatbot},
 		svcCache:            cache.New(5*time.Minute, 10*time.Minute),
 		chatCacheExpiration: 5 * time.Minute,
 	}
@@ -349,7 +355,7 @@ func TestSealNonStreamResponse_RoundTrip(t *testing.T) {
 
 	respBody := []byte(`{"id":"chatcmpl-x","model":"gpt-4o","usage":{"total_tokens":30},"choices":[{"index":0,"message":{"role":"assistant","content":"hi"}}]}`)
 
-	sealed, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, respBody)
+	sealed, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, respBody, wire.ProfileChat)
 	if err != nil {
 		t.Fatalf("maybeSealNonStreamResponse: %v", err)
 	}
@@ -417,7 +423,7 @@ func TestSealNonStreamResponse_UnboundTraceInjectable(t *testing.T) {
 	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
 
 	respBody := []byte(`{"id":"x","model":"gpt-4o","usage":{"total_tokens":3},"choices":[{"message":{"content":"hi"}}]}`)
-	sealed, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, respBody)
+	sealed, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, respBody, wire.ProfileChat)
 	if err != nil || !isSealed {
 		t.Fatalf("maybeSealNonStreamResponse: sealed=%v err=%v", isSealed, err)
 	}
@@ -510,7 +516,7 @@ func TestSealNonStreamResponse_NotSealed(t *testing.T) {
 	f := newE2EEFixture(t)
 	ctx := newGinCtx() // not marked sealed
 	body := []byte(`{"choices":[]}`)
-	out, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, body)
+	out, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, body, wire.ProfileChat)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -789,7 +795,7 @@ func TestSealNonStreamResponse_NullBodyFailsClosed(t *testing.T) {
 
 	// A literal JSON null unmarshals to a nil map without error — must fail closed,
 	// not panic.
-	_, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, []byte("null"))
+	_, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, []byte("null"), wire.ProfileChat)
 	if !isSealed {
 		t.Fatal("expected isSealed=true for a sealed request")
 	}
