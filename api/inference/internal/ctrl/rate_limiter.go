@@ -33,9 +33,9 @@ func GetRateLimiter() *ModelMismatchLimiter {
 	mismatchLimiterOnce.Do(func() {
 		globalMismatchLimiter = &ModelMismatchLimiter{
 			users:  make(map[string]*UserMismatchInfo),
-			limit:  5,                // Max 5 mismatches
-			window: 5 * time.Minute,  // Within 5 minutes
-			block:  1 * time.Hour,    // Block for 1 hour
+			limit:  5,               // Max 5 mismatches
+			window: 5 * time.Minute, // Within 5 minutes
+			block:  1 * time.Hour,   // Block for 1 hour
 		}
 		// Start cleanup goroutine (similar to common/middleware/RateLimiter)
 		go globalMismatchLimiter.cleanup()

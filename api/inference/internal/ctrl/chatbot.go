@@ -319,12 +319,25 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 	var silentReadBytes int64 = 0
 	const maxSilentReadBytes int64 = 10 * 1024 * 1024 // 10MB limit to prevent abuse
 
+	// Started before the first read so the wait for the upstream's first line is
+	// measured, not just the gaps between the lines that follow. The clock
+	// begins HERE, which is after the upstream's response headers are in hand —
+	// see streamTiming for why the field is not called ttft.
+	timing := newStreamTiming()
+
 	ctx.Stream(func(w io.Writer) bool {
 		reader := bufio.NewReader(io.TeeReader(resp.Body, &rawBody))
 
 		for {
 			line, err := reader.ReadString('\n')
 			if err != nil {
+				// ReadString returns what it read alongside the error, so an
+				// upstream whose last line carries no trailing newline delivers
+				// it here. Account for it before the error handling returns, or
+				// that line is missing from every counter while rawBody still
+				// has it — breaking the bytes-vs-billed-tokens cross-check this
+				// instrument exists to support.
+				timing.mark(line)
 				if err == io.EOF {
 					// E2EE (§7): if the upstream closed without a [DONE] sentinel, the
 					// synthetic final frame was never emitted. Emit it now so the client
@@ -334,15 +347,23 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 						if fin, ferr := frameSealer.finalFrameLine(); ferr == nil && fin != "" {
 							if _, werr := w.Write([]byte(fin)); werr == nil {
 								ctx.Writer.Flush()
+								timing.markWrite()
 							}
 						}
 					}
 					return false
 				}
+				// handleBrokerError renders an error body into the already-open
+				// stream, so these bytes reach the client and count as a write.
+				// The doc comment argues this counter is trustworthy BECAUSE the
+				// loop has few write sites; that only holds if none is skipped.
 				c.handleBrokerError(ctx, err, "read from body")
+				timing.markWrite()
 				streamErr = err
 				return false
 			}
+
+			timing.mark(line)
 
 			// Sanitize before forwarding: drop SSE keepalive/comment lines and strip
 			// upstream identity/cost leak fields (#184). The raw line is captured in
@@ -363,6 +384,7 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 					// Fail-closed: a sealed request whose frame cannot be sealed must
 					// not receive plaintext. Stop the stream.
 					c.handleBrokerError(ctx, sErr, "seal stream frame")
+					timing.markWrite()
 					streamErr = sErr
 					return false
 				}
@@ -378,6 +400,11 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 						// Mark as ignorable and continue reading silently for complete billing
 						ctx.Set("ignoreError", true)
 						clientDisconnected = true
+						// Stop the client-side clock here. The drain below is a real
+						// measurement of the PROVIDER, but nobody is left to
+						// experience it as silence — counting it would make every
+						// ordinary abort log a large client_max_gap_ms.
+						timing.markClientGone()
 						c.logger.Warnf("Client disconnected, continuing to read from backend for accurate billing")
 						// Don't return false, continue reading
 					} else {
@@ -387,6 +414,7 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 					}
 				} else {
 					ctx.Writer.Flush()
+					timing.markWrite()
 				}
 			}
 
@@ -400,6 +428,75 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 			}
 		}
 	})
+
+	// Unconditional: a stream that succeeded is exactly the case with no other
+	// record of how it went, and it is the case a "why did it stall" report
+	// arrives about.
+	//
+	// chat_key is the correlation handle: this logger has no per-request fields,
+	// so concurrent streams would otherwise be indistinguishable. It is also what
+	// the router records as chatID — but only where ZG-Res-Key is actually set
+	// (!TargetSeparated || IsCentralized || e2eeSealed, above). On a
+	// TargetSeparated non-centralized deployment neither the client nor the router
+	// ever sees it, so there chat_key separates concurrent streams in THIS log and
+	// nothing more; the cross-hop comparison has to fall back to time and
+	// model_name.
+	//
+	// model_name is printed rather than left to a join, because for the traffic
+	// this instrument exists for the join does not exist: a whitelisted request's
+	// model.Request lives only in memory and never becomes a row, which is the
+	// same reason a successful whitelisted stream left just one log line to begin
+	// with. Without it a `max_gap_ms=141000` here names no model.
+	//
+	// Everything else stays out. Printing more is how the first version of this
+	// line came to render a whole model.Request — user address, signature, fees —
+	// into an INFO log; request_hash is the join key for the rest.
+	//
+	// model_name and upstream are quoted AND truncated, per the convention
+	// logsafe.go names. That file assumes a model name is "the operator's own
+	// configuration"; on the whitelist path it is not — ExtractModelName returns
+	// the request body's `model` verbatim and, unlike the billed path, does not
+	// length-clamp it. So model_name is the CALLER's string: %q stops a newline in
+	// it from forging whole records in the one log an incident is reconstructed
+	// from, and truncateForLog stops a caller writing an arbitrarily long value
+	// into every line. upstream gets the same treatment for consistency, though it
+	// is genuinely server-set (EffectiveProviderIdentityFor, not the client's
+	// X-0G-Upstream header).
+	//
+	// PARSE THIS LINE AS LOGFMT, NOT BY SPLITTING ON SPACES. %q escapes newlines
+	// and control characters but not spaces, so a caller sending
+	// {"model": "glm 5"} yields model_name="glm 5" and a naive splitter shifts
+	// every field after it. Only streamTiming.String()'s bare numbers are safe to
+	// split blind, and only its own test asserts that. Forging a whole record —
+	// the part that matters — is blocked either way.
+	//
+	// upstream is here because #604 made one provider address serve several
+	// upstreams for the same model, so model_name alone no longer says WHICH one
+	// stalled — and saying which is this instrument's entire purpose.
+	//
+	// It reads c.metricUpstream(ctx), not reqModel.Upstream, so the string is
+	// byte-identical to the label #691 puts on every model-scoped metric. The two
+	// agree in the ordinary case, but metricUpstream carries the fallback chain
+	// the metrics use, and a log field that can disagree with the metric label is
+	// a log field you cannot join to the metric — which is the only reason to
+	// print it.
+	//
+	// disconnected is only observable from a failed write, so it would read false
+	// for a client that left BEFORE the first write: gin's Stream checks
+	// CloseNotify up front and skips the step entirely, printing lines=0 and
+	// max_gap_ms≈0 — indistinguishable from "the upstream sent nothing", which is
+	// the opposite party's fault. The context check covers that, but only when
+	// nothing arrived: SDKs close the body the moment they parse `data: [DONE]`
+	// while this loop is still reading the upstream's trailing bytes, so a
+	// cancelled context on a stream that DID deliver is a normal finish, and
+	// flagging it would invert the very distinction the field exists to draw.
+	timing.finish()
+	c.logger.Infof("stream timing: %s chat_key=%s model_name=%q upstream=%q request_hash=%s disconnected=%t",
+		timing, chatKey,
+		truncateForLog([]byte(reqModel.ModelName), 80),
+		truncateForLog([]byte(c.metricUpstream(ctx)), 80),
+		reqModel.RequestHash,
+		clientDisconnected || (timing.lines == 0 && ctx.Request.Context().Err() != nil))
 
 	// Process billing regardless of stream error
 	// If client disconnected but we continued reading, we have complete data for accurate billing
