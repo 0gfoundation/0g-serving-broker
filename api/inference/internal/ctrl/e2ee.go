@@ -546,6 +546,26 @@ func (rs *responseFrameSealer) sealSSELine(line string) (string, error) {
 	if !strings.HasPrefix(payload, "{") {
 		return line, nil
 	}
+	// §7 puts the final frame LAST, so a frame arriving behind it is refused
+	// rather than sealed. Two things would otherwise go wrong, and the second is
+	// the serious one: it would be sealed final=false behind a frame that already
+	// said final (no receiver-side check catches that — OpenFrame has no
+	// post-final rule), and sealFrame would fold it into the §8 streaming
+	// binding. A client stops consuming at the frame marked final, so it would
+	// recompute the binding over N frames while this broker signed N+1, and the
+	// signature would fail to verify on a turn that otherwise succeeded.
+	//
+	// Refusing HERE, before sealFrame, is what keeps the binding equal to what
+	// the client received; the caller then stops the stream, and billing and
+	// signature caching still run over the frames actually emitted.
+	//
+	// This became reachable with frame-typed profiles: a chat stream can only
+	// emit its final frame at [DONE] or EOF, i.e. where nothing follows, but an
+	// Anthropic terminal event (`error`, or a `message_stop` an upstream appends
+	// anything to) can land mid-stream.
+	if rs.emittedFinal {
+		return "", fmt.Errorf("seal stream frame: upstream sent a data frame after the terminal frame; §7 requires the final frame to be last")
+	}
 	var frame wire.Response
 	if err := json.Unmarshal([]byte(payload), &frame); err != nil {
 		return "", fmt.Errorf("seal stream frame: %w", err)
@@ -567,13 +587,13 @@ func (rs *responseFrameSealer) sealSSELine(line string) (string, error) {
 // A single-shape profile has no terminal event and answers false for every
 // frame, which is what keeps the chat stream on its synthetic-final path. An
 // unrecognized shape also answers false; sealFrame refuses it a moment later,
-// which is where that belongs. A duplicate terminal event (an upstream that
-// somehow sent two) is not marked again: `final` must appear exactly once, and
-// emittedFinal is what the synthetic path checks too.
+// which is where that belongs.
+//
+// It has no opinion about a SECOND terminal event, deliberately: nothing reaches
+// it once one has been sealed, because sealSSELine refuses every data frame
+// behind the final one. `final` appearing exactly once is that rule's job, not a
+// duplicate check here.
 func (rs *responseFrameSealer) isTerminal(frame wire.Response) bool {
-	if rs.emittedFinal {
-		return false
-	}
 	terminal, err := wire.IsTerminalResponseFrame(rs.profile, frame)
 	return err == nil && terminal
 }

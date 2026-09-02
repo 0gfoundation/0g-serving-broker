@@ -374,6 +374,64 @@ func TestAnthropicStreamMarksAnErrorFrameFinal(t *testing.T) {
 	}
 }
 
+// §7 puts the final frame last, and with a frame-typed profile a terminal event
+// can land mid-stream — so an upstream CAN send a data frame behind it (a proxy
+// that appends `message_stop` after `error`, or duplicates it). Sealing that
+// frame would fold it into the §8 streaming binding, and since a client stops
+// consuming at the frame marked final, the client would recompute the binding
+// over N frames while the broker signed N+1: signature failure on a turn that
+// otherwise succeeded. So it is refused, and refused BEFORE sealing, which is
+// what keeps the binding equal to what the client received.
+func TestAnthropicStreamRefusesADataFrameAfterTheTerminalFrame(t *testing.T) {
+	f := newE2EEFixture(t)
+	ctx := newAnthropicGinCtx()
+	if _, err := f.c.MaybeUnsealRequest(ctx, f.sealAnthropicRequest(t, []string{"messages", "system"})); err != nil {
+		t.Fatalf("unseal: %v", err)
+	}
+	sealer, err := f.c.newResponseFrameSealer(ctx)
+	if err != nil {
+		t.Fatalf("newResponseFrameSealer: %v", err)
+	}
+	for _, line := range anthropicSSE { // ends with message_stop, the terminal event
+		if _, err := sealer.sealSSELine(line); err != nil {
+			t.Fatalf("sealSSELine(%q): %v", line, err)
+		}
+	}
+	// What the client verifies §8 over: the frames up to and including `final`.
+	atFinal, ok, err := sealer.signedText()
+	if err != nil || !ok {
+		t.Fatalf("signedText: ok=%v err=%v", ok, err)
+	}
+	boundAtFinal := sealer.frameCount
+
+	// Lines that legitimately trail a terminal frame must still pass through: a
+	// real Anthropic stream ends its last event with a blank line, and an
+	// OpenAI-compatible shim may append [DONE].
+	for _, line := range []string{"\n", "event: message_stop\n", "data: [DONE]\n"} {
+		if _, err := sealer.sealSSELine(line); err != nil {
+			t.Errorf("sealSSELine(%q) must still pass through after the final frame: %v", strings.TrimSpace(line), err)
+		}
+	}
+
+	// A data frame, however, is refused.
+	if _, err := sealer.sealSSELine(`data: {"type":"message_stop"}` + "\n"); err == nil {
+		t.Fatal("expected a data frame after the terminal frame to be refused")
+	}
+
+	// And the refusal left the §8 binding untouched, so the signature the broker
+	// caches is still the one the client can recompute.
+	after, _, err := sealer.signedText()
+	if err != nil {
+		t.Fatalf("signedText: %v", err)
+	}
+	if sealer.frameCount != boundAtFinal {
+		t.Errorf("bound %d frames, want %d: the refused frame must not be folded into the binding", sealer.frameCount, boundAtFinal)
+	}
+	if after != atFinal {
+		t.Errorf("the signed aggregate changed after the refusal:\n  at final: %s\n  after:    %s", atFinal, after)
+	}
+}
+
 // The non-streaming shape's `content` IS an array, which makes it the one
 // Anthropic field an empty-array placeholder would technically fit — and it must
 // still fail closed. The Messages API always returns `content` on a `message`

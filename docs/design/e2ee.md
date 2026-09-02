@@ -201,6 +201,18 @@ frame-typed profile's answer is a property of the frame.
   of the API (it seals nothing per §7.2) rather than a bare placeholder. It never
   synthesizes an `error`: there is no failure to report, only a truncation, and
   inventing one would attribute to the model something it did not produce.
+- **A data frame arriving BEHIND the final frame is refused**, and refused before
+  sealing. §7 puts the final frame last, and with a frame-typed profile a terminal
+  event can land mid-stream, so an upstream can send one (a proxy appending
+  `message_stop` after `error`, or duplicating it). It matters mostly for §8:
+  `sealFrame` folds every frame it seals into the streaming binding, and a client
+  stops consuming at the frame marked `final` — so a trailing frame would leave
+  the client recomputing the binding over N frames while the broker signed N+1,
+  failing verification on a turn that otherwise succeeded. Refusing before the
+  seal keeps the binding equal to what the client received; billing and signature
+  caching then run over the frames actually emitted (both are independent of the
+  stream error). Blank lines, `event:` lines and `[DONE]` still pass through — a
+  real stream ends its last event with a blank line.
 
 `ensureSealedFieldsPresent` injects an empty placeholder only for the sealed
 fields a frame may legitimately **omit** — `choices` (chat) and `data` (image),
