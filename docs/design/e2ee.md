@@ -201,6 +201,22 @@ frame-typed profile's answer is a property of the frame.
   only inspects `data:` JSON too). Forwarding one hands an upstream a channel for
   arbitrary text to the client and to every intermediary on an otherwise sealed
   turn.
+
+  **Dropping is only for a line that IS an SSE field line**, and the test for that
+  is a field-name TOKEN (`isSSEFieldLine`), not the presence of a colon. A bare
+  JSON body's first colon makes `{"type"` pass for a field name, so a provider
+  that ignored `stream: true` and answered with a whole non-streaming response had
+  it dropped as if it were an `id:` line — the entire answer discarded, the stream
+  then capped with a synthetic terminal frame, and the client handed a sealed,
+  signed, well-formed turn that reports normal completion and contains nothing,
+  computed from the same bytes billing read. So a line that is not a field line
+  fails closed like a non-object `data:` payload: on a sealed turn plaintext
+  cannot be forwarded, and silence must not be reported as success. An
+  unrecognized field NAME still counts as a field line — the SSE spec has
+  receivers ignore unknown fields, so an upstream may legitimately send one and no
+  answer lives there. The refusal names the shape it saw ("a bare JSON body", "a
+  markup document", "free-form text") plus a byte count, never any of the bytes,
+  since that error reaches the client.
 - **The `event:` line is REBUILT from each frame's bound `type`**, which is why
   dropping the upstream's costs nothing: §7.2 already has a receiver ignore the
   received line and rebuild it from the bound discriminator, and `sealFrame` does

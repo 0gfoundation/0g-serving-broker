@@ -1020,6 +1020,67 @@ func TestStreamFrameSealer_NonObjectDataLineFailsClosed(t *testing.T) {
 	}
 }
 
+// A provider that ignores `stream: true` and answers with a whole non-streaming
+// body is the worst input for the drop branch, because the body's first colon
+// makes `{"type"` look like an SSE field name: the line was dropped as if it were
+// an `id:` line, the ENTIRE answer went in the bin, and the stream was then capped
+// with a synthetic terminal frame — so the client got a sealed, signed,
+// well-formed turn reporting normal completion with nothing in it, off the same
+// bytes billing was computed from. Only a real SSE field line may be dropped;
+// anything else fails closed.
+func TestStreamFrameSealer_NonSSEBodyFailsClosed(t *testing.T) {
+	for _, profile := range []wire.Profile{wire.ProfileChat, wire.ProfileAnthropic} {
+		t.Run(string(profile), func(t *testing.T) {
+			f := newE2EEFixture(t)
+			ctx := newGinCtx()
+			ctx.Set(CtxKeyE2EESealed, true)
+			ctx.Set(CtxKeyE2EEProfile, profile)
+			ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+			ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
+			sealer, err := f.c.newResponseFrameSealer(ctx)
+			if err != nil {
+				t.Fatalf("newResponseFrameSealer: %v", err)
+			}
+			for _, line := range []string{
+				// The reachable one: `stream: true` ignored, non-streaming body returned.
+				`{"type":"message","content":[{"type":"text","text":"THE WHOLE ANSWER"}]}` + "\n",
+				`{"id":"c1","choices":[{"message":{"content":"THE WHOLE ANSWER"}}]}` + "\n",
+				`[{"choices":[]}]` + "\n",
+				"<html><body>502 Bad Gateway</body></html>\n",
+				"Internal Server Error\n",
+			} {
+				out, err := sealer.sealSSELine(line)
+				if err == nil {
+					t.Errorf("sealSSELine(%q) must fail closed, got %q", strings.TrimSpace(line), out)
+				}
+				if out != "" {
+					t.Errorf("sealSSELine(%q) must emit nothing on failure, got %q", strings.TrimSpace(line), out)
+				}
+				// The error reaches the client, so it must carry no upstream bytes.
+				if err != nil && strings.Contains(err.Error(), "ANSWER") {
+					t.Errorf("the error must not quote upstream text: %v", err)
+				}
+			}
+			// Real SSE field lines are still dropped silently, unknown names included
+			// (the SSE spec has receivers ignore those, so an upstream may send one and
+			// no answer lives there), and so is an SSE comment.
+			for _, line := range []string{
+				"event: content_block_delta\n",
+				"id: 1\n",
+				"retry: 10000\n",
+				"unknown-field: whatever\n",
+				"bare-name-no-colon\n",
+				": keepalive ping\n",
+			} {
+				out, err := sealer.sealSSELine(line)
+				if err != nil || out != "" {
+					t.Errorf("sealSSELine(%q) must be dropped silently, got %q (%v)", strings.TrimSpace(line), out, err)
+				}
+			}
+		})
+	}
+}
+
 // The chat path's own post-final case, and the reason the drop-vs-fail decision
 // reads what a frame CARRIES rather than what its shape may seal: chat's sealed
 // set is ["choices"] for every frame whatever it holds, and no chat frame is ever

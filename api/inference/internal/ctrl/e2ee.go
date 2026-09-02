@@ -720,13 +720,33 @@ func (rs *responseFrameSealer) sealSSELine(line string) (string, error) {
 	}
 	after, ok := strings.CutPrefix(trimmed, "data:")
 	if !ok {
-		// Any other SSE field line: `event:` (rebuilt by sealFrame from the bound
-		// discriminator), `id:`, `retry:`, or something unrecognized. None of them
-		// is inside the AAD, none of them is checked by anything, and none carries
-		// content a sealed receiver may act on — so none is forwarded. Debug rather
-		// than Warn: an upstream that sends `id:` sends it on every frame, and this
-		// is a normal thing to discard, not an incident.
-		rs.logger.Debugf("e2ee stream: dropping a non-data SSE line, which no sealed receiver may trust: %q", trimmed)
+		// Dropping is only correct for a line that IS an SSE field line. A line that
+		// is not one means the upstream answered a STREAMING request with something
+		// that is not an SSE stream at all — in practice a whole non-streaming JSON
+		// body from a provider that ignored `stream: true`. Discarding that as if it
+		// were an `id:` line throws away the ENTIRE answer, and the stream is then
+		// capped with a synthetic terminal frame: the client receives a sealed,
+		// signed, well-formed turn that reports as normally completed and contains
+		// nothing, while billing reads the same bytes the client never got. So it
+		// fails closed, exactly like the non-object `data:` payload below — on a
+		// sealed turn plaintext cannot be forwarded, and silence must not be
+		// reported as success.
+		if !isSSEFieldLine(trimmed) {
+			return "", fmt.Errorf("seal stream frame: upstream answered a streaming request with %s (%d bytes) rather than an SSE stream, so the response cannot be sealed", nonSSELineKind(trimmed), len(trimmed))
+		}
+		// A real SSE field line: `event:` (rebuilt by sealFrame from the bound
+		// discriminator), `id:`, `retry:`, an SSE comment, or an unrecognized field
+		// name the SSE spec has receivers ignore. None of them is inside the AAD,
+		// none of them is checked by anything, and none carries content a sealed
+		// receiver may act on — so none is forwarded. Debug rather than Warn: an
+		// upstream that sends `id:` sends it on every frame, and this is a normal
+		// thing to discard, not an incident.
+		//
+		// The NAME is logged, never the value: the name is a token by construction
+		// (isSSEFieldLine just validated it), while the value is upstream-controlled
+		// text of any length — the place a credential or a megabyte would sit.
+		name, _, _ := strings.Cut(trimmed, ":")
+		rs.logger.Debugf("e2ee stream: dropping a non-data SSE line (field %q, %d bytes), which no sealed receiver may trust", name, len(trimmed))
 		return "", nil
 	}
 	// The sentinel is recognized from the PARSED payload, so the space after the
@@ -796,6 +816,54 @@ func (rs *responseFrameSealer) sealSSELine(line string) (string, error) {
 		return rs.handleFrameAfterFinal(frame)
 	}
 	return rs.sealFrame(frame, rs.isTerminal(frame))
+}
+
+// isSSEFieldLine reports whether a line is an SSE field line: an SSE comment (a
+// leading colon, i.e. an empty field name) or a field-NAME TOKEN, optionally
+// followed by ":" and a value.
+//
+// The token rule is what separates a line a sealed stream may silently DISCARD
+// from one it must refuse. "Has a colon" cannot do it: a bare JSON body's first
+// colon makes `{"type"` look like a field name, which is how a whole
+// non-streaming response passed for an `id:` line and was dropped. A real field
+// name is a token, so anything with a brace, a quote or a space in it is not a
+// field line at all but a body the upstream sent instead of a stream.
+//
+// An unrecognized NAME still counts: the SSE spec has receivers ignore unknown
+// fields, so an upstream may legitimately send one, and dropping it is safe —
+// nothing is forwarded and nothing is lost, because a field this broker does not
+// know is not where an answer lives.
+func isSSEFieldLine(trimmed string) bool {
+	if strings.HasPrefix(trimmed, ":") {
+		return true // an SSE comment (typically a keepalive): no field, no content
+	}
+	name, _, _ := strings.Cut(trimmed, ":")
+	if name == "" {
+		return false
+	}
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// nonSSELineKind names what a non-SSE line looks like WITHOUT quoting any of it.
+// The returned strings are this broker's own, so the error they end up in — which
+// reaches the client — carries no upstream-controlled text; the line's length is
+// reported separately and is enough to tell a stray byte from a whole body.
+func nonSSELineKind(trimmed string) string {
+	switch {
+	case strings.HasPrefix(trimmed, "{"), strings.HasPrefix(trimmed, "["):
+		return "a bare JSON body"
+	case strings.HasPrefix(trimmed, "<"):
+		return "a markup document"
+	default:
+		return "free-form text"
+	}
 }
 
 // handleFrameAfterFinal decides what to do with a data frame that arrived behind
