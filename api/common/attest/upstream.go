@@ -115,8 +115,18 @@ func parseUpstreamSet(payload string) ([]Upstream, error) {
 		return nil, fmt.Errorf("%s payload header %q does not name a member count", EventUpstreamSet, header[0])
 	}
 
-	members := make([]Upstream, 0, want)
-	seen := make(map[string]struct{}, want)
+	// Sized from the LINES, never from want. want is a number the party being described
+	// chose, and it is checked against the members only at the end of this loop — so
+	// pre-allocating from it hands that party an allocation of any size it likes. The
+	// 16-byte payload "count=1000000000" would ask for a billion Upstreams here, and every
+	// verifier and SDK client that resolves this CVM would take an out-of-memory or a panic
+	// in makeslice instead of an answer, from a record that was going to be refused two
+	// dozen lines below anyway.
+	//
+	// len(lines) is bounded by the payload, which is bounded by the event log the caller
+	// already holds, and it is an upper bound on the members a payload can spell.
+	members := make([]Upstream, 0, len(lines))
+	seen := make(map[string]struct{}, len(lines))
 	for _, line := range lines[i+1:] {
 		fields := strings.Fields(line)
 		if len(fields) == 0 {
