@@ -70,7 +70,9 @@ const (
 	// prepareFrameForSealing SEALS it where a single-shape profile would have left
 	// it cleartext (an error message can quote the request), and
 	// handleFrameAfterFinal FAILS the stream on one arriving behind the final
-	// frame (dropping it would tell the client its turn succeeded).
+	// frame (dropping it would tell the client its turn succeeded). The first is
+	// in the step BOTH seal paths share, which is what keeps the rule from
+	// applying to streams only.
 	failureField = "error"
 
 	// doneSentinel is the OpenAI-style stream terminator, as it appears in a
@@ -427,13 +429,18 @@ func (c *Ctrl) maybeSealNonStreamResponse(ctx *gin.Context, body []byte) (out []
 	if uerr := json.Unmarshal(body, &resp); uerr != nil || resp == nil {
 		return nil, true, respBindHash, fmt.Errorf("seal response: body is not a JSON object")
 	}
-	// Resolved against the RESPONSE, not the profile alone: a frame-typed profile
-	// (Anthropic) answers per frame shape (§7.2).
-	sealedFields, err := wire.ResponseSealedFieldsForFrame(profile, resp)
+	// Through the SAME preparation the streaming path uses, not a local copy of
+	// it: resolved against the RESPONSE rather than the profile alone (a
+	// frame-typed profile answers per frame shape, §7.2), plus the placeholders a
+	// frame may legitimately omit and the failure-report rule. This path had its
+	// own inlined pair of those first two steps, so when the third arrived it
+	// applied to streams only and a non-streaming chat/image response with a
+	// top-level `error` still shipped the message in its cleartext half — the
+	// exact drift a shared step exists to prevent.
+	sealedFields, err := prepareFrameForSealing(profile, resp)
 	if err != nil {
 		return nil, true, respBindHash, fmt.Errorf("seal response: %w", err)
 	}
-	ensureSealedFieldsPresent(profile, resp, sealedFields)
 	// Declare model + x_0g_trace unbound so the router may rewrite/inject them
 	// downstream (SPEC §5.2).
 	frame, err := wire.SealResponseFor(profile, ephPub, resp, sealedFields, e2eeResponseUnboundFields...)

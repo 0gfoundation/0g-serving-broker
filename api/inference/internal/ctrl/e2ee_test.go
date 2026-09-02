@@ -781,6 +781,70 @@ func TestStreamFrameSealer_ChatMidStreamErrorIsSealed(t *testing.T) {
 	}
 }
 
+// The non-streaming path must apply the same preparation as the streaming one,
+// including the failure-report rule. It had its own inlined copy of the resolve
+// and placeholder steps, so the rule reached streams only and an HTTP 200 whose
+// body carried a top-level `error` still shipped the message in the clear.
+func TestSealNonStreamResponse_FailureReportIsSealed(t *testing.T) {
+	const secret = "upstream said: TOP SECRET PROMPT ECHO"
+	for _, tt := range []struct {
+		profile    wire.Profile
+		body       string
+		wantSealed []string
+	}{
+		{
+			profile:    wire.ProfileChat,
+			body:       `{"id":"c1","model":"gpt-4o","error":{"message":"` + secret + `","code":429}}`,
+			wantSealed: []string{"choices", "error"},
+		},
+		{
+			// Anthropic's non-streaming shape governs `error` itself, so it must be
+			// left to the taxonomy rather than have the rule applied twice.
+			profile:    wire.ProfileAnthropic,
+			body:       `{"id":"msg_1","type":"error","error":{"message":"` + secret + `"}}`,
+			wantSealed: []string{"error"},
+		},
+	} {
+		t.Run(string(tt.profile), func(t *testing.T) {
+			f := newE2EEFixture(t)
+			ctx := newGinCtx()
+			ctx.Set(CtxKeyE2EESealed, true)
+			ctx.Set(CtxKeyE2EEProfile, tt.profile)
+			ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+			ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
+
+			out, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, []byte(tt.body))
+			if err != nil || !isSealed {
+				t.Fatalf("maybeSealNonStreamResponse: sealed=%v err=%v", isSealed, err)
+			}
+			if strings.Contains(string(out), "TOP SECRET") {
+				t.Fatalf("the error message must not ride in the cleartext half:\n%s", out)
+			}
+			var frame wire.Response
+			if err := json.Unmarshal(out, &frame); err != nil {
+				t.Fatalf("sealed frame: %v", err)
+			}
+			if _, cleartext := frame[failureField]; cleartext {
+				t.Error("`error` must be sealed away, not left cleartext")
+			}
+			e2ee, err := frame.E2EE()
+			if err != nil {
+				t.Fatalf("read _e2ee: %v", err)
+			}
+			if !sameStrings(e2ee.SealedFields, tt.wantSealed) {
+				t.Errorf("sealed_fields = %v, want %v", e2ee.SealedFields, tt.wantSealed)
+			}
+			opened, err := wire.OpenResponseFor(tt.profile, f.clientEphSk, frame)
+			if err != nil {
+				t.Fatalf("OpenResponseFor: a conforming client must accept this: %v", err)
+			}
+			if !strings.Contains(string(opened[failureField]), secret) {
+				t.Errorf("opened error = %s, want the sealed message merged back", opened[failureField])
+			}
+		})
+	}
+}
+
 // Neither the log line nor the client-visible error may carry upstream text. On
 // the chat profile `type` is an ordinary cleartext field the wire package has no
 // rule about, so it is arbitrary and unbounded — and it reached a broker Warn and
