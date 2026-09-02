@@ -148,15 +148,13 @@ func (c *Ctrl) ValidateSession(ctx *gin.Context) (string, error) {
 		return "", errors.New("invalid signature length")
 	}
 
-	// Adjust V value for Ethereum signature recovery (same as verifySignature)
-	v1 := sigBytes[64] - 27
-	pubKey, err := crypto.SigToPub(prefixedMsg.Bytes(), append(sigBytes[:64], v1))
+	// RecoverSigner normalises the recovery id for both conventions. A bare
+	// "sigBytes[64] - 27" underflows a raw 0 (what go-ethereum's crypto.Sign
+	// emits) to 229, and SigToPub then rejects a perfectly valid signature.
+	recoveredAddr, err := util.RecoverSigner(prefixedMsg.Bytes(), sigBytes)
 	if err != nil {
 		return "", errors.Wrap(err, "failed to recover public key from signature")
 	}
-
-	// Get address from public key
-	recoveredAddr := crypto.PubkeyToAddress(*pubKey)
 
 	// Verify recovered address matches claimed address (same as verifySignature)
 	if !strings.EqualFold(recoveredAddr.Hex(), address) {
@@ -238,15 +236,11 @@ func (c *Ctrl) ValidateProviderAuth(ctx *gin.Context) error {
 		return errors.New("invalid signature length")
 	}
 
-	// Adjust V value for Ethereum signature recovery
-	v1 := sigBytes[64] - 27
-	pubKey, err := crypto.SigToPub(prefixedMsg.Bytes(), append(sigBytes[:64], v1))
+	// See the note in the sibling recovery above: normalise, do not subtract.
+	recoveredAddr, err := util.RecoverSigner(prefixedMsg.Bytes(), sigBytes)
 	if err != nil {
 		return errors.Wrap(err, "failed to recover public key from signature")
 	}
-
-	// Get address from public key
-	recoveredAddr := crypto.PubkeyToAddress(*pubKey)
 
 	// Verify recovered address matches claimed address
 	if !strings.EqualFold(recoveredAddr.Hex(), address) {

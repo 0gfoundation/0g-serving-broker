@@ -239,3 +239,59 @@ func TestAesDecryptLargeFile_MultiChunkTagStream(t *testing.T) {
 		t.Errorf("multi-chunk round trip mismatch: got %d bytes, want %d", len(got), len(want))
 	}
 }
+
+// The signature-verification sites across the repo used to hand-roll the
+// recovery-id handling, most of them as a bare "sigBytes[64] - 27". These pin the
+// two properties every caller now depends on: a raw 0/1 is accepted (so a client
+// signing with go-ethereum's crypto.Sign is not refused), and the caller's buffer
+// is not mutated (several callers reuse theirs after the recovery).
+
+func TestRecoverPubkey_DoesNotMutateCallerSignature(t *testing.T) {
+	key, err := ethcrypto.HexToECDSA(testEnclaveKey)
+	if err != nil {
+		t.Fatalf("HexToECDSA: %v", err)
+	}
+	hash := ethcrypto.Keccak256([]byte("payload"))
+	sig, err := ethcrypto.Sign(hash, key)
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	sig[64] += 27 // the Ethereum-facing form
+
+	before := make([]byte, len(sig))
+	copy(before, sig)
+
+	if _, err := RecoverPubkey(hash, sig); err != nil {
+		t.Fatalf("RecoverPubkey: %v", err)
+	}
+	if !bytes.Equal(sig, before) {
+		t.Errorf("caller signature was mutated: v went %d → %d", before[64], sig[64])
+	}
+}
+
+func TestRecoverPubkey_MatchesRecoverSigner(t *testing.T) {
+	key, err := ethcrypto.HexToECDSA(testEnclaveKey)
+	if err != nil {
+		t.Fatalf("HexToECDSA: %v", err)
+	}
+	hash := ethcrypto.Keccak256([]byte("payload"))
+	sig, err := ethcrypto.Sign(hash, key)
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+
+	pub, err := RecoverPubkey(hash, sig)
+	if err != nil {
+		t.Fatalf("RecoverPubkey: %v", err)
+	}
+	addr, err := RecoverSigner(hash, sig)
+	if err != nil {
+		t.Fatalf("RecoverSigner: %v", err)
+	}
+	if ethcrypto.PubkeyToAddress(*pub) != addr {
+		t.Error("RecoverPubkey and RecoverSigner disagree")
+	}
+	if addr != ethcrypto.PubkeyToAddress(key.PublicKey) {
+		t.Error("recovered the wrong address")
+	}
+}
