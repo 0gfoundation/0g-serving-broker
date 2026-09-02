@@ -177,16 +177,13 @@ func (*Ctrl) validateSignature(task *schema.Task) error {
 	// compare refused valid signatures over their representation. The two sibling
 	// verifiers below already compared this way.
 	//
-	// This makes THIS check agree with them; it does not make the whole
-	// lowercase-address flow work end to end. CancelTask still compares
-	// existing.UserAddress against the path param byte-exact (task.go:98), and
-	// db.CancelTask's WHERE user_address = ? does the same, so a task created with a
-	// lowercase address and cancelled with the EIP-55 spelling now reaches a 403
-	// "task does not belong to this user" instead of a 401 "address mismatch" —
-	// a better place to fail, still a failure. Fixing it properly means normalising
-	// UserAddress at both ingresses (body and path param) to one spelling, which
-	// changes what is stored and so needs a migration for existing rows. That is a
-	// separate change, not something to smuggle into this one.
+	// The rest of the flow agrees with it now, and this paragraph used to say it did not.
+	// It described CancelTask and db.CancelTask as still comparing byte-exact and claimed
+	// closing that needed a migration; both were fixed on this branch without one —
+	// CancelTask passes the row's own spelling (so its WHERE stays exact), and the two
+	// filters that take an address from the caller compare LOWER(user_address) against
+	// every spelling schema.Task.Bind can store. Nothing about what is stored changed, so
+	// the migration this comment predicted was never needed.
 	if recoveredAddress != common.HexToAddress(task.UserAddress) {
 		return errors.New("signature verification failed: address mismatch")
 	}
@@ -228,7 +225,19 @@ func (c *Ctrl) GetProgress(id *uuid.UUID, userAddress string) (string, error) {
 		return "", errors.Internal(errors.Wrap(err, "get task"))
 	}
 
-	// Verify user owns this task
+	// NOT an ownership check on this route, whatever it looks like. GetProgress serves
+	// GET /v1/user/:userAddress/task/:taskID/log, which handler.Register wires with no
+	// middleware and no signature verification — so `userAddress` is a path parameter the
+	// CALLER chose, and this compares the caller's claim against itself. Anyone holding a
+	// task UUID reads the log by naming the owner's address, which is public on-chain.
+	//
+	// It is kept because it is the right comparison and it becomes a real check the moment
+	// the route authenticates the address, which is what DownloadLoRA already does on the
+	// sibling route (VerifyDownloadSignature, task.go:422 — a timestamped signature over the
+	// task id). Doing the same here changes the contract for every existing client of three
+	// GET routes, so it is deliberately not smuggled in alongside an address-comparison fix;
+	// tracked separately. GetTask and ListTask have the same exposure and no comparison at
+	// all.
 	if !sameUser(task.UserAddress, userAddress) {
 		return "", errors.NewForbidden("task does not belong to this user")
 	}
