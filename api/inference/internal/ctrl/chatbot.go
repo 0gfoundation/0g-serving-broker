@@ -330,7 +330,14 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 					// still receives exactly one completion marker (a missing final frame
 					// is a truncation on the client). Skip if the client already left.
 					if frameSealer != nil && !clientDisconnected {
-						if fin, ferr := frameSealer.finalFrameLine(); ferr == nil && fin != "" {
+						fin, ferr := frameSealer.finalFrameLine()
+						switch {
+						case ferr != nil:
+							// Nothing can be sent to the client at EOF, so the one thing
+							// that must not happen is silence: the client will reject this
+							// stream as a truncation (§7) and only this log says why.
+							c.logger.Errorf("e2ee stream: could not synthesize the final frame at EOF, the client will see a truncated stream: %v", ferr)
+						case fin != "":
 							if _, werr := w.Write([]byte(fin)); werr == nil {
 								ctx.Writer.Flush()
 							}

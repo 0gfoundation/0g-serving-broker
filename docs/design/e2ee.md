@@ -150,9 +150,10 @@ applied silently.
 
 | Service type | Surface | Profile |
 |---|---|---|
-| `chatbot` | `/v1/chat/completions` (or an unrecognized path) | `chat` |
-| `chatbot` | `/v1/messages` | `anthropic` |
-| `text-to-image` | any | `image` |
+| `chatbot` | `/chat/completions` | `chat` |
+| `chatbot` | `/messages`, `/v1/messages` | `anthropic` |
+| `chatbot` | an unrecognized path | **refused** |
+| `text-to-image` | any (not a chat surface) | `image` |
 | everything else | any | refused |
 
 **The surface is half the key, not decoration.** One chatbot service answers on
@@ -160,6 +161,15 @@ both chat paths, so keyed on the service type alone an Anthropic sealed request
 resolved to `chat`: the response path then sealed an injected empty `choices`
 while the real `content`/`delta` rode in the frame's cleartext half — no error
 anywhere, since the wire format is identical and the frames look plausible.
+
+An **unrecognized** chatbot path is refused for the same reason, and it is the
+likelier way in: adding a chat route means adding to `constant.TargetRoute`,
+while teaching `apiFormatForPath` about it is a separate edit nothing forces — so
+a surface that fell through to `chat` would apply chat's rules to an unanalyzed
+request shape, silently. It costs nothing today (every chatbot route in
+`TargetRoute` is matched, pinned by
+`TestEveryChatRouteHasARecognizedSurface`), and an unsealed request never
+reaches this resolution at all.
 
 `MaybeUnsealRequest` resolves it once and stashes it on the gin context
 (`CtxKeyE2EEProfile`); every seal path reads it back rather than re-deriving or
@@ -201,6 +211,14 @@ frame-typed profile's answer is a property of the frame.
   of the API (it seals nothing per §7.2) rather than a bare placeholder. It never
   synthesizes an `error`: there is no failure to report, only a truncation, and
   inventing one would attribute to the model something it did not produce.
+  What to synthesize is the one per-profile literal left in `ctrl/e2ee.go`
+  (`synthFinalFrameFor`), because "which event should a broker invent when the
+  upstream sent none" is a serving decision rather than a wire rule. So
+  `newResponseFrameSealer` proves the entry is one the profile can seal *before*
+  the first frame goes out: a frame-typed profile added without one fails the
+  request up front instead of emitting a stream with no final frame, which is a
+  truncation the client rejects wholesale and which EOF is too late to report.
+  The EOF path logs a synthesis failure for the same reason.
 - **A data frame arriving BEHIND the final frame is refused**, and refused before
   sealing. §7 puts the final frame last, and with a frame-typed profile a terminal
   event can land mid-stream, so an upstream can send one (a proxy appending

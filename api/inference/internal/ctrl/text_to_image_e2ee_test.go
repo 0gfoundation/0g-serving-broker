@@ -116,9 +116,13 @@ func TestProfileForRequest(t *testing.T) {
 	}{
 		{"chatbot on the openai surface", constant.ServiceTypeChatbot, config.APIFormatOpenAI, wire.ProfileChat, true},
 		{"chatbot on the anthropic surface", constant.ServiceTypeChatbot, config.APIFormatAnthropic, wire.ProfileAnthropic, true},
-		// An unrecognized path on the chatbot service is chat's own case: the
-		// surface only distinguishes the two chat APIs.
-		{"chatbot on an unrecognized path", constant.ServiceTypeChatbot, "", wire.ProfileChat, true},
+		// An unrecognized path is REFUSED, not read as chat's own case. It is the
+		// likelier mistake of the two: adding a chat route means adding to
+		// constant.TargetRoute, and teaching apiFormatForPath about it is a
+		// separate edit nothing forces — and chat's rules applied to an unanalyzed
+		// request shape is the silent bug the surface key exists to prevent. It
+		// costs nothing today: every chatbot route in TargetRoute is matched.
+		{"chatbot on an unrecognized path", constant.ServiceTypeChatbot, "", "", false},
 		{"chatbot on a surface that does not exist yet", constant.ServiceTypeChatbot, "some-future-format", "", false},
 		// The image endpoint is not a chat surface at all, so the surface is
 		// whatever the path happened to be and must not change the answer.
@@ -144,6 +148,60 @@ func TestProfileForRequest(t *testing.T) {
 				t.Fatalf("profile = %q, want %q", gotProfile, tt.wantProfile)
 			}
 		})
+	}
+}
+
+// What makes refusing an unrecognized surface free rather than a regression:
+// every CHAT route the proxy serves is one apiFormatForPath recognizes. Adding a
+// chat route means adding to constant.TargetRoute, and teaching apiFormatForPath
+// about it is a separate edit nothing forces — so this is the guard that forces
+// it. A new NON-chat route has to be listed here, which is a deliberate act.
+func TestEveryChatRouteHasARecognizedSurface(t *testing.T) {
+	nonChatRoutes := map[string]struct{}{
+		"/images/edits":         {},
+		"/images/generations":   {},
+		"/audio/transcriptions": {},
+		"/videos":               {},
+	}
+	for route := range constant.TargetRoute {
+		if _, nonChat := nonChatRoutes[route]; nonChat {
+			continue
+		}
+		if surface := apiFormatForPath(route); surface == "" {
+			t.Errorf("chat route %q resolves to no API surface: teach apiFormatForPath about it, "+
+				"or list it above if it is not a chat route — a sealed request on it is refused today", route)
+		}
+	}
+}
+
+// Every profile this broker can be asked to seal a STREAM under must have a
+// synthetic terminal frame the profile itself can seal, since that frame is what
+// caps a stream whose upstream dropped off. The check lives in
+// newResponseFrameSealer so a gap fails the request up front; this pins the
+// invariant, so a frame-typed profile added to profileForRequest without an
+// entry in synthFinalFrameFor fails here rather than in production at EOF.
+func TestEverySealableProfileHasASealableSyntheticFinalFrame(t *testing.T) {
+	seen := map[wire.Profile]bool{}
+	for _, svcType := range []string{
+		constant.ServiceTypeChatbot, constant.ServiceTypeTextToImage,
+		constant.ServiceTypeSpeechToText, constant.ServiceTypeImageEditing,
+		constant.ServiceTypeVideoGeneration,
+	} {
+		for _, surface := range []string{config.APIFormatOpenAI, config.APIFormatAnthropic, ""} {
+			profile, sealable := profileForRequest(svcType, surface)
+			if !sealable || seen[profile] {
+				continue
+			}
+			seen[profile] = true
+			synth := synthFinalFrameFor(profile)
+			if _, err := wire.ResponseSealedFieldsForFrame(profile, synth.frame); err != nil {
+				t.Errorf("profile %q (%s on the %q surface) has no synthetic terminal frame it can seal: %v",
+					profile, svcType, surface, err)
+			}
+		}
+	}
+	if len(seen) == 0 {
+		t.Fatal("no sealable profile found: the table above no longer exercises profileForRequest")
 	}
 }
 
