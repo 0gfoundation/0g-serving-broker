@@ -80,6 +80,28 @@ func (c *Ctrl) CreateTask(ctx context.Context, task *schema.Task) (*uuid.UUID, e
 	return dbTask.ID, nil
 }
 
+// sameUser reports whether two spellings of a user address denote the same
+// account.
+//
+// An address reaches these checks from two ingresses that normalise onto nothing:
+// the JSON body (schema.Task.Bind, which validates the form but keeps the
+// caller's casing) and the URL path parameter, which is not touched at all. The
+// stored value is therefore whatever spelling created the task, and the value
+// being compared against is whatever spelling is cancelling or reading it. A
+// byte-exact compare refuses a user their own task over that difference alone:
+// create with signer.address.toLowerCase(), cancel with wallet.address, and the
+// EIP-55 mixed-case form does not equal the lower-case one in the row.
+//
+// The signature checks on these same routes already compare through
+// common.HexToAddress, so before this the request would pass authentication and
+// then be told the task belongs to someone else.
+//
+// This is the comparison, not a normalisation: nothing about what is stored
+// changes, so no existing row has to be rewritten.
+func sameUser(a, b string) bool {
+	return common.HexToAddress(a) == common.HexToAddress(b)
+}
+
 func (c *Ctrl) CancelTask(ctx context.Context, task *schema.Task) error {
 	if err := c.validateSignature(task); err != nil {
 		return errors.Unauthorized(err)
@@ -95,11 +117,16 @@ func (c *Ctrl) CancelTask(ctx context.Context, task *schema.Task) error {
 		}
 		return errors.Internal(errors.Wrap(err, "load task"))
 	}
-	if existing.UserAddress != task.UserAddress {
+	if !sameUser(existing.UserAddress, task.UserAddress) {
 		return errors.NewForbidden("task does not belong to this user")
 	}
 
-	if err := c.db.CancelTask(task.ID, task.UserAddress); err != nil {
+	// existing.UserAddress, not task.UserAddress: the check above proved they are the
+	// same account, and the UPDATE's WHERE user_address = ? is a SQL string compare
+	// whose case sensitivity depends on the column's collation. Passing the spelling
+	// that is actually in the row makes the statement match whatever that collation
+	// turns out to be.
+	if err := c.db.CancelTask(task.ID, existing.UserAddress); err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			// Re-read once to disambiguate two RowsAffected==0 causes the
 			// preflight cannot rule out:
@@ -202,7 +229,7 @@ func (c *Ctrl) GetProgress(id *uuid.UUID, userAddress string) (string, error) {
 	}
 
 	// Verify user owns this task
-	if task.UserAddress != userAddress {
+	if !sameUser(task.UserAddress, userAddress) {
 		return "", errors.NewForbidden("task does not belong to this user")
 	}
 
@@ -516,7 +543,7 @@ func (c *Ctrl) GetLoRAModel(id *uuid.UUID, userAddress string) (string, error) {
 	}
 
 	// Verify user owns this task
-	if task.UserAddress != userAddress {
+	if !sameUser(task.UserAddress, userAddress) {
 		return "", errors.NewForbidden("task does not belong to this user")
 	}
 
