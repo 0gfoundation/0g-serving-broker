@@ -40,57 +40,94 @@ const (
 	UpstreamsUnknown    = "unknown" // the deciding record could not be read
 )
 
-// emptyUpstreamSet is how a record spells "no destination is permitted".
+// upstreamCountPrefix opens the one header line every EventUpstreamSet payload
+// carries: "count=<n>", the number of members the writer means the set to hold.
 //
-// The empty set is written out rather than left as an empty payload so that a
-// truncated, unset or absent payload is an error instead of a claim. The two are not
-// interchangeable: a bound of zero says the config routes nowhere, which is the
-// strongest thing a set can say, and it must not be what a writer produces by
-// failing to fill a field in.
-//
-// It cannot collide with a member: a member line carries a URL as well, so a line
-// holding this word alone is never a name.
-const emptyUpstreamSet = "none"
+// It cannot be confused with a member line. upstreamNamePattern admits no "=", so no
+// member's first field can start with this.
+const upstreamCountPrefix = "count="
 
 // parseUpstreamSet reads one EventUpstreamSet payload into the set it names.
 //
-// The payload is the WHOLE set — one member per line, "<name> <base URL>" or
-// "<name> <base URL> <identity>", or the single word "none" for the empty set. It is
-// not a mutation of what an earlier record said, so nothing is replayed and nothing
-// accumulates: the last record decides, exactly as it does for the image and config
-// records.
+// The payload is the WHOLE set:
 //
-// That is the reason to encode it this way rather than as add and remove records. The
-// set comes from one config file, which is read as a whole, so a change to it is
-// already atomic at the source; an encoding that splits it into per-member records
-// invents a partial state the source never has. A reader then has to decide what a
-// truncated run of records means, and every answer is bad: believing the prefix
-// reports a subset of where plaintext can go, refusing it leaves the CVM
-// unverifiable, and neither can be repaired, because RTMR3 only appends — a
-// half-written batch has no successor that undoes it. One record per set has none of
-// that: a partial write is a single unreadable record, and appending the truth after
-// it is a complete fix.
+//	count=<n>
+//	<name> <base URL> [<identity>]
+//	…                              ← n of these
+//
+// It is not a mutation of what an earlier record said, so nothing is replayed and
+// nothing accumulates: the last record decides, exactly as it does for the image and
+// config records. That is why one record carries the whole set rather than one member
+// each — the set comes from one config file, read as a whole, so a change to it is
+// already atomic at the source, and an encoding that splits it across records invents a
+// partial state the source never has, which RTMR3 then makes permanent because it only
+// appends and a half-written batch has no successor that undoes it.
+//
+// # Why the count is in the payload
+//
+// Because "one record per set" does NOT by itself make a partial write unreadable, and
+// an earlier version of this comment claimed it did. A payload is several lines; lose
+// the tail and what remains is a SHORTER READABLE SET, not a broken record. Of the 76
+// prefixes of a two-member payload, 40 parse cleanly, and one of them is exactly
+// "engine1 http://engine-1:8000/v1\n" — a set of one in-CVM engine, with the external
+// vendor silently gone, a state of known and a valid hash. That is the fail-open
+// direction the whole record exists to close, and nothing else catches it:
+// upstreamChanges reports no change because the shorter record is internally
+// consistent, and the hash forks the signing key without saying why.
+//
+// It does not take an attacker. A writer renders this payload from its config, and the
+// grammar gives it no way to spell "one member I could not establish" — so a writer
+// that gives up mid-build has a shorter, perfectly readable set to emit.
+//
+// The count closes both. A writer takes n from its config BEFORE rendering, so a build
+// that falls short says so; and a truncated payload loses members without losing the
+// count. What makes this work where the deleted zg-upstream-set-complete record did not
+// is that it travels in the same payload as the members: a separate record could be the
+// one that got lost, which is what forced a reader to treat every unclosed batch as
+// unusable.
+//
+// count=0 is the empty set, and it is the only spelling of it — an empty or
+// whitespace-only payload has no header and is refused. The two must not be
+// interchangeable: a bound of zero says the config routes nowhere, which is the
+// strongest thing a set can say, and it must not be what a writer produces by failing
+// to fill a field in.
 //
 // The order of the returned members is the order the record lists them, so a caller
 // can print the set the way it was written. UpstreamSetHash does not use that order —
 // see there.
 func parseUpstreamSet(payload string) ([]Upstream, error) {
-	if strings.TrimSpace(payload) == emptyUpstreamSet {
-		return nil, nil
-	}
 	lines := strings.Split(payload, "\n")
-	members := make([]Upstream, 0, len(lines))
-	seen := make(map[string]struct{}, len(lines))
-	for _, line := range lines {
+	// The header must be the first line that holds anything. Not "somewhere in the
+	// payload": a reader that went looking for it would accept a payload whose real
+	// header was truncated away and a member line's tail happened to spell another one.
+	var i int
+	for ; i < len(lines) && len(strings.Fields(lines[i])) == 0; i++ {
+	}
+	if i == len(lines) {
+		return nil, fmt.Errorf("%s payload %q is empty; even the empty set is written out, as %s0, so that an unwritten payload is not read as a bound of zero", EventUpstreamSet, payload, upstreamCountPrefix)
+	}
+	header := strings.Fields(lines[i])
+	if len(header) != 1 || !strings.HasPrefix(header[0], upstreamCountPrefix) {
+		return nil, fmt.Errorf("%s payload starts with %q, want a header %s<n> naming how many members follow", EventUpstreamSet, lines[i], upstreamCountPrefix)
+	}
+	want, err := strconv.Atoi(strings.TrimPrefix(header[0], upstreamCountPrefix))
+	if err != nil || want < 0 {
+		return nil, fmt.Errorf("%s payload header %q does not name a member count", EventUpstreamSet, header[0])
+	}
+
+	members := make([]Upstream, 0, want)
+	seen := make(map[string]struct{}, want)
+	for _, line := range lines[i+1:] {
 		fields := strings.Fields(line)
 		if len(fields) == 0 {
 			// A blank line is skipped rather than refused: a writer that joins members with
 			// "\n" produces a trailing one, and that is not worth making a set unreadable
-			// over. It cannot hide a member, since a member needs two fields.
+			// over. It cannot hide a member, since a member needs two fields — and it cannot
+			// hide one from the count either, which is what actually guards the tally.
 			continue
 		}
 		if len(fields) < 2 || len(fields) > 3 {
-			return nil, fmt.Errorf("%s payload line %q has %d fields, want a name, a base URL and an optional identity (or a lone %q for the empty set)", EventUpstreamSet, line, len(fields), emptyUpstreamSet)
+			return nil, fmt.Errorf("%s payload line %q has %d fields, want a name, a base URL and an optional identity", EventUpstreamSet, line, len(fields))
 		}
 		name := fields[0]
 		if !upstreamNamePattern.MatchString(name) {
@@ -118,8 +155,17 @@ func parseUpstreamSet(payload string) ([]Upstream, error) {
 		}
 		members = append(members, member)
 	}
+	// The check the rest of this function exists to make possible. A count that
+	// disagrees with what the payload spells means the writer and this reader do not
+	// have the same set, and neither of them can say which is right — so no set.
+	if len(members) != want {
+		return nil, fmt.Errorf("%s payload says %s%d and spells %d member(s), so the set it names is not the set it lists", EventUpstreamSet, upstreamCountPrefix, want, len(members))
+	}
 	if len(members) == 0 {
-		return nil, fmt.Errorf("%s payload %q names no member and is not %q; the empty set has to be written out, so that an unwritten payload is not read as a bound of zero", EventUpstreamSet, payload, emptyUpstreamSet)
+		// Distinguished from a set only by UpstreamsState, never by this slice — see the
+		// field's doc. Returned as nil rather than an empty slice so the two cannot be
+		// told apart by shape and a caller is forced to read the state.
+		return nil, nil
 	}
 	return members, nil
 }
@@ -375,10 +421,18 @@ func (r *RunningState) UpstreamSetHash() (string, error) {
 	// Refuse rather than hash, because a hash that does not identify the set it claims
 	// to is worse than no hash at all.
 	lines := make([]string, 0, len(r.Upstreams))
+	seen := make(map[string]struct{}, len(r.Upstreams))
 	for _, u := range r.Upstreams {
 		if strings.ContainsAny(u.Name+u.URL+u.Identity, " \t\n") {
 			return "", fmt.Errorf("upstream %q has whitespace in a field, so the set cannot be encoded unambiguously", u.Name)
 		}
+		// Refused for the same reason parseUpstreamSet refuses it, and reachable the same
+		// way the whitespace above is: a name bound to two destinations at once is not a
+		// set, so hashing it would produce an identity for something that has none.
+		if _, dup := seen[u.Name]; dup {
+			return "", fmt.Errorf("upstream %q appears twice, so this is not a set and has no identity to hash", u.Name)
+		}
+		seen[u.Name] = struct{}{}
 		lines = append(lines, u.Name+" "+u.URL+" "+u.Identity+"\n")
 	}
 	sort.Strings(lines)

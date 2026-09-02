@@ -32,16 +32,20 @@ const (
 	EventConfigUpdate = "zg-config-update"
 
 	// EventUpstreamSet carries the WHOLE set of destinations the broker may forward
-	// unsealed plaintext to: one member per line, "<name> <base URL>" or
-	// "<name> <base URL> <identity>", or the single word "none" for the empty set.
+	// unsealed plaintext to: a header line naming how many members follow, then one
+	// member per line.
+	//
+	//	count=2
+	//	engine1 http://engine-1:8000/v1
+	//	vendor https://vendor.example/v1 openrouter
 	//
 	// That set is the complete list of places a request can end up, which is what the
 	// config's mapping of models onto names cannot itself establish — the mapping
 	// lives in the config file, and no boot measurement covers its content.
 	//
 	// A record is a snapshot, not a mutation, so the last one decides and the earlier
-	// ones are history. See parseUpstreamSet for why the alternative — one record per
-	// member — makes a truncated write unrepairable on an append-only log.
+	// ones are history. See parseUpstreamSet for that, and for why the count has to
+	// travel in the same payload as the members it counts.
 	EventUpstreamSet = "zg-upstream-set"
 
 	// EventNamespace prefixes every event this project writes. dstack already
