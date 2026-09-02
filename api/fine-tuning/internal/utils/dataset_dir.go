@@ -50,7 +50,9 @@ func canonicalAddressDir(userAddress string) string {
 }
 
 // datasetHashPattern is what a dataset hash may be: exactly what SaveDataset produces,
-// which is "0x" plus the lowercase hex of a sha256.
+// which is "0x" plus the lowercase hex of a Keccak-256 (crypto.NewKeccakState, not sha256
+// — the digest is 32 bytes either way, so the pattern is the same, but saying the wrong
+// one sends the next reader to the wrong writer).
 //
 // It exists because the hash is a PATH ELEMENT and was the only one never checked.
 // DatasetDir's doc above explains at length why UserAddress has to pass
