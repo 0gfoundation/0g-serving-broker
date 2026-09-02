@@ -3,8 +3,10 @@ package db
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -53,9 +55,29 @@ func (d *DB) GetTaskProgress(id *uuid.UUID) (string, error) {
 	return svc.Progress, nil
 }
 
+// userAddressSpellings returns every form the user_address column can hold for one
+// account, lowercased, for use with "LOWER(user_address) IN ?".
+//
+// It is the SQL counterpart of ctrl.sameUser, and it has to exist because SQL cannot
+// call common.HexToAddress. Two spellings, not one, because schema.Task.Bind stores
+// the caller's own casing and accepts an address with or without the "0x" prefix — so
+// a row created by one client and a query from another differ in either or both, and a
+// byte-exact WHERE silently returns nothing. Lowercasing covers the case difference;
+// listing the bare and prefixed forms covers the prefix. Nothing else varies: Bind
+// trims whitespace and common.IsHexAddress has already required exactly 40 hex digits.
+//
+// LOWER() gives up any index on the column. That is the trade for not rewriting stored
+// rows, and it is the pattern the inference DB already uses for the same reason
+// (inference/internal/db/user.go). CancelTask does not need this — it holds the row, so
+// it passes the row's own spelling and the comparison stays exact.
+func userAddressSpellings(userAddress string) []string {
+	bare := strings.ToLower(strings.TrimPrefix(common.HexToAddress(userAddress).Hex(), "0x"))
+	return []string{bare, "0x" + bare}
+}
+
 func (d *DB) ListTask(userAddress string, latest, desc bool) ([]Task, error) {
 	var tasks []Task
-	query := d.db.Where(&Task{UserAddress: userAddress})
+	query := d.db.Where("LOWER(user_address) IN ?", userAddressSpellings(userAddress))
 	if latest {
 		query = query.Order("created_at DESC").Limit(1)
 	} else {
@@ -109,7 +131,7 @@ func (d *DB) UnFinishedTaskCount(userAddress string) (int64, error) {
 	}
 
 	ret := d.db.Model(&Task{}).
-		Where("progress NOT IN ? AND user_address = ?", finishedStates, userAddress).
+		Where("progress NOT IN ? AND LOWER(user_address) IN ?", finishedStates, userAddressSpellings(userAddress)).
 		Count(&count)
 	if ret.Error != nil {
 		return 0, ret.Error

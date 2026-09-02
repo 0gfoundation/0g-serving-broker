@@ -2,6 +2,7 @@ package db
 
 import (
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/0glabs/0g-serving-broker/inference/model"
@@ -109,13 +110,67 @@ func (d *DB) ListIdleAdapters(idleThreshold time.Duration) ([]model.LoRAAdapter,
 // loop dead-locks on `Duplicate entry for key 'task_id'` and the task never
 // reaches Delivered (Bug Report — May 2026, Bug #3).
 func (d *DB) CreateAdapterKey(key *model.AdapterKey) error {
-	return d.db.
-		Where("task_id = ?", key.TaskID).
-		Assign(model.AdapterKey{
-			StorageHash:    key.StorageHash,
-			ProviderEncKey: key.ProviderEncKey,
-		}).
-		FirstOrCreate(key).Error
+	// Explicit read-then-write rather than Assign+FirstOrCreate, because the three
+	// columns are ONE description of ONE artifact and the rules for a push that
+	// omits teeSignerAddress cannot be expressed with Assign: a struct Assign drops
+	// zero values, so it would apply the new storageHash and providerEncKey while
+	// silently keeping the old signer.
+	//
+	// storageHash identifies the uploaded encrypted artifact: normally 0G Storage's
+	// root hash, or keccak of the encrypted file when the upload failed and the
+	// finalizer fell back to the local copy (finalizer.go:112-118). Either way it is
+	// derived from the encrypted bytes, so it changes whenever the artifact is
+	// re-encrypted — and re-encryption changes the chunk-tag stream the signature
+	// covers. That is what makes it the right discriminator:
+	//
+	//   - same storageHash, no signer supplied → the stored signer still describes
+	//     these exact bytes, so preserve it. This is the version-skew retry case; a
+	//     fine-tuning broker that predates the field must not wipe a good signer.
+	//
+	//   - storageHash changed, no signer supplied → the stored signer describes the
+	//     PREVIOUS artifact. Keeping it would make verification fail as "signer
+	//     mismatch", which reads as tampering and sends whoever debugs it down the
+	//     wrong path. Clearing it fails closed too, but with the documented,
+	//     recoverable "no usable TEE signer" error that names how to complete the
+	//     row.
+	//
+	//   - signer supplied → it wins, which is what a rotation after an enclave-image
+	//     change needs.
+	return d.db.Transaction(func(tx *gorm.DB) error {
+		var existing model.AdapterKey
+		err := tx.Where("task_id = ?", key.TaskID).First(&existing).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return tx.Create(key).Error
+		}
+		if err != nil {
+			return err
+		}
+
+		signer := key.TeeSignerAddress
+		// EqualFold, not ==: these are hex strings, and the manual remediation the
+		// refusal advertises is an operator hand-assembling this payload. Pasting the
+		// same hash in a different case would otherwise be read as "the artifact
+		// changed", clear a perfectly good signer, and take a working adapter out of
+		// service. Our own sender is always hexutil.Encode (lower-case), so this only
+		// ever bites the hand-written path.
+		if signer == "" && strings.EqualFold(existing.StorageHash, key.StorageHash) {
+			signer = existing.TeeSignerAddress
+		}
+
+		// A map, not a struct: the deliberate clear above writes an empty string, and
+		// a struct update would drop it as a zero value.
+		//
+		// The WHERE is explicit because model.AdapterKey has no primary key — its
+		// only key is the unique index on task_id — so gorm cannot derive one from
+		// the loaded row and Updates would fail with "WHERE conditions required".
+		return tx.Model(&model.AdapterKey{}).
+			Where("task_id = ?", key.TaskID).
+			Updates(map[string]interface{}{
+				"storage_hash":       key.StorageHash,
+				"provider_enc_key":   key.ProviderEncKey,
+				"tee_signer_address": signer,
+			}).Error
+	})
 }
 
 // GetAdapterKeyByTaskID retrieves a pre-pushed adapter key by its task ID.

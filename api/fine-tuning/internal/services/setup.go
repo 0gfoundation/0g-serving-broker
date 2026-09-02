@@ -133,7 +133,12 @@ func (s *Setup) prepareData(ctx context.Context, task *db.Task, paths *utils.Tas
 	// Step 2: Try user-uploaded dataset (stored in {dataDir}/datasets/{userAddress}/{datasetHash})
 	// First check for pre-converted HF format (_hf suffix), then fall back to raw JSONL
 	if !datasetReady {
-		uploadedDatasetPath := filepath.Join(utils.GetDataDir(), "datasets", task.UserAddress, task.DatasetHash)
+		// ResolveDatasetDir, not a path built from task.UserAddress: that string is
+		// whatever spelling the task body carried, while the directory was named by
+		// whatever spelling the UPLOAD carried, and both ends authenticate every spelling.
+		// The resolver folds them onto one name and still finds an upload written before
+		// that folding existed. See utils.DatasetDir.
+		uploadedDatasetPath := filepath.Join(utils.ResolveDatasetDir(task.UserAddress), task.DatasetHash)
 		hfDatasetPath := uploadedDatasetPath + "_hf"
 
 		// Try HF format first
@@ -650,7 +655,6 @@ func (s *Setup) verifyProviderBalance(ctx context.Context) error {
 	return nil
 }
 
-
 func (s *Setup) getHash(
 	fileRootHash string,
 	userAddress common.Address,
@@ -679,14 +683,13 @@ func (s *Setup) verifySignature(signature string, messageHash common.Hash, userA
 		return errSignature
 	}
 
-	v1 := sigBytes[64] - 27
-	pubKey, err := crypto.SigToPub(messageHash.Bytes(), append(sigBytes[:64], v1))
+	// Normalise rather than subtract: a bare "- 27" underflows a raw 0 (what
+	// go-ethereum's crypto.Sign emits) to 229 and rejects a valid signature.
+	pubKey, err := util.RecoverPubkey(messageHash.Bytes(), sigBytes)
 	if err != nil {
 		s.logger.Errorf("failed to recover public key: %v", err)
 		return errSignature
-
 	}
-
 	recoveredAddress := crypto.PubkeyToAddress(*pubKey)
 	if !bytes.EqualFold([]byte(recoveredAddress.Hex()), []byte(userAddress.Hex())) {
 		s.logger.Errorf("signature verification failed")

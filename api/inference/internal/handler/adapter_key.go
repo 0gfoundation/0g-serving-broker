@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
 
 	"github.com/0glabs/0g-serving-broker/inference/model"
@@ -14,6 +15,19 @@ type adapterKeyRequest struct {
 	TaskID         string `json:"taskId" binding:"required"`
 	StorageHash    string `json:"storageHash" binding:"required"`
 	ProviderEncKey string `json:"providerEncKey" binding:"required"`
+	// TeeSignerAddress is the producing enclave's signer address, used to verify the
+	// artifact's TEE tag signature before the adapter is decrypted and deployed.
+	//
+	// Deliberately NOT binding:"required". These are two separately deployed
+	// services, and the error codes here are a documented backwards-compatible
+	// contract. Requiring it would make every push from a fine-tuning broker that
+	// predates this field return 400: pushAdapterKey burns its three retries and
+	// Finalizer.Execute returns before UpdateTask and AddDeliverable, so training
+	// that already completed and was paid for never reaches the contract and the
+	// task is eventually marked failed. Absent, the field is stored empty and
+	// lora.Manager fails closed at deploy time with an actionable "re-push"
+	// message — the adapter does not deploy, but nothing is destroyed.
+	TeeSignerAddress string `json:"teeSignerAddress"`
 }
 
 // adapterKeyErrorCode is a machine-readable identifier sent alongside the
@@ -29,6 +43,7 @@ const (
 	adapterKeyErrInvalidHashSize = "invalid_hash_size" // storageHash length wrong → caller bug, never retry
 	adapterKeyErrInvalidHashHex  = "invalid_hash_hex"  // storageHash not hex → caller bug, never retry
 	adapterKeyErrInvalidEncKey   = "invalid_enc_key"   // providerEncKey not hex → caller bug, never retry
+	adapterKeyErrInvalidSigner   = "invalid_signer"    // teeSignerAddress not a 20-byte hex address → caller bug, never retry
 	adapterKeyErrPersist         = "persist_failed"    // db error during upsert → caller MAY retry with backoff
 )
 
@@ -97,10 +112,46 @@ func (h *Handler) ReceiveAdapterKey(c *gin.Context) {
 		return
 	}
 
+	// The signer address gates TEE tag-signature verification on the consumption
+	// path. An omitted value is accepted (see the field comment) and stored empty
+	// so the deploy path fails closed with a useful message; a value that IS
+	// present must be usable, because a malformed or zero one would otherwise be
+	// rejected much later — after a full 0G Storage download and ECIES decrypt —
+	// and with a message about the field being absent when it was not.
+	//
+	// common.IsHexAddress accepts the all-zero address, so it is excluded
+	// explicitly: it is not a signer any enclave can produce, and letting it
+	// through would let it act as a skip-verification sentinel at this layer.
+	signerAddress := ""
+	if trimmed := strings.TrimSpace(req.TeeSignerAddress); trimmed != "" {
+		if !common.IsHexAddress(trimmed) || common.HexToAddress(trimmed) == (common.Address{}) {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "teeSignerAddress must be a non-zero 20-byte hex address",
+				"code":  adapterKeyErrInvalidSigner,
+			})
+			return
+		}
+		// Checksummed so a later string comparison is not tripped by case drift.
+		signerAddress = common.HexToAddress(trimmed).Hex()
+	}
+
+	// A signer-less push is accepted so a version-skewed fine-tuning broker does not
+	// strand a paid-for deliverable — but it means the adapter will refuse to deploy
+	// later, after the user has acknowledged and paid. Logged at Warn so the skew is
+	// visible at the point it is still cheap to fix, rather than only surfacing as a
+	// failed deploy once nothing can be done about that task.
+	if signerAddress == "" {
+		h.logger.Warnf(
+			"adapter-key push for task %s carries no teeSignerAddress: the artifact's TEE tag signature will not be verifiable and the adapter will NOT deploy. "+
+				"This usually means the fine-tuning broker predates the field and needs upgrading; the key can be completed later by re-pushing to this endpoint with teeSignerAddress set",
+			req.TaskID)
+	}
+
 	key := &model.AdapterKey{
-		TaskID:         req.TaskID,
-		StorageHash:    req.StorageHash,
-		ProviderEncKey: req.ProviderEncKey,
+		TaskID:           req.TaskID,
+		StorageHash:      req.StorageHash,
+		ProviderEncKey:   req.ProviderEncKey,
+		TeeSignerAddress: signerAddress,
 	}
 
 	if err := h.ctrl.CreateAdapterKey(key); err != nil {

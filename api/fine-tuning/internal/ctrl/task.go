@@ -20,6 +20,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/common/util"
 	constant "github.com/0glabs/0g-serving-broker/fine-tuning/const"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/db"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/utils"
@@ -79,6 +80,28 @@ func (c *Ctrl) CreateTask(ctx context.Context, task *schema.Task) (*uuid.UUID, e
 	return dbTask.ID, nil
 }
 
+// sameUser reports whether two spellings of a user address denote the same
+// account.
+//
+// An address reaches these checks from two ingresses that normalise onto nothing:
+// the JSON body (schema.Task.Bind, which validates the form but keeps the
+// caller's casing) and the URL path parameter, which is not touched at all. The
+// stored value is therefore whatever spelling created the task, and the value
+// being compared against is whatever spelling is cancelling or reading it. A
+// byte-exact compare refuses a user their own task over that difference alone:
+// create with signer.address.toLowerCase(), cancel with wallet.address, and the
+// EIP-55 mixed-case form does not equal the lower-case one in the row.
+//
+// The signature checks on these same routes already compare through
+// common.HexToAddress, so before this the request would pass authentication and
+// then be told the task belongs to someone else.
+//
+// This is the comparison, not a normalisation: nothing about what is stored
+// changes, so no existing row has to be rewritten.
+func sameUser(a, b string) bool {
+	return common.HexToAddress(a) == common.HexToAddress(b)
+}
+
 func (c *Ctrl) CancelTask(ctx context.Context, task *schema.Task) error {
 	if err := c.validateSignature(task); err != nil {
 		return errors.Unauthorized(err)
@@ -94,11 +117,16 @@ func (c *Ctrl) CancelTask(ctx context.Context, task *schema.Task) error {
 		}
 		return errors.Internal(errors.Wrap(err, "load task"))
 	}
-	if existing.UserAddress != task.UserAddress {
+	if !sameUser(existing.UserAddress, task.UserAddress) {
 		return errors.NewForbidden("task does not belong to this user")
 	}
 
-	if err := c.db.CancelTask(task.ID, task.UserAddress); err != nil {
+	// existing.UserAddress, not task.UserAddress: the check above proved they are the
+	// same account, and the UPDATE's WHERE user_address = ? is a SQL string compare
+	// whose case sensitivity depends on the column's collation. Passing the spelling
+	// that is actually in the row makes the statement match whatever that collation
+	// turns out to be.
+	if err := c.db.CancelTask(task.ID, existing.UserAddress); err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			// Re-read once to disambiguate two RowsAffected==0 causes the
 			// preflight cannot rule out:
@@ -137,18 +165,31 @@ func (*Ctrl) validateSignature(task *schema.Task) error {
 		return fmt.Errorf("invalid signature length %d, expected 65", len(sigBytes))
 	}
 
-	if sigBytes[64] != 27 && sigBytes[64] != 28 {
-		return fmt.Errorf("invalid recovery ID (V): got %d", sigBytes[64])
-	}
-
-	sigBytes[64] -= 27
-	pubKey, err := crypto.SigToPub(hash, sigBytes)
+	// Accepts a raw 0/1 as well as 27/28. Requiring 27/28 rejected signatures
+	// produced by go-ethereum's crypto.Sign, which emits the raw form — a client
+	// signing with the standard Go library was refused for a valid signature.
+	recoveredAddress, err := util.RecoverSigner(hash, sigBytes)
 	if err != nil {
 		return err
 	}
-
-	recoveredAddress := crypto.PubkeyToAddress(*pubKey)
-	if recoveredAddress.Hex() != task.UserAddress {
+	// Compare as addresses, not as strings: Hex() returns the EIP-55 mixed-case form
+	// while task.UserAddress is whatever spelling the caller used, so a byte-exact
+	// compare refused valid signatures over their representation. The two sibling
+	// verifiers below already compared this way.
+	//
+	// Every other place a spelling difference could bite agrees with it now, and this
+	// paragraph used to say the opposite. It described CancelTask and db.CancelTask as
+	// still comparing byte-exact and claimed that closing them needed a migration; both
+	// were fixed on this branch without one — CancelTask passes the row's own spelling so
+	// its WHERE stays exact, and the two filters that take an address from the caller
+	// compare LOWER(user_address) against every spelling schema.Task.Bind can store.
+	//
+	// The one that was NOT a comparison, and so was missed twice: the dataset DIRECTORY
+	// name. It is written from the URL path parameter and read back from the JSON body, so
+	// the same difference broke a task's setup instead of its authorisation. That is
+	// utils.DatasetDir now. Nothing about what is stored in the DB changed either way, so
+	// the migration this comment predicted was never needed.
+	if recoveredAddress != common.HexToAddress(task.UserAddress) {
 		return errors.New("signature verification failed: address mismatch")
 	}
 
@@ -189,8 +230,20 @@ func (c *Ctrl) GetProgress(id *uuid.UUID, userAddress string) (string, error) {
 		return "", errors.Internal(errors.Wrap(err, "get task"))
 	}
 
-	// Verify user owns this task
-	if task.UserAddress != userAddress {
+	// NOT an ownership check on this route, whatever it looks like. GetProgress serves
+	// GET /v1/user/:userAddress/task/:taskID/log, which handler.Register wires with no
+	// middleware and no signature verification — so `userAddress` is a path parameter the
+	// CALLER chose, and this compares the caller's claim against itself. Anyone holding a
+	// task UUID reads the log by naming the owner's address, which is public on-chain.
+	//
+	// It is kept because it is the right comparison and it becomes a real check the moment
+	// the route authenticates the address, which is what DownloadLoRA already does on the
+	// sibling route (VerifyDownloadSignature, task.go:422 — a timestamped signature over the
+	// task id). Doing the same here changes the contract for every existing client of three
+	// GET routes, so it is deliberately not smuggled in alongside an address-comparison fix;
+	// tracked separately. GetTask and ListTask have the same exposure and no comparison at
+	// all.
+	if !sameUser(task.UserAddress, userAddress) {
 		return "", errors.NewForbidden("task does not belong to this user")
 	}
 
@@ -269,11 +322,11 @@ func (c *Ctrl) validateTrainingParams(task *schema.Task) error {
 
 	// Define required parameters and their constraints
 	requiredParams := map[string]bool{
-		"neftune_noise_alpha":           true,
-		"num_train_epochs":              true,
-		"per_device_train_batch_size":   true,
-		"learning_rate":                 true,
-		"max_steps":                     true,
+		"neftune_noise_alpha":         true,
+		"num_train_epochs":            true,
+		"per_device_train_batch_size": true,
+		"learning_rate":               true,
+		"max_steps":                   true,
 	}
 
 	// Define forbidden parameters that users often add by mistake
@@ -422,17 +475,11 @@ func (c *Ctrl) VerifyDownloadSignature(id *uuid.UUID, userAddress string, signat
 		return fmt.Errorf("invalid signature length %d, expected 65", len(sigBytes))
 	}
 
-	if sigBytes[64] != 27 && sigBytes[64] != 28 {
-		return fmt.Errorf("invalid recovery ID (V): got %d", sigBytes[64])
-	}
-
-	sigBytes[64] -= 27
-	pubKey, err := crypto.SigToPub(hash, sigBytes)
+	// Raw 0/1 accepted as well as 27/28; see the note on the first recovery above.
+	recoveredAddr, err := util.RecoverSigner(hash, sigBytes)
 	if err != nil {
 		return errors.Wrap(err, "recover public key from signature")
 	}
-
-	recoveredAddr := crypto.PubkeyToAddress(*pubKey)
 	expectedAddr := common.HexToAddress(userAddress)
 
 	if recoveredAddr != expectedAddr {
@@ -480,17 +527,11 @@ func (c *Ctrl) VerifyUploadSignature(userAddress string, signature string, times
 		return fmt.Errorf("invalid signature length %d, expected 65", len(sigBytes))
 	}
 
-	if sigBytes[64] != 27 && sigBytes[64] != 28 {
-		return fmt.Errorf("invalid recovery ID (V): got %d", sigBytes[64])
-	}
-
-	sigBytes[64] -= 27
-	pubKey, err := crypto.SigToPub(hash, sigBytes)
+	// Raw 0/1 accepted as well as 27/28; see the note on the first recovery above.
+	recoveredAddr, err := util.RecoverSigner(hash, sigBytes)
 	if err != nil {
 		return errors.Wrap(err, "recover public key from signature")
 	}
-
-	recoveredAddr := crypto.PubkeyToAddress(*pubKey)
 	expectedAddr := common.HexToAddress(userAddress)
 
 	if recoveredAddr != expectedAddr {
@@ -516,7 +557,7 @@ func (c *Ctrl) GetLoRAModel(id *uuid.UUID, userAddress string) (string, error) {
 	}
 
 	// Verify user owns this task
-	if task.UserAddress != userAddress {
+	if !sameUser(task.UserAddress, userAddress) {
 		return "", errors.NewForbidden("task does not belong to this user")
 	}
 
@@ -573,8 +614,20 @@ func (c *Ctrl) SaveDataset(userAddress string, file *multipart.FileHeader) (stri
 	}
 
 	// 4. Create dataset directory and validate path
+	//
+	// utils.DatasetDir, not the caller's own spelling: this directory is written from the
+	// URL path parameter and read back from schema.Task.UserAddress (the JSON body), and
+	// both ingresses accept every spelling common.IsHexAddress does while
+	// VerifyUploadSignature authenticates all of them. Upload with wallet.address, create
+	// the task with signer.address.toLowerCase(), and on a case-sensitive filesystem setup
+	// looks in a directory that does not exist. See DatasetDir's doc.
+	//
+	// The checks in step 3 above are now redundant — a folded address is "0x" plus 40
+	// lowercase hex digits and cannot traverse — and are kept because they are what
+	// guarantees that, together with the IsHexAddress in step 1. DatasetDir normalises; it
+	// does not validate, and it says so.
 	baseDir := filepath.Join(utils.GetDataDir(), "datasets")
-	datasetDir := filepath.Join(baseDir, userAddress)
+	datasetDir := utils.DatasetDir(userAddress)
 
 	// Ensure datasetDir is within baseDir (prevent path traversal)
 	absDatasetDir, err := filepath.Abs(datasetDir)
@@ -796,4 +849,3 @@ func validateJSONLFormat(content []byte) error {
 
 	return nil
 }
-

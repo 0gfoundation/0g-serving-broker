@@ -4,12 +4,15 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/sha256"
+	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	pccrypto "github.com/0gfoundation/0g-pc-e2ee/protocol/crypto"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/ethclient"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/log"
@@ -401,4 +404,134 @@ func (s *TeeService) SignEIP712(digest []byte) ([]byte, error) {
 	}
 
 	return signature, nil
+}
+
+// hardhatChainID is the chain id of the local hardhat node the integration
+// stack brings up (api/inference/integration/all-in-one). It is the only chain
+// the mock backend is allowed to run against.
+const hardhatChainID = 31337
+
+// ClientTypeForNetwork resolves the NETWORK environment variable to a TEE
+// backend, refusing the one combination that has no safe meaning: the mock
+// backend on a chain that is not a local hardhat node.
+//
+// MockTappdClient.DeriveKey returns a constant that has been public in this
+// repository since 6a328696, and it ignores the path argument, so getSigningKey
+// and getEncKey are handed the SAME public value. Both keys are therefore
+// recomputable by anyone with a checkout: the secp256k1 signer is
+// 0x325744be57db298C2652c672B32Eb12875d92D83 and the X25519 private key follows
+// from deriveEncKey on that same constant. Against a local hardhat node that is
+// just a test fixture. Against a real chain it is a broker that writes an
+// attacker-known address into its on-chain teeSignerAddress (contract.
+// addOrUpdateService) and serves an attacker-known enc_pub from
+// /v1/e2ee/pubkey, which makes every sealed prompt readable and every "TEE"
+// signature forgeable by anyone — the same key-custody loss that got the GCP
+// and AliCloud backends deleted, reached through a value we ship as a default.
+//
+// Nothing else prevents the combination. NETWORK selects only the backend; the
+// chain is configured independently by network.url and network.chainID, and
+// NETWORK=hardhat is the default in the all-in-one compose file.
+//
+// The declared chain id is checked first because it fails without touching the
+// network, and then the node is asked, because the declaration alone proves
+// nothing: a config declaring 31337 while pointing network.url at a real chain
+// would otherwise pass. Both halves live in this one function rather than beside
+// each other, so selecting the mock backend cannot be separated from proving the
+// chain is local — an earlier version exported the dial as its own function that
+// "callers are expected to call", which is not a property, only a hope.
+//
+// The error paths return Phala rather than the ClientType zero value, which is
+// Mock: a caller that mishandles the error must not thereby select the very
+// backend this function exists to withhold.
+func ClientTypeForNetwork(ctx context.Context, network string, chainID int64, url string) (ClientType, error) {
+	switch network {
+	case "hardhat":
+		if chainID != hardhatChainID {
+			return Phala, fmt.Errorf(
+				"NETWORK=hardhat selects the mock TEE backend, whose signing and E2EE keys are a constant committed to this repository, but network.chainID is %d rather than the local hardhat node's %d. Every key this broker would publish is already known to anyone with a checkout, so refusing to start: set NETWORK=phala for a real chain, or point network.url/chainID at a local hardhat node",
+				chainID, hardhatChainID)
+		}
+		if err := verifyChainIsLocal(ctx, url); err != nil {
+			return Phala, err
+		}
+		return Mock, nil
+	// gcp and alicloud selected TEE backends that have been REMOVED (see
+	// ClientType). Rejected by name rather than left to the Phala default: a
+	// deployment still carrying one of these values asked for a backend that no
+	// longer exists, and silently running it on a different one is how a config
+	// mistake becomes an attestation nobody notices is wrong.
+	case "gcp", "alicloud":
+		return Phala, fmt.Errorf(
+			"NETWORK=%s is no longer supported: the GCP and AliCloud TEE backends were removed because they could not bind a key to the enclave measurement. Use NETWORK=phala (or hardhat for local development)",
+			network)
+	default:
+		return Phala, nil
+	}
+}
+
+// VerifierForNetwork returns the TEE verifier a service advertises on-chain for
+// the given NETWORK value, so the verifier and the backend that produces the quote
+// are decided in one place.
+//
+// They were not, and disagreed: with NETWORK unset ClientTypeForNetwork selects
+// Phala, which produces a dstack quote, while the switch in
+// inference/internal/contract.addOrUpdateService published cryptopilot. A client
+// that honours TEEVerifier would then reach for the wrong verifier and fail. The
+// default here follows the backend — Phala means dstack.
+//
+// hardhat keeps cryptopilot rather than gaining a meaning of its own: its quote is
+// MockTappdClient's, which no verifier accepts, so the value is inert either way
+// and changing it would only add a third case to reason about.
+func VerifierForNetwork(network string) string {
+	switch network {
+	case "hardhat":
+		return VerifierCryptoPilot
+	default:
+		return VerifierDStack
+	}
+}
+
+// verifyChainIsLocal proves that the node behind url really is a local hardhat
+// chain. Only ClientTypeForNetwork's hardhat branch reaches it, so no other
+// backend ever pays for the round trip.
+//
+// The declared network.chainID catches the configuration this whole guard exists
+// for — the wizard and the compose file both hand out a real chain id — but a
+// config that declares 31337 while pointing network.url at a real chain passes it.
+//
+// Such a config cannot settle: EIP-155 signing uses the declared id
+// (common/chain.EthereumNetwork builds its transactor from it), so no transaction
+// it produces is accepted by the chain it is actually talking to. That is not
+// enough on its own. GET /v1/quote and GET /v1/e2ee/pubkey are served straight
+// off TeeService and need no transaction at all, so a client sealing to the
+// advertised enc_pub would be sealing to a key anyone can derive from a checkout.
+// Worse for a provider already registered on-chain with a real Phala signer that
+// restarts into such a config: its on-chain teeSignerAddress stays valid while the
+// broker serves mock key material under it.
+//
+// One eth_chainId at startup closes that, and only the mock path pays for it.
+func verifyChainIsLocal(ctx context.Context, url string) error {
+	if url == "" {
+		return fmt.Errorf("NETWORK=hardhat selects the mock TEE backend, but network.url is empty, so the chain it would run against cannot be checked")
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	client, err := ethclient.DialContext(ctx, url)
+	if err != nil {
+		return fmt.Errorf("NETWORK=hardhat selects the mock TEE backend, whose keys are public, so the chain behind network.url must be confirmed local before starting; dialing %s failed: %w", url, err)
+	}
+	defer client.Close()
+
+	observed, err := client.ChainID(ctx)
+	if err != nil {
+		return fmt.Errorf("NETWORK=hardhat selects the mock TEE backend, whose keys are public, so the chain behind network.url must be confirmed local before starting; eth_chainId against %s failed: %w", url, err)
+	}
+	if observed.Int64() != hardhatChainID {
+		return fmt.Errorf(
+			"NETWORK=hardhat selects the mock TEE backend, whose signing and E2EE keys are a constant committed to this repository, but %s reports chain id %s rather than the local hardhat node's %d. Refusing to publish publicly derivable keys against that chain: set NETWORK=phala, or point network.url at a local hardhat node",
+			url, observed, hardhatChainID)
+	}
+	return nil
 }

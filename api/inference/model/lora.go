@@ -36,4 +36,15 @@ type AdapterKey struct {
 	TaskID         string `json:"taskId" gorm:"type:varchar(255);not null;uniqueIndex"`
 	StorageHash    string `json:"storageHash" gorm:"type:varchar(255);not null"`
 	ProviderEncKey string `json:"providerEncKey" gorm:"type:text;not null"`
+	// TeeSignerAddress is the address the producing enclave signed the artifact's
+	// chunk-tag stream with. AesDecryptLargeFile verifies the 65-byte signature at
+	// the head of the downloaded artifact against it; without it the signature is
+	// unverifiable and the adapter must not be deployed.
+	//
+	// A plain string, not *string: gorm writes "" rather than NULL for a push that
+	// omits the field, and reads a pre-migration NULL back as "". Pre-migration rows
+	// and explicitly-empty ones are therefore NOT distinguishable, and nothing
+	// depends on distinguishing them — lora.Manager treats "", a malformed value and
+	// 0x0 identically, refusing to deploy in every case.
+	TeeSignerAddress string `json:"teeSignerAddress" gorm:"type:varchar(42)"`
 }

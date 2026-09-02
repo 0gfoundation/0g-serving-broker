@@ -720,3 +720,125 @@ func TestConcurrentGetAndSet(t *testing.T) {
 
 	wg.Wait()
 }
+
+// The TEE signer guard is what makes the whole verification fail closed, so its
+// three refusal branches are pinned: absent, explicitly zero, and malformed. Each
+// must be rejected BEFORE any download or decrypt, and the message must name the
+// action an operator can actually take — pushAdapterKey has one caller inside
+// Finalizer.Execute, so an already-delivered task is never re-pushed on its own.
+func TestDownloadFromStorage_RefusesUnusableTeeSigner(t *testing.T) {
+	cases := []struct {
+		name   string
+		signer string
+	}{
+		{"absent", ""},
+		{"explicit zero address", "0x0000000000000000000000000000000000000000"},
+		{"malformed", "not-an-address"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			database := setupTestDB(t)
+
+			taskID := "task-signer-" + tc.name
+			if err := database.CreateAdapterKey(&model.AdapterKey{
+				TaskID:           taskID,
+				StorageHash:      "0x8888888888888888888888888888888888888888888888888888888888888888",
+				ProviderEncKey:   "0xabcdef",
+				TeeSignerAddress: tc.signer,
+			}); err != nil {
+				t.Fatalf("seed adapter key: %v", err)
+			}
+
+			m := &Manager{
+				adapters:          make(map[string]*AdapterInfo),
+				storageDownloader: &StorageDownloader{logger: getTestLogger()},
+				db:                database,
+				logger:            getTestLogger(),
+			}
+			info := &AdapterInfo{TaskID: taskID, AdapterName: "ft-signer-" + tc.name}
+
+			err := m.downloadFromStorage(context.Background(), info)
+			if err == nil {
+				t.Fatal("expected a refusal for an unusable TEE signer address")
+			}
+			if !contains(err.Error(), "no usable TEE signer address") {
+				t.Errorf("error = %q, want the signer refusal", err.Error())
+			}
+			// The remediation must be actionable, not "wait for the fine-tuning broker",
+			// and both halves must name real routes: the push endpoint the operator can
+			// call, and the deploy endpoint that actually re-enters the download.
+			if !contains(err.Error(), "/internal/v1/adapter-keys") {
+				t.Errorf("error = %q, want it to name the push endpoint an operator can call", err.Error())
+			}
+			if !contains(err.Error(), "/v1/lora/adapters/deploy") {
+				t.Errorf("error = %q, want the deploy route with its /v1 prefix — the unprefixed path 404s", err.Error())
+			}
+		})
+	}
+}
+
+// A refused adapter is left in Failed, and downloadFromStorage has removed its
+// files — so the remediation the refusal names is only real if a Failed adapter
+// can re-enter the DOWNLOAD path, not just the deploy step. UserDeployAdapter used
+// to send Failed straight to deployToVLLM, which could never succeed against a
+// removed directory, making every refusal terminal and recoverable only by hand.
+func TestUserDeployAdapter_FailedAdapterReEntersDownload(t *testing.T) {
+	database := setupTestDB(t)
+
+	const taskID = "task-failed-recovers"
+	const adapterName = "ft-failed-recovers"
+	// No signer: the first attempt is refused, exactly as an upgraded broker would
+	// refuse a key row that predates the column.
+	if err := database.CreateAdapterKey(&model.AdapterKey{
+		TaskID:         taskID,
+		StorageHash:    "0x9999999999999999999999999999999999999999999999999999999999999999",
+		ProviderEncKey: "0xabcdef",
+	}); err != nil {
+		t.Fatalf("seed adapter key: %v", err)
+	}
+
+	m := &Manager{
+		adapters:          make(map[string]*AdapterInfo),
+		storageDownloader: &StorageDownloader{logger: getTestLogger()},
+		db:                database,
+		logger:            getTestLogger(),
+		ctx:               context.Background(),
+	}
+	// A path that does not exist, i.e. the state downloadFromStorage leaves behind.
+	m.adapters[adapterName] = &AdapterInfo{
+		TaskID:      taskID,
+		AdapterName: adapterName,
+		AdapterPath: filepath.Join(t.TempDir(), "not-downloaded"),
+		State:       model.AdapterStateFailed,
+	}
+
+	if err := m.UserDeployAdapter(context.Background(), adapterName); err != nil {
+		t.Fatalf("UserDeployAdapter on a Failed adapter: %v", err)
+	}
+
+	// The worker runs in a goroutine. UserDeployAdapter set the state to Loading
+	// synchronously, so wait for it to settle back to Failed: the key still has no
+	// signer, so the re-download is refused again.
+	//
+	// That it settles at all is the discriminator. sllmClient is nil here, so if the
+	// state machine had gone straight to deployToVLLM — what it did before this
+	// change — the goroutine would have panicked on the nil client and taken the
+	// test binary with it. Reaching Failed cleanly means downloadFromStorage ran and
+	// refused first, i.e. the download path was re-entered.
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		if got := m.GetAdapter(adapterName); got != nil && got.State == model.AdapterStateFailed {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	got := m.GetAdapter(adapterName)
+	if got == nil {
+		t.Fatal("adapter vanished")
+	}
+	if got.State != model.AdapterStateFailed {
+		t.Errorf("state = %s, want failed after a refused re-download", got.State)
+	}
+}
