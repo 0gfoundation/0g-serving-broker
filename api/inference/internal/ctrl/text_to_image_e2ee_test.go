@@ -174,34 +174,60 @@ func TestEveryChatRouteHasARecognizedSurface(t *testing.T) {
 	}
 }
 
-// Every profile this broker can be asked to seal a STREAM under must have a
-// synthetic terminal frame the profile itself can seal, since that frame is what
-// caps a stream whose upstream dropped off. The check lives in
-// newResponseFrameSealer so a gap fails the request up front; this pins the
-// invariant, so a frame-typed profile added to profileForRequest without an
-// entry in synthFinalFrameFor fails here rather than in production at EOF.
-func TestEverySealableProfileHasASealableSyntheticFinalFrame(t *testing.T) {
-	seen := map[wire.Profile]bool{}
-	for _, svcType := range []string{
-		constant.ServiceTypeChatbot, constant.ServiceTypeTextToImage,
-		constant.ServiceTypeSpeechToText, constant.ServiceTypeImageEditing,
-		constant.ServiceTypeVideoGeneration,
-	} {
-		for _, surface := range []string{config.APIFormatOpenAI, config.APIFormatAnthropic, ""} {
-			profile, sealable := profileForRequest(svcType, surface)
-			if !sealable || seen[profile] {
-				continue
-			}
-			seen[profile] = true
-			synth := synthFinalFrameFor(profile)
-			if _, err := wire.ResponseSealedFieldsForFrame(profile, synth); err != nil {
-				t.Errorf("profile %q (%s on the %q surface) has no synthetic terminal frame it can seal: %v",
-					profile, svcType, surface, err)
-			}
-		}
+// Which profiles can be sealed as a STREAM, and what makes the answer
+// trustworthy: the frame a truncated stream would be capped with must actually
+// SEAL, which newResponseFrameSealer establishes by sealing it through a
+// throwaway context. Resolving its sealed set — what this test used to assert —
+// proves much less: SealFrame also requires every declared field to be present
+// and runs the profile's final-frame cleartext checks, so the image profile
+// passed the resolve-only probe and would have failed at EOF instead.
+//
+// So the expectation is per profile, and "image cannot" is the honest answer
+// rather than a gap: §7.1 requires a cleartext `usage.output_images` on a sealed
+// image response, which a synthesized placeholder has no way to carry. Only the
+// chatbot path streams today, so it is unreachable — but if text-to-image ever
+// gains a stream, it fails at setup with that reason instead of leaving a client
+// a stream with no final frame.
+func TestProfileStreamabilityIsProvenBySealing(t *testing.T) {
+	f := newE2EEFixture(t)
+	tests := []struct {
+		profile    wire.Profile
+		canCap     bool
+		wantReason string
+	}{
+		{wire.ProfileChat, true, ""},
+		{wire.ProfileAnthropic, true, ""},
+		{wire.ProfileImage, false, "usage.output_images"},
 	}
-	if len(seen) == 0 {
-		t.Fatal("no sealable profile found: the table above no longer exercises profileForRequest")
+	for _, tt := range tests {
+		t.Run(string(tt.profile), func(t *testing.T) {
+			err := dryRunSealFinalFrame(tt.profile, f.clientEphPub, synthFinalFrameFor(tt.profile))
+			if tt.canCap {
+				if err != nil {
+					t.Fatalf("profile %q must be able to seal the frame that caps a truncated stream: %v", tt.profile, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("profile %q has no legal way to cap a truncated stream, so setup must refuse it", tt.profile)
+			}
+			if !strings.Contains(err.Error(), tt.wantReason) {
+				t.Errorf("error should carry the profile's own reason (%q), got: %v", tt.wantReason, err)
+			}
+		})
+	}
+
+	// And the profiles profileForRequest can hand a STREAM to are exactly the ones
+	// that can cap one, so a frame-typed profile added there without an entry in
+	// synthFinalFrameFor fails here rather than in production.
+	for _, surface := range []string{config.APIFormatOpenAI, config.APIFormatAnthropic} {
+		profile, sealable := profileForRequest(constant.ServiceTypeChatbot, surface)
+		if !sealable {
+			t.Fatalf("precondition: the chatbot service must be sealable on the %q surface", surface)
+		}
+		if err := dryRunSealFinalFrame(profile, f.clientEphPub, synthFinalFrameFor(profile)); err != nil {
+			t.Errorf("profile %q is reachable as a stream but cannot cap one: %v", profile, err)
+		}
 	}
 }
 

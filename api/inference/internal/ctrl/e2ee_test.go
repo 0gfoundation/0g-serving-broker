@@ -700,6 +700,66 @@ func collectSealedFrames(t *testing.T, rs *responseFrameSealer, lines []string) 
 	return frames
 }
 
+// The space after an SSE field's colon is OPTIONAL, so the sentinel has to be
+// recognized from the parsed payload. It was matched against the raw line, which
+// meant `data:[DONE]` fell through to the fail-closed branch and destroyed a turn
+// that had already delivered every content frame: no final frame reached the
+// client (§7 makes that a wholesale rejection) and a JSON error body was appended
+// behind the sealed frames.
+func TestStreamFrameSealer_DoneSentinelSpacing(t *testing.T) {
+	for _, done := range []string{"data: [DONE]\n", "data:[DONE]\n", "data:  [DONE]\n", "data: [DONE]  \n"} {
+		t.Run(strings.TrimSpace(done), func(t *testing.T) {
+			f := newE2EEFixture(t)
+			ctx := newGinCtx()
+			ctx.Set(CtxKeyE2EESealed, true)
+			ctx.Set(CtxKeyE2EEProfile, wire.ProfileChat)
+			ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+			ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
+			sealer, err := f.c.newResponseFrameSealer(ctx)
+			if err != nil {
+				t.Fatalf("newResponseFrameSealer: %v", err)
+			}
+			if _, err := sealer.sealSSELine(`data: {"id":"a","choices":[{"delta":{"content":"hi"}}]}` + "\n"); err != nil {
+				t.Fatalf("content frame: %v", err)
+			}
+			out, err := sealer.sealSSELine(done)
+			if err != nil {
+				t.Fatalf("the sentinel must be recognized whatever the spacing: %v", err)
+			}
+			if !sealer.emittedFinal {
+				t.Error("the sentinel must trigger the synthetic final frame")
+			}
+			if !strings.Contains(out, "[DONE]") {
+				t.Errorf("the sentinel line must still reach the client, got %q", out)
+			}
+		})
+	}
+}
+
+// An empty `data:` line carries no frame and no content, so it is dropped rather
+// than failing the stream — there is nothing to seal and nothing to leak.
+func TestStreamFrameSealer_EmptyDataLineIsDropped(t *testing.T) {
+	f := newE2EEFixture(t)
+	ctx := newGinCtx()
+	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEProfile, wire.ProfileChat)
+	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
+	sealer, err := f.c.newResponseFrameSealer(ctx)
+	if err != nil {
+		t.Fatalf("newResponseFrameSealer: %v", err)
+	}
+	for _, line := range []string{"data:\n", "data: \n"} {
+		out, err := sealer.sealSSELine(line)
+		if err != nil {
+			t.Errorf("sealSSELine(%q) must be dropped, not fail the stream: %v", strings.TrimSpace(line), err)
+		}
+		if out != "" {
+			t.Errorf("sealSSELine(%q) must emit nothing, got %q", strings.TrimSpace(line), out)
+		}
+	}
+}
+
 // A `data:` payload that is neither [DONE] nor a JSON object has no frame to
 // seal and nothing that could check it — the same hole as a forwarded `event:`
 // line, except that clients RENDER `data:` payloads. A sealed stream fails

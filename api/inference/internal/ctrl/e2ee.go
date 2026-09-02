@@ -58,6 +58,12 @@ const (
 	anthropicFrameType   = "type"
 	anthropicMessageStop = "message_stop"
 
+	// doneSentinel is the OpenAI-style stream terminator, as it appears in a
+	// `data:` line's payload — matched after the payload is parsed out, because
+	// SSE makes the space after the colon optional and `data:[DONE]` is the same
+	// sentinel as `data: [DONE]`.
+	doneSentinel = "[DONE]"
+
 	// CtxKeyE2EESealed marks (bool) that the current request arrived sealed, so the
 	// response path knows to seal its reply.
 	CtxKeyE2EESealed = "e2eeSealed"
@@ -492,20 +498,26 @@ func (c *Ctrl) newResponseFrameSealer(ctx *gin.Context) (*responseFrameSealer, e
 		return nil, fmt.Errorf("e2ee stream: request binding hash missing from context")
 	}
 	// Prove now that the frame this stream would be CAPPED with is one the profile
-	// can actually seal. The check is here rather than at EOF because EOF is the
+	// can actually SEAL — by sealing it, through a throwaway HPKE context whose
+	// output is discarded. The check is here rather than at EOF because EOF is the
 	// one moment a failure cannot be reported: the caller can no longer answer the
-	// request, so a profile with no usable entry in synthFinalFrameFor would leave
-	// the client a stream with no final frame — a truncation it rejects wholesale
-	// (§7). Refusing at setup makes that a failed request instead, with the
-	// profile named.
+	// request, so a profile whose synthetic frame does not seal would leave the
+	// client a stream with no final frame, a truncation it rejects wholesale (§7).
+	// Refusing at setup makes that a failed request instead, with the profile
+	// named and the profile's own reason attached.
 	//
-	// It passes trivially for a single-shape profile (the zero frame resolves to
-	// the profile default) and for Anthropic (`message_stop` seals nothing), and
-	// fails for a frame-typed profile added without an entry, whose zero frame has
-	// no discriminator to resolve.
+	// A DRY SEAL rather than resolving the sealed set, because resolving proves
+	// much less than it appears to: SealFrame also requires every declared field
+	// to be present and, on a final frame, runs the profile's cleartext checks.
+	// The image profile passed the resolve-only probe and then failed at EOF with
+	// "sealed image response must carry cleartext usage.output_images" — its §7.1
+	// requirement, which a synthesized placeholder cannot satisfy. That is the
+	// honest answer for it (an image stream has no legal way to be capped), and it
+	// is unreachable today since only the chatbot path streams; the point is that
+	// the check now establishes the property it claims instead of a weaker one.
 	synthFinal := synthFinalFrameFor(profile)
-	if _, err := wire.ResponseSealedFieldsForFrame(profile, synthFinal); err != nil {
-		return nil, fmt.Errorf("e2ee stream: profile %q declares no synthetic terminal frame this broker can seal: %w", profile, err)
+	if err := dryRunSealFinalFrame(profile, ephPub, synthFinal); err != nil {
+		return nil, fmt.Errorf("e2ee stream: profile %q cannot seal the synthetic terminal frame that would cap a truncated stream: %w", profile, err)
 	}
 	return &responseFrameSealer{
 		sealer:     s,
@@ -514,6 +526,46 @@ func (c *Ctrl) newResponseFrameSealer(ctx *gin.Context) (*responseFrameSealer, e
 		synthFinal: synthFinal,
 		logger:     c.logger,
 	}, nil
+}
+
+// dryRunSealFinalFrame seals a copy of frame as a FINAL frame through a
+// throwaway HPKE context and throws the result away, reporting only whether the
+// profile accepted it. It exists so newResponseFrameSealer can establish that
+// the frame it would cap a truncated stream with is actually sealable, which is
+// strictly more than resolving its sealed set: SealFrame also demands every
+// declared field be present and runs the profile's final-frame cleartext checks.
+//
+// The context is discarded rather than reused for the real stream: a sealer's
+// sequence numbers and its §8 binding must cover exactly the frames the client
+// receives, and this frame is never sent.
+func dryRunSealFinalFrame(profile wire.Profile, clientEphPub pccrypto.PublicKey, frame wire.Response) error {
+	probe, err := wire.NewResponseSealerFor(profile, clientEphPub, e2eeResponseUnboundFields...)
+	if err != nil {
+		return err
+	}
+	dry := wire.Response{}
+	for k, v := range frame {
+		dry[k] = v
+	}
+	sealedFields, err := prepareFrameForSealing(profile, dry)
+	if err != nil {
+		return err
+	}
+	_, err = probe.SealFrame(dry, sealedFields, true)
+	return err
+}
+
+// prepareFrameForSealing resolves what this frame must seal and fills in the
+// placeholders a frame of this profile may legitimately omit, returning the
+// sealed set to hand SealFrame. Shared by the real seal path and the dry run, so
+// the dry run cannot drift from what it is meant to predict.
+func prepareFrameForSealing(profile wire.Profile, frame wire.Response) ([]string, error) {
+	sealedFields, err := wire.ResponseSealedFieldsForFrame(profile, frame)
+	if err != nil {
+		return nil, err
+	}
+	ensureSealedFieldsPresent(profile, frame, sealedFields)
+	return sealedFields, nil
 }
 
 // profileHasFrameDiscriminator reports whether this profile's response frames
@@ -608,13 +660,6 @@ func (rs *responseFrameSealer) sealSSELine(line string) (string, error) {
 	if trimmed == "" {
 		return line, nil // preserve SSE event separators
 	}
-	if isStreamDone([]byte(trimmed)) {
-		final, err := rs.finalFrameLine()
-		if err != nil {
-			return "", err
-		}
-		return final + line, nil // synthetic final frame (if any) precedes [DONE]
-	}
 	after, ok := strings.CutPrefix(trimmed, "data:")
 	if !ok {
 		// Any other SSE field line: `event:` (rebuilt by sealFrame from the bound
@@ -626,14 +671,35 @@ func (rs *responseFrameSealer) sealSSELine(line string) (string, error) {
 		rs.logger.Debugf("e2ee stream: dropping a non-data SSE line, which no sealed receiver may trust: %q", trimmed)
 		return "", nil
 	}
+	// The sentinel is recognized from the PARSED payload, so the space after the
+	// colon — which SSE makes OPTIONAL — cannot change the outcome. It used to be
+	// matched against the raw line (`isStreamDone`, still used by the plaintext
+	// path), which meant `data:[DONE]` fell through to the fail-closed branch
+	// below and destroyed a turn that had already delivered every content frame:
+	// the client got a stream with no final frame, which §7 makes it reject
+	// wholesale, plus a JSON error body behind it.
 	payload := strings.TrimSpace(after)
+	if payload == doneSentinel {
+		final, err := rs.finalFrameLine()
+		if err != nil {
+			return "", err
+		}
+		return final + line, nil // synthetic final frame (if any) precedes [DONE]
+	}
+	if payload == "" {
+		// A `data:` line with no payload carries no frame and no content, so there
+		// is nothing to seal and nothing to leak. Dropped like any other line a
+		// sealed receiver cannot act on.
+		rs.logger.Debugf("e2ee stream: dropping an empty `data:` line")
+		return "", nil
+	}
 	if !strings.HasPrefix(payload, "{") {
-		// Not [DONE] (handled above) and not a JSON object, so there is no frame to
-		// seal and nothing that could check it — the same hole as the `event:`
+		// Neither the sentinel nor a JSON object, so there is no frame to seal and
+		// nothing that could check it — the same hole as a forwarded `event:`
 		// line, one branch away, except that clients RENDER `data:` payloads. A
 		// sealed stream fails closed rather than passing arbitrary text through to
 		// the client and every intermediary in the clear.
-		return "", fmt.Errorf("seal stream frame: upstream sent a `data:` payload that is neither [DONE] nor a JSON object, so it cannot be sealed")
+		return "", fmt.Errorf("seal stream frame: upstream sent a `data:` payload that is neither %s nor a JSON object, so it cannot be sealed", doneSentinel)
 	}
 	var frame wire.Response
 	if err := json.Unmarshal([]byte(payload), &frame); err != nil {
@@ -829,11 +895,10 @@ func (rs *responseFrameSealer) sealFrame(frame wire.Response, final bool) (strin
 	// Resolved per frame, not once per stream: a frame-typed profile's answer is a
 	// property of the frame (§7.2), and one set held for the whole stream would
 	// seal nothing on every content frame.
-	sealedFields, err := wire.ResponseSealedFieldsForFrame(rs.profile, frame)
+	sealedFields, err := prepareFrameForSealing(rs.profile, frame)
 	if err != nil {
 		return "", fmt.Errorf("seal frame: %w", err)
 	}
-	ensureSealedFieldsPresent(rs.profile, frame, sealedFields)
 	out, err := rs.sealer.SealFrame(frame, sealedFields, final)
 	if err != nil {
 		return "", fmt.Errorf("seal frame: %w", err)

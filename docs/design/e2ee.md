@@ -230,6 +230,16 @@ frame-typed profile's answer is a property of the frame.
   `message_stop` would mark an error-terminated stream non-final and then append a
   `message_stop` after the `error`, a sequence no Anthropic stream produces and
   one that reads to a client as a turn that completed normally.
+  `newResponseFrameSealer` proves at stream setup that the capping frame is one
+  the profile can actually SEAL, by sealing it through a throwaway HPKE context
+  and discarding the result. Resolving its sealed set proves less than it looks:
+  `SealFrame` also requires every declared field to be present and runs the
+  profile's final-frame cleartext checks — the image profile passed a resolve-only
+  probe and would then have failed at EOF on its §7.1 `usage.output_images`
+  requirement, which a synthesized placeholder cannot carry. (That is the honest
+  answer for image: it has no legal way to cap a truncated stream. Unreachable
+  today, since only the chatbot path streams.)
+
   On an upstream that drops off before either, `finalFrameLine` synthesizes a
   `message_stop` — a full `event: message_stop` + sealed data event, a legal frame
   of the API (it seals nothing per §7.2) rather than a bare placeholder. It never
@@ -295,7 +305,13 @@ frame-typed profile's answer is a property of the frame.
     not be swallowed.
 
   Blank lines and `[DONE]` still pass through — a real stream ends its last event
-  with a blank line, and `[DONE]` is a sentinel rather than content.
+  with a blank line, and `[DONE]` is a sentinel rather than content. The sentinel
+  is matched on the PARSED payload, because SSE makes the space after the colon
+  optional: `data:[DONE]` is the same sentinel as `data: [DONE]`, and matching the
+  raw line meant the spaceless form fell through to the fail-closed branch and
+  destroyed a turn that had already delivered every content frame. An empty
+  `data:` line carries no frame and no content, so it is dropped rather than
+  failed.
 
 `ensureSealedFieldsPresent(profile, frame, sealedFields)` injects an empty
 placeholder only for the sealed fields a frame of THAT PROFILE may legitimately
