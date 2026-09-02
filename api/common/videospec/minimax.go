@@ -128,3 +128,26 @@ func (m miniMax) Tier(size string) string {
 	}
 	return MiniMaxDefaultTier
 }
+
+// Duration states the bounds NormalizeSeconds applies above. An unreadable value
+// renders the FLOOR here — H3 requires a duration, so the vendor never chooses.
+func (miniMax) Duration() DurationSpec {
+	return DurationSpec{
+		Min:         MiniMaxMinSeconds,
+		Max:         MiniMaxMaxSeconds,
+		OutOfRange:  OutOfRangeClamp,
+		Unspecified: UnspecifiedMin,
+		Rounding:    RoundingCeil,
+	}
+}
+
+// Resolution states the tier vocabulary Tier resolves against. Pixel dimensions
+// do NOT select a tier here — see Tier — so a caller sending "1280x720" to a
+// 2K-default model gets, and pays for, a 2K clip.
+func (miniMax) Resolution() ResolutionSpec {
+	return ResolutionSpec{
+		Tiers:     copyTokens(miniMaxResolutionTokens),
+		Default:   MiniMaxDefaultTier,
+		PixelSize: PixelSizeAspectRatioOnly,
+	}
+}

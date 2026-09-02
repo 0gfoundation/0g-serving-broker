@@ -11,6 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/0glabs/0g-serving-broker/common/videospec"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
@@ -61,6 +62,47 @@ type ModelObject struct {
 	// decentralized providers. Consumers prepend "https://" if they need a URL.
 	ServingDomain string           `json:"serving_domain,omitempty"`
 	RateLimits    *ModelRateLimits `json:"rate_limits,omitempty"`
+	// Capabilities states the model's own request-shape rules — the duration
+	// range it accepts, whether an out-of-range value is clamped or passed
+	// through, its resolution tiers. Machine-readable so a catalog consumer can
+	// render them per model instead of restating them in prose that has to hedge
+	// across every model it might describe. Omitted when nothing publishes them.
+	Capabilities *ModelCapabilities `json:"capabilities,omitempty"`
+}
+
+// ModelCapabilities holds the per-modality request-shape rules a client needs in
+// order to build a request this model will actually honour.
+//
+// Everything in here is a FACT ABOUT THE MODEL, sourced from the same rules the
+// billing path applies, never an operator's free text: the point is that the
+// catalog and the broker cannot disagree. Blocks are per-modality and absent
+// when they do not apply — a chat model has neither of these today.
+type ModelCapabilities struct {
+	Duration   *videospec.DurationSpec   `json:"duration,omitempty"`
+	Resolution *videospec.ResolutionSpec `json:"resolution,omitempty"`
+}
+
+// videoCapabilities projects a video vendor's own rules into the catalog, or nil
+// when they are not published.
+//
+// Two nils, both meaning "not published" and neither an error: a vendor absent
+// from videospec has no recorded rules at all (the same "unknown" every other
+// videospec caller must treat as unknown, never as the common case), and one
+// that records rules without implementing Describer has not stated them
+// declaratively. Both are the pre-change state, which every consumer already
+// handles by finding no block.
+func videoCapabilities(vendor string) *ModelCapabilities {
+	spec, ok := videospec.Get(videospec.Vendor(vendor))
+	if !ok {
+		return nil
+	}
+	d, ok := spec.(videospec.Describer)
+	if !ok {
+		return nil
+	}
+	duration := d.Duration()
+	resolution := d.Resolution()
+	return &ModelCapabilities{Duration: &duration, Resolution: &resolution}
 }
 
 // ModelRateLimits exposes per-user rate limit configuration so clients/SDKs
@@ -682,6 +724,16 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 				if obj.TeeType == "" {
 					obj.TeeType = mi.TeeType
 				}
+			}
+
+			// Video request-shape rules, from the vendor's own videospec entry —
+			// the same rules the pre-forward balance gate and the translator
+			// apply, so a model page cannot describe bounds the broker does not
+			// enforce. Multi-model only: a single-model video service carries no
+			// per-model billing config, so it names no vendor and there is
+			// nothing to read (its `variants` are absent for the same reason).
+			if svc.Type == constant.ServiceTypeVideoGeneration && mp.Billing != nil {
+				obj.Capabilities = videoCapabilities(mp.Billing.Vendor)
 			}
 
 			if isUSD && svc.Type == constant.ServiceTypeVideoGeneration {

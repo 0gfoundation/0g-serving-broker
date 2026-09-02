@@ -266,3 +266,25 @@ func (s seedance) EstimateBillableTokens(rawSeconds, rawSize string) (int64, boo
 	// most 30 × 48,600 ≈ 1.5e6 — far inside int64.
 	return seconds * perSecond, true
 }
+
+// Duration states the bounds NormalizeSeconds applies above: both clamp, and an
+// unreadable value is omitted so the vendor picks the length itself.
+func (seedance) Duration() DurationSpec {
+	return DurationSpec{
+		Min:         SeedanceMinSeconds,
+		Max:         SeedanceMaxSeconds,
+		OutOfRange:  OutOfRangeClamp,
+		Unspecified: UnspecifiedVendorDefault,
+		Rounding:    RoundingCeil,
+	}
+}
+
+// Resolution states the tier vocabulary Tier resolves against. Pixel dimensions
+// select a tier here (nearest by longer side), unlike MiniMax.
+func (seedance) Resolution() ResolutionSpec {
+	return ResolutionSpec{
+		Tiers:     copyTokens(seedanceResolutionTokens),
+		Default:   SeedanceDefaultTier,
+		PixelSize: PixelSizeSelectsTier,
+	}
+}

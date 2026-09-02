@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/0glabs/0g-serving-broker/common/videospec"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	"github.com/0glabs/0g-serving-broker/inference/internal/pricefeed"
 	"github.com/0glabs/0g-serving-broker/inference/model"
@@ -1892,5 +1893,97 @@ func TestVideoPriceUnit(t *testing.T) {
 	}
 	if got := videoPriceUnit(nil); got != "" {
 		t.Errorf("videoPriceUnit(nil) = %q, want empty", got)
+	}
+}
+
+// videoCapabilitiesConfig builds a one-entry multi-model video service pointed at
+// the named vendor. Capabilities ride the multi-model path because that is the
+// only shape carrying a per-model billing block (and therefore a vendor).
+func videoCapabilitiesConfig(t *testing.T, serviceType, vendor string) config.Service {
+	t.Helper()
+	svcCfg := config.Service{
+		ModelType: "vid-1",
+		Type:      serviceType,
+		ModelPricing: []config.ModelPricingEntry{{
+			Model:       "vid-1",
+			InputPrice:  "0",
+			OutputPrice: "100",
+			Billing:     &config.BillingConfig{Mode: config.BillingModePerVideoSecond, Vendor: vendor},
+		}},
+	}
+	if err := svcCfg.BuildModelPricingMap(); err != nil {
+		t.Fatalf("BuildModelPricingMap: %v", err)
+	}
+	return svcCfg
+}
+
+func TestGetModels_VideoCapabilities(t *testing.T) {
+	tests := []struct {
+		name        string
+		serviceType string
+		vendor      string
+		want        *ModelCapabilities
+	}{
+		{
+			name:        "described vendor publishes its own bounds",
+			serviceType: "video-generation",
+			vendor:      "minimax",
+			want: &ModelCapabilities{
+				Duration:   &videospec.DurationSpec{Min: 4, Max: 15, OutOfRange: videospec.OutOfRangeClamp, Unspecified: videospec.UnspecifiedMin, Rounding: videospec.RoundingCeil},
+				Resolution: &videospec.ResolutionSpec{Tiers: []string{"512P", "720P", "768P", "1080P", "2K", "4K"}, Default: "2K", PixelSize: videospec.PixelSizeAspectRatioOnly},
+			},
+		},
+		{
+			// An unregistered vendor has no recorded rules — omit the block rather
+			// than publishing defaults nobody stated.
+			name:        "unknown vendor publishes nothing",
+			serviceType: "video-generation",
+			vendor:      "no-such-vendor",
+			want:        nil,
+		},
+		{
+			// A vendor name on a non-video service describes nothing about it.
+			name:        "non-video service publishes nothing",
+			serviceType: "chatbot",
+			vendor:      "minimax",
+			want:        nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mock := &mockModelsCtrl{
+				service:       model.Service{ModelType: "vid-1", Type: tt.serviceType},
+				serviceConfig: videoCapabilitiesConfig(t, tt.serviceType, tt.vendor),
+			}
+			h := newModelsTestHandler(mock)
+			w := performRequest(h.GetModels, "GET", "/v1/models", "", nil)
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+			}
+			var resp ModelListResponse
+			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("failed to parse response: %v", err)
+			}
+			if len(resp.Data) != 1 {
+				t.Fatalf("expected 1 row, got %d", len(resp.Data))
+			}
+			got := resp.Data[0].Capabilities
+			if tt.want == nil {
+				if got != nil {
+					t.Fatalf("capabilities = %+v, want omitted", got)
+				}
+				return
+			}
+			if got == nil {
+				t.Fatal("capabilities omitted, want a block")
+			}
+			if !reflect.DeepEqual(got.Duration, tt.want.Duration) {
+				t.Errorf("capabilities.duration = %+v, want %+v", got.Duration, tt.want.Duration)
+			}
+			if !reflect.DeepEqual(got.Resolution, tt.want.Resolution) {
+				t.Errorf("capabilities.resolution = %+v, want %+v", got.Resolution, tt.want.Resolution)
+			}
+		})
 	}
 }
