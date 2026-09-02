@@ -232,6 +232,41 @@ func (d *DB) ReleaseVideoFeeHold(requestHash string) error {
 	return releaseVideoFeeHold(d.db, requestHash)
 }
 
+// ReleaseVideoFeeHoldUnlessPolling clears the fee hold on a Request row unless a poll job
+// that can still resolve it is in flight.
+//
+// This is the release that covers every way a create can end without billing, including the
+// ones nobody enumerates. ProcessHTTPRequest returns before handleVideoGenerationResponse on
+// any non-200 from the vendor and on a dial or timeout error, and the handler in front of it
+// can return between CreateRequest and the dispatch — so per-exit releases will always be one
+// exit behind. One call after dispatch, asking the DB which requests still have something
+// coming, does not have that problem.
+//
+// The exclusion is exactly PruneRequest's: a pending or polling job is the one thing that
+// will still write a real fee to this row, so it is the one thing that justifies keeping the
+// hold. Anything else — a job that resolved, a job that was never created — means nothing
+// further will bill, and holding the caller's balance past that point charges them for a clip
+// that is not coming. Note that CalculateUnsettledFee sums across ALL service types, so a
+// stranded video hold locks the caller out of chatbot too.
+//
+// Guarded on output_count = 0 like the unconditional release, so a row the poll already
+// billed keeps its real fee.
+func (d *DB) ReleaseVideoFeeHoldUnlessPolling(requestHash string) error {
+	if requestHash == "" {
+		return nil
+	}
+	inFlight := d.db.Model(&model.VideoPollJob{}).
+		Select("request_hash").
+		Where("status IN ?", []model.VideoPollStatus{
+			model.VideoPollStatusPending,
+			model.VideoPollStatusPolling,
+		})
+	return d.db.Model(&model.Request{}).
+		Where("request_hash = ? AND output_count = ?", requestHash, 0).
+		Where("request_hash NOT IN (?)", inFlight).
+		Update("fee", "0").Error
+}
+
 // FailVideoPollJob marks a job failed — the provider reported a terminal failure, or a poll
 // attempt hit a non-retryable error. Bills nothing; the linked Request row (when one exists —
 // see IsWhitelisted) keeps its zero-output default and is excluded from settlement

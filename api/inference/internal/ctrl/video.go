@@ -913,7 +913,6 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 		// bill, and there is no job to poll.
 		c.logger.Infof("video generation failed at create time for request %s; not billing", reqModel.RequestHash)
 		monitor.RecordVideoGenerationFailed()
-		c.releaseVideoFeeHold(reqModel.RequestHash)
 		return nil
 
 	case videoActionDeferToPoll:
@@ -949,7 +948,6 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 		// not a silent skip (this was a Warnf that hid Wan2.7 mis-parsing).
 		c.logger.Errorf("video billing indeterminate: no positive seconds in response or request, NOT billing request %s (free output)", reqModel.RequestHash)
 		monitor.RecordVideoBillingSkipped()
-		c.releaseVideoFeeHold(reqModel.RequestHash)
 		return nil
 	}
 	if source == videoSourceRequest {
@@ -981,20 +979,32 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 	return nil
 }
 
-// releaseVideoFeeHold clears the reserve proxy.go wrote into this request's fee, on a create
-// that is terminal-without-billing and has no poll job to resolve it later.
+// ReleaseVideoHoldUnlessSomethingWillBill clears the fee hold a video create wrote (see
+// proxy.go's reservedFee) unless something is still going to bill the request.
 //
-// Every such exit needs it. The hold bounds what a caller can have in flight; a create that
-// will never be billed has nothing in flight, so leaving the hold would lock up the caller's
-// balance until PruneRequest removes the row. The row is already unbillable either way —
-// output_count stays 0 and the settlement query filters on it — so this frees the balance
-// without changing what is charged.
+// Called once after dispatch rather than at each exit that decides not to bill. Those exits
+// are not enumerable by inspection — the first attempt at this listed three and missed the
+// one that matters most, a non-200 from the vendor, where ProcessHTTPRequest returns before
+// the video response handler runs at all. A client whose prompt the vendor rejects would have
+// left a hold worth the dearest-tier fallback on the row for an hour, and
+// CalculateUnsettledFee sums across every service type, so two or three rejected creates lock
+// the account out of chatbot as well.
 //
-// Logged, not returned. The caller is on a path that has already decided not to bill and
-// returns its own outcome; failing it over a hold that PruneRequest will clear within the
-// hour would turn a billing skip into a request-level error.
-func (c *Ctrl) releaseVideoFeeHold(requestHash string) {
-	if err := c.videoPollDB.ReleaseVideoFeeHold(requestHash); err != nil {
+// The scheduler being disabled is handled separately and deliberately releases MORE. With no
+// scanner running, a job row sits in pending forever: PruneRequest refuses to delete a row
+// referenced by a pending or polling job, and DeleteExpiredVideoPollJobs only removes
+// terminal ones, so the hold would never come off by any path. On main that misconfiguration
+// cost the provider revenue; with a hold written it would monotonically consume the caller's
+// balance until an operator noticed. Releasing restores main's exposure for a state that is
+// already logged as an error on every request, which is the better of the two.
+func (c *Ctrl) ReleaseVideoHoldUnlessSomethingWillBill(requestHash string) {
+	if !c.videoPollEnabled.Load() {
+		if err := c.videoPollDB.ReleaseVideoFeeHold(requestHash); err != nil {
+			c.logger.Errorf("failed to release the video fee hold on request %s with the poll scheduler disabled; the caller's locked balance stays held with nothing able to free it: %v", requestHash, err)
+		}
+		return
+	}
+	if err := c.videoPollDB.ReleaseVideoFeeHoldUnlessPolling(requestHash); err != nil {
 		c.logger.Errorf("failed to release the video fee hold on request %s; the caller's locked balance stays held until the row is pruned: %v", requestHash, err)
 	}
 }
@@ -1028,8 +1038,6 @@ func (c *Ctrl) deferVideoBillingToPoll(ctx *gin.Context, providerJobID, chatKey,
 		// exists there and is fetchable straight from the upstream.
 		if reqModel.IsWhitelisted {
 			c.recordWhitelistedUsage(reqModel, 0, 0, 0, 0, "")
-		} else {
-			c.releaseVideoFeeHold(reqModel.RequestHash)
 		}
 		return nil
 	}
@@ -1043,6 +1051,14 @@ func (c *Ctrl) deferVideoBillingToPoll(ctx *gin.Context, providerJobID, chatKey,
 		// enabling the scheduler later lets that job poll and re-sign under the same
 		// key, restoring the lookup. Until then a 404 is the truthful answer.
 		c.dropUnpollableVideoSignature(chatKey, "the VideoPoll scheduler is disabled", false)
+		// The fee hold has to go too, and the reason is the pending row written below. With no
+		// scanner running it stays pending forever, and PruneRequest refuses to delete a row a
+		// pending or polling job references while DeleteExpiredVideoPollJobs only removes
+		// terminal ones — so no path would ever free the hold. That is the difference between
+		// this misconfiguration costing the provider revenue, which it did before, and it
+		// consuming the caller's locked balance one create at a time with no way back.
+		// ReleaseVideoHoldUnlessSomethingWillBill makes the same call after dispatch; this is
+		// the same release, and it is idempotent.
 	}
 	// c.videoPollCfg is always populated with real values (the operator's config, or
 	// config.GetConfig()'s sane defaults) regardless of whether the scheduler is actually
@@ -1089,8 +1105,6 @@ func (c *Ctrl) deferVideoBillingToPoll(ctx *gin.Context, providerJobID, chatKey,
 		c.dropUnpollableVideoSignature(chatKey, "the poll job could not be persisted", true)
 		if reqModel.IsWhitelisted {
 			c.recordWhitelistedUsage(reqModel, 0, 0, 0, 0, "")
-		} else {
-			c.releaseVideoFeeHold(reqModel.RequestHash)
 		}
 		return errors.Wrap(err, "create video poll job")
 	}

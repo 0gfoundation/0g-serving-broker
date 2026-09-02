@@ -67,6 +67,10 @@ type videoPollDB interface {
 	// plain DB handle because it belongs to the same story as the resolutions above, and
 	// because the video path's tests mock this interface and not that handle.
 	ReleaseVideoFeeHold(requestHash string) error
+	// ReleaseVideoFeeHoldUnlessPolling is the same release, skipped while a poll job that can
+	// still resolve the request is in flight. It is what the proxy calls after dispatch, so a
+	// create that ended without billing does not depend on that exit having been enumerated.
+	ReleaseVideoFeeHoldUnlessPolling(requestHash string) error
 	TimeOutVideoPollJob(id uint64, claimAttempts int, requestHash, errMsg string) error
 	DeleteExpiredVideoPollJobs(retention time.Duration) error
 }

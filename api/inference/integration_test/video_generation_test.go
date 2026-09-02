@@ -169,7 +169,7 @@ func TestVideoGenerationFlow(t *testing.T) {
 		// create response was non-terminal. It is not a zero-fee placeholder: the row carries
 		// the RESERVE in its fee so the amount is held against the caller's locked balance
 		// for the whole generation window (see proxy.go's reservedFee, and
-		// TestVideoGenerationFlow_ReserveIsHeldThenReplaced). What is still zero is
+		// TestVideoHoldSurvivesWhileAJobIsInFlight). What is still zero is
 		// OutputCount — deferVideoBillingToPoll fabricates no output — so actual billing only
 		// lands once the background poll scheduler observes the provider's job as completed.
 		// Poll for it with a timeout rather than asserting synchronously (mirrors
@@ -1191,111 +1191,6 @@ func TestVideoGenerationListIsNotGated(t *testing.T) {
 // prerequisite for testing a refusal end to end; guarding the nil in production would only hide a
 // genuinely broken deployment. Recorded so the next attempt does not rediscover the crash.
 
-// The reserve has to be HELD, not merely checked, and then replaced rather than added to.
-//
-// validateBalanceAdequacy is `fee + SUM(unprocessed fee) + MinimumLockedBalance <= lockBalance`
-// and CalculateUnsettledFee sums the fee COLUMN, so a reserve that is computed and thrown away
-// bounds exactly one in-flight create. With the row left at "0" for the whole generation
-// window, a caller fires N creates, each sees the other N-1 contributing nothing, and each
-// passes the identical check — which is the entire exposure this branch set out to close.
-//
-// Two things here, the second being the finding:
-//
-//  1. the create writes the reserve into the row's fee, and does so without making the row
-//     settleable — a hold is not a bill;
-//  2. the caller's unsettled total therefore includes it while the job is in flight, which is
-//     what makes a second concurrent create see the first.
-//
-// The third — that completion REPLACES the hold rather than adding to it — is asserted by
-// TestVideoGenerationFlow; see the note at the end of this function for why it cannot live
-// here too.
-func TestVideoGenerationFlow_ReserveIsHeldThenReplaced(t *testing.T) {
-	mockProvider, _ := newMockVideoProvider(t)
-	t.Cleanup(func() { mockProvider.Close() })
-
-	env := setupTestEnv(t, func(cfg *config.Config) {
-		cfg.Service.TargetURL = mockProvider.URL
-		cfg.Service.Type = "video-generation"
-		cfg.Service.ModelType = "sora-2"
-	})
-
-	boundary := "----TestBoundary"
-	fields := map[string]string{
-		"model":   "sora-2",
-		"prompt":  "A cat playing piano on stage",
-		"seconds": "5",
-		"size":    "720x1280",
-	}
-	var body strings.Builder
-	for name, value := range fields {
-		body.WriteString("--" + boundary + "\r\n")
-		body.WriteString(fmt.Sprintf("Content-Disposition: form-data; name=\"%s\"\r\n\r\n%s\r\n", name, value))
-	}
-	body.WriteString("--" + boundary + "--")
-
-	req := httptest.NewRequest("POST", "/v1/proxy/videos", strings.NewReader(body.String()))
-	req.Header.Set("Content-Type", "multipart/form-data; boundary="+boundary)
-	req.Header.Set("Authorization", createAuthHeader(t, env.privateKey, env.providerAddr))
-	w := httptest.NewRecorder()
-	env.engine.ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("create: expected 200, got %d: %s", w.Code, w.Body.String())
-	}
-
-	// The poll scheduler is deliberately NOT started, so the job stays in flight and this
-	// observes exactly the window a second concurrent create would arrive in.
-	requests, _, err := env.ctrl.ListRequest(model.RequestListOptions{})
-	if err != nil {
-		t.Fatalf("list requests: %v", err)
-	}
-	userRequests := filterRequestsByUser(requests, env.userAddr)
-	if len(userRequests) != 1 {
-		t.Fatalf("expected 1 request record, got %d", len(userRequests))
-	}
-	held := userRequests[0]
-
-	// 1. The hold is on the row.
-	if held.Fee == "0" || held.Fee == "" {
-		t.Fatalf("Fee = %q while the job is in flight: the reserve was computed and thrown away, so N concurrent creates each pass the same check", held.Fee)
-	}
-	reserve, ok := new(big.Int).SetString(held.Fee, 10)
-	if !ok || reserve.Sign() <= 0 {
-		t.Fatalf("Fee = %q, want a positive reserve", held.Fee)
-	}
-	// And it is a hold, not a bill: nothing has been generated, so the row must still be
-	// invisible to the settlement that charges (ExcludeZeroOutput filters on output_count).
-	if held.OutputCount != 0 {
-		t.Errorf("OutputCount = %d before the job resolved, want 0: a hold must not be settleable", held.OutputCount)
-	}
-	settleable, _, err := env.ctrl.ListRequest(model.RequestListOptions{ExcludeZeroOutput: true})
-	if err != nil {
-		t.Fatalf("list settleable requests: %v", err)
-	}
-	if len(filterRequestsByUser(settleable, env.userAddr)) != 0 {
-		t.Error("the in-flight row is visible to the settlement query, so the hold could be charged as if it were a bill")
-	}
-
-	// 2. The finding: the hold reaches the number the next admission check adds up.
-	unsettled, err := env.ctrl.GetUnsettledFee(env.userAddr)
-	if err != nil {
-		t.Fatalf("calculate unsettled fee: %v", err)
-	}
-	if unsettled.Cmp(reserve) != 0 {
-		t.Errorf("unsettled fee = %s, want the reserve %s: this is the sum validateBalanceAdequacy adds to the next request's own fee, so anything less lets a second create through on a balance that covers only the first", unsettled, reserve)
-	}
-
-	// Replacement — that completion overwrites this hold instead of adding to it — is
-	// TestVideoGenerationFlow's job, not this one's. It asserts Fee == "500" exactly after
-	// the poll resolves, and with the hold now written at create time that assertion only
-	// holds if the response's amount REPLACED the reserve.
-	//
-	// It cannot be asserted here as well, because the two need opposite setups: that test
-	// starts the poll scheduler before the create, and it has to — setupTestEnv does not
-	// call InitVideoPollScheduler, so a job registered while the scheduler is down gets a
-	// zero-value poll window and expires immediately. This test needs the scheduler down,
-	// so the job stays in flight and the hold is observable at all.
-}
-
 // POST /videos/{id}/remix renders a clip and is not billed, so it is refused.
 //
 // It lands on the auth-only route because it matches the "/videos/" prefix while POST /videos
@@ -1368,5 +1263,238 @@ func TestVideoRemixIsRefusedRatherThanServedFree(t *testing.T) {
 		if gw.Code != http.StatusOK {
 			t.Errorf("GET %s = %d, want 200: the method check must not close the read routes", path, gw.Code)
 		}
+	}
+}
+
+// videoCreate fires one multipart create and returns the recorder.
+func videoCreate(t *testing.T, env *testEnv) *httptest.ResponseRecorder {
+	t.Helper()
+	boundary := "----TestBoundary"
+	var body strings.Builder
+	for name, value := range map[string]string{"model": "sora-2", "prompt": "a cat", "seconds": "5", "size": "720x1280"} {
+		body.WriteString("--" + boundary + "\r\n")
+		body.WriteString(fmt.Sprintf("Content-Disposition: form-data; name=\"%s\"\r\n\r\n%s\r\n", name, value))
+	}
+	body.WriteString("--" + boundary + "--")
+	req := httptest.NewRequest("POST", "/v1/proxy/videos", strings.NewReader(body.String()))
+	req.Header.Set("Content-Type", "multipart/form-data; boundary="+boundary)
+	req.Header.Set("Authorization", createAuthHeader(t, env.privateKey, env.providerAddr))
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+	return w
+}
+
+// userHoldTotal is the number the next admission check adds to the incoming request's own
+// fee — CalculateUnsettledFee, which sums the fee column across EVERY service type.
+func userHoldTotal(t *testing.T, env *testEnv) *big.Int {
+	t.Helper()
+	total, err := env.ctrl.GetUnsettledFee(env.userAddr)
+	if err != nil {
+		t.Fatalf("unsettled fee: %v", err)
+	}
+	return total
+}
+
+// The hold must come off whenever nothing is going to bill the request — and the two cases
+// below are the ones a per-exit release missed, which is why the release is now one deferred
+// call that asks the DB instead of a list of exits.
+//
+// Both matter more than they look. CalculateUnsettledFee sums across all service types, so a
+// stranded video hold is charged against chatbot too: at the dearest-tier fallback a couple of
+// rejected creates are enough to lock an account out of everything.
+func TestVideoHoldIsReleasedWhenNothingWillBill(t *testing.T) {
+	t.Run("the vendor rejects the create", func(t *testing.T) {
+		// A 400 from the vendor. ProcessHTTPRequest returns at the status check, BEFORE
+		// handleVideoGenerationResponse runs at all — so no create-time exit is reached and no
+		// poll job exists. The first version of the hold released at three enumerated exits
+		// and left this one holding ~20 0G for an hour.
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":{"message":"prompt rejected"}}`))
+		}))
+		t.Cleanup(upstream.Close)
+
+		env := setupTestEnv(t, func(cfg *config.Config) {
+			cfg.Service.TargetURL = upstream.URL
+			cfg.Service.Type = "video-generation"
+			cfg.Service.ModelType = "sora-2"
+		})
+
+		if w := videoCreate(t, env); w.Code == http.StatusOK {
+			t.Fatalf("this test needs the vendor to refuse the create, got %d", w.Code)
+		}
+		if total := userHoldTotal(t, env); total.Sign() != 0 {
+			t.Errorf("unsettled fee = %s after a create the vendor refused, want 0: nothing will ever bill this request, so the hold is charging the caller for a clip that is not coming — and it counts against every other service type too", total)
+		}
+	})
+
+	t.Run("the poll scheduler is disabled", func(t *testing.T) {
+		// The worst of the two, because nothing would EVER free it: the job row is written in
+		// pending, PruneRequest refuses to delete a row a pending or polling job references,
+		// and DeleteExpiredVideoPollJobs only removes terminal ones. On main this
+		// misconfiguration cost the provider revenue; with a hold written it consumes the
+		// caller's balance one create at a time, permanently.
+		//
+		// setupTestEnv does not call InitVideoPollScheduler, so this is the default state here.
+		mockProvider, _ := newMockVideoProvider(t)
+		t.Cleanup(func() { mockProvider.Close() })
+
+		env := setupTestEnv(t, func(cfg *config.Config) {
+			cfg.Service.TargetURL = mockProvider.URL
+			cfg.Service.Type = "video-generation"
+			cfg.Service.ModelType = "sora-2"
+		})
+
+		if w := videoCreate(t, env); w.Code != http.StatusOK {
+			t.Fatalf("create: expected 200, got %d: %s", w.Code, w.Body.String())
+		}
+		if total := userHoldTotal(t, env); total.Sign() != 0 {
+			t.Errorf("unsettled fee = %s with the poll scheduler disabled, want 0: the job sits in pending forever, so PruneRequest will not delete the row and no path releases the hold", total)
+		}
+	})
+}
+
+// And the case the release must NOT fire on, or the bound it exists for is gone: a job that is
+// genuinely in flight.
+//
+// TestVideoHoldSurvivesWhileAJobIsInFlight already asserts the hold survives with the
+// scheduler down — which is now the RELEASE case — so the surviving hold has to be observed
+// with a scheduler running instead. Scan and poll intervals are long enough that the job is
+// still pending when the assertion runs.
+func TestVideoHoldSurvivesWhileAJobIsInFlight(t *testing.T) {
+	mockProvider, _ := newMockVideoProvider(t)
+	t.Cleanup(func() { mockProvider.Close() })
+
+	env := setupTestEnv(t, func(cfg *config.Config) {
+		cfg.Service.TargetURL = mockProvider.URL
+		cfg.Service.Type = "video-generation"
+		cfg.Service.ModelType = "sora-2"
+	})
+	if err := env.ctrl.InitVideoPollScheduler(config.VideoPollConfig{
+		Enabled:            true,
+		MaxConcurrentPolls: 10,
+		PollInterval:       10 * time.Minute,
+		MaxPollDuration:    time.Hour,
+		ScanInterval:       10 * time.Minute,
+		LeaseWindow:        time.Hour,
+		PollRequestTimeout: 5 * time.Second,
+		RetentionTTL:       time.Hour,
+		CleanupInterval:    time.Hour,
+	}); err != nil {
+		t.Fatalf("init video poll scheduler: %v", err)
+	}
+	t.Cleanup(func() { env.ctrl.ShutdownVideoPollScheduler() })
+
+	if w := videoCreate(t, env); w.Code != http.StatusOK {
+		t.Fatalf("create: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	total := userHoldTotal(t, env)
+	if total.Sign() <= 0 {
+		t.Fatalf("unsettled fee = %s while a poll job is in flight, want the reserve: releasing here would give back the bound that stops N concurrent creates passing one balance check", total)
+	}
+
+	// The hold is on the row, and it equals what the caller's next admission check will add.
+	requests, _, err := env.ctrl.ListRequest(model.RequestListOptions{})
+	if err != nil {
+		t.Fatalf("list requests: %v", err)
+	}
+	userRequests := filterRequestsByUser(requests, env.userAddr)
+	if len(userRequests) != 1 {
+		t.Fatalf("expected 1 request record, got %d", len(userRequests))
+	}
+	held := userRequests[0]
+	onRow, ok := new(big.Int).SetString(held.Fee, 10)
+	if !ok || onRow.Cmp(total) != 0 {
+		t.Errorf("row fee = %q, unsettled total = %s: the hold and the number the next check adds have to be the same value", held.Fee, total)
+	}
+
+	// And it is a hold, not a bill. Nothing has been generated, so the row must stay
+	// invisible to the settlement that charges — which filters on output_count, not on fee.
+	if held.OutputCount != 0 {
+		t.Errorf("OutputCount = %d before the job resolved, want 0: a hold must not be settleable", held.OutputCount)
+	}
+	settleable, _, err := env.ctrl.ListRequest(model.RequestListOptions{ExcludeZeroOutput: true})
+	if err != nil {
+		t.Fatalf("list settleable requests: %v", err)
+	}
+	if len(filterRequestsByUser(settleable, env.userAddr)) != 0 {
+		t.Error("the in-flight row is visible to the settlement query, so the hold could be charged as if it were a bill")
+	}
+
+	// Replacement — that completion overwrites the hold instead of adding to it — is
+	// TestVideoGenerationFlow's job: it asserts Fee == "500" exactly after the poll resolves,
+	// which only holds if the response's amount REPLACED the reserve. It cannot be asserted
+	// here as well, because this test needs a scan interval long enough that the job is still
+	// pending.
+}
+
+// A create the vendor completes inline bills immediately and registers no poll job — so the
+// deferred release runs with nothing excluding it, and the only thing between it and the fee
+// that was just written is the output_count guard.
+//
+// This is the case the guard exists for, and it is the one the async flow cannot cover: there
+// a pending job excludes the release whether the guard works or not. Without the guard, a
+// synchronously-billed clip is served and then zeroed — delivered, and nobody pays.
+func TestVideoSynchronousBillingSurvivesTheDeferredRelease(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// Terminal at create time with a real duration: classifyVideoStatus takes the
+		// bill-now branch and UpdateRequestVideoBilling writes the fee inline.
+		_, _ = w.Write([]byte(`{"id":"vid_sync","status":"completed","seconds":5,"size":"720x1280"}`))
+	}))
+	t.Cleanup(upstream.Close)
+
+	env := setupTestEnv(t, func(cfg *config.Config) {
+		cfg.Service.TargetURL = upstream.URL
+		cfg.Service.Type = "video-generation"
+		cfg.Service.ModelType = "sora-2"
+	})
+	// The scheduler has to be RUNNING for this test to reach the guard it is about. With it
+	// down, ReleaseVideoHoldUnlessSomethingWillBill takes the unconditional release instead —
+	// which carries its own copy of the guard, so the conditional one would go untested.
+	// (Measured: without this the guard could be deleted and this test still passed.)
+	if err := env.ctrl.InitVideoPollScheduler(config.VideoPollConfig{
+		Enabled:            true,
+		MaxConcurrentPolls: 10,
+		PollInterval:       10 * time.Minute,
+		MaxPollDuration:    time.Hour,
+		ScanInterval:       10 * time.Minute,
+		LeaseWindow:        time.Hour,
+		PollRequestTimeout: 5 * time.Second,
+		RetentionTTL:       time.Hour,
+		CleanupInterval:    time.Hour,
+	}); err != nil {
+		t.Fatalf("init video poll scheduler: %v", err)
+	}
+	t.Cleanup(func() { env.ctrl.ShutdownVideoPollScheduler() })
+
+	if w := videoCreate(t, env); w.Code != http.StatusOK {
+		t.Fatalf("create: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	requests, _, err := env.ctrl.ListRequest(model.RequestListOptions{})
+	if err != nil {
+		t.Fatalf("list requests: %v", err)
+	}
+	userRequests := filterRequestsByUser(requests, env.userAddr)
+	if len(userRequests) != 1 {
+		t.Fatalf("expected 1 request record, got %d", len(userRequests))
+	}
+	billed := userRequests[0]
+	// outputCount = ceil(5 x 1.0) = 5, fee = 5 x 100 = 500 — the amount computed from the
+	// response, still on the row after the release ran.
+	if billed.OutputCount != 5 {
+		t.Fatalf("OutputCount = %d, want 5: this test needs the synchronous billing path to have run", billed.OutputCount)
+	}
+	if billed.Fee != "500" {
+		t.Errorf("Fee = %q after the deferred release, want 500: the release zeroed a real charge, so a delivered clip goes unpaid", billed.Fee)
+	}
+	// And it is settleable, which is the other half of "the charge survived".
+	settleable, _, err := env.ctrl.ListRequest(model.RequestListOptions{ExcludeZeroOutput: true})
+	if err != nil {
+		t.Fatalf("list settleable requests: %v", err)
+	}
+	if len(filterRequestsByUser(settleable, env.userAddr)) != 1 {
+		t.Error("the billed row is not visible to the settlement query, so the charge will never be collected")
 	}
 }

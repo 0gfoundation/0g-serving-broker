@@ -971,6 +971,19 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		p.handleBrokerError(ctx, err, "create request")
 		return
 	}
+	// The row now carries the hold, so from here every exit has to release it or leave the
+	// caller's balance locked. Deferred rather than placed at each exit because those are not
+	// enumerable by inspection: ProcessHTTPRequest returns before the video response handler
+	// on any non-200 from the vendor and on a dial or timeout error, and the two calls below
+	// can fail after this point too. The release asks the DB whether anything is still going
+	// to bill this request, so it is correct at every exit including the ones nobody listed.
+	//
+	// Only video writes a hold today (reservedFee is "0" for every other service type,
+	// because they write their real fee before the request returns). A service that starts
+	// writing one needs its own release; this one is about video poll jobs.
+	if reservedFee != "0" {
+		defer p.ctrl.ReleaseVideoHoldUnlessSomethingWillBill(req.RequestHash)
+	}
 
 	httpReq, err := p.ctrl.PrepareHTTPRequest(ctx, targetURL, reqBody, svcType)
 	if err != nil {

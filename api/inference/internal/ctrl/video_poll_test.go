@@ -146,6 +146,26 @@ func (m *mockVideoPollDB) CompleteVideoPollJobWithBilling(id uint64, claimAttemp
 // above, and db.FailVideoPollJob's doc comment) — a plain nil return on a lost race would give
 // false confidence that a whitelisted-job caller can tell "I won this write" from "someone else
 // already resolved it."
+func (m *mockVideoPollDB) ReleaseVideoFeeHoldUnlessPolling(requestHash string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.errOnRelease != nil {
+		return m.errOnRelease
+	}
+	// The real query skips the release while a pending or polling job references the request,
+	// which is what justifies keeping the hold. Replicated rather than unconditional, or a
+	// ctrl-layer test would pass with that exclusion reverted and the hold would be dropped
+	// out from under a job still running.
+	for _, j := range m.jobs {
+		if j.RequestHash == requestHash &&
+			(j.Status == model.VideoPollStatusPending || j.Status == model.VideoPollStatusPolling) {
+			return nil
+		}
+	}
+	m.releasedHolds = append(m.releasedHolds, requestHash)
+	return nil
+}
+
 func (m *mockVideoPollDB) ReleaseVideoFeeHold(requestHash string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
