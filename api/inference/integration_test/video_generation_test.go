@@ -166,10 +166,13 @@ func TestVideoGenerationFlow(t *testing.T) {
 		}
 
 		// A request record is created immediately (Init state, unbilled) even though the
-		// create response was non-terminal — deferVideoBillingToPoll registers a
-		// VideoPollJob but doesn't fabricate a fee. Actual billing only lands once the
-		// background poll scheduler observes the provider's job as completed, so poll for it
-		// with a timeout instead of asserting it synchronously (mirrors
+		// create response was non-terminal. It is not a zero-fee placeholder: the row carries
+		// the RESERVE in its fee so the amount is held against the caller's locked balance
+		// for the whole generation window (see proxy.go's reservedFee, and
+		// TestVideoGenerationFlow_ReserveIsHeldThenReplaced). What is still zero is
+		// OutputCount — deferVideoBillingToPoll fabricates no output — so actual billing only
+		// lands once the background poll scheduler observes the provider's job as completed.
+		// Poll for it with a timeout rather than asserting synchronously (mirrors
 		// TestAsyncTextToImageFlow's Step2_PollUntilCompleted pattern).
 		var latestReq model.Request
 		deadline := time.Now().Add(10 * time.Second)
@@ -1187,3 +1190,108 @@ func TestVideoGenerationListIsNotGated(t *testing.T) {
 // nil ProviderContract.Contract and SIGSEGVs the test binary. Wiring a real contract binding is the
 // prerequisite for testing a refusal end to end; guarding the nil in production would only hide a
 // genuinely broken deployment. Recorded so the next attempt does not rediscover the crash.
+
+// The reserve has to be HELD, not merely checked, and then replaced rather than added to.
+//
+// validateBalanceAdequacy is `fee + SUM(unprocessed fee) + MinimumLockedBalance <= lockBalance`
+// and CalculateUnsettledFee sums the fee COLUMN, so a reserve that is computed and thrown away
+// bounds exactly one in-flight create. With the row left at "0" for the whole generation
+// window, a caller fires N creates, each sees the other N-1 contributing nothing, and each
+// passes the identical check — which is the entire exposure this branch set out to close.
+//
+// Two things here, the second being the finding:
+//
+//  1. the create writes the reserve into the row's fee, and does so without making the row
+//     settleable — a hold is not a bill;
+//  2. the caller's unsettled total therefore includes it while the job is in flight, which is
+//     what makes a second concurrent create see the first.
+//
+// The third — that completion REPLACES the hold rather than adding to it — is asserted by
+// TestVideoGenerationFlow; see the note at the end of this function for why it cannot live
+// here too.
+func TestVideoGenerationFlow_ReserveIsHeldThenReplaced(t *testing.T) {
+	mockProvider, _ := newMockVideoProvider(t)
+	t.Cleanup(func() { mockProvider.Close() })
+
+	env := setupTestEnv(t, func(cfg *config.Config) {
+		cfg.Service.TargetURL = mockProvider.URL
+		cfg.Service.Type = "video-generation"
+		cfg.Service.ModelType = "sora-2"
+	})
+
+	boundary := "----TestBoundary"
+	fields := map[string]string{
+		"model":   "sora-2",
+		"prompt":  "A cat playing piano on stage",
+		"seconds": "5",
+		"size":    "720x1280",
+	}
+	var body strings.Builder
+	for name, value := range fields {
+		body.WriteString("--" + boundary + "\r\n")
+		body.WriteString(fmt.Sprintf("Content-Disposition: form-data; name=\"%s\"\r\n\r\n%s\r\n", name, value))
+	}
+	body.WriteString("--" + boundary + "--")
+
+	req := httptest.NewRequest("POST", "/v1/proxy/videos", strings.NewReader(body.String()))
+	req.Header.Set("Content-Type", "multipart/form-data; boundary="+boundary)
+	req.Header.Set("Authorization", createAuthHeader(t, env.privateKey, env.providerAddr))
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// The poll scheduler is deliberately NOT started, so the job stays in flight and this
+	// observes exactly the window a second concurrent create would arrive in.
+	requests, _, err := env.ctrl.ListRequest(model.RequestListOptions{})
+	if err != nil {
+		t.Fatalf("list requests: %v", err)
+	}
+	userRequests := filterRequestsByUser(requests, env.userAddr)
+	if len(userRequests) != 1 {
+		t.Fatalf("expected 1 request record, got %d", len(userRequests))
+	}
+	held := userRequests[0]
+
+	// 1. The hold is on the row.
+	if held.Fee == "0" || held.Fee == "" {
+		t.Fatalf("Fee = %q while the job is in flight: the reserve was computed and thrown away, so N concurrent creates each pass the same check", held.Fee)
+	}
+	reserve, ok := new(big.Int).SetString(held.Fee, 10)
+	if !ok || reserve.Sign() <= 0 {
+		t.Fatalf("Fee = %q, want a positive reserve", held.Fee)
+	}
+	// And it is a hold, not a bill: nothing has been generated, so the row must still be
+	// invisible to the settlement that charges (ExcludeZeroOutput filters on output_count).
+	if held.OutputCount != 0 {
+		t.Errorf("OutputCount = %d before the job resolved, want 0: a hold must not be settleable", held.OutputCount)
+	}
+	settleable, _, err := env.ctrl.ListRequest(model.RequestListOptions{ExcludeZeroOutput: true})
+	if err != nil {
+		t.Fatalf("list settleable requests: %v", err)
+	}
+	if len(filterRequestsByUser(settleable, env.userAddr)) != 0 {
+		t.Error("the in-flight row is visible to the settlement query, so the hold could be charged as if it were a bill")
+	}
+
+	// 2. The finding: the hold reaches the number the next admission check adds up.
+	unsettled, err := env.ctrl.GetUnsettledFee(env.userAddr)
+	if err != nil {
+		t.Fatalf("calculate unsettled fee: %v", err)
+	}
+	if unsettled.Cmp(reserve) != 0 {
+		t.Errorf("unsettled fee = %s, want the reserve %s: this is the sum validateBalanceAdequacy adds to the next request's own fee, so anything less lets a second create through on a balance that covers only the first", unsettled, reserve)
+	}
+
+	// Replacement — that completion overwrites this hold instead of adding to it — is
+	// TestVideoGenerationFlow's job, not this one's. It asserts Fee == "500" exactly after
+	// the poll resolves, and with the hold now written at create time that assertion only
+	// holds if the response's amount REPLACED the reserve.
+	//
+	// It cannot be asserted here as well, because the two need opposite setups: that test
+	// starts the poll scheduler before the create, and it has to — setupTestEnv does not
+	// call InitVideoPollScheduler, so a job registered while the scheduler is down gets a
+	// zero-value poll window and expires immediately. This test needs the scheduler down,
+	// so the job stays in flight and the hold is observable at all.
+}

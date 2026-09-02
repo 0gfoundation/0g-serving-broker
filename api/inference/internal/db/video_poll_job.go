@@ -196,6 +196,42 @@ func (d *DB) CompleteVideoPollJobWithBilling(id uint64, claimAttempts int, reque
 	}, ErrVideoPollJobAlreadyResolved, ErrVideoPollJobRequestMissing)
 }
 
+// releaseVideoFeeHold clears the reserve a video create wrote into its Request row's fee
+// (see proxy.go's reservedFee), for a job that resolved without billing.
+//
+// The hold exists to bound how much a caller can have in flight at once. Once the job is
+// terminally resolved nothing is in flight, so keeping it would lock up the caller's
+// balance for no benefit until PruneRequest removes the row. That matters most in exactly
+// the case where the broker is already at fault: a timed-out job may have been delivered
+// and never billed, and penalising the caller's balance for the broker's reconciliation
+// gap recovers nothing.
+//
+// Guarded on output_count = 0, which makes it idempotent and safe against a completion
+// that won a race: a row with output has a real fee computed from the response, and this
+// must never overwrite that with zero.
+func releaseVideoFeeHold(tx *gorm.DB, requestHash string) error {
+	if requestHash == "" {
+		return nil
+	}
+	// RowsAffected is deliberately not checked. Zero is the normal answer in two cases
+	// that are not errors: a whitelisted job has no Request row at all, and a row already
+	// released (or already billed) matches nothing.
+	return tx.Model(&model.Request{}).
+		Where("request_hash = ? AND output_count = ?", requestHash, 0).
+		Update("fee", "0").Error
+}
+
+// ReleaseVideoFeeHold clears the fee hold on a Request row for a video create that will
+// never be billed and has no poll job to resolve it — the provider failed at create time,
+// the response carried no resolvable duration, or no poll job could be registered at all.
+//
+// Same guard and same reasoning as the in-transaction release the poll resolutions use; see
+// releaseVideoFeeHold. Standalone because these callers have no job row to update alongside
+// it, so there is nothing to be atomic with.
+func (d *DB) ReleaseVideoFeeHold(requestHash string) error {
+	return releaseVideoFeeHold(d.db, requestHash)
+}
+
 // FailVideoPollJob marks a job failed — the provider reported a terminal failure, or a poll
 // attempt hit a non-retryable error. Bills nothing; the linked Request row (when one exists —
 // see IsWhitelisted) keeps its zero-output default and is excluded from settlement
@@ -210,20 +246,24 @@ func (d *DB) CompleteVideoPollJobWithBilling(id uint64, claimAttempts int, reque
 // from "someone else already resolved this, recording usage here would double-count" — an
 // unconditional nil return (this function's behavior before whitelisted jobs existed) can't
 // distinguish the two.
-func (d *DB) FailVideoPollJob(id uint64, claimAttempts int, errMsg string) error {
-	res := d.db.Model(&model.VideoPollJob{}).
-		Where("id = ? AND status = ? AND attempts = ?", id, model.VideoPollStatusPolling, claimAttempts).
-		Updates(map[string]interface{}{
-			"status":        model.VideoPollStatusFailed,
-			"error_message": errMsg,
-		})
-	if res.Error != nil {
-		return res.Error
-	}
-	if res.RowsAffected == 0 {
-		return ErrVideoPollJobAlreadyResolved
-	}
-	return nil
+func (d *DB) FailVideoPollJob(id uint64, claimAttempts int, requestHash, errMsg string) error {
+	return d.db.Transaction(func(tx *gorm.DB) error {
+		res := tx.Model(&model.VideoPollJob{}).
+			Where("id = ? AND status = ? AND attempts = ?", id, model.VideoPollStatusPolling, claimAttempts).
+			Updates(map[string]interface{}{
+				"status":        model.VideoPollStatusFailed,
+				"error_message": errMsg,
+			})
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return ErrVideoPollJobAlreadyResolved
+		}
+		// In the same transaction as the status change, so the two cannot disagree: a
+		// resolved job never leaves a hold behind, and a lost fencing race releases nothing.
+		return releaseVideoFeeHold(tx, requestHash)
+	})
 }
 
 // TimeOutVideoPollJob marks a job timed_out: ExpiresAt passed before a terminal state was
@@ -235,23 +275,29 @@ func (d *DB) FailVideoPollJob(id uint64, claimAttempts int, errMsg string) error
 // OR reclaimed by a newer worker, by a concurrent poll must not be overwritten with a spurious
 // timeout from a superseded claim. Returns ErrVideoPollJobAlreadyResolved on a lost race — see
 // FailVideoPollJob's doc comment for why this distinction matters now.
-func (d *DB) TimeOutVideoPollJob(id uint64, claimAttempts int, errMsg string) error {
-	res := d.db.Model(&model.VideoPollJob{}).
-		Where("id = ? AND status IN ? AND attempts = ?", id, []model.VideoPollStatus{
-			model.VideoPollStatusPending,
-			model.VideoPollStatusPolling,
-		}, claimAttempts).
-		Updates(map[string]interface{}{
-			"status":        model.VideoPollStatusTimedOut,
-			"error_message": errMsg,
-		})
-	if res.Error != nil {
-		return res.Error
-	}
-	if res.RowsAffected == 0 {
-		return ErrVideoPollJobAlreadyResolved
-	}
-	return nil
+func (d *DB) TimeOutVideoPollJob(id uint64, claimAttempts int, requestHash, errMsg string) error {
+	return d.db.Transaction(func(tx *gorm.DB) error {
+		res := tx.Model(&model.VideoPollJob{}).
+			Where("id = ? AND status IN ? AND attempts = ?", id, []model.VideoPollStatus{
+				model.VideoPollStatusPending,
+				model.VideoPollStatusPolling,
+			}, claimAttempts).
+			Updates(map[string]interface{}{
+				"status":        model.VideoPollStatusTimedOut,
+				"error_message": errMsg,
+			})
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return ErrVideoPollJobAlreadyResolved
+		}
+		// Released here even though a timeout is the case where the provider MAY have
+		// delivered: the broker is not going to bill it either way (output_count stays 0, so
+		// settlement skips the row), so holding the caller's balance recovers nothing and
+		// charges them for the broker's own reconciliation gap.
+		return releaseVideoFeeHold(tx, requestHash)
+	})
 }
 
 // CompleteVideoPollJobWhitelisted marks a whitelisted job completed WITHOUT touching any

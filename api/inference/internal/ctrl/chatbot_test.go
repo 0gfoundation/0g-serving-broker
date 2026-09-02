@@ -72,6 +72,10 @@ func newChatbotTestCtrl(t *testing.T, svc config.Service) *Ctrl {
 		svcCache:            cache.New(5*time.Minute, 10*time.Minute),
 		chatCacheExpiration: 5 * time.Minute,
 		logger:              &testAsyncLoggerImpl{},
+		// The video signing tests reach deferVideoBillingToPoll, which releases the fee hold
+		// a create wrote when it decides the request will never be billed. That is real DB
+		// access on a path that used to have none, so the harness needs a store.
+		videoPollDB: newMockVideoPollDB(),
 	}
 }
 

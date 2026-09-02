@@ -43,6 +43,18 @@ type mockVideoPollDB struct {
 	lastCompleteUnit      string
 	lastCompleteRateClass string
 
+	// The request hash each terminal-without-billing resolution passed down, so a test can
+	// assert the fee HOLD a video create wrote (proxy.go's reservedFee) is released for the
+	// right row rather than left for PruneRequest.
+	lastFailRequestHash    string
+	lastTimeoutRequestHash string
+
+	// releasedHolds records every request hash whose fee hold was released, in order, so a
+	// test can assert a create that will never be billed does not leave the caller's balance
+	// held until PruneRequest runs.
+	releasedHolds []string
+	errOnRelease  error
+
 	// whitelistedCompleteCalled counts CompleteVideoPollJobWhitelisted calls that actually won
 	// the guarded write (excludes lost-race calls) — see its doc comment below.
 	whitelistedCompleteCalled int
@@ -134,7 +146,15 @@ func (m *mockVideoPollDB) CompleteVideoPollJobWithBilling(id uint64, claimAttemp
 // above, and db.FailVideoPollJob's doc comment) — a plain nil return on a lost race would give
 // false confidence that a whitelisted-job caller can tell "I won this write" from "someone else
 // already resolved it."
-func (m *mockVideoPollDB) FailVideoPollJob(id uint64, claimAttempts int, errMsg string) error {
+func (m *mockVideoPollDB) ReleaseVideoFeeHold(requestHash string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.releasedHolds = append(m.releasedHolds, requestHash)
+	return m.errOnRelease
+}
+
+func (m *mockVideoPollDB) FailVideoPollJob(id uint64, claimAttempts int, requestHash, errMsg string) error {
+	m.lastFailRequestHash = requestHash
 	if m.errOnFail != nil {
 		return m.errOnFail
 	}
@@ -154,7 +174,8 @@ func (m *mockVideoPollDB) FailVideoPollJob(id uint64, claimAttempts int, errMsg 
 
 // TimeOutVideoPollJob replicates the real db.DB's guard AND lost-race sentinel — see
 // FailVideoPollJob's comment above.
-func (m *mockVideoPollDB) TimeOutVideoPollJob(id uint64, claimAttempts int, errMsg string) error {
+func (m *mockVideoPollDB) TimeOutVideoPollJob(id uint64, claimAttempts int, requestHash, errMsg string) error {
+	m.lastTimeoutRequestHash = requestHash
 	if m.errOnTimeout != nil {
 		return m.errOnTimeout
 	}
@@ -518,6 +539,15 @@ func TestPollVideoJob_FailedStatus(t *testing.T) {
 	if got.Status != model.VideoPollStatusFailed {
 		t.Fatalf("Status = %q, want failed", got.Status)
 	}
+	// The fee HOLD proxy.go wrote at create time has to come off with the job. Nothing is in
+	// flight any more, and the row is unbillable either way (output_count stays 0, which is
+	// what the settlement query filters on) — so leaving it would lock up the caller's
+	// balance until PruneRequest sweeps the row, for a clip the provider never delivered.
+	// The release happens inside FailVideoPollJob's transaction, so a lost fencing race
+	// releases nothing; what is checked here is that the request hash reached it at all.
+	if store.lastFailRequestHash != job.RequestHash {
+		t.Errorf("FailVideoPollJob got request hash %q, want %q: without it the hold is left for PruneRequest", store.lastFailRequestHash, job.RequestHash)
+	}
 }
 
 func TestPollVideoJob_StillQueued_Reschedules(t *testing.T) {
@@ -564,6 +594,13 @@ func TestPollVideoJob_TimedOut_NoHTTPCall(t *testing.T) {
 	got := store.get(1)
 	if got.Status != model.VideoPollStatusTimedOut {
 		t.Fatalf("Status = %q, want timed_out", got.Status)
+	}
+	// Released here too, and this is the case where it matters most. A timeout is the one
+	// resolution where the provider may actually have delivered — but the broker is not going
+	// to bill it either way, so holding the caller's balance recovers nothing and charges them
+	// for the broker's own reconciliation gap.
+	if store.lastTimeoutRequestHash != job.RequestHash {
+		t.Errorf("TimeOutVideoPollJob got request hash %q, want %q", store.lastTimeoutRequestHash, job.RequestHash)
 	}
 }
 

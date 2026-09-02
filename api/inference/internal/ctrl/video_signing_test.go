@@ -278,6 +278,17 @@ func TestNoJobIDKeepsCreateSignature(t *testing.T) {
 	if _, found := ctrl.svcCache.Get(ctrl.chatCacheKey("video-key")); !found {
 		t.Error("create-time signature was evicted even though the client has no id to fetch a final body with")
 	}
+	// This exit decides the request will never be billed — there is no id to poll — so the
+	// fee hold proxy.go wrote has to come off. It is the only create-time exit with no job
+	// row to carry the release, which is why it is asserted on the ctrl rather than through a
+	// resolution.
+	store, ok := ctrl.videoPollDB.(*mockVideoPollDB)
+	if !ok {
+		t.Fatalf("test harness no longer uses the mock store: %T", ctrl.videoPollDB)
+	}
+	if len(store.releasedHolds) != 1 || store.releasedHolds[0] != "req-1" {
+		t.Errorf("released holds = %q, want [req-1]: a create that will never be billed must not keep the caller's balance held until PruneRequest runs", store.releasedHolds)
+	}
 }
 
 // TestIsContractJobID pins the published id contract on the broker side. This is

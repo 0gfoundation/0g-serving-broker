@@ -308,7 +308,7 @@ func TestFailVideoPollJob_StaleClaimRejectedEvenWhenStatusStillPolling(t *testin
 	// ErrVideoPollJobAlreadyResolved (not nil): the RowsAffected check added so a
 	// whitelisted-job caller can tell "I won this write" from "someone else already resolved
 	// it" applies to every caller, not just whitelisted ones.
-	if err := d.FailVideoPollJob(created.ID, staleAttempts, "worker A: provider reported status=failed"); !errors.Is(err, ErrVideoPollJobAlreadyResolved) {
+	if err := d.FailVideoPollJob(created.ID, staleAttempts, created.RequestHash, "worker A: provider reported status=failed"); !errors.Is(err, ErrVideoPollJobAlreadyResolved) {
 		t.Fatalf("FailVideoPollJob (stale worker A) error = %v, want ErrVideoPollJobAlreadyResolved", err)
 	}
 
@@ -426,10 +426,10 @@ func TestFailAndTimeOutVideoPollJob(t *testing.T) {
 	d.db.Where("request_hash = ?", "fail-1").First(&f)
 	d.db.Where("request_hash = ?", "timeout-1").First(&to)
 
-	if err := d.FailVideoPollJob(f.ID, 0, "provider reported status=failed"); err != nil {
+	if err := d.FailVideoPollJob(f.ID, 0, f.RequestHash, "provider reported status=failed"); err != nil {
 		t.Fatalf("FailVideoPollJob: %v", err)
 	}
-	if err := d.TimeOutVideoPollJob(to.ID, 0, "exceeded MaxPollDuration"); err != nil {
+	if err := d.TimeOutVideoPollJob(to.ID, 0, to.RequestHash, "exceeded MaxPollDuration"); err != nil {
 		t.Fatalf("TimeOutVideoPollJob: %v", err)
 	}
 
@@ -664,7 +664,7 @@ func TestTimeOutVideoPollJob_StaleClaimRejected(t *testing.T) {
 		t.Fatalf("expected the reclaim to bump attempts to 2, got claimed=%+v", claimed)
 	}
 
-	if err := d.TimeOutVideoPollJob(created.ID, staleAttempts, "stale worker: exceeded MaxPollDuration"); !errors.Is(err, ErrVideoPollJobAlreadyResolved) {
+	if err := d.TimeOutVideoPollJob(created.ID, staleAttempts, created.RequestHash, "stale worker: exceeded MaxPollDuration"); !errors.Is(err, ErrVideoPollJobAlreadyResolved) {
 		t.Fatalf("TimeOutVideoPollJob (stale claim) error = %v, want ErrVideoPollJobAlreadyResolved", err)
 	}
 
@@ -674,5 +674,68 @@ func TestTimeOutVideoPollJob_StaleClaimRejected(t *testing.T) {
 	}
 	if got.Status != model.VideoPollStatusPolling {
 		t.Errorf("Status = %q, want unchanged polling — the stale timeout must not have won", got.Status)
+	}
+}
+
+// The release must never touch a row that has been billed.
+//
+// A video create writes the reserve into its Request row's fee as a HOLD (proxy.go's
+// reservedFee), and every resolution that will not bill releases it. Those two can race: a
+// completion writes the real fee, and a superseded worker's failure path can still call the
+// release afterwards. Without the output_count guard that release would overwrite a real
+// charge with zero — the provider delivered a clip and nobody paid for it, which is a worse
+// failure than the exposure the hold exists to close.
+//
+// Guarded on output_count = 0 because that is the flag the whole billing path already uses
+// for "nothing was delivered": it is what the settlement query filters on (ExcludeZeroOutput)
+// and what PruneRequest sweeps by.
+func TestReleaseVideoFeeHold_LeavesABilledRowAlone(t *testing.T) {
+	d := setupTestDB(t)
+	migrateVideoPollTables(t, d)
+
+	// A row still in flight: the hold is on it and nothing has been delivered.
+	seedVideoRequest(t, d, "held")
+	if err := d.db.Model(&model.Request{}).Where("request_hash = ?", "held").
+		Update("fee", "6698000000000000000").Error; err != nil {
+		t.Fatalf("seed the hold: %v", err)
+	}
+	// A row the poll already billed: a real fee computed from the response, with output.
+	seedVideoRequest(t, d, "billed")
+	if err := d.db.Model(&model.Request{}).Where("request_hash = ?", "billed").
+		Updates(map[string]interface{}{"fee": "500", "output_count": 5}).Error; err != nil {
+		t.Fatalf("seed the billed row: %v", err)
+	}
+
+	if err := d.ReleaseVideoFeeHold("held"); err != nil {
+		t.Fatalf("release the hold: %v", err)
+	}
+	if err := d.ReleaseVideoFeeHold("billed"); err != nil {
+		t.Fatalf("release against a billed row: %v", err)
+	}
+
+	var held, billed model.Request
+	if err := d.db.Where("request_hash = ?", "held").First(&held).Error; err != nil {
+		t.Fatalf("read back the held row: %v", err)
+	}
+	if err := d.db.Where("request_hash = ?", "billed").First(&billed).Error; err != nil {
+		t.Fatalf("read back the billed row: %v", err)
+	}
+	if held.Fee != "0" {
+		t.Errorf("the in-flight row's fee = %q, want 0: the hold was not released, so the caller's balance stays locked until PruneRequest runs", held.Fee)
+	}
+	if billed.Fee != "500" {
+		t.Errorf("the billed row's fee = %q, want 500: the release overwrote a real charge, so a delivered clip goes unpaid", billed.Fee)
+	}
+
+	// And it is idempotent, because a resolution can be retried.
+	if err := d.ReleaseVideoFeeHold("held"); err != nil {
+		t.Fatalf("second release: %v", err)
+	}
+	// A hash nobody recorded — a whitelisted job has no Request row at all — is not an error.
+	if err := d.ReleaseVideoFeeHold("no-such-request"); err != nil {
+		t.Fatalf("release for a request with no row: %v", err)
+	}
+	if err := d.ReleaseVideoFeeHold(""); err != nil {
+		t.Fatalf("release with no request hash: %v", err)
 	}
 }

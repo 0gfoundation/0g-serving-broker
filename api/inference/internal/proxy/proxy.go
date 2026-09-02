@@ -794,6 +794,11 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	}
 
 	var expectedInputFee string
+	// reservedFee is what this request HOLDS against the caller's locked balance until it
+	// settles, as distinct from expectedInputFee, which only feeds the admission check. Zero
+	// for every service that settles at response time within the same request; non-zero only
+	// for a video create, which can stay in flight for minutes. See where it is written below.
+	reservedFee := "0"
 	switch svcType {
 	case "zgStorage", "chatbot", "speech-to-text":
 		expectedInputFee = "0"
@@ -826,8 +831,9 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		// (1 0G) as the only thing between a caller and a clip that bills many times that. Measured on
 		// mainnet: a wallet with exactly 1.0 0G locked passed and was billed 6.698 0G for one 5s clip.
 		//
-		// VideoCreateReserveFee is an upper bound, not an estimate — see its doc. Not a charge: the
-		// real fee is computed from the response and this number is never persisted.
+		// VideoCreateReserveFee is an upper bound, not an estimate — see its doc. Not a charge:
+		// the real fee is computed from the response, and this number is only HELD (see
+		// reservedFee below), never settled.
 		// POST only. `/videos` is an exact-match TargetRoute with no method gate, so GET /v1/proxy/videos
 		// — the OpenAI list endpoint — reaches this switch too, and reserving there demanded ~20 0G to
 		// LIST videos where main demanded 1 0G, turning an upstream 400/404 into a 402.
@@ -862,6 +868,32 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 			return
 		}
 		expectedInputFee = fee
+		// Held, not just checked. validateBalanceAdequacy is
+		// `fee + SUM(unprocessed fee) + MinimumLockedBalance <= lockBalance`, and
+		// CalculateUnsettledFee sums the fee COLUMN — so a reserve that is never written
+		// bounds one create and nothing else. With the row left at "0" for the whole
+		// generation window, a caller fires N creates, each sees the other N-1 contributing
+		// zero, and each passes the identical check: measured against the same mainnet case
+		// this branch cites, 8 0G locked admits ~50 concurrent 6.698 0G clips.
+		//
+		// Writing it into fee makes the hold real, and every exit releases it without new
+		// bookkeeping:
+		//   - completed  CompleteVideoPollJobWithBilling / UpdateRequestVideoBilling REPLACE
+		//                fee with the amount computed from the response, so the reserve is
+		//                never what gets charged.
+		//   - failed, timed out, or never registered a poll job
+		//                the row keeps output_count = 0. The only settlement that charges
+		//                passes ExcludeZeroOutput (settlement_tee.go), which filters on
+		//                output_count, so it is never billed — and PruneRequest deletes it
+		//                after ZeroOutputRequestPruneThreshold, which releases the hold.
+		//                PruneRequest also excludes rows referenced by a pending/polling job,
+		//                so the hold cannot be pruned out from under a job still running.
+		//
+		// So the cost of this is that a create the provider failed holds the reserve for up
+		// to the prune threshold (1 hour). That is the right side to err on for the timeout
+		// case in particular, where the provider may have generated the clip and the broker
+		// has not yet reconciled it.
+		reservedFee = fee
 	default:
 		p.handleBrokerError(ctx, errors.New("unknown service type"), "prepare request extractor")
 		return
@@ -870,7 +902,10 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	// Use estimated values for validation only
 	// Actual values will be set when LLM response is received
 	req.InputFee = "0" // Will be set with actual value from LLM response
-	req.Fee = "0"      // Will be set with actual value from LLM response
+	// Fee is the hold, and for everything except a video create it is still "0": those
+	// service types write the real fee before the request returns, so there is no window
+	// in which a second request could see a stale zero.
+	req.Fee = reservedFee
 	req.Nonce = uuid.New().String()
 	req.RequestHash = req.Nonce
 	req.ServiceName = svcType

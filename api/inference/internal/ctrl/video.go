@@ -913,6 +913,7 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 		// bill, and there is no job to poll.
 		c.logger.Infof("video generation failed at create time for request %s; not billing", reqModel.RequestHash)
 		monitor.RecordVideoGenerationFailed()
+		c.releaseVideoFeeHold(reqModel.RequestHash)
 		return nil
 
 	case videoActionDeferToPoll:
@@ -948,6 +949,7 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 		// not a silent skip (this was a Warnf that hid Wan2.7 mis-parsing).
 		c.logger.Errorf("video billing indeterminate: no positive seconds in response or request, NOT billing request %s (free output)", reqModel.RequestHash)
 		monitor.RecordVideoBillingSkipped()
+		c.releaseVideoFeeHold(reqModel.RequestHash)
 		return nil
 	}
 	if source == videoSourceRequest {
@@ -979,6 +981,24 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 	return nil
 }
 
+// releaseVideoFeeHold clears the reserve proxy.go wrote into this request's fee, on a create
+// that is terminal-without-billing and has no poll job to resolve it later.
+//
+// Every such exit needs it. The hold bounds what a caller can have in flight; a create that
+// will never be billed has nothing in flight, so leaving the hold would lock up the caller's
+// balance until PruneRequest removes the row. The row is already unbillable either way —
+// output_count stays 0 and the settlement query filters on it — so this frees the balance
+// without changing what is charged.
+//
+// Logged, not returned. The caller is on a path that has already decided not to bill and
+// returns its own outcome; failing it over a hold that PruneRequest will clear within the
+// hour would turn a billing skip into a request-level error.
+func (c *Ctrl) releaseVideoFeeHold(requestHash string) {
+	if err := c.videoPollDB.ReleaseVideoFeeHold(requestHash); err != nil {
+		c.logger.Errorf("failed to release the video fee hold on request %s; the caller's locked balance stays held until the row is pruned: %v", requestHash, err)
+	}
+}
+
 // deferVideoBillingToPoll registers a VideoPollJob so the background scheduler resolves this
 // request once the provider reaches a terminal state, instead of guessing from the requested
 // duration. Called when a create response reports status=queued/in_progress — the real
@@ -1008,6 +1028,8 @@ func (c *Ctrl) deferVideoBillingToPoll(ctx *gin.Context, providerJobID, chatKey,
 		// exists there and is fetchable straight from the upstream.
 		if reqModel.IsWhitelisted {
 			c.recordWhitelistedUsage(reqModel, 0, 0, 0, 0, "")
+		} else {
+			c.releaseVideoFeeHold(reqModel.RequestHash)
 		}
 		return nil
 	}
@@ -1067,6 +1089,8 @@ func (c *Ctrl) deferVideoBillingToPoll(ctx *gin.Context, providerJobID, chatKey,
 		c.dropUnpollableVideoSignature(chatKey, "the poll job could not be persisted", true)
 		if reqModel.IsWhitelisted {
 			c.recordWhitelistedUsage(reqModel, 0, 0, 0, 0, "")
+		} else {
+			c.releaseVideoFeeHold(reqModel.RequestHash)
 		}
 		return errors.Wrap(err, "create video poll job")
 	}

@@ -61,8 +61,13 @@ type videoPollDB interface {
 	// lost fencing race, distinguishing "I actually won this write" from "someone else already
 	// resolved it" — needed so a whitelisted-job caller knows when it is safe to record usage
 	// without double-counting. See db.FailVideoPollJob's doc comment.
-	FailVideoPollJob(id uint64, claimAttempts int, errMsg string) error
-	TimeOutVideoPollJob(id uint64, claimAttempts int, errMsg string) error
+	FailVideoPollJob(id uint64, claimAttempts int, requestHash, errMsg string) error
+	// ReleaseVideoFeeHold clears the fee hold proxy.go wrote for a create that is
+	// terminal-without-billing and has no poll job to resolve it. Here rather than on the
+	// plain DB handle because it belongs to the same story as the resolutions above, and
+	// because the video path's tests mock this interface and not that handle.
+	ReleaseVideoFeeHold(requestHash string) error
+	TimeOutVideoPollJob(id uint64, claimAttempts int, requestHash, errMsg string) error
 	DeleteExpiredVideoPollJobs(retention time.Duration) error
 }
 
