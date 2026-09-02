@@ -49,9 +49,11 @@ const (
 	clientEphPubLen = 32
 
 	// anthropicFrameType is the cleartext field an Anthropic response frame names
-	// its own shape in, and anthropicMessageStop the value of the event that closes
-	// a stream (SPEC §7.2). The wire package owns the full taxonomy; the broker
-	// needs only these two, to recognize the terminal event and to synthesize one.
+	// its own shape in, and anthropicMessageStop the event a completed turn ends
+	// with (SPEC §7.2). The wire package owns the full taxonomy — including which
+	// shapes are terminal, which is asked of it rather than restated here; the
+	// broker needs these two only to SYNTHESIZE the event a truncated stream never
+	// got.
 	anthropicFrameType   = "type"
 	anthropicMessageStop = "message_stop"
 
@@ -275,7 +277,11 @@ func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, reqBody []byte) ([]byte, err
 //
 // An empty surface (a path apiFormatForPath does not recognize) is chat's own
 // case: the image and multipart endpoints are not chat surfaces at all, so only
-// the chatbot arm consults it.
+// the chatbot arm consults it. Its inner default arm is therefore unreachable
+// today — apiFormatForPath returns one of exactly three values — and exists for
+// the fourth: a surface added there (a Gemini path, say) starts out REFUSED for
+// sealed requests instead of quietly inheriting chat's rules, which is the same
+// silent mix-up the surface key was added to fix.
 func profileForRequest(svcType, surface string) (p wire.Profile, sealable bool) {
 	switch svcType {
 	case constant.ServiceTypeChatbot:
@@ -430,14 +436,21 @@ type responseFrameSealer struct {
 	// holding one set for the whole stream is exactly the mistake — it would seal
 	// nothing on every content frame.
 	profile wire.Profile
-	// terminalFrame, for a frame-typed profile, is the plaintext frame that closes
-	// the stream (Anthropic's `message_stop`). It is what makes the synthetic final
-	// frame emitted on EOF a legal event of that profile rather than a bare
-	// placeholder. Empty for a single-shape profile, whose final frame carries only
-	// empty placeholders.
-	terminalFrame wire.Response
-	emittedFinal  bool
-	frameCount    int
+	// synthFinalFrame is the plaintext frame this profile's stream is CAPPED with
+	// when an upstream drops off without sending a terminal event of its own — for
+	// Anthropic a `message_stop`, which is a legal event of the API (it seals
+	// nothing, §7.2) rather than a bare placeholder. Empty for a single-shape
+	// profile, whose synthetic final frame carries only empty placeholders.
+	//
+	// It is deliberately NOT how a terminal frame is RECOGNIZED: which shapes end
+	// a stream is the profile's business (Anthropic has two — a completed turn
+	// ends with `message_stop`, a failed one with `error` and no `message_stop`),
+	// so that question goes to wire.IsTerminalResponseFrame. Capping and
+	// recognizing coincide for a normal turn and diverge for a failed one, which
+	// is why they are separate fields of the answer.
+	synthFinalFrame wire.Response
+	emittedFinal    bool
+	frameCount      int
 }
 
 // newResponseFrameSealer returns a per-stream frame sealer when the request was
@@ -468,22 +481,27 @@ func (c *Ctrl) newResponseFrameSealer(ctx *gin.Context) (*responseFrameSealer, e
 		return nil, fmt.Errorf("e2ee stream: request binding hash missing from context")
 	}
 	return &responseFrameSealer{
-		sealer:        s,
-		binder:        proof.NewStreamBinderFromReqHash(reqBindHash),
-		profile:       profile,
-		terminalFrame: terminalFrameFor(profile),
+		sealer:          s,
+		binder:          proof.NewStreamBinderFromReqHash(reqBindHash),
+		profile:         profile,
+		synthFinalFrame: synthFinalFrameFor(profile),
 	}, nil
 }
 
-// terminalFrameFor returns the plaintext frame that closes a stream of this
-// profile, or nil for a profile whose streams have no such event.
+// synthFinalFrameFor returns the plaintext frame to cap a truncated stream of
+// this profile with, or nil for a profile whose streams have no such event.
 //
-// Anthropic's stream ends with `message_stop` rather than a `[DONE]` sentinel,
-// and that event is a legal frame of the profile: it seals nothing (§7.2), so it
-// doubles as the synthetic final frame when an upstream drops off without
-// sending one. A chat stream has no equivalent event — its final frame is a
-// placeholder with empty content — so it gets nil.
-func terminalFrameFor(p wire.Profile) wire.Response {
+// Anthropic's stream ends with a `message_stop` event rather than a `[DONE]`
+// sentinel, and that event is a legal frame of the profile — it seals nothing
+// (§7.2) — so it is what an upstream that dropped off should have sent, and what
+// this broker sends in its place. A chat stream has no equivalent event: its
+// final frame is a placeholder with empty content, so it gets nil.
+//
+// A stream that failed partway ends with `error`, which is terminal too — but a
+// broker never SYNTHESIZES one: it has no error to report, only a truncation,
+// and inventing an `error` frame would attribute a failure to the model that the
+// model did not produce.
+func synthFinalFrameFor(p wire.Profile) wire.Response {
 	if p == wire.ProfileAnthropic {
 		return wire.Response{anthropicFrameType: json.RawMessage(`"` + anthropicMessageStop + `"`)}
 	}
@@ -491,10 +509,10 @@ func terminalFrameFor(p wire.Profile) wire.Response {
 }
 
 // sealSSELine transforms one already-sanitized SSE line into its sealed form
-// (SPEC §7). A "data: {json}" chunk is sealed as a NON-final frame, except the
-// one event that a frame-typed profile defines as terminal (Anthropic's
-// `message_stop`), which is sealed AS the final frame — it is guaranteed last, so
-// nothing synthetic is needed after it.
+// (SPEC §7). A "data: {json}" chunk is sealed as a NON-final frame, except an
+// event a frame-typed profile defines as TERMINAL (for Anthropic `message_stop`
+// closing a completed turn, or `error` closing a failed one), which is sealed AS
+// the final frame — it is last by definition, so nothing synthetic follows it.
 //
 // For a chat stream, which has no such event, exactly one final frame is emitted
 // synthetically at stream end — before a "data: [DONE]" sentinel here, or on EOF
@@ -535,45 +553,58 @@ func (rs *responseFrameSealer) sealSSELine(line string) (string, error) {
 	return rs.sealFrame(frame, rs.isTerminal(frame))
 }
 
-// isTerminal reports whether this frame is the event that closes a frame-typed
-// profile's stream, and so must be sealed with final=true. A duplicate (an
-// upstream that somehow sent two) is not marked again: `final` must appear
-// exactly once, and emittedFinal is what the placeholder path checks too.
+// isTerminal reports whether this frame is an event that CLOSES this profile's
+// stream, and so must be sealed with final=true.
+//
+// Which shapes those are is the profile's business, so it is asked, not
+// hardcoded here: Anthropic has two — `message_stop` for a completed turn and
+// `error` for one that failed partway, which sends no `message_stop` at all.
+// Recognizing only the frame this broker would SYNTHESIZE (see synthFinalFrame)
+// would mark an error-terminated stream non-final, and the EOF path would then
+// append a `message_stop` after the `error` — a sequence no Anthropic stream
+// produces, reading to a client as a turn that completed normally.
+//
+// A single-shape profile has no terminal event and answers false for every
+// frame, which is what keeps the chat stream on its synthetic-final path. An
+// unrecognized shape also answers false; sealFrame refuses it a moment later,
+// which is where that belongs. A duplicate terminal event (an upstream that
+// somehow sent two) is not marked again: `final` must appear exactly once, and
+// emittedFinal is what the synthetic path checks too.
 func (rs *responseFrameSealer) isTerminal(frame wire.Response) bool {
-	if len(rs.terminalFrame) == 0 || rs.emittedFinal {
+	if rs.emittedFinal {
 		return false
 	}
-	got, ok := frame[anthropicFrameType]
-	return ok && bytes.Equal(bytes.TrimSpace(got), bytes.TrimSpace(rs.terminalFrame[anthropicFrameType]))
+	terminal, err := wire.IsTerminalResponseFrame(rs.profile, frame)
+	return err == nil && terminal
 }
 
 // finalFrameLine returns a synthetic final SSE frame so the client always
 // receives exactly one completion marker (SPEC §7). It returns "" if a final
 // frame was already emitted, making it safe to call on both [DONE] and EOF — and
-// on an Anthropic stream that already sent its `message_stop`, which IS the final
+// on an Anthropic stream that already sent a terminal event, which IS the final
 // frame, so the EOF path then adds nothing.
 //
 // What the frame contains comes from the profile, never a literal
 // {"choices": []}: a single-shape profile gets empty placeholders for its sealed
 // fields (every one of them is a JSON array, so an empty one merges to nothing on
-// the client), and a frame-typed profile gets its terminal event, which is a
-// legal frame of that profile and seals nothing at all.
+// the client), and a frame-typed profile gets the event a healthy upstream would
+// have closed with, which is a legal frame of that profile and seals nothing.
 func (rs *responseFrameSealer) finalFrameLine() (string, error) {
 	if rs.emittedFinal {
 		return "", nil
 	}
 	frame := wire.Response{}
-	for k, v := range rs.terminalFrame {
+	for k, v := range rs.synthFinalFrame {
 		frame[k] = v
 	}
 	out, err := rs.sealFrame(frame, true)
 	if err != nil {
 		return "", err
 	}
-	// A frame-typed profile's terminal event needs its `event:` line to be a
-	// well-formed SSE event of that API, since this frame is synthesized here
-	// rather than forwarded from an upstream that would have sent one.
-	if len(rs.terminalFrame) > 0 {
+	// A frame-typed profile's event needs its `event:` line to be a well-formed
+	// SSE event of that API, since this frame is synthesized here rather than
+	// forwarded from an upstream that would have sent one.
+	if len(rs.synthFinalFrame) > 0 {
 		return "event: " + anthropicMessageStop + "\n" + out, nil
 	}
 	return out, nil

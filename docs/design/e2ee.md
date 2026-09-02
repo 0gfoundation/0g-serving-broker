@@ -188,11 +188,19 @@ frame-typed profile's answer is a property of the frame.
   from per-frame `usage` (empty `usage:{}` chunks and vLLM
   `continuous_usage_stats` would otherwise mark a non-terminal frame final and
   truncate the stream).
-- **Anthropic streams** end with `message_stop`, which is guaranteed last, so it
-  is sealed AS the final frame and nothing synthetic follows it. On an upstream
-  that drops off first, `finalFrameLine` synthesizes one — a full
-  `event: message_stop` + sealed data event, a legal frame of the API (it seals
-  nothing per §7.2) rather than a bare placeholder.
+- **Anthropic streams** end with a terminal EVENT, which is sealed AS the final
+  frame so nothing synthetic follows it. There are **two**: `message_stop` closes
+  a completed turn and `error` closes one that failed partway, sending no
+  `message_stop` at all — so which shapes are terminal is asked of
+  `wire.IsTerminalResponseFrame` rather than hardcoded here. Recognizing only
+  `message_stop` would mark an error-terminated stream non-final and then append a
+  `message_stop` after the `error`, a sequence no Anthropic stream produces and
+  one that reads to a client as a turn that completed normally.
+  On an upstream that drops off before either, `finalFrameLine` synthesizes a
+  `message_stop` — a full `event: message_stop` + sealed data event, a legal frame
+  of the API (it seals nothing per §7.2) rather than a bare placeholder. It never
+  synthesizes an `error`: there is no failure to report, only a truncation, and
+  inventing one would attribute to the model something it did not produce.
 
 `ensureSealedFieldsPresent` injects an empty placeholder only for **array-valued**
 sealed fields (`choices`, `data`, `content`), so a usage-only chat chunk with no

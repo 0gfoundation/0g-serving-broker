@@ -321,6 +321,59 @@ func TestAnthropicStreamSynthesizesMessageStopOnEOF(t *testing.T) {
 	}
 }
 
+// A turn that fails partway ends with `error` and sends no message_stop at all.
+// That frame is terminal too, so it must carry `final` itself — and the EOF path
+// must then add nothing. Marking it non-final instead would append a
+// `message_stop` AFTER an `error`: a sequence no Anthropic stream produces, which
+// reads to a client as a turn that completed normally.
+func TestAnthropicStreamMarksAnErrorFrameFinal(t *testing.T) {
+	f := newE2EEFixture(t)
+	ctx := newAnthropicGinCtx()
+	if _, err := f.c.MaybeUnsealRequest(ctx, f.sealAnthropicRequest(t, []string{"messages", "system"})); err != nil {
+		t.Fatalf("unseal: %v", err)
+	}
+	sealer, err := f.c.newResponseFrameSealer(ctx)
+	if err != nil {
+		t.Fatalf("newResponseFrameSealer: %v", err)
+	}
+	// A turn that produced some output and then failed.
+	for _, line := range anthropicSSE[:9] {
+		if _, err := sealer.sealSSELine(line); err != nil {
+			t.Fatalf("sealSSELine(%q): %v", line, err)
+		}
+	}
+	const errLine = `data: {"type":"error","error":{"type":"overloaded_error","message":"upstream overloaded"}}` + "\n"
+	sealedErr, err := sealer.sealSSELine(errLine)
+	if err != nil {
+		t.Fatalf("sealSSELine(error): %v", err)
+	}
+	if strings.Contains(sealedErr, "overloaded") {
+		t.Errorf("the error payload must be sealed, not readable: %s", sealedErr)
+	}
+
+	payload, ok := strings.CutPrefix(strings.TrimSpace(sealedErr), "data:")
+	if !ok {
+		t.Fatalf("no data line in %q", sealedErr)
+	}
+	var frame wire.Response
+	if err := json.Unmarshal([]byte(strings.TrimSpace(payload)), &frame); err != nil {
+		t.Fatalf("sealed error frame: %v", err)
+	}
+	e2ee, err := frame.E2EE()
+	if err != nil {
+		t.Fatalf("read _e2ee: %v", err)
+	}
+	if !e2ee.Final {
+		t.Error("`error` ends the stream, so it must be the frame carrying final")
+	}
+	if len(e2ee.SealedFields) != 1 || e2ee.SealedFields[0] != "error" {
+		t.Errorf("sealed_fields = %v, want [error]", e2ee.SealedFields)
+	}
+	if tail, err := sealer.finalFrameLine(); err != nil || tail != "" {
+		t.Errorf("nothing may follow a terminal frame, got %q (%v)", tail, err)
+	}
+}
+
 // A frame whose shape declares a content field it does not carry is a malformed
 // upstream frame. It must fail closed rather than be papered over with an empty
 // placeholder: `delta` is an OBJECT, so `[]` there would be a type error shipped
