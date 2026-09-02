@@ -531,6 +531,30 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 			// validation and passes through here, instead of being misrouted into
 			// extractVideoJobID and rejected with a nonsensical "missing video job id".
 			if strings.HasPrefix(strings.ToLower(targetPath), videoStatusPathPrefix) {
+				// This branch forwards with charging=false and writes no Request row, so
+				// anything reaching it is served for free. That is correct for reading a job
+				// back; it is not correct for a method that makes the vendor RENDER.
+				//
+				// POST /videos/{id}/remix does render, and it lands here rather than in the
+				// billing switch because it matches this prefix while POST /videos (the create,
+				// an exact-match TargetRoute) does not. Ownership passes for any job the caller
+				// owns, so the loop is: pay for one clip, then POST remix on its id without
+				// bound — every render billed to the provider by the vendor and to nobody by the
+				// broker.
+				//
+				// An allowlist rather than "refuse POST", because the hole is the shape and not
+				// the verb: any future method under this prefix that produces output would be
+				// free again by default, and a free render should be a decision somebody made
+				// rather than a route nobody noticed. Remix becomes servable again by giving it
+				// a reserve and a Request row in the billing switch, which is a feature and not
+				// this fix.
+				switch ctx.Request.Method {
+				case http.MethodGet, http.MethodHead, http.MethodDelete:
+				default:
+					ctx.Set("ignoreError", true)
+					p.handleBrokerError(ctx, errors.NewBadRequest("%s is not served on %s: this route is read-only, and a request that renders has to be billed", ctx.Request.Method, targetPath), "video read-only route")
+					return
+				}
 				jobID := extractVideoJobID(targetPath)
 				if jobID == "" {
 					ctx.Set("ignoreError", true)
@@ -839,8 +863,9 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		// LIST videos where main demanded 1 0G, turning an upstream 400/404 into a 402.
 		//
 		// Every route that reaches THIS switch and renders a clip is a POST /videos. `POST
-		// /videos/{id}/remix` does render one, but it matches AuthRequiredPrefixes and never arrives
-		// here — unreserved and unbilled, on main as much as here, and not this change's to fix.
+		// /videos/{id}/remix` also renders one, but it matches AuthRequiredPrefixes and never
+		// arrives here — so it is refused there rather than served free; see the read-only method
+		// check in that branch.
 		if ctx.Request.Method != http.MethodPost {
 			expectedInputFee = "0"
 			break
