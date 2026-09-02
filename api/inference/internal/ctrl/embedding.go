@@ -36,6 +36,19 @@ type EmbeddingResponse struct {
 // so this is its own type rather than a reuse of chatbot.go's Usage, which
 // would silently accept (and never populate) a field this response never
 // carries.
+//
+// Deliberately narrower than 0g-router's shared pkg/inference.Usage, which
+// embedding there reuses wholesale and which also carries
+// PromptTokensDetails.CachedTokens — so router's CalculateCostBreakdown reads
+// a cache discount for embedding if a provider ever reports one, while this
+// type has no field to hold it and updateEmbeddingWithUsage never applies
+// cacheTokenBilling. Asymmetric on purpose (not a bug to fix in this type —
+// the no-completion-side reasoning above still holds), latent rather than
+// live: no known embedding vendor reports prompt_tokens_details.cached_tokens
+// today, so nothing currently exercises the gap. If one starts, add a
+// CachedTokens field here and cacheTokenBilling handling in
+// updateEmbeddingWithUsage, or router will silently discount what broker
+// bills at full price.
 type EmbeddingUsage struct {
 	PromptTokens int `json:"prompt_tokens"`
 	TotalTokens  int `json:"total_tokens"`
