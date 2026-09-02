@@ -156,7 +156,7 @@ func TestResolveReportsAnUnknownUpstreamSet(t *testing.T) {
 		{
 			name:    "an empty payload",
 			event:   RuntimeEvent{Event: EventUpstreamSet, Payload: nil},
-			wantErr: "is empty",
+			wantErr: "nothing but whitespace",
 		},
 		{
 			// The truncation case: a payload whose tail was lost still spells a complete,

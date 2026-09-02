@@ -74,12 +74,12 @@ func TestParseUpstreamSet(t *testing.T) {
 		{
 			name:    "an empty payload is not the empty set",
 			payload: "",
-			wantErr: "is empty",
+			wantErr: "nothing but whitespace",
 		},
 		{
 			name:    "a whitespace-only payload is not the empty set",
 			payload: " \n\t\n",
-			wantErr: "is empty",
+			wantErr: "nothing but whitespace",
 		},
 		// The header. It is what makes a payload that lost its tail unreadable instead of
 		// a smaller, perfectly consistent set — see upstream_truncation_test.go.

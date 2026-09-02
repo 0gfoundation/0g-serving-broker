@@ -40,6 +40,27 @@ const (
 	UpstreamsUnknown    = "unknown" // the deciding record could not be read
 )
 
+// maxUpstreamLine bounds one line of an EventUpstreamSet payload.
+//
+// It exists so the REFUSALS are bounded, not the parse. Every error below quotes the text
+// it refused with %q, which is how a reader tells an operator what is wrong — and a payload
+// with no newline in it is one line, so those quotes were as large as the payload. Measured:
+// a 4 MiB payload allocated 51 MB in fmt.Errorf alone and produced an 8.4 MB error string.
+// That string is not transient either: resolve.go keeps it in RunningState.UpstreamsErr and
+// copies it into UpstreamChanges when a later record supersedes it, and both are
+// JSON-transported to SDK and verifier callers.
+//
+// 4096 because a member line is a name of at most 63 bytes, a base URL, and an optional
+// identity. No standard bounds a URL, but nothing that addresses a real service comes close
+// to this — nginx allows 8k for a whole request line — so the cap refuses what was never a
+// member while leaving a wide margin over what is.
+//
+// Capping the line rather than truncating each message is what makes this hold everywhere:
+// name, identity and the URL all come out of a line, so one guard bounds every quote
+// downstream of it, including validUpstreamURL's. A truncating helper at each %q would have
+// to be remembered at each new one.
+const maxUpstreamLine = 4096
+
 // upstreamCountPrefix opens the one header line every EventUpstreamSet payload
 // carries: "count=<n>", the number of members the writer means the set to hold.
 //
@@ -123,6 +144,18 @@ func parseUpstreamSet(payload string) ([]Upstream, error) {
 	// non-negative want always means the header was seen.
 	want := -1
 	for line := range strings.SplitSeq(payload, "\n") {
+		// Before strings.Fields, which is what makes it bound the FIELDS too: a line with
+		// no whitespace in it is one field, so without this a name or an identity could be
+		// as large as the payload and get quoted by the refusal that rejects it.
+		//
+		// It is deliberately not conditioned on the line holding anything. An earlier
+		// version of this comment claimed the position also stopped a run of spaces
+		// carrying megabytes past the blank-line skip; there is nothing past that skip for
+		// it to carry, and strings.Fields over whitespace allocates nothing. The position
+		// earns its keep on the field bound alone.
+		if len(line) > maxUpstreamLine {
+			return nil, fmt.Errorf("%s payload has a %d-byte line, over the %d-byte limit; a member is a name, a base URL and an optional identity", EventUpstreamSet, len(line), maxUpstreamLine)
+		}
 		fields := strings.Fields(line)
 		if len(fields) == 0 {
 			// A blank line is skipped rather than refused: a writer that joins members with
@@ -177,7 +210,10 @@ func parseUpstreamSet(payload string) ([]Upstream, error) {
 		members = append(members, member)
 	}
 	if want < 0 {
-		return nil, fmt.Errorf("%s payload %q is empty; even the empty set is written out, as %s0, so that an unwritten payload is not read as a bound of zero", EventUpstreamSet, payload, upstreamCountPrefix)
+		// The length, not the content: reaching here means no non-blank line was seen, so
+		// the payload is entirely whitespace and quoting it says nothing an operator can
+		// use while costing whatever was sent.
+		return nil, fmt.Errorf("%s payload is %d bytes of nothing but whitespace; even the empty set is written out, as %s0, so that an unwritten payload is not read as a bound of zero", EventUpstreamSet, len(payload), upstreamCountPrefix)
 	}
 	// The check the rest of this function exists to make possible. A count that
 	// disagrees with what the payload spells means the writer and this reader do not
