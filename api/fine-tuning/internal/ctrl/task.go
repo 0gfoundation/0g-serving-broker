@@ -177,12 +177,17 @@ func (*Ctrl) validateSignature(task *schema.Task) error {
 	// compare refused valid signatures over their representation. The two sibling
 	// verifiers below already compared this way.
 	//
-	// The rest of the flow agrees with it now, and this paragraph used to say it did not.
-	// It described CancelTask and db.CancelTask as still comparing byte-exact and claimed
-	// closing that needed a migration; both were fixed on this branch without one —
-	// CancelTask passes the row's own spelling (so its WHERE stays exact), and the two
-	// filters that take an address from the caller compare LOWER(user_address) against
-	// every spelling schema.Task.Bind can store. Nothing about what is stored changed, so
+	// Every other place a spelling difference could bite agrees with it now, and this
+	// paragraph used to say the opposite. It described CancelTask and db.CancelTask as
+	// still comparing byte-exact and claimed that closing them needed a migration; both
+	// were fixed on this branch without one — CancelTask passes the row's own spelling so
+	// its WHERE stays exact, and the two filters that take an address from the caller
+	// compare LOWER(user_address) against every spelling schema.Task.Bind can store.
+	//
+	// The one that was NOT a comparison, and so was missed twice: the dataset DIRECTORY
+	// name. It is written from the URL path parameter and read back from the JSON body, so
+	// the same difference broke a task's setup instead of its authorisation. That is
+	// utils.DatasetDir now. Nothing about what is stored in the DB changed either way, so
 	// the migration this comment predicted was never needed.
 	if recoveredAddress != common.HexToAddress(task.UserAddress) {
 		return errors.New("signature verification failed: address mismatch")
@@ -609,8 +614,20 @@ func (c *Ctrl) SaveDataset(userAddress string, file *multipart.FileHeader) (stri
 	}
 
 	// 4. Create dataset directory and validate path
+	//
+	// utils.DatasetDir, not the caller's own spelling: this directory is written from the
+	// URL path parameter and read back from schema.Task.UserAddress (the JSON body), and
+	// both ingresses accept every spelling common.IsHexAddress does while
+	// VerifyUploadSignature authenticates all of them. Upload with wallet.address, create
+	// the task with signer.address.toLowerCase(), and on a case-sensitive filesystem setup
+	// looks in a directory that does not exist. See DatasetDir's doc.
+	//
+	// The checks in step 3 above are now redundant — a folded address is "0x" plus 40
+	// lowercase hex digits and cannot traverse — and are kept because they are what
+	// guarantees that, together with the IsHexAddress in step 1. DatasetDir normalises; it
+	// does not validate, and it says so.
 	baseDir := filepath.Join(utils.GetDataDir(), "datasets")
-	datasetDir := filepath.Join(baseDir, userAddress)
+	datasetDir := utils.DatasetDir(userAddress)
 
 	// Ensure datasetDir is within baseDir (prevent path traversal)
 	absDatasetDir, err := filepath.Abs(datasetDir)
