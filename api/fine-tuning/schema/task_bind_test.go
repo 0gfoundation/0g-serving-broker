@@ -30,8 +30,17 @@ func TestTaskBindRejectsNonAddressUserAddress(t *testing.T) {
 		return task.Bind(ctx)
 	}
 
-	if err := bind(t, valid); err != nil {
-		t.Fatalf("a plain hex address was rejected: %v", err)
+	// Every spelling a real client might send has to keep working — this check sits
+	// on the CreateTask ingress, so a false rejection here is a hard break.
+	for _, ok := range []string{
+		valid,
+		strings.ToUpper("0x" + valid[2:]), // upper case
+		valid[2:],                         // no 0x prefix
+		"  " + valid + "  ",               // surrounding whitespace
+	} {
+		if err := bind(t, ok); err != nil {
+			t.Errorf("a valid address spelling was rejected: %q -> %v", ok, err)
+		}
 	}
 
 	rejected := []string{

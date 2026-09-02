@@ -2,6 +2,7 @@ package schema
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/db"
@@ -50,10 +51,17 @@ func (d *Task) Bind(ctx *gin.Context) error {
 	//
 	// common.IsHexAddress rejects it: it requires the whole string to be a 20-byte
 	// hex address.
-	if !common.IsHexAddress(r.UserAddress) {
+	//
+	// Trimmed before validating, and the trimmed value is what is stored: surrounding
+	// whitespace is a formatting artifact, not an attack, and rejecting it would be
+	// the one way this check breaks a caller that is otherwise sending a perfectly
+	// good address. Storing the trimmed form also keeps it comparable with the path
+	// param on the cancel route, which cannot carry spaces.
+	userAddress := strings.TrimSpace(r.UserAddress)
+	if !common.IsHexAddress(userAddress) {
 		return fmt.Errorf("userAddress %q is not a valid hex address", r.UserAddress)
 	}
-	d.UserAddress = r.UserAddress
+	d.UserAddress = userAddress
 	d.PreTrainedModelHash = r.PreTrainedModelHash
 	d.DatasetHash = r.DatasetHash
 	d.TrainingParams = r.TrainingParams
