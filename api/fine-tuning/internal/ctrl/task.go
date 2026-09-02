@@ -98,8 +98,24 @@ func (c *Ctrl) CreateTask(ctx context.Context, task *schema.Task) (*uuid.UUID, e
 //
 // This is the comparison, not a normalisation: nothing about what is stored
 // changes, so no existing row has to be rewritten.
+//
+// Both sides must parse as addresses before they are compared as addresses.
+// common.HexToAddress is not a parser — it pads, truncates and gives up on the
+// first bad nibble — so EVERY malformed string maps to the zero address and any
+// two of them would compare equal. "0xOther" and "0xSomeoneElse" are both the
+// zero address. schema.Task.Bind rejects a malformed body address, but the path
+// parameter is validated nowhere and rows written before that check exists can
+// hold anything, so an unparseable stored owner must not match an unparseable
+// caller.
+//
+// Falling back to an exact compare keeps the pre-existing behaviour for such a
+// row — its true owner, passing the identical string, still matches — without
+// ever letting two DIFFERENT unparseable strings collapse onto one account.
 func sameUser(a, b string) bool {
-	return common.HexToAddress(a) == common.HexToAddress(b)
+	if common.IsHexAddress(a) && common.IsHexAddress(b) {
+		return common.HexToAddress(a) == common.HexToAddress(b)
+	}
+	return a == b
 }
 
 func (c *Ctrl) CancelTask(ctx context.Context, task *schema.Task) error {
