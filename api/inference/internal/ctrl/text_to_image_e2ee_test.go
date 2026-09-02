@@ -278,6 +278,27 @@ func TestWithImageUsage(t *testing.T) {
 			wantKeeps: "data",
 		},
 		{
+			// The one non-object value that does NOT make Unmarshal return an
+			// error: `null` decodes into a map's ZERO VALUE, silently. Decoding in
+			// place therefore left a nil map and the write below panicked — and the
+			// inference engine runs without gin.Recovery(), so that killed the
+			// connection instead of returning an error. The "weird" case above
+			// passes either way, which is exactly why it never caught this.
+			name:      "replaces a null usage rather than panicking",
+			body:      `{"data":[],"usage":null}`,
+			imageNum:  1,
+			wantUsage: `{"output_images":1}`,
+			wantKeeps: "data",
+		},
+		{
+			// Same trap, one level down: a null count inside a real usage object.
+			name:      "overrides a null output_images",
+			body:      `{"data":[],"usage":{"output_images":null,"input_tokens":7}}`,
+			imageNum:  2,
+			wantUsage: `{"output_images":2,"input_tokens":7}`,
+			wantKeeps: "data",
+		},
+		{
 			name:    "rejects a non-object body",
 			body:    `[1,2,3]`,
 			wantErr: true,

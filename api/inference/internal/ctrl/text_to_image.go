@@ -94,11 +94,25 @@ func withImageUsage(body []byte, imageNum int64) ([]byte, error) {
 		return nil, fmt.Errorf("attach usage.output_images: image response is not a JSON object: %w", err)
 	}
 
+	// Adopt the upstream's usage only when it decodes to an actual object.
+	// Anything else — a string, a number, or `null` — is replaced rather than
+	// failing the request: the field is the broker's to publish here, and the
+	// image count is what matters.
+	//
+	// `null` is the case worth naming. Unmarshalling it into a map sets the map to
+	// its ZERO VALUE and returns NO error, so decoding in place would leave a nil
+	// map that the write below panics on ("assignment to entry in nil map") — and
+	// the inference engine runs without gin.Recovery(), so that panic kills the
+	// connection rather than producing an error: truncated response, no billing,
+	// no failure attribution. Providers that always serialize `usage` emit exactly
+	// this. Decoding into a separate variable makes the nil unreachable by
+	// construction rather than something a later edit has to remember.
 	usage := map[string]json.RawMessage{}
 	if raw, ok := resp["usage"]; ok {
-		// A non-object usage is replaced rather than failing the request: the field
-		// is the broker's to publish here, and the images count is what matters.
-		_ = json.Unmarshal(raw, &usage)
+		var upstream map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &upstream); err == nil && upstream != nil {
+			usage = upstream
+		}
 	}
 	count, err := json.Marshal(imageNum)
 	if err != nil {
