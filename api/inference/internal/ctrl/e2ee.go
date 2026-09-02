@@ -516,6 +516,21 @@ func (c *Ctrl) newResponseFrameSealer(ctx *gin.Context) (*responseFrameSealer, e
 	}, nil
 }
 
+// profileHasFrameDiscriminator reports whether this profile's response frames
+// name their own shape in a cleartext field the wire package validates — which
+// is what makes an `event:` line derivable from a frame, and what makes the
+// derived value trustworthy (ResponseSealedFieldsForFrame refuses a shape outside
+// the taxonomy, so the value can only be one of a fixed set of identifiers).
+//
+// It sits beside synthFinalFrameFor because it is the same kind of per-profile
+// fact — what this profile's SSE stream looks like — and, like it, is a serving
+// question the wire package does not expose an answer to. Both are the reason a
+// frame-typed profile added without touching this file is refused at stream
+// setup rather than served wrongly.
+func profileHasFrameDiscriminator(p wire.Profile) bool {
+	return p == wire.ProfileAnthropic
+}
+
 // synthFinalFrameFor returns the plaintext frame to cap a truncated stream of
 // this profile with, or nil for a profile whose streams have no such event.
 //
@@ -573,11 +588,21 @@ func synthFinalFrameFor(p wire.Profile) wire.Response {
 // continuous_usage_stats puts usage on every chunk, either of which would mark a
 // non-terminal frame final and truncate the client's stream.
 //
-// Blank/comment/non-JSON lines pass through unchanged — which is what carries an
-// Anthropic `event: <type>` line through beside its sealed data line. That line
-// is NOT what the shape is read from: it lives outside the frame JSON and so
-// outside the AAD, so a receiver reads the bound `type` field instead and rebuilds
-// the line from it (§7.2).
+// What passes through is an ALLOWLIST, because a sealed stream's every byte
+// should be either sealed or accounted for: the blank line that separates SSE
+// events, the `[DONE]` sentinel, and `data:` frames (sealed). Every other line —
+// `event:`, `id:`, `retry:`, an unknown field — is DROPPED, and a `data:` payload
+// that is not a JSON object fails the stream closed.
+//
+// The reason is the same for all of them: they sit outside the frame JSON and so
+// outside the AAD and the §8 binding, and while everything a sealed frame's
+// cleartext half may contain is checked by the profile taxonomy, these lines are
+// checked by nothing (sanitizeStreamLine's leak-field stripping, #184, only
+// inspects `data:` JSON too). Forwarding one hands an upstream a channel for
+// arbitrary text to the client and to every intermediary on an otherwise sealed
+// turn. The `event:` line loses nothing by being dropped, since §7.2 already
+// requires a receiver to ignore the received line and rebuild it from the bound
+// discriminator — which is what sealFrame does.
 func (rs *responseFrameSealer) sealSSELine(line string) (string, error) {
 	trimmed := strings.TrimSpace(line)
 	if trimmed == "" {
@@ -590,21 +615,16 @@ func (rs *responseFrameSealer) sealSSELine(line string) (string, error) {
 		}
 		return final + line, nil // synthetic final frame (if any) precedes [DONE]
 	}
-	// An upstream `event:` line is DROPPED, and this broker emits its own from the
-	// frame's bound `type` (see sealFrame). Forwarding it buys nothing and costs
-	// something: it sits outside the frame JSON and therefore outside the AAD, so
-	// §7.2 already requires a receiver to ignore it and rebuild the line from the
-	// bound discriminator — while everything a sealed frame's cleartext half may
-	// contain is checked by the profile taxonomy, and this line is checked by
-	// nothing. sanitizeStreamLine's leak-field stripping (#184) only inspects
-	// `data:` JSON too, so an upstream could write arbitrary text there and have
-	// the router read it in the clear on an otherwise sealed turn.
-	if _, isEvent := strings.CutPrefix(trimmed, "event:"); isEvent {
-		return "", nil
-	}
 	after, ok := strings.CutPrefix(trimmed, "data:")
 	if !ok {
-		return line, nil
+		// Any other SSE field line: `event:` (rebuilt by sealFrame from the bound
+		// discriminator), `id:`, `retry:`, or something unrecognized. None of them
+		// is inside the AAD, none of them is checked by anything, and none carries
+		// content a sealed receiver may act on — so none is forwarded. Debug rather
+		// than Warn: an upstream that sends `id:` sends it on every frame, and this
+		// is a normal thing to discard, not an incident.
+		rs.logger.Debugf("e2ee stream: dropping a non-data SSE line, which no sealed receiver may trust: %q", trimmed)
+		return "", nil
 	}
 	payload := strings.TrimSpace(after)
 	if !strings.HasPrefix(payload, "{") {
@@ -820,11 +840,30 @@ func (rs *responseFrameSealer) sealFrame(frame wire.Response, final bool) (strin
 	}
 	// The SSE `event:` line, rebuilt from the frame's own BOUND discriminator —
 	// the upstream's was dropped (see sealSSELine), and this is the same
-	// derivation §7.2 requires of a receiver. A profile whose frames carry no
-	// discriminator (chat, image) gets no event line, which is what its API sends.
+	// derivation §7.2 requires of a receiver.
+	//
+	// Only for a profile that HAS a discriminator, which is the load-bearing half.
+	// On such a profile the value is already validated: ResponseSealedFieldsForFrame
+	// above refuses any shape outside the taxonomy, so `kind` is one of a fixed set
+	// of identifiers. On a single-shape profile nothing validates it — `type` is an
+	// ordinary cleartext field the wire package has no rule about — so an upstream
+	// could put anything there, INCLUDING a newline, and a line built from it would
+	// end and start a fresh SSE line: an attacker-chosen, unsealed, unbound `data:`
+	// frame written into a sealed stream, ahead of the real one. That is exactly the
+	// channel dropping the upstream's own `event:` line closes, so it must not be
+	// reopened here.
 	eventLine := ""
-	if kind := frameKindOf(frame); kind != "" {
-		eventLine = "event: " + kind + "\n"
+	if profileHasFrameDiscriminator(rs.profile) {
+		kind := frameKindOf(frame)
+		if strings.ContainsAny(kind, "\r\n") {
+			// Unreachable through the taxonomy, and fail-closed rather than
+			// silently dropped: a shape identifier with a line break means an
+			// assumption above this line stopped holding.
+			return "", fmt.Errorf("seal frame: frame discriminator %q contains a line break", kind)
+		}
+		if kind != "" {
+			eventLine = "event: " + kind + "\n"
+		}
 	}
 	// Fold the exact on-wire frame into the §8 streaming binding, in send order
 	// (the final frame last), so the signed aggregate matches what the client

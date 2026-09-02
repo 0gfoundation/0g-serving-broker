@@ -190,18 +190,32 @@ frame-typed profile's answer is a property of the frame.
   seals each SSE frame under one HPKE context (sequence increments per frame).
   Each sealed frame is a self-contained SSE event (`\n\n` terminator) so it never
   merges with the next frame or `[DONE]` in the client's SSE reader.
-- **The `event:` line is REBUILT from each frame's bound `type`, never
-  forwarded.** The upstream's line is dropped. It sits outside the frame JSON and
-  so outside the AAD — which is why §7.2 has a receiver ignore the received line
-  and rebuild it from the bound discriminator, and why an upstream must not be
-  able to write into it: everything a sealed frame's cleartext half may hold is
-  checked by the per-shape taxonomy, and this line is checked by nothing
-  (`sanitizeStreamLine`'s leak-field stripping only inspects `data:` JSON too).
-  Forwarding it would let an upstream hand the router arbitrary text in the clear
-  on an otherwise sealed turn, and buys nothing, since a conforming receiver
-  ignores it. `sealFrame` therefore derives it from the frame it is sealing, for
-  forwarded and synthesized frames alike — a chat or image stream gets no event
-  line, because those frames have no discriminator and their API sends none.
+- **What a sealed stream may emit is an ALLOWLIST**: the blank line that separates
+  SSE events, the `[DONE]` sentinel, and `data:` frames (sealed). Every other line
+  — `event:`, `id:`, `retry:`, an unknown field — is dropped, and a `data:`
+  payload that is not a JSON object fails the stream closed. They all sit outside
+  the frame JSON and so outside the AAD and the §8 binding, and while everything a
+  sealed frame's cleartext half may hold is checked by the per-shape taxonomy,
+  these lines are checked by nothing (`sanitizeStreamLine`'s leak-field stripping
+  only inspects `data:` JSON too). Forwarding one hands an upstream a channel for
+  arbitrary text to the client and to every intermediary on an otherwise sealed
+  turn.
+- **The `event:` line is REBUILT from each frame's bound `type`**, which is why
+  dropping the upstream's costs nothing: §7.2 already has a receiver ignore the
+  received line and rebuild it from the bound discriminator, and `sealFrame` does
+  the same derivation for forwarded and synthesized frames alike.
+
+  It is built **only for a profile that has a discriminator**, and that gate is
+  the load-bearing half. On such a profile the value is already validated —
+  `ResponseSealedFieldsForFrame` refuses any shape outside the taxonomy, so it can
+  only be one of a fixed set of identifiers. On a single-shape profile nothing
+  validates it: `type` is an ordinary cleartext field the wire package has no rule
+  about, so an upstream could put anything there **including a newline**, and a
+  line built from it would end and start a fresh SSE line — an attacker-chosen,
+  unsealed, unbound `data:` frame written into a sealed stream ahead of the real
+  one. That is the very channel this section closes, so a chat or image stream
+  gets no event line (which is also what their API sends), and a discriminator
+  carrying a line break fails the frame closed rather than being quietly dropped.
 - **Chat streams** (no terminal event of their own): every data frame is sealed as
   NON-final and exactly one synthetic final frame is emitted at stream end —
   before `[DONE]`, or on EOF-without-`[DONE]`. `final` is deliberately NOT derived
@@ -282,11 +296,6 @@ frame-typed profile's answer is a property of the frame.
 
   Blank lines and `[DONE]` still pass through — a real stream ends its last event
   with a blank line, and `[DONE]` is a sentinel rather than content.
-- **A `data:` payload that is neither `[DONE]` nor a JSON object fails closed.**
-  There is no frame to seal, and nothing that could check it: the same hole as a
-  forwarded `event:` line, one branch away, except that clients RENDER `data:`
-  payloads. Passing it through would hand arbitrary text to the client and every
-  intermediary in the clear on an otherwise sealed turn.
 
 `ensureSealedFieldsPresent(profile, frame, sealedFields)` injects an empty
 placeholder only for the sealed fields a frame of THAT PROFILE may legitimately

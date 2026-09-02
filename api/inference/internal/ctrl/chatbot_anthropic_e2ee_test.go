@@ -234,8 +234,10 @@ func TestAnthropicStreamSealsPerFrameShape(t *testing.T) {
 	if strings.Contains(joined, "the secret answer") {
 		t.Fatalf("a delta rode in the clear:\n%s", joined)
 	}
-	// The `event:` lines pass through beside their sealed data lines, so the
-	// stream stays a well-formed SSE stream of this API.
+	// The stream stays a well-formed SSE stream of this API: an `event:` line
+	// beside every sealed data line. The upstream's own line was dropped — these
+	// are rebuilt from each frame's bound `type` (see
+	// TestAnthropicStreamRebuildsTheEventLine).
 	for _, want := range []string{"event: message_start", "event: content_block_delta", "event: message_stop"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("%q must survive sealing", want)
@@ -445,17 +447,22 @@ func TestAnthropicStreamRebuildsTheEventLine(t *testing.T) {
 		t.Fatalf("newResponseFrameSealer: %v", err)
 	}
 
-	// An upstream event line — whatever it says — is dropped, not forwarded.
+	// An upstream event line — whatever it says — is dropped, not forwarded. So is
+	// every other non-data field line: none is inside the AAD, none is checked by
+	// anything, and none carries content a sealed receiver may act on.
 	for _, line := range []string{
 		"event: SECRET-ON-THE-EVENT-LINE\n",
 		"event: content_block_delta\n", // even the correct one: it is not the source of truth
+		"id: SECRET-ON-THE-ID-LINE\n",
+		"retry: 10000\n",
+		"unknown-field: SECRET\n",
 	} {
 		out, err := sealer.sealSSELine(line)
 		if err != nil {
 			t.Errorf("sealSSELine(%q): %v", strings.TrimSpace(line), err)
 		}
 		if out != "" {
-			t.Errorf("an upstream `event:` line must not be forwarded, got %q", out)
+			t.Errorf("a non-data SSE line must not be forwarded, got %q", out)
 		}
 	}
 
@@ -491,12 +498,44 @@ func TestStreamFrameSealerChatEmitsNoEventLine(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newResponseFrameSealer: %v", err)
 	}
-	out, err := sealer.sealSSELine(`data: {"id":"a","choices":[{"delta":{"content":"hi"}}]}` + "\n")
-	if err != nil {
-		t.Fatalf("sealSSELine: %v", err)
-	}
-	if !strings.HasPrefix(out, "data: {") {
-		t.Errorf("a chat frame must be emitted without an `event:` line, got %q", out)
+	// Including — especially — a chunk carrying a top-level `type`. On this profile
+	// `type` is an ordinary cleartext field the wire package has no rule about, so
+	// an event line derived from it would put an UNVALIDATED upstream string on the
+	// wire ahead of the sealed frame; with a newline in it, a whole
+	// attacker-chosen, unsealed, unbound `data:` frame — reopening, one branch
+	// away, the channel that dropping the upstream's own `event:` line closes.
+	for _, line := range []string{
+		`data: {"id":"a","choices":[{"delta":{"content":"hi"}}]}` + "\n",
+		`data: {"id":"a","choices":[{"delta":{"content":"hi"}}],"type":"benign"}` + "\n",
+		`data: {"id":"a","choices":[{"delta":{"content":"real"}}],` +
+			`"type":"evil\ndata: {\"choices\":[{\"delta\":{\"content\":\"injected\"}}]}\n"}` + "\n",
+	} {
+		out, err := sealer.sealSSELine(line)
+		if err != nil {
+			t.Fatalf("sealSSELine: %v", err)
+		}
+		if !strings.HasPrefix(out, "data: {") {
+			t.Errorf("a chat frame must be emitted without an `event:` line, got %q", out)
+		}
+		// The invariant is about SSE LINES, not about the bytes appearing anywhere:
+		// the smuggled newline stays a JSON escape inside the sealed frame's
+		// cleartext `type`, which is a bound field like any other and rides through
+		// exactly as it does on main. What must not happen is a new LINE.
+		dataLines, eventLines := 0, 0
+		for _, l := range strings.Split(out, "\n") {
+			switch {
+			case strings.HasPrefix(l, "data: "):
+				dataLines++
+			case strings.HasPrefix(l, "event:"):
+				eventLines++
+			case strings.TrimSpace(l) == "":
+			default:
+				t.Errorf("unexpected SSE line %q in %q", l, out)
+			}
+		}
+		if dataLines != 1 || eventLines != 0 {
+			t.Errorf("emitted %d data and %d event lines, want exactly 1 and 0: %q", dataLines, eventLines, out)
+		}
 	}
 }
 
@@ -656,12 +695,13 @@ func TestAnthropicStreamHandlesADataFrameAfterTheTerminalFrame(t *testing.T) {
 	}
 	boundAtFinal := sealer.frameCount
 
-	// Lines that legitimately trail a terminal frame must still pass through: a
+	// Lines that legitimately trail a terminal frame must not fail the stream: a
 	// real Anthropic stream ends its last event with a blank line, and an
-	// OpenAI-compatible shim may append [DONE].
+	// OpenAI-compatible shim may append [DONE]. (An `event:` line is dropped
+	// rather than forwarded, here as everywhere.)
 	for _, line := range []string{"\n", "event: message_stop\n", "data: [DONE]\n"} {
 		if _, err := sealer.sealSSELine(line); err != nil {
-			t.Errorf("sealSSELine(%q) must still pass through after the final frame: %v", strings.TrimSpace(line), err)
+			t.Errorf("sealSSELine(%q) must not fail the stream after the final frame: %v", strings.TrimSpace(line), err)
 		}
 	}
 
