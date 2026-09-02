@@ -410,6 +410,29 @@ func (d *DB) Migrate() error {
 				return tx.Exec("ALTER TABLE `video_job_owner` MODIFY `provider_job_id` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL;").Error
 			},
 		},
+		{
+			ID: "adapter-key-tee-signer-address",
+			Migrate: func(tx *gorm.DB) error {
+				// The fine-tuning broker signs Keccak256(chunk-tag stream) into the head of
+				// every encrypted LoRA artifact, but the inference broker used to skip those
+				// 65 bytes without verifying them — dead security metadata. Verifying needs
+				// the producing enclave's address, which nothing carried, so the adapter key
+				// push now includes it and this column stores it.
+				//
+				// Nullable because AutoMigrate cannot add a NOT NULL column to a table that
+				// already has rows without a default. It does NOT make pre-migration rows
+				// distinguishable from explicitly-empty ones: model.AdapterKey declares a
+				// plain string, so gorm reads a legacy NULL back as "" and writes "" for a
+				// push that omits the field. Nothing depends on telling them apart —
+				// lora.Manager refuses to deploy on "", on a malformed value and on 0x0
+				// alike, so pre-existing adapters fail closed rather than silently keeping
+				// the old unverified behaviour.
+				type AdapterKey struct {
+					TeeSignerAddress string `gorm:"type:varchar(42)"`
+				}
+				return tx.AutoMigrate(&AdapterKey{})
+			},
+		},
 	})
 
 	return errors.Wrap(m.Migrate(), "migrate database")

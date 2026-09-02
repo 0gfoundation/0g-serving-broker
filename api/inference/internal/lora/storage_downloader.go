@@ -6,12 +6,13 @@ import (
 	"path/filepath"
 	"strings"
 
+	zgcommon "github.com/0gfoundation/0g-storage-client/common"
+	"github.com/0gfoundation/0g-storage-client/indexer"
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/0glabs/0g-serving-broker/inference/config"
-	zgcommon "github.com/0gfoundation/0g-storage-client/common"
-	"github.com/0gfoundation/0g-storage-client/indexer"
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/sirupsen/logrus"
 )
 
@@ -50,7 +51,7 @@ func NewStorageDownloader(cfg config.LoRAConfig, providerKey string, logger log.
 //
 // Returns the actual directory path containing the adapter files (may differ from
 // outputDir if the zip archive contains a top-level directory wrapper).
-func (d *StorageDownloader) DownloadAndDecrypt(ctx context.Context, storageHashHex string, providerEncKey []byte, outputDir string) (string, error) {
+func (d *StorageDownloader) DownloadAndDecrypt(ctx context.Context, storageHashHex string, providerEncKey []byte, outputDir string, expectedSigner common.Address) (string, error) {
 	// Step 1: Decrypt AES key
 	d.logger.Infof("decrypting AES key with provider ECIES private key (%d encrypted bytes)", len(providerEncKey))
 	aesKey, err := util.ProviderECIESDecrypt(d.providerKey, providerEncKey)
@@ -87,8 +88,11 @@ func (d *StorageDownloader) DownloadAndDecrypt(ctx context.Context, storageHashH
 		_ = os.Remove(decryptedZip)
 	}()
 
-	d.logger.Infof("decrypting adapter with AES-GCM")
-	if err := util.AesDecryptLargeFile(aesKey, encryptedFile, decryptedZip); err != nil {
+	// Verifies the 65-byte TEE tag signature at the head of the artifact against
+	// expectedSigner before returning; on mismatch the plaintext is removed and we
+	// never reach the unzip below.
+	d.logger.Infof("decrypting adapter with AES-GCM and verifying TEE tag signature (signer %s)", expectedSigner.Hex())
+	if err := util.AesDecryptLargeFile(aesKey, encryptedFile, decryptedZip, expectedSigner); err != nil {
 		return "", errors.Wrap(err, "AES decrypt adapter file")
 	}
 

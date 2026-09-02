@@ -316,3 +316,152 @@ func TestAdapterKeyIdempotent(t *testing.T) {
 		t.Fatalf("idempotent CreateAdapterKey (third push, identical payload): %v", err)
 	}
 }
+
+// A row written before tee_signer_address existed has it empty, and lora.Manager
+// then refuses to deploy the adapter and tells the operator to have the
+// fine-tuning broker re-push. That remediation only works if the upsert actually
+// assigns the column: FirstOrCreate's found-branch issues Updates() with the
+// assigned columns only, and its preceding Find has already overwritten the
+// struct's field with the stored value — so omitting it from Assign makes the
+// re-push a silent no-op and strands the adapter permanently.
+func TestAdapterKeyRePushFillsTeeSignerAddress(t *testing.T) {
+	d := setupTestDB(t)
+
+	const taskID = "task-key-repush-signer"
+	legacy := &model.AdapterKey{
+		TaskID:         taskID,
+		StorageHash:    "0x3333333333333333333333333333333333333333333333333333333333333333",
+		ProviderEncKey: "0xenckey",
+	}
+	if err := d.CreateAdapterKey(legacy); err != nil {
+		t.Fatalf("seed legacy row: %v", err)
+	}
+	got, err := d.GetAdapterKeyByTaskID(taskID)
+	if err != nil {
+		t.Fatalf("read back seed: %v", err)
+	}
+	if got.TeeSignerAddress != "" {
+		t.Fatalf("setup: want an empty signer on the legacy row, got %q", got.TeeSignerAddress)
+	}
+
+	const wantSigner = "0x71562b71999873DB5b286dF957af199Ec94617F7"
+	repush := &model.AdapterKey{
+		TaskID:           taskID,
+		StorageHash:      legacy.StorageHash,
+		ProviderEncKey:   legacy.ProviderEncKey,
+		TeeSignerAddress: wantSigner,
+	}
+	if err := d.CreateAdapterKey(repush); err != nil {
+		t.Fatalf("re-push: %v", err)
+	}
+
+	got, err = d.GetAdapterKeyByTaskID(taskID)
+	if err != nil {
+		t.Fatalf("read back after re-push: %v", err)
+	}
+	if got.TeeSignerAddress != wantSigner {
+		t.Errorf("TeeSignerAddress = %q, want %q; the documented re-push remediation is a no-op", got.TeeSignerAddress, wantSigner)
+	}
+
+	// And a later re-push must be able to REPLACE it, which is what an
+	// enclave-image change requires.
+	const rotated = "0x1e65079A4d283D1890071140dFAf0af203DebCF2"
+	if err := d.CreateAdapterKey(&model.AdapterKey{
+		TaskID:           taskID,
+		StorageHash:      legacy.StorageHash,
+		ProviderEncKey:   legacy.ProviderEncKey,
+		TeeSignerAddress: rotated,
+	}); err != nil {
+		t.Fatalf("rotating re-push: %v", err)
+	}
+	got, err = d.GetAdapterKeyByTaskID(taskID)
+	if err != nil {
+		t.Fatalf("read back after rotation: %v", err)
+	}
+	if got.TeeSignerAddress != rotated {
+		t.Errorf("TeeSignerAddress = %q, want %q after a rotating re-push", got.TeeSignerAddress, rotated)
+	}
+}
+
+// A push that omits teeSignerAddress must not WIPE a signer already stored. The
+// field is optional at the handler (an older fine-tuning broker does not send it),
+// and it is in the upsert's Assign set so a re-push can fill and rotate it — those
+// two together would let a stale-version push overwrite a good address with the
+// empty string and strand a working adapter.
+func TestAdapterKeyPushWithoutSignerDoesNotWipeIt(t *testing.T) {
+	d := setupTestDB(t)
+
+	const taskID = "task-key-no-wipe"
+	const signer = "0x71562b71999873DB5b286dF957af199Ec94617F7"
+	if err := d.CreateAdapterKey(&model.AdapterKey{
+		TaskID:           taskID,
+		StorageHash:      "0x4444444444444444444444444444444444444444444444444444444444444444",
+		ProviderEncKey:   "0xenckey",
+		TeeSignerAddress: signer,
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// The same task, same artifact bytes, pushed again by a broker that predates the
+	// field. storageHash is unchanged, so the stored signer still describes these
+	// bytes and must survive.
+	if err := d.CreateAdapterKey(&model.AdapterKey{
+		TaskID:         taskID,
+		StorageHash:    "0x4444444444444444444444444444444444444444444444444444444444444444",
+		ProviderEncKey: "0xenckey-v2",
+	}); err != nil {
+		t.Fatalf("push without signer: %v", err)
+	}
+
+	got, err := d.GetAdapterKeyByTaskID(taskID)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if got.TeeSignerAddress != signer {
+		t.Errorf("TeeSignerAddress = %q, want %q preserved; a same-artifact push without the field wiped a good signer", got.TeeSignerAddress, signer)
+	}
+	// The fields the push DID carry must still have been applied.
+	if got.ProviderEncKey != "0xenckey-v2" {
+		t.Errorf("ProviderEncKey = %q, want the pushed value", got.ProviderEncKey)
+	}
+}
+
+// The converse: a push that CHANGES the artifact without supplying a signer must
+// not leave the row describing artifact B with signer A. Keeping the stale signer
+// makes verification fail as "signer mismatch", which reads as tampering; clearing
+// it fails closed with the documented, recoverable "no usable TEE signer" error.
+func TestAdapterKeyPushWithNewArtifactClearsStaleSigner(t *testing.T) {
+	d := setupTestDB(t)
+
+	const taskID = "task-key-stale-signer"
+	const oldHash = "0x6666666666666666666666666666666666666666666666666666666666666666"
+	const newHash = "0x7777777777777777777777777777777777777777777777777777777777777777"
+	if err := d.CreateAdapterKey(&model.AdapterKey{
+		TaskID:           taskID,
+		StorageHash:      oldHash,
+		ProviderEncKey:   "0xenckey-a",
+		TeeSignerAddress: "0x71562b71999873DB5b286dF957af199Ec94617F7",
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Re-encrypted by a rolled-back broker: new artifact, new AES key, no signer.
+	if err := d.CreateAdapterKey(&model.AdapterKey{
+		TaskID:         taskID,
+		StorageHash:    newHash,
+		ProviderEncKey: "0xenckey-b",
+	}); err != nil {
+		t.Fatalf("push new artifact without signer: %v", err)
+	}
+
+	got, err := d.GetAdapterKeyByTaskID(taskID)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if got.StorageHash != newHash || got.ProviderEncKey != "0xenckey-b" {
+		t.Errorf("artifact fields not applied: hash=%q key=%q", got.StorageHash, got.ProviderEncKey)
+	}
+	if got.TeeSignerAddress != "" {
+		t.Errorf("TeeSignerAddress = %q, want cleared; a signer describing the previous artifact was kept alongside a new one", got.TeeSignerAddress)
+	}
+}
