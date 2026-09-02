@@ -191,7 +191,8 @@ frame-typed profile's answer is a property of the frame.
   Each sealed frame is a self-contained SSE event (`\n\n` terminator) so it never
   merges with the next frame or `[DONE]` in the client's SSE reader.
 - **What a sealed stream may emit is an ALLOWLIST**: the blank line that separates
-  SSE events, the `[DONE]` sentinel, and `data:` frames (sealed). Every other line
+  SSE events, the `[DONE]` sentinel *where the profile's own grammar has one*, and
+  `data:` frames (sealed). Every other line
   — `event:`, `id:`, `retry:`, an unknown field — is dropped, and a `data:`
   payload that is not a JSON object fails the stream closed. They all sit outside
   the frame JSON and so outside the AAD and the §8 binding, and while everything a
@@ -310,14 +311,28 @@ frame-typed profile's answer is a property of the frame.
     content-bearing, so a trailing one reports a real downstream failure and must
     not be swallowed.
 
-  Blank lines and `[DONE]` still pass through — a real stream ends its last event
-  with a blank line, and `[DONE]` is a sentinel rather than content. The sentinel
-  is matched on the PARSED payload, because SSE makes the space after the colon
-  optional: `data:[DONE]` is the same sentinel as `data: [DONE]`, and matching the
-  raw line meant the spaceless form fell through to the fail-closed branch and
-  destroyed a turn that had already delivered every content frame. An empty
-  `data:` line carries no frame and no content, so it is dropped rather than
-  failed.
+  Blank lines still pass through — a real stream ends its last event with a blank
+  line. An empty `data:` line carries no frame and no content, so it is dropped
+  rather than failed.
+
+  **`[DONE]` passes through only on a profile whose grammar has it.** It is a
+  sentinel rather than content, and an OpenAI-shaped chat client requires it, so
+  the chat and image profiles forward it. A Messages stream has no such sentinel —
+  it ends with a terminal EVENT — so on a frame-typed profile the line is DROPPED
+  (at `Debug`, since an upstream emitting it is a quirk, not a fault: LiteLLM's
+  Anthropic passthrough does on some versions). Forwarding it there was
+  inconsistent three ways at once: it is unsealed, unbound cleartext on a stream
+  whose whole point is that every byte is sealed or accounted for; it contradicts
+  the allowlist's own justification, which admits the sentinel because the profile's
+  clients need it; and it arrives *behind* a terminal event that a Messages SDK has
+  already used to close the turn, so at best it is ignored and at worst it trips a
+  stricter state machine. The synthetic final frame (if the sentinel is what ends
+  the stream) is still emitted first in both cases — only the sentinel line itself
+  differs.
+  The sentinel is matched on the PARSED payload, because SSE makes the space after
+  the colon optional: `data:[DONE]` is the same sentinel as `data: [DONE]`, and
+  matching the raw line meant the spaceless form fell through to the fail-closed
+  branch and destroyed a turn that had already delivered every content frame.
 
 **A failure report is sealed even where the profile's own set does not name it.**
 An upstream error message can quote the request that produced it, so `error` is
@@ -330,6 +345,19 @@ required set is mandated — and it opens on a conforming client). A frame-typed
 profile is left alone, because it already governs the field and disagrees about
 where it belongs: its `error` shape seals `error`, carrying it on any other shape
 is refused outright, and adding it to a shape that seals nothing is refused too.
+
+> ⚠️ **This is a behavior change on the chat path, and the router is the party it
+> lands on.** On a sealed chat turn — streaming and non-streaming alike — a
+> top-level `error` object USED TO travel in the cleartext half and now does not.
+> Any router-side logic that reads `error` out of a sealed chat frame to classify a
+> failure, decide a retry, or fail over to another provider stops seeing it: the
+> router holds no response key, so the field is opaque to it. It is still
+> DETECTABLE without a key — the frame's cleartext `sealed_fields` names `error`,
+> which is exactly "this turn reported a failure" and enough to drive
+> classification, retry or failover — but the message text and any error code are
+> not. HTTP status, `ZG-Failure-Source` and the usual headers are unaffected. If
+> the router needs more than the presence signal on a sealed turn, that has to come
+> from a cleartext channel outside the frame. Coordinate with `0g-router`.
 
 `ensureSealedFieldsPresent(profile, frame, sealedFields)` injects an empty
 placeholder only for the sealed fields a frame of THAT PROFILE may legitimately

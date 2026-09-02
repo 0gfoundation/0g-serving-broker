@@ -697,12 +697,22 @@ func TestAnthropicStreamHandlesADataFrameAfterTheTerminalFrame(t *testing.T) {
 
 	// Lines that legitimately trail a terminal frame must not fail the stream: a
 	// real Anthropic stream ends its last event with a blank line, and an
-	// OpenAI-compatible shim may append [DONE]. (An `event:` line is dropped
-	// rather than forwarded, here as everywhere.)
+	// OpenAI-compatible shim may append [DONE]. (Both the `event:` line and the
+	// sentinel are dropped rather than forwarded — see below.)
 	for _, line := range []string{"\n", "event: message_stop\n", "data: [DONE]\n"} {
 		if _, err := sealer.sealSSELine(line); err != nil {
 			t.Errorf("sealSSELine(%q) must not fail the stream after the final frame: %v", strings.TrimSpace(line), err)
 		}
+	}
+
+	// [DONE] is an OpenAI sentinel with no place in the Messages grammar, and it
+	// arrives with no `event:` line on the profile where every such line is
+	// rebuilt from the bound discriminator. Forwarding it would leave one line
+	// outside the AAD and the §8 binding while a trailing `ping` — which carries
+	// strictly more — is dropped. LiteLLM's Anthropic passthrough emits it on
+	// some versions, so this is reachable, not theoretical.
+	if out, err := sealer.sealSSELine("data: [DONE]\n"); err != nil || out != "" {
+		t.Errorf("the sentinel must be dropped on a frame-typed profile, got %q (%v)", out, err)
 	}
 
 	// A data frame carrying no answer — a duplicate terminal event, or any shape

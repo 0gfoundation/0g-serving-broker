@@ -690,9 +690,10 @@ func synthFinalFrameFor(p wire.Profile) wire.Response {
 //
 // What passes through is an ALLOWLIST, because a sealed stream's every byte
 // should be either sealed or accounted for: the blank line that separates SSE
-// events, the `[DONE]` sentinel, and `data:` frames (sealed). Every other line —
-// `event:`, `id:`, `retry:`, an unknown field — is DROPPED, and a `data:` payload
-// that is not a JSON object fails the stream closed.
+// events, the `[DONE]` sentinel where the profile's own grammar has one, and
+// `data:` frames (sealed). Every other line — `event:`, `id:`, `retry:`, an
+// unknown field — is DROPPED, and a `data:` payload that is not a JSON object
+// fails the stream closed.
 //
 // The reason is the same for all of them: they sit outside the frame JSON and so
 // outside the AAD and the §8 binding, and while everything a sealed frame's
@@ -731,6 +732,19 @@ func (rs *responseFrameSealer) sealSSELine(line string) (string, error) {
 		final, err := rs.finalFrameLine()
 		if err != nil {
 			return "", err
+		}
+		if profileHasFrameDiscriminator(rs.profile) {
+			// Not part of this profile's stream grammar: `[DONE]` is an OpenAI
+			// sentinel, and a Messages stream ends with a terminal EVENT instead. It
+			// arrives with no `event:` line on the one profile where this broker
+			// rebuilds every such line from the bound discriminator, and behind the
+			// final frame it is exactly what handleFrameAfterFinal drops — a
+			// trailing `ping` carries strictly more and is dropped with a Warn. So
+			// dropping it is what makes the allowlist consistent; forwarding it left
+			// one line outside the AAD and the §8 binding. Reachable: LiteLLM's
+			// Anthropic passthrough emits it on some versions.
+			rs.logger.Debugf("e2ee stream: dropping a %s sentinel, which is not part of the %q stream grammar", doneSentinel, rs.profile)
+			return final, nil
 		}
 		return final + line, nil // synthetic final frame (if any) precedes [DONE]
 	}
