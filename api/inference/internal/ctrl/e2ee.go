@@ -14,6 +14,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	pccrypto "github.com/0gfoundation/0g-pc-e2ee/protocol/crypto"
@@ -22,6 +23,8 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/common/log"
+	"github.com/0glabs/0g-serving-broker/inference/config"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 )
 
@@ -47,6 +50,37 @@ const (
 	// public key (SPEC §3 suite).
 	clientEphPubLen = 32
 
+	// anthropicFrameType is the cleartext field an Anthropic response frame names
+	// its own shape in, and anthropicMessageStop the event a completed turn ends
+	// with (SPEC §7.2). The wire package owns the full taxonomy — including which
+	// shapes are terminal, which is asked of it rather than restated here; the
+	// broker needs these two only to SYNTHESIZE the event a truncated stream never
+	// got.
+	anthropicFrameType   = "type"
+	anthropicMessageStop = "message_stop"
+
+	// failureField is the field an upstream reports a mid-stream failure in, on
+	// both surfaces this broker serves — Anthropic's `error` shape carries it as
+	// its content field, and an OpenAI-compatible stream sends a bare
+	// `{"error": …}` chunk. Named here because "does this frame report a failure"
+	// cannot be answered from a profile's sealed set alone: chat's is only
+	// ["choices"], so its error chunk is content the taxonomy does not name.
+	//
+	// Two places act on it, for the two things that can go wrong with a report:
+	// prepareFrameForSealing SEALS it where a single-shape profile would have left
+	// it cleartext (an error message can quote the request), and
+	// handleFrameAfterFinal FAILS the stream on one arriving behind the final
+	// frame (dropping it would tell the client its turn succeeded). The first is
+	// in the step BOTH seal paths share, which is what keeps the rule from
+	// applying to streams only.
+	failureField = "error"
+
+	// doneSentinel is the OpenAI-style stream terminator, as it appears in a
+	// `data:` line's payload — matched after the payload is parsed out, because
+	// SSE makes the space after the colon optional and `data:[DONE]` is the same
+	// sentinel as `data: [DONE]`.
+	doneSentinel = "[DONE]"
+
 	// CtxKeyE2EESealed marks (bool) that the current request arrived sealed, so the
 	// response path knows to seal its reply.
 	CtxKeyE2EESealed = "e2eeSealed"
@@ -66,6 +100,18 @@ const (
 	// before forwarding, so the response path can no longer recompute it — the
 	// binding is stashed here and combined with the response hash at sign time.
 	CtxKeyE2EEReqBindHash = "e2eeReqBindHash"
+	// CtxKeyE2EEProfile holds the wire.Profile (SPEC §5.1) the request was opened
+	// under, resolved once at unseal time from the service type AND the API
+	// surface the request arrived on.
+	//
+	// The response path reads it back rather than re-deriving it, so a response
+	// cannot be sealed under a profile whose rules were never applied to its
+	// request. Re-deriving looked equivalent while every service type had exactly
+	// one surface; it stopped being equivalent with /v1/messages, which is the
+	// SAME chatbot service type as /v1/chat/completions — so the chat literal at
+	// the non-streaming call site was simply wrong for it, and being wrong here is
+	// silent (identical wire format, plausible frames, content in the clear).
+	CtxKeyE2EEProfile = "e2eeProfile"
 )
 
 // e2eeResponseUnboundFields are declared in every sealed response's
@@ -170,9 +216,10 @@ func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, reqBody []byte) ([]byte, err
 	// payload, and the pinned cleartext field is present, correctly valued, not
 	// sealed away and not declared unbound. Resolve the profile here — the
 	// protocol package cannot know which endpoint this broker serves.
-	profile, sealable := profileForServiceType(c.Service.Type)
+	surface := apiFormatForPath(ctx.Request.URL.Path)
+	profile, sealable := profileForRequest(c.Service.Type, surface)
 	if !sealable {
-		return nil, fmt.Errorf("sealed requests are not supported for service type %q", c.Service.Type)
+		return nil, fmt.Errorf("sealed requests are not supported for service type %q on the %q API surface", c.Service.Type, surface)
 	}
 
 	// Extract the client's response ephemeral key before opening, so the response
@@ -221,6 +268,7 @@ func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, reqBody []byte) ([]byte, err
 	}
 
 	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEProfile, profile)
 	ctx.Set(CtxKeyE2EEClientEphPub, pccrypto.PublicKey(clientEphPub))
 	ctx.Set(CtxKeyE2EEPlaintextReq, plaintext)
 	ctx.Set(CtxKeyE2EEReqBindHash, reqBindHash)
@@ -228,23 +276,54 @@ func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, reqBody []byte) ([]byte, err
 	return plaintext, nil
 }
 
-// profileForServiceType maps the endpoint this broker serves to the wire profile
-// whose rules apply to a sealed request on it. sealable=false means "no sealed
-// request is acceptable here".
+// profileForRequest maps the endpoint this broker serves — service type AND the
+// API surface the request arrived on — to the wire profile whose rules apply to a
+// sealed request on it. sealable=false means "no sealed request is acceptable
+// here".
 //
-// The mapping is an ALLOWLIST, and deliberately so. SPEC §1 covers exactly two
-// profiles; everything else either has no envelope format yet (the multipart
-// service types — their request is multipart/form-data, which cannot be an
-// envelope, so a JSON envelope arriving on one would unseal into a body the
-// upstream cannot consume) or has simply not been specified (video-generation,
-// and whatever service type is added next). A default arm that guessed
-// ProfileChat for those would apply the wrong rule to a request shape nobody has
-// analyzed — and would do it silently for a service type that does not exist
-// yet. Refusing is the honest answer, and it is what SPEC §1 requires.
-func profileForServiceType(svcType string) (p wire.Profile, sealable bool) {
+// The SURFACE is half the key, not decoration. One chatbot service answers on two
+// of them: /v1/chat/completions (OpenAI) and /v1/messages (Anthropic), whose
+// payload and response shapes differ (a top-level `system` prompt; response
+// frames typed by `type`, SPEC §7.2). Keyed on the service type alone,
+// an Anthropic sealed request resolved to ProfileChat, which sealed an injected
+// empty `choices` while the real `content`/`delta` rode in the clear — no error
+// anywhere, since the wire format is identical and the frames look plausible.
+//
+// The mapping is an ALLOWLIST, and deliberately so. Everything absent either has
+// no envelope format yet (the multipart service types — their request is
+// multipart/form-data, which cannot be an envelope, so a JSON envelope arriving
+// on one would unseal into a body the upstream cannot consume) or has simply not
+// been specified (video-generation, and whatever service type is added next). A
+// default arm that guessed ProfileChat for those would apply the wrong rule to a
+// request shape nobody has analyzed — and would do it silently for a service type
+// that does not exist yet. Refusing is the honest answer, and it is what SPEC §1
+// requires.
+//
+// That allowlist discipline extends to the SURFACE, so an UNRECOGNIZED one
+// (apiFormatForPath's "") is refused on the chatbot arm rather than read as
+// chat's own case. It is the likelier of the two mistakes: adding a chat route
+// means adding an entry to constant.TargetRoute, and teaching apiFormatForPath
+// about it is a SEPARATE edit that nothing forces — so a new surface that
+// resolved "" to ProfileChat would apply chat's rules to an unanalyzed request
+// shape, silently, which is the exact bug the surface key was added to fix.
+// Refusing costs nothing today: every chatbot route in TargetRoute (/messages,
+// /v1/messages, /chat/completions) is matched by apiFormatForPath, and an
+// unsealed request never reaches here at all — the profile is resolved only
+// after the envelope is confirmed.
+//
+// The image and multipart endpoints are not chat surfaces, so the surface is
+// whatever their path happened to be and only the chatbot arm consults it.
+func profileForRequest(svcType, surface string) (p wire.Profile, sealable bool) {
 	switch svcType {
 	case constant.ServiceTypeChatbot:
-		return wire.ProfileChat, true
+		switch surface {
+		case config.APIFormatAnthropic:
+			return wire.ProfileAnthropic, true
+		case config.APIFormatOpenAI:
+			return wire.ProfileChat, true
+		default:
+			return "", false
+		}
 	case constant.ServiceTypeTextToImage:
 		return wire.ProfileImage, true
 	default:
@@ -306,23 +385,43 @@ func e2eeReqBindHash(ctx *gin.Context) ([32]byte, bool) {
 	return h, ok
 }
 
+// e2eeProfile returns the wire profile the request was opened under, stashed at
+// unseal time. Its absence on a sealed request means the response path ran
+// without a prior unseal, which the seal paths treat as fail-closed rather than
+// picking a profile of their own.
+func e2eeProfile(ctx *gin.Context) (wire.Profile, bool) {
+	v, ok := ctx.Get(CtxKeyE2EEProfile)
+	if !ok {
+		return "", false
+	}
+	p, ok := v.(wire.Profile)
+	return p, ok && p != ""
+}
+
 // maybeSealNonStreamResponse seals a non-streaming response (SPEC §7) under the
-// profile the request used, when the request was sealed; otherwise it returns
-// body unchanged with sealed=false. Fail-closed: when the request was sealed but
-// sealing fails, it returns an error and the caller MUST NOT forward the
-// plaintext body.
+// profile the request was opened with, when the request was sealed; otherwise it
+// returns body unchanged with sealed=false. Fail-closed: when the request was
+// sealed but sealing fails, it returns an error and the caller MUST NOT forward
+// the plaintext body.
 //
-// It takes the profile rather than a sealed-field list because the profile
-// implies the list AND the profile-specific checks the sealer runs on the frame
+// The profile comes from the context rather than the call site. It implies the
+// sealed-field list AND the profile-specific checks the sealer runs on the frame
 // — for image, that it carries the cleartext `usage.output_images` the router
-// bills on (§7.1). Passing the list alone let the image path seal through the
-// chat profile, which knows of no such requirement.
-func (c *Ctrl) maybeSealNonStreamResponse(ctx *gin.Context, body []byte, profile wire.Profile) (out []byte, sealed bool, respBindHash [32]byte, err error) {
+// bills on (§7.1) — so passing the list alone let the image path seal through the
+// chat profile, which knows of no such requirement. A profile CONSTANT at the
+// call site fixed that but had the same shape of flaw one level up: the chatbot
+// handler serves both /v1/chat/completions and /v1/messages, so its `ProfileChat`
+// literal was wrong for every sealed Anthropic request. Reading what the request
+// was actually opened under is the only version of this that cannot drift.
+func (c *Ctrl) maybeSealNonStreamResponse(ctx *gin.Context, body []byte) (out []byte, sealed bool, respBindHash [32]byte, err error) {
 	ephPub, isSealed := e2eeSealedRequest(ctx)
 	if !isSealed {
 		return body, false, respBindHash, nil
 	}
-	sealedFields := wire.DefaultResponseSealedFieldsFor(profile)
+	profile, ok := e2eeProfile(ctx)
+	if !ok {
+		return nil, true, respBindHash, fmt.Errorf("seal response: the request's e2ee profile is missing from the context")
+	}
 	var resp wire.Response
 	// A literal JSON `null` unmarshals into a nil map WITHOUT error;
 	// ensureSealedFieldsPresent would then panic writing to it. Reject any
@@ -330,7 +429,18 @@ func (c *Ctrl) maybeSealNonStreamResponse(ctx *gin.Context, body []byte, profile
 	if uerr := json.Unmarshal(body, &resp); uerr != nil || resp == nil {
 		return nil, true, respBindHash, fmt.Errorf("seal response: body is not a JSON object")
 	}
-	ensureSealedFieldsPresent(resp, sealedFields)
+	// Through the SAME preparation the streaming path uses, not a local copy of
+	// it: resolved against the RESPONSE rather than the profile alone (a
+	// frame-typed profile answers per frame shape, §7.2), plus the placeholders a
+	// frame may legitimately omit and the failure-report rule. This path had its
+	// own inlined pair of those first two steps, so when the third arrived it
+	// applied to streams only and a non-streaming chat/image response with a
+	// top-level `error` still shipped the message in its cleartext half — the
+	// exact drift a shared step exists to prevent.
+	sealedFields, err := prepareFrameForSealing(profile, resp)
+	if err != nil {
+		return nil, true, respBindHash, fmt.Errorf("seal response: %w", err)
+	}
 	// Declare model + x_0g_trace unbound so the router may rewrite/inject them
 	// downstream (SPEC §5.2).
 	frame, err := wire.SealResponseFor(profile, ephPub, resp, sealedFields, e2eeResponseUnboundFields...)
@@ -355,16 +465,35 @@ func (c *Ctrl) maybeSealNonStreamResponse(ctx *gin.Context, body []byte, profile
 type responseFrameSealer struct {
 	sealer *wire.ResponseSealer
 	binder *proof.StreamBinder
-	// sealedFields is the profile's response content set, resolved once from the
-	// service type. Held here rather than read from a package-level chat constant
-	// at each call site: the non-streaming path had exactly that shape and it let
-	// image responses seal through the chat profile — identical wire format, so
-	// the mix-up was invisible in the output. Only text-to-image (non-streaming)
-	// and chatbot are sealable today, so this path is chat-only in practice, but
-	// the next streaming profile must not have to rediscover that.
-	sealedFields []string
+	// profile is the one the REQUEST was opened under (read off the context, not
+	// re-derived), so the stream cannot be sealed under rules that were never
+	// applied to the request. What each frame must seal is then resolved from the
+	// frame: a frame-typed profile (Anthropic, §7.2) answers per event shape, and
+	// holding one set for the whole stream is exactly the mistake — it would seal
+	// nothing on every content frame.
+	profile wire.Profile
+	// synthFinal is what this profile's stream is CAPPED with when an upstream
+	// drops off without sending a terminal event of its own. Zero for a
+	// single-shape profile, whose synthetic final frame carries only empty
+	// placeholders.
+	//
+	// It is deliberately NOT how a terminal frame is RECOGNIZED: which shapes end
+	// a stream is the profile's business (Anthropic has two — a completed turn
+	// ends with `message_stop`, a failed one with `error` and no `message_stop`),
+	// so that question goes to wire.IsTerminalResponseFrame. Capping and
+	// recognizing coincide for a normal turn and diverge for a failed one, which
+	// is why they are separate.
+	synthFinal   wire.Response
 	emittedFinal bool
 	frameCount   int
+	// droppedAfterFinal counts the frames refused by handleFrameAfterFinal's drop
+	// branch. Only the first is logged as it happens; the total is reported once,
+	// so a chatty upstream cannot turn one stream into unbounded log volume.
+	droppedAfterFinal int
+	// logger reports what was dropped: a frame this broker declines to seal but
+	// does not fail the request over leaves no other trace, since the client sees
+	// a complete stream either way.
+	logger log.Logger
 }
 
 // newResponseFrameSealer returns a per-stream frame sealer when the request was
@@ -374,12 +503,11 @@ func (c *Ctrl) newResponseFrameSealer(ctx *gin.Context) (*responseFrameSealer, e
 	if !sealed {
 		return nil, nil
 	}
-	// Same allowlist the request side used to decide this request was sealable at
-	// all, so the stream cannot be sealed under a profile whose rules were never
-	// applied to the request.
-	profile, sealable := profileForServiceType(c.Service.Type)
-	if !sealable {
-		return nil, fmt.Errorf("sealed responses are not supported for service type %q", c.Service.Type)
+	// The profile the REQUEST was opened under, so the stream cannot be sealed
+	// under rules that were never applied to the request.
+	profile, ok := e2eeProfile(ctx)
+	if !ok {
+		return nil, fmt.Errorf("e2ee stream: the request's e2ee profile is missing from the context")
 	}
 	// Declare model + x_0g_trace unbound on every frame so the router may
 	// rewrite/inject them into the sealed stream downstream (SPEC §5.2). The whole
@@ -395,64 +523,555 @@ func (c *Ctrl) newResponseFrameSealer(ctx *gin.Context) (*responseFrameSealer, e
 	if !ok {
 		return nil, fmt.Errorf("e2ee stream: request binding hash missing from context")
 	}
+	// Prove now that the frame this stream would be CAPPED with is one the profile
+	// can actually SEAL — by sealing it, through a throwaway HPKE context whose
+	// output is discarded. The check is here rather than at EOF because EOF is the
+	// one moment a failure cannot be reported: the caller can no longer answer the
+	// request, so a profile whose synthetic frame does not seal would leave the
+	// client a stream with no final frame, a truncation it rejects wholesale (§7).
+	// Refusing at setup makes that a failed request instead, with the profile
+	// named and the profile's own reason attached.
+	//
+	// A DRY SEAL rather than resolving the sealed set, because resolving proves
+	// much less than it appears to: SealFrame also requires every declared field
+	// to be present and, on a final frame, runs the profile's cleartext checks.
+	// The image profile passed the resolve-only probe and then failed at EOF with
+	// "sealed image response must carry cleartext usage.output_images" — its §7.1
+	// requirement, which a synthesized placeholder cannot satisfy. That is the
+	// honest answer for it (an image stream has no legal way to be capped), and it
+	// is unreachable today since only the chatbot path streams; the point is that
+	// the check now establishes the property it claims instead of a weaker one.
+	synthFinal := synthFinalFrameFor(profile)
+	if err := dryRunSealFinalFrame(profile, ephPub, synthFinal); err != nil {
+		return nil, fmt.Errorf("e2ee stream: profile %q cannot seal the synthetic terminal frame that would cap a truncated stream: %w", profile, err)
+	}
 	return &responseFrameSealer{
-		sealer:       s,
-		binder:       proof.NewStreamBinderFromReqHash(reqBindHash),
-		sealedFields: wire.DefaultResponseSealedFieldsFor(profile),
+		sealer:     s,
+		binder:     proof.NewStreamBinderFromReqHash(reqBindHash),
+		profile:    profile,
+		synthFinal: synthFinal,
+		logger:     c.logger,
 	}, nil
 }
 
+// dryRunSealFinalFrame seals a copy of frame as a FINAL frame through a
+// throwaway HPKE context and throws the result away, reporting only whether the
+// profile accepted it. It exists so newResponseFrameSealer can establish that
+// the frame it would cap a truncated stream with is actually sealable, which is
+// strictly more than resolving its sealed set: SealFrame also demands every
+// declared field be present and runs the profile's final-frame cleartext checks.
+//
+// The context is discarded rather than reused for the real stream: a sealer's
+// sequence numbers and its §8 binding must cover exactly the frames the client
+// receives, and this frame is never sent.
+func dryRunSealFinalFrame(profile wire.Profile, clientEphPub pccrypto.PublicKey, frame wire.Response) error {
+	probe, err := wire.NewResponseSealerFor(profile, clientEphPub, e2eeResponseUnboundFields...)
+	if err != nil {
+		return err
+	}
+	dry := wire.Response{}
+	for k, v := range frame {
+		dry[k] = v
+	}
+	sealedFields, err := prepareFrameForSealing(profile, dry)
+	if err != nil {
+		return err
+	}
+	_, err = probe.SealFrame(dry, sealedFields, true)
+	return err
+}
+
+// prepareFrameForSealing resolves what this frame must seal and fills in the
+// placeholders a frame of this profile may legitimately omit, returning the
+// sealed set to hand SealFrame. Shared by the real seal path and the dry run, so
+// the dry run cannot drift from what it is meant to predict.
+//
+// It also SEALS A FAILURE REPORT the profile's own set does not name. `error` is
+// content on either surface — an upstream error message can quote the request
+// that produced it — but only the Anthropic taxonomy says so: chat's sealed set
+// is ["choices"] whatever the frame holds, so an OpenAI-style `{"error": …}`
+// chunk mid-stream had its message ride in the frame's cleartext half, reaching
+// every intermediary on an otherwise sealed turn. Adding it is legal (a sealed
+// SUPERSET is permitted; only the profile's required set is mandated) and it
+// opens on a conforming client, verified end to end.
+//
+// Only for a profile with no discriminator, because a frame-typed one already
+// governs the field and disagrees about where it belongs: its `error` shape
+// seals `error` itself, and carrying it on any other shape is refused outright
+// ("it is generated content under some frame shape, so a frame may carry it only
+// by sealing it") — while adding it to a shape that seals nothing is refused
+// too ("must seal nothing"). So there the taxonomy is both sufficient and the
+// only correct answer.
+//
+// Its reach ends at the response body: nothing here runs when the upstream
+// returns a NON-200, because ProcessHTTPRequest hands that to handleServiceError
+// and returns before any charging handler. Such a body reaches the client in the
+// clear on a sealed turn — the same content class this rule seals, on a path
+// where the taxonomy has nothing to say (an upstream 500 body is not a frame of
+// any profile), so closing it needs a wire shape for an HTTP-level failure
+// rather than an improvised seal here. Boundary documented in
+// docs/design/e2ee.md ("An upstream HTTP error body is NOT sealed").
+func prepareFrameForSealing(profile wire.Profile, frame wire.Response) ([]string, error) {
+	sealedFields, err := wire.ResponseSealedFieldsForFrame(profile, frame)
+	if err != nil {
+		return nil, err
+	}
+	if !profileHasFrameDiscriminator(profile) {
+		if v, ok := frame[failureField]; ok && !isEmptyJSONValue(v) && !slices.Contains(sealedFields, failureField) {
+			sealedFields = append(slices.Clone(sealedFields), failureField)
+		}
+	}
+	ensureSealedFieldsPresent(profile, frame, sealedFields)
+	return sealedFields, nil
+}
+
+// profileHasFrameDiscriminator reports whether this profile's response frames
+// name their own shape in a cleartext field the wire package validates — which
+// is what makes an `event:` line derivable from a frame, and what makes the
+// derived value trustworthy (ResponseSealedFieldsForFrame refuses a shape outside
+// the taxonomy, so the value can only be one of a fixed set of identifiers).
+//
+// It sits beside synthFinalFrameFor because it is the same kind of per-profile
+// fact — what this profile's SSE stream looks like — and, like it, is a serving
+// question the wire package does not expose an answer to. Both are the reason a
+// frame-typed profile added without touching this file is refused at stream
+// setup rather than served wrongly.
+func profileHasFrameDiscriminator(p wire.Profile) bool {
+	return p == wire.ProfileAnthropic
+}
+
+// synthFinalFrameFor returns the plaintext frame to cap a truncated stream of
+// this profile with, or nil for a profile whose streams have no such event.
+//
+// It answers with the FRAME only, no event name beside it: sealFrame derives the
+// SSE `event:` line from whatever frame it is sealing, reading the frame's own
+// bound discriminator, so a synthesized event is announced exactly like a
+// forwarded one and the name is not a second per-profile literal anywhere.
+//
+// Anthropic's stream ends with a `message_stop` event rather than a `[DONE]`
+// sentinel, and that event is a legal frame of the profile — it seals nothing
+// (§7.2) — so it is what an upstream that dropped off should have sent, and what
+// this broker sends in its place. A chat stream has no equivalent event: its
+// final frame is a placeholder with empty content, so it gets the zero value.
+//
+// A stream that failed partway ends with `error`, which is terminal too — but a
+// broker never SYNTHESIZES one: it has no error to report, only a truncation,
+// and inventing an `error` frame would attribute a failure to the model that the
+// model did not produce.
+//
+// The capped turn is INCOMPLETE, deliberately visibly so. Anthropic's grammar
+// ends a turn `content_block_stop` → `message_delta` (which carries `stop_reason`
+// and `usage.output_tokens`) → `message_stop`, and a stream truncated
+// mid-`content_block_delta` skips the first two: an SDK accumulating it gets a
+// message with `stop_reason: null`, and the router sees no output-token count.
+// Filling that gap with a synthesized `message_delta` would mean inventing both
+// values — and §8 signs whatever is sent, so the broker would be attesting
+// numbers the model never produced. A null `stop_reason` is the honest signal
+// that the turn did not complete.
+//
+// This is the one per-profile literal left in this file, and the profile that
+// needs it is the only one that can supply it: the wire package owns which
+// shapes END a stream, but "which event should a broker invent when the upstream
+// sent none" is a serving decision, not a wire rule (an enclave could
+// legitimately choose to fail the request instead). A frame-typed profile added
+// without an entry here therefore does not degrade quietly:
+// newResponseFrameSealer proves the entry can be sealed before the first frame
+// goes out, so the stream is refused up front rather than truncated at EOF.
+func synthFinalFrameFor(p wire.Profile) wire.Response {
+	if p == wire.ProfileAnthropic {
+		return wire.Response{anthropicFrameType: json.RawMessage(`"` + anthropicMessageStop + `"`)}
+	}
+	return nil
+}
+
 // sealSSELine transforms one already-sanitized SSE line into its sealed form
-// (SPEC §7). Every "data: {json}" chunk is sealed as a NON-final frame; exactly
-// one final frame is emitted synthetically at stream end — before a "data: [DONE]"
-// sentinel here, or on EOF by the caller via finalFrameLine. Deriving `final` from
-// per-frame usage is deliberately avoided: some upstreams emit empty "usage":{}
-// mid-stream, and vLLM continuous_usage_stats puts usage on every chunk, either of
-// which would mark a non-terminal frame final and truncate the client's stream.
-// Blank/comment/non-JSON lines pass through unchanged.
+// (SPEC §7). A "data: {json}" chunk is sealed as a NON-final frame, except an
+// event a frame-typed profile defines as TERMINAL (for Anthropic `message_stop`
+// closing a completed turn, or `error` closing a failed one), which is sealed AS
+// the final frame — it is last by definition, so nothing synthetic follows it.
+//
+// For a chat stream, which has no such event, exactly one final frame is emitted
+// synthetically at stream end — before a "data: [DONE]" sentinel here, or on EOF
+// by the caller via finalFrameLine. Deriving `final` from per-frame usage is
+// deliberately avoided: some upstreams emit empty "usage":{} mid-stream, and vLLM
+// continuous_usage_stats puts usage on every chunk, either of which would mark a
+// non-terminal frame final and truncate the client's stream.
+//
+// What passes through is an ALLOWLIST, because a sealed stream's every byte
+// should be either sealed or accounted for: the blank line that separates SSE
+// events, the `[DONE]` sentinel where the profile's own grammar has one, and
+// `data:` frames (sealed). Every other line — `event:`, `id:`, `retry:`, an
+// unknown field — is DROPPED, and a `data:` payload that is not a JSON object
+// fails the stream closed.
+//
+// The reason is the same for all of them: they sit outside the frame JSON and so
+// outside the AAD and the §8 binding, and while everything a sealed frame's
+// cleartext half may contain is checked by the profile taxonomy, these lines are
+// checked by nothing (sanitizeStreamLine's leak-field stripping, #184, only
+// inspects `data:` JSON too). Forwarding one hands an upstream a channel for
+// arbitrary text to the client and to every intermediary on an otherwise sealed
+// turn. The `event:` line loses nothing by being dropped, since §7.2 already
+// requires a receiver to ignore the received line and rebuild it from the bound
+// discriminator — which is what sealFrame does.
 func (rs *responseFrameSealer) sealSSELine(line string) (string, error) {
 	trimmed := strings.TrimSpace(line)
 	if trimmed == "" {
 		return line, nil // preserve SSE event separators
 	}
-	if isStreamDone([]byte(trimmed)) {
+	after, ok := strings.CutPrefix(trimmed, "data:")
+	if !ok {
+		// Dropping is only correct for a line that IS an SSE field line. A line that
+		// is not one means the upstream answered a STREAMING request with something
+		// that is not an SSE stream at all — in practice a whole non-streaming JSON
+		// body from a provider that ignored `stream: true`. Discarding that as if it
+		// were an `id:` line throws away the ENTIRE answer, and the stream is then
+		// capped with a synthetic terminal frame: the client receives a sealed,
+		// signed, well-formed turn that reports as normally completed and contains
+		// nothing, while billing reads the same bytes the client never got. So it
+		// fails closed, exactly like the non-object `data:` payload below — on a
+		// sealed turn plaintext cannot be forwarded, and silence must not be
+		// reported as success.
+		if !isSSEFieldLine(trimmed) {
+			return "", fmt.Errorf("seal stream frame: upstream answered a streaming request with %s (%d bytes) rather than an SSE stream, so the response cannot be sealed", nonSSELineKind(trimmed), len(trimmed))
+		}
+		// A real SSE field line: `event:` (rebuilt by sealFrame from the bound
+		// discriminator), `id:`, `retry:`, an SSE comment, or an unrecognized field
+		// name the SSE spec has receivers ignore. None of them is inside the AAD,
+		// none of them is checked by anything, and none carries content a sealed
+		// receiver may act on — so none is forwarded. Debug rather than Warn: an
+		// upstream that sends `id:` sends it on every frame, and this is a normal
+		// thing to discard, not an incident.
+		//
+		// The NAME is logged, never the value: the name is a token by construction
+		// (isSSEFieldLine just validated it), while the value is upstream-controlled
+		// text of any length — the place a credential or a megabyte would sit.
+		name, _, _ := strings.Cut(trimmed, ":")
+		rs.logger.Debugf("e2ee stream: dropping a non-data SSE line (field %q, %d bytes), which no sealed receiver may trust", name, len(trimmed))
+		return "", nil
+	}
+	// The sentinel is recognized from the PARSED payload, so the space after the
+	// colon — which SSE makes OPTIONAL — cannot change the outcome. It used to be
+	// matched against the raw line (`isStreamDone`, still used by the plaintext
+	// path), which meant `data:[DONE]` fell through to the fail-closed branch
+	// below and destroyed a turn that had already delivered every content frame:
+	// the client got a stream with no final frame, which §7 makes it reject
+	// wholesale, plus a JSON error body behind it.
+	payload := strings.TrimSpace(after)
+	if payload == doneSentinel {
 		final, err := rs.finalFrameLine()
 		if err != nil {
 			return "", err
 		}
+		if profileHasFrameDiscriminator(rs.profile) {
+			// Not part of this profile's stream grammar: `[DONE]` is an OpenAI
+			// sentinel, and a Messages stream ends with a terminal EVENT instead. It
+			// arrives with no `event:` line on the one profile where this broker
+			// rebuilds every such line from the bound discriminator, and behind the
+			// final frame it is exactly what handleFrameAfterFinal drops — a
+			// trailing `ping` carries strictly more and is dropped with a Warn. So
+			// dropping it is what makes the allowlist consistent; forwarding it left
+			// one line outside the AAD and the §8 binding. Reachable: LiteLLM's
+			// Anthropic passthrough emits it on some versions.
+			//
+			// finalFrameLine still runs first, and that is not a contradiction: the
+			// sentinel is not part of the GRAMMAR but it is still a reliable
+			// end-of-stream signal, and in the case that actually occurs the terminal
+			// event came first, so it returns "" and nothing is synthesized. It
+			// matters only for an upstream that sends the sentinel and no terminal
+			// event, where capping here rather than at EOF is the same frame a moment
+			// earlier.
+			rs.logger.Debugf("e2ee stream: dropping a %s sentinel, which is not part of the %q stream grammar", doneSentinel, rs.profile)
+			return final, nil
+		}
 		return final + line, nil // synthetic final frame (if any) precedes [DONE]
 	}
-	after, ok := strings.CutPrefix(trimmed, "data:")
-	if !ok {
-		return line, nil
+	if payload == "" {
+		// A `data:` line with no payload carries no frame and no content, so there
+		// is nothing to seal and nothing to leak. Dropped like any other line a
+		// sealed receiver cannot act on.
+		rs.logger.Debugf("e2ee stream: dropping an empty `data:` line")
+		return "", nil
 	}
-	payload := strings.TrimSpace(after)
 	if !strings.HasPrefix(payload, "{") {
-		return line, nil
+		// Neither the sentinel nor a JSON object, so there is no frame to seal and
+		// nothing that could check it — the same hole as a forwarded `event:`
+		// line, one branch away, except that clients RENDER `data:` payloads. A
+		// sealed stream fails closed rather than passing arbitrary text through to
+		// the client and every intermediary in the clear.
+		return "", fmt.Errorf("seal stream frame: upstream sent a `data:` payload that is neither %s nor a JSON object, so it cannot be sealed", doneSentinel)
 	}
 	var frame wire.Response
 	if err := json.Unmarshal([]byte(payload), &frame); err != nil {
 		return "", fmt.Errorf("seal stream frame: %w", err)
 	}
-	ensureSealedFieldsPresent(frame, rs.sealedFields)
-	return rs.sealFrame(frame, false)
+	// §7 puts the final frame LAST, so a frame arriving behind it is never
+	// SEALED. Two things would otherwise go wrong, and the second is the serious
+	// one: it would be sealed final=false behind a frame that already said final
+	// (no receiver-side check catches that — OpenFrame has no post-final rule),
+	// and sealFrame would fold it into the §8 streaming binding. A client stops
+	// consuming at the frame marked final, so it would recompute the binding over
+	// N frames while this broker signed N+1, and the signature would fail to
+	// verify on a turn that otherwise succeeded.
+	//
+	// Handling it HERE, before sealFrame, is what keeps the binding equal to what
+	// the client received.
+	//
+	// This became reachable with frame-typed profiles: a chat stream can only
+	// emit its final frame at [DONE] or EOF, i.e. where nothing follows, but an
+	// Anthropic terminal event (`error`, or a `message_stop` an upstream appends
+	// anything to) can land mid-stream.
+	if rs.emittedFinal {
+		return rs.handleFrameAfterFinal(frame)
+	}
+	return rs.sealFrame(frame, rs.isTerminal(frame))
+}
+
+// isSSEFieldLine reports whether a line is an SSE field line: an SSE comment (a
+// leading colon, i.e. an empty field name) or a field-NAME TOKEN, optionally
+// followed by ":" and a value.
+//
+// The token rule is what separates a line a sealed stream may silently DISCARD
+// from one it must refuse. "Has a colon" cannot do it: a bare JSON body's first
+// colon makes `{"type"` look like a field name, which is how a whole
+// non-streaming response passed for an `id:` line and was dropped. A real field
+// name is a token, so anything with a brace, a quote or a space in it is not a
+// field line at all but a body the upstream sent instead of a stream.
+//
+// An unrecognized NAME still counts: the SSE spec has receivers ignore unknown
+// fields, so an upstream may legitimately send one, and dropping it is safe —
+// nothing is forwarded and nothing is lost, because a field this broker does not
+// know is not where an answer lives.
+func isSSEFieldLine(trimmed string) bool {
+	if strings.HasPrefix(trimmed, ":") {
+		return true // an SSE comment (typically a keepalive): no field, no content
+	}
+	name, _, _ := strings.Cut(trimmed, ":")
+	if name == "" {
+		return false
+	}
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// nonSSELineKind names what a non-SSE line looks like WITHOUT quoting any of it.
+// The returned strings are this broker's own, so the error they end up in — which
+// reaches the client — carries no upstream-controlled text; the line's length is
+// reported separately and is enough to tell a stray byte from a whole body.
+func nonSSELineKind(trimmed string) string {
+	switch {
+	case strings.HasPrefix(trimmed, "{"), strings.HasPrefix(trimmed, "["):
+		return "a bare JSON body"
+	case strings.HasPrefix(trimmed, "<"):
+		return "a markup document"
+	default:
+		return "free-form text"
+	}
+}
+
+// handleFrameAfterFinal decides what to do with a data frame that arrived behind
+// the final one. Either way it is not sealed and not bound; the question is only
+// whether the stream continues.
+//
+// It is DROPPED when the frame CARRIES no answer: a duplicate or trailing
+// `message_stop`, a `ping`, or any frame holding none of the fields its shape
+// would seal — EMPTY counting as absent, since `choices: []` is how this file
+// itself writes "nothing here" (ensureSealedFieldsPresent manufactures exactly
+// that as its placeholder). OpenAI's trailing usage-only chunk is the case that
+// makes the distinction load-bearing: it carries `"choices": []`, so a
+// presence-only test failed the very frame this branch was written for.
+// That is the case actually seen in the wild — a proxy that appends
+// `message_stop` after `error` or sends it twice, and a chat upstream's trailing
+// usage-only chunk behind [DONE] — and the client is unharmed, having already
+// received a complete final frame. Failing instead would be worse than the
+// quirk: the stream is already committed and flushed, so the error path appends
+// a JSON error body behind the sealed final frame and reports a turn that fully
+// delivered as a broker error.
+//
+// It FAILS the stream when the frame does carry one of those fields, when it
+// reports a FAILURE (a non-empty `error`, which is content on either surface
+// even where the profile's sealed set does not name it), or when its shape is
+// unknown and so might carry either. That is the one case where dropping loses data:
+// something the client will never see, silently. Stopping is also all this
+// broker can do about it — the frame cannot be sealed without breaking the §8
+// binding the client verifies. Being TERMINAL is not an exemption: Anthropic's
+// `error` is terminal AND carries content, so a trailing one reports a real
+// downstream failure and must not be swallowed — and neither may chat's, which
+// is why the failure check does not go through the sealed set.
+//
+// The decision is on what the frame HOLDS, not on what its shape may seal,
+// because for a single-shape profile those differ: chat's sealed set is
+// ["choices"] for every frame whatever it contains, and no chat frame is ever
+// terminal, so a shape-based test failed the stream on every post-[DONE] chunk —
+// including the usage-only one that legitimately carries no `choices` at all
+// (the frame ensureSealedFieldsPresent exists to accommodate). For a frame-typed
+// profile the two tests agree: a `content_block_delta` carries its `delta`, and
+// `ping` / `message_stop` carry nothing to begin with.
+func (rs *responseFrameSealer) handleFrameAfterFinal(frame wire.Response) (string, error) {
+	const because = "§7 requires the final frame to be last, and sealing this one would break the §8 binding the client recomputes"
+	sealed, err := wire.ResponseSealedFieldsForFrame(rs.profile, frame)
+	if err != nil {
+		return "", fmt.Errorf("seal stream frame: upstream sent a frame of unknown shape after the terminal frame, which may carry content: %s: %w", because, err)
+	}
+	for _, f := range sealed {
+		v, ok := frame[f]
+		if !ok || isEmptyJSONValue(v) {
+			continue
+		}
+		// Carries an answer. Being TERMINAL does not exempt it: Anthropic's
+		// `error` is both terminal and content-bearing, so a "terminal frames are
+		// safe to drop" shortcut silently swallowed a downstream failure report
+		// that arrived behind a `message_stop` — the exact case this branch exists
+		// for. Whether a shape ends a stream says nothing about whether it carries
+		// something the client needs.
+		return "", fmt.Errorf("seal stream frame: upstream sent a frame (%s) carrying %q after the terminal frame: %s", frameDescriptionOf(frame, rs.profile), f, because)
+	}
+	// A failure REPORT is content too, whatever the profile's sealed set says.
+	// The sealed-set loop above catches Anthropic's, because `error` is that
+	// profile's content field for the `error` shape — but chat's sealed set is
+	// only ["choices"], so an OpenAI-style `{"error": …}` behind [DONE] fell
+	// through to the drop below and the client saw a normally-completed turn. The
+	// asymmetry was accidental (a vocabulary difference, not a decision), and it
+	// lands on exactly the frame this branch exists to protect: the one telling
+	// the caller its turn did not really succeed.
+	if errField, ok := frame[failureField]; ok && !isEmptyJSONValue(errField) {
+		return "", fmt.Errorf("seal stream frame: upstream sent a frame (%s) carrying %q after the terminal frame: %s", frameDescriptionOf(frame, rs.profile), failureField, because)
+	}
+	// One Warn per stream, not per frame: the actionable signal is "this upstream
+	// sends frames after the terminal one", which the first occurrence carries in
+	// full. The rest are counted and reported once by logDroppedAfterFinal, so an
+	// upstream emitting many of them cannot amplify into unbounded log volume —
+	// this path returns ("", nil) and the caller keeps reading.
+	rs.droppedAfterFinal++
+	if rs.droppedAfterFinal == 1 {
+		rs.logger.Warnf("e2ee stream: dropping a frame (%s) that arrived after the terminal frame and carries no answer; %s", frameDescriptionOf(frame, rs.profile), because)
+	}
+	return "", nil
+}
+
+// logDroppedAfterFinal reports, once, how many frames this stream dropped behind
+// its terminal frame. Called by the caller after the stream loop, beside
+// signedText: the first drop is logged as it happens, and this is what keeps the
+// rest from being either silent or unbounded.
+func (rs *responseFrameSealer) logDroppedAfterFinal() {
+	if rs.droppedAfterFinal > 1 {
+		rs.logger.Warnf("e2ee stream: dropped %d frames that arrived after the terminal frame (only the first is logged in full)", rs.droppedAfterFinal)
+	}
+}
+
+// isEmptyJSONValue reports whether a raw JSON value carries nothing: `null`, an
+// empty array, object or string. It is the counterpart of the empty-array
+// placeholder ensureSealedFieldsPresent injects — a field holding `[]` and a
+// field that is absent mean the same thing on this wire, so they must take the
+// same branch wherever "does this frame carry an answer" is asked.
+func isEmptyJSONValue(v json.RawMessage) bool {
+	var decoded any
+	if err := json.Unmarshal(v, &decoded); err != nil {
+		return false // undecodable: treat as content rather than assume it is empty
+	}
+	switch t := decoded.(type) {
+	case nil:
+		return true
+	case []any:
+		return len(t) == 0
+	case map[string]any:
+		return len(t) == 0
+	case string:
+		return t == ""
+	}
+	return false
+}
+
+// frameKindOf returns a frame's bound discriminator value, or "" when it has
+// none (a single-shape profile's frames, which their API sends without an
+// `event:` line). It reads the same cleartext field the wire package keys its
+// per-shape rules off, which is why the line built from it is trustworthy in a
+// way the upstream's own line is not: this value is inside the AAD.
+func frameKindOf(frame wire.Response) string {
+	var kind string
+	if err := json.Unmarshal(frame[anthropicFrameType], &kind); err != nil {
+		return ""
+	}
+	return kind
+}
+
+// frameDescriptionOf names a frame for a log or an error: its shape for a
+// frame-typed profile, and just the profile for a single-shape one, whose frames
+// have no shape to name. It is for humans only — every decision reads the shape
+// through the wire package.
+//
+// Gated on the same predicate as the `event:` line, and for the same reason. On a
+// single-shape profile `type` is an ordinary cleartext field the wire package has
+// no rule about, so it is arbitrary, unbounded upstream text — and these strings
+// reach a broker log line and, on the fail path, an error that
+// handleBrokerError hands to the CLIENT. That let an upstream write forged lines
+// into the log ("chat FORGED\nERROR broker: …") and choose the text of a
+// broker-attributed error. On a frame-typed profile the value is already
+// validated: ResponseSealedFieldsForFrame refuses any shape outside the taxonomy
+// before either caller reaches here.
+//
+// The gate is also the more accurate description: on chat a `type` field is not
+// a shape name at all.
+func frameDescriptionOf(frame wire.Response, profile wire.Profile) string {
+	if profileHasFrameDiscriminator(profile) {
+		if kind := frameKindOf(frame); kind != "" {
+			return fmt.Sprintf("%s %s", profile, kind)
+		}
+	}
+	return fmt.Sprintf("%s profile", profile)
+}
+
+// isTerminal reports whether this frame is an event that CLOSES this profile's
+// stream, and so must be sealed with final=true.
+//
+// Which shapes those are is the profile's business, so it is asked, not
+// hardcoded here: Anthropic has two — `message_stop` for a completed turn and
+// `error` for one that failed partway, which sends no `message_stop` at all.
+// Recognizing only the frame this broker would SYNTHESIZE (see synthFinalFrame)
+// would mark an error-terminated stream non-final, and the EOF path would then
+// append a `message_stop` after the `error` — a sequence no Anthropic stream
+// produces, reading to a client as a turn that completed normally.
+//
+// A single-shape profile has no terminal event and answers false for every
+// frame, which is what keeps the chat stream on its synthetic-final path. An
+// unrecognized shape also answers false; sealFrame refuses it a moment later,
+// which is where that belongs.
+//
+// It has no opinion about a SECOND terminal event, deliberately: nothing reaches
+// it once one has been sealed, because sealSSELine refuses every data frame
+// behind the final one. `final` appearing exactly once is that rule's job, not a
+// duplicate check here.
+func (rs *responseFrameSealer) isTerminal(frame wire.Response) bool {
+	terminal, err := wire.IsTerminalResponseFrame(rs.profile, frame)
+	return err == nil && terminal
 }
 
 // finalFrameLine returns a synthetic final SSE frame so the client always
 // receives exactly one completion marker (SPEC §7). It returns "" if a final
-// frame was already emitted, making it safe to call on both [DONE] and EOF.
+// frame was already emitted, making it safe to call on both [DONE] and EOF — and
+// on an Anthropic stream that already sent a terminal event, which IS the final
+// frame, so the EOF path then adds nothing.
 //
-// The frame's sealed fields come from the profile rather than a literal
-// {"choices": []}: every v1 sealed field is a JSON array, so an empty one merges
-// to nothing on the client, but a hardcoded "choices" under a future streaming
-// profile would be a runtime seal failure ("sealed field not present in frame")
-// rather than anything the compiler catches.
+// What the frame contains comes from the profile, never a literal
+// {"choices": []}: a single-shape profile gets empty placeholders for its sealed
+// fields (every one of them is a JSON array, so an empty one merges to nothing on
+// the client), and a frame-typed profile gets the event a healthy upstream would
+// have closed with, which is a legal frame of that profile and seals nothing.
 func (rs *responseFrameSealer) finalFrameLine() (string, error) {
 	if rs.emittedFinal {
 		return "", nil
 	}
 	frame := wire.Response{}
-	ensureSealedFieldsPresent(frame, rs.sealedFields)
+	for k, v := range rs.synthFinal {
+		frame[k] = v
+	}
+	// sealFrame builds the `event:` line from this frame's own bound `type`, so a
+	// synthesized event is announced exactly like a forwarded one.
 	return rs.sealFrame(frame, true)
 }
 
@@ -466,9 +1085,43 @@ func (rs *responseFrameSealer) finalFrameLine() (string, error) {
 // an abrupt EOF may omit); an extra blank line the upstream also sends is
 // harmless (ignored by SSE parsers).
 func (rs *responseFrameSealer) sealFrame(frame wire.Response, final bool) (string, error) {
-	out, err := rs.sealer.SealFrame(frame, rs.sealedFields, final)
+	// Resolved per frame, not once per stream: a frame-typed profile's answer is a
+	// property of the frame (§7.2), and one set held for the whole stream would
+	// seal nothing on every content frame.
+	sealedFields, err := prepareFrameForSealing(rs.profile, frame)
 	if err != nil {
 		return "", fmt.Errorf("seal frame: %w", err)
+	}
+	out, err := rs.sealer.SealFrame(frame, sealedFields, final)
+	if err != nil {
+		return "", fmt.Errorf("seal frame: %w", err)
+	}
+	// The SSE `event:` line, rebuilt from the frame's own BOUND discriminator —
+	// the upstream's was dropped (see sealSSELine), and this is the same
+	// derivation §7.2 requires of a receiver.
+	//
+	// Only for a profile that HAS a discriminator, which is the load-bearing half.
+	// On such a profile the value is already validated: ResponseSealedFieldsForFrame
+	// above refuses any shape outside the taxonomy, so `kind` is one of a fixed set
+	// of identifiers. On a single-shape profile nothing validates it — `type` is an
+	// ordinary cleartext field the wire package has no rule about — so an upstream
+	// could put anything there, INCLUDING a newline, and a line built from it would
+	// end and start a fresh SSE line: an attacker-chosen, unsealed, unbound `data:`
+	// frame written into a sealed stream, ahead of the real one. That is exactly the
+	// channel dropping the upstream's own `event:` line closes, so it must not be
+	// reopened here.
+	eventLine := ""
+	if profileHasFrameDiscriminator(rs.profile) {
+		kind := frameKindOf(frame)
+		if strings.ContainsAny(kind, "\r\n") {
+			// Unreachable through the taxonomy, and fail-closed rather than
+			// silently dropped: a shape identifier with a line break means an
+			// assumption above this line stopped holding.
+			return "", fmt.Errorf("seal frame: frame discriminator %q contains a line break", kind)
+		}
+		if kind != "" {
+			eventLine = "event: " + kind + "\n"
+		}
 	}
 	// Fold the exact on-wire frame into the §8 streaming binding, in send order
 	// (the final frame last), so the signed aggregate matches what the client
@@ -484,7 +1137,7 @@ func (rs *responseFrameSealer) sealFrame(frame wire.Response, final bool) (strin
 	if final {
 		rs.emittedFinal = true
 	}
-	return "data: " + string(b) + "\n\n", nil
+	return eventLine + "data: " + string(b) + "\n\n", nil
 }
 
 // signedText finalizes the §8 streaming binding and returns the scheme-tagged
@@ -499,17 +1152,60 @@ func (rs *responseFrameSealer) signedText() (text string, ok bool, err error) {
 	return text, err == nil, err
 }
 
-// ensureSealedFieldsPresent guarantees every field in sealedFields exists on the
-// frame, so SealFrame (which errors on a declared-but-absent sealed field) never
-// fails on a frame that legitimately omits one — e.g. a trailing usage-only chat
-// chunk with no "choices". Every v1 sealed field is a JSON array ("choices",
-// "data"), so an injected empty array merges to nothing on the client.
+// placeholderSealedFields are, PER PROFILE, the sealed fields a legitimate frame
+// of that profile can OMIT and whose value is a JSON array, so that an empty one
+// merges to nothing on the client. Both halves must hold to be listed, and the
+// first is the operative one: the placeholder is for a frame that is well-formed
+// WITHOUT the field, never for one that should have carried it.
+//
+// Keyed on the profile because that is what the invariant is a property of — the
+// field NAME alone does not carry it. A bare name set is correct only by
+// coincidence of vocabulary: a frame-typed profile with a shape whose content
+// field happened to be called `data` would inherit the image profile's
+// permission and get a placeholder on a frame obliged to carry content, which is
+// exactly the failure the Anthropic reasoning below rejects.
+//
+// Only chat and image have an entry. A trailing usage-only chat chunk
+// legitimately carries no `choices`, and that is what this exists for.
+//
+// Anthropic has NO entry, for two separate reasons:
+//   - its per-shape stream fields (`delta`, `content_block`, `error`) are OBJECTS,
+//     where `[]` would not be a placeholder but a type error shipped to a client;
+//   - its non-streaming `content` IS an array, but the Messages API always returns
+//     it on a `message` response (an empty array at worst), so a placeholder there
+//     could only ever fire on a broken upstream — and it would then seal, sign and
+//     mark final a frame containing an empty answer, while the router bills the
+//     output tokens the same response reported. Nothing would report a problem:
+//     exactly the silent failure this profile's rules exist to remove.
+//
+// So a frame whose shape declares a field it does not carry fails closed here,
+// with the sealer's own "sealed field not present in frame".
+var placeholderSealedFields = map[wire.Profile]map[string]struct{}{
+	wire.ProfileChat:  {"choices": {}},
+	wire.ProfileImage: {"data": {}},
+}
+
+// ensureSealedFieldsPresent guarantees every field of sealedFields that a frame
+// of THIS profile may legitimately omit (placeholderSealedFields) exists on it,
+// so SealFrame — which errors on a declared-but-absent sealed field — never
+// fails on a frame that is well-formed without one, e.g. a trailing usage-only
+// chat chunk with no "choices".
+//
+// The profile travels with the field list because the list alone cannot answer
+// the question; both callers resolved the list FROM a profile, so neither has to
+// go looking for it.
 //
 // This is a shape guard, not a content fallback: a path where a missing sealed
 // field would mean lost content must reject BEFORE sealing rather than rely on
 // this (the image path refuses an undecodable response for exactly that reason).
-func ensureSealedFieldsPresent(frame wire.Response, sealedFields []string) {
+// Anything not listed for this profile is left alone, so the sealer's own
+// "sealed field not present in frame" is the answer for it.
+func ensureSealedFieldsPresent(profile wire.Profile, frame wire.Response, sealedFields []string) {
+	mayOmit := placeholderSealedFields[profile]
 	for _, f := range sealedFields {
+		if _, ok := mayOmit[f]; !ok {
+			continue
+		}
 		if _, ok := frame[f]; !ok {
 			frame[f] = json.RawMessage("[]")
 		}

@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	"github.com/0gfoundation/0g-pc-e2ee/protocol/proof"
-	"github.com/0gfoundation/0g-pc-e2ee/protocol/wire"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
@@ -338,7 +337,7 @@ func (c *Ctrl) handleTextToImageResponse(ctx *gin.Context, resp *http.Response, 
 			c.handleBrokerError(ctx, usageErr, "sealed image response")
 			return usageErr
 		}
-		sealed, _, respBindHash, sealErr := c.maybeSealNonStreamResponse(ctx, withUsage, wire.ProfileImage)
+		sealed, _, respBindHash, sealErr := c.maybeSealNonStreamResponse(ctx, withUsage)
 		if sealErr != nil {
 			// Fail-closed: never forward plaintext images for a sealed request.
 			c.handleBrokerError(ctx, sealErr, "seal image response")

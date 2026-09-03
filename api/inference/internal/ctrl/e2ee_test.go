@@ -350,12 +350,13 @@ func TestSealNonStreamResponse_RoundTrip(t *testing.T) {
 	ctx := newGinCtx()
 	// Mark the context sealed as MaybeUnsealRequest would.
 	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEProfile, wire.ProfileChat)
 	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
 	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
 
 	respBody := []byte(`{"id":"chatcmpl-x","model":"gpt-4o","usage":{"total_tokens":30},"choices":[{"index":0,"message":{"role":"assistant","content":"hi"}}]}`)
 
-	sealed, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, respBody, wire.ProfileChat)
+	sealed, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, respBody)
 	if err != nil {
 		t.Fatalf("maybeSealNonStreamResponse: %v", err)
 	}
@@ -419,11 +420,12 @@ func TestSealNonStreamResponse_UnboundTraceInjectable(t *testing.T) {
 	f := newE2EEFixture(t)
 	ctx := newGinCtx()
 	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEProfile, wire.ProfileChat)
 	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
 	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
 
 	respBody := []byte(`{"id":"x","model":"gpt-4o","usage":{"total_tokens":3},"choices":[{"message":{"content":"hi"}}]}`)
-	sealed, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, respBody, wire.ProfileChat)
+	sealed, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, respBody)
 	if err != nil || !isSealed {
 		t.Fatalf("maybeSealNonStreamResponse: sealed=%v err=%v", isSealed, err)
 	}
@@ -470,6 +472,7 @@ func TestStreamFrameSealer_UnboundTrace(t *testing.T) {
 	f := newE2EEFixture(t)
 	ctx := newGinCtx()
 	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEProfile, wire.ProfileChat)
 	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
 	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
 
@@ -516,7 +519,7 @@ func TestSealNonStreamResponse_NotSealed(t *testing.T) {
 	f := newE2EEFixture(t)
 	ctx := newGinCtx() // not marked sealed
 	body := []byte(`{"choices":[]}`)
-	out, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, body, wire.ProfileChat)
+	out, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, body)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -532,6 +535,7 @@ func TestStreamFrameSealer_RoundTrip(t *testing.T) {
 	f := newE2EEFixture(t)
 	ctx := newGinCtx()
 	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEProfile, wire.ProfileChat)
 	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
 	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
 
@@ -615,6 +619,7 @@ func TestStreamFrameSealer_SyntheticFinalOnDone(t *testing.T) {
 	f := newE2EEFixture(t)
 	ctx := newGinCtx()
 	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEProfile, wire.ProfileChat)
 	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
 	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
 
@@ -695,6 +700,457 @@ func collectSealedFrames(t *testing.T, rs *responseFrameSealer, lines []string) 
 	return frames
 }
 
+// An upstream error message can quote the request that produced it, so a
+// mid-stream `{"error": …}` chunk is content — but only the Anthropic taxonomy
+// says so. chat's sealed set is ["choices"] whatever the frame holds, so the
+// message used to ride in the frame's cleartext half, reaching every intermediary
+// on an otherwise sealed turn. A sealed superset is legal, so it is sealed.
+func TestStreamFrameSealer_ChatMidStreamErrorIsSealed(t *testing.T) {
+	f := newE2EEFixture(t)
+	ctx := newGinCtx()
+	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEProfile, wire.ProfileChat)
+	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
+	sealer, err := f.c.newResponseFrameSealer(ctx)
+	if err != nil {
+		t.Fatalf("newResponseFrameSealer: %v", err)
+	}
+
+	const secret = "upstream said: TOP SECRET PROMPT ECHO"
+	out, err := sealer.sealSSELine(`data: {"error":{"message":"` + secret + `","code":429}}` + "\n")
+	if err != nil {
+		t.Fatalf("sealSSELine: %v", err)
+	}
+	if strings.Contains(out, "TOP SECRET") {
+		t.Fatalf("the error message must not ride in the cleartext half:\n%s", out)
+	}
+
+	payload, ok := strings.CutPrefix(strings.TrimSpace(out), "data:")
+	if !ok {
+		t.Fatalf("no data line in %q", out)
+	}
+	var frame wire.Response
+	if err := json.Unmarshal([]byte(strings.TrimSpace(payload)), &frame); err != nil {
+		t.Fatalf("sealed frame: %v", err)
+	}
+	if _, cleartext := frame[failureField]; cleartext {
+		t.Error("`error` must be sealed away, not left cleartext")
+	}
+	e2ee, err := frame.E2EE()
+	if err != nil {
+		t.Fatalf("read _e2ee: %v", err)
+	}
+	if !sameStrings(e2ee.SealedFields, []string{"choices", "error"}) {
+		t.Errorf("sealed_fields = %v, want [choices error]", e2ee.SealedFields)
+	}
+
+	// And a conforming client still opens it and gets the message back.
+	opener, err := wire.NewResponseOpenerFor(wire.ProfileChat, f.clientEphSk, frame)
+	if err != nil {
+		t.Fatalf("NewResponseOpenerFor: %v", err)
+	}
+	opened, err := opener.OpenFrame(frame)
+	if err != nil {
+		t.Fatalf("OpenFrame: a conforming client must accept this frame: %v", err)
+	}
+	if !strings.Contains(string(opened[failureField]), secret) {
+		t.Errorf("opened error = %s, want the sealed message merged back", opened[failureField])
+	}
+
+	// An empty or absent `error` adds nothing: the sealed set stays the profile's.
+	for _, line := range []string{
+		`data: {"choices":[{"delta":{"content":"hi"}}]}` + "\n",
+		`data: {"choices":[],"error":null}` + "\n",
+	} {
+		out, err := sealer.sealSSELine(line)
+		if err != nil {
+			t.Fatalf("sealSSELine(%q): %v", strings.TrimSpace(line), err)
+		}
+		fr, ok := sealedFrameFrom(t, out)
+		if !ok {
+			t.Fatalf("no sealed frame in %q", out)
+		}
+		e, err := fr.E2EE()
+		if err != nil {
+			t.Fatalf("read _e2ee: %v", err)
+		}
+		if !sameStrings(e.SealedFields, []string{"choices"}) {
+			t.Errorf("sealed_fields = %v for %q, want [choices]", e.SealedFields, strings.TrimSpace(line))
+		}
+	}
+}
+
+// The non-streaming path must apply the same preparation as the streaming one,
+// including the failure-report rule. It had its own inlined copy of the resolve
+// and placeholder steps, so the rule reached streams only and an HTTP 200 whose
+// body carried a top-level `error` still shipped the message in the clear.
+func TestSealNonStreamResponse_FailureReportIsSealed(t *testing.T) {
+	const secret = "upstream said: TOP SECRET PROMPT ECHO"
+	for _, tt := range []struct {
+		profile    wire.Profile
+		body       string
+		wantSealed []string
+	}{
+		{
+			profile:    wire.ProfileChat,
+			body:       `{"id":"c1","model":"gpt-4o","error":{"message":"` + secret + `","code":429}}`,
+			wantSealed: []string{"choices", "error"},
+		},
+		{
+			// Anthropic's non-streaming shape governs `error` itself, so it must be
+			// left to the taxonomy rather than have the rule applied twice.
+			profile:    wire.ProfileAnthropic,
+			body:       `{"id":"msg_1","type":"error","error":{"message":"` + secret + `"}}`,
+			wantSealed: []string{"error"},
+		},
+	} {
+		t.Run(string(tt.profile), func(t *testing.T) {
+			f := newE2EEFixture(t)
+			ctx := newGinCtx()
+			ctx.Set(CtxKeyE2EESealed, true)
+			ctx.Set(CtxKeyE2EEProfile, tt.profile)
+			ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+			ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
+
+			out, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, []byte(tt.body))
+			if err != nil || !isSealed {
+				t.Fatalf("maybeSealNonStreamResponse: sealed=%v err=%v", isSealed, err)
+			}
+			if strings.Contains(string(out), "TOP SECRET") {
+				t.Fatalf("the error message must not ride in the cleartext half:\n%s", out)
+			}
+			var frame wire.Response
+			if err := json.Unmarshal(out, &frame); err != nil {
+				t.Fatalf("sealed frame: %v", err)
+			}
+			if _, cleartext := frame[failureField]; cleartext {
+				t.Error("`error` must be sealed away, not left cleartext")
+			}
+			e2ee, err := frame.E2EE()
+			if err != nil {
+				t.Fatalf("read _e2ee: %v", err)
+			}
+			if !sameStrings(e2ee.SealedFields, tt.wantSealed) {
+				t.Errorf("sealed_fields = %v, want %v", e2ee.SealedFields, tt.wantSealed)
+			}
+			opened, err := wire.OpenResponseFor(tt.profile, f.clientEphSk, frame)
+			if err != nil {
+				t.Fatalf("OpenResponseFor: a conforming client must accept this: %v", err)
+			}
+			if !strings.Contains(string(opened[failureField]), secret) {
+				t.Errorf("opened error = %s, want the sealed message merged back", opened[failureField])
+			}
+		})
+	}
+}
+
+// Neither the log line nor the client-visible error may carry upstream text. On
+// the chat profile `type` is an ordinary cleartext field the wire package has no
+// rule about, so it is arbitrary and unbounded — and it reached a broker Warn and
+// an error that handleBrokerError hands to the client, letting an upstream write
+// forged lines into the log and choose the text of a broker-attributed error.
+func TestStreamFrameSealer_ChatFrameDescriptionCarriesNoUpstreamText(t *testing.T) {
+	forged := "FORGED\nERROR broker: something alarming"
+	frame := wire.Response{
+		"type":    mustRaw(t, forged),
+		"choices": mustRaw(t, []any{}),
+	}
+	if got := frameDescriptionOf(frame, wire.ProfileChat); got != "chat profile" {
+		t.Errorf("frameDescriptionOf = %q, want %q: a chat `type` is not a validated shape name", got, "chat profile")
+	}
+	// On a frame-typed profile the value IS validated before either caller reaches
+	// the description, so naming the shape there is both safe and useful.
+	anth := wire.Response{"type": mustRaw(t, "content_block_delta")}
+	if got := frameDescriptionOf(anth, wire.ProfileAnthropic); got != "anthropic content_block_delta" {
+		t.Errorf("frameDescriptionOf = %q, want the shape named", got)
+	}
+
+	// End to end: the error the client would see names no upstream text.
+	f := newE2EEFixture(t)
+	ctx := newGinCtx()
+	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEProfile, wire.ProfileChat)
+	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
+	sealer, err := f.c.newResponseFrameSealer(ctx)
+	if err != nil {
+		t.Fatalf("newResponseFrameSealer: %v", err)
+	}
+	for _, line := range []string{
+		`data: {"id":"a","choices":[{"delta":{"content":"hi"}}]}` + "\n",
+		"data: [DONE]\n",
+	} {
+		if _, err := sealer.sealSSELine(line); err != nil {
+			t.Fatalf("sealSSELine(%q): %v", strings.TrimSpace(line), err)
+		}
+	}
+	_, err = sealer.sealSSELine(`data: {"type":"X\nY-CLIENT-VISIBLE","choices":[{"delta":{"content":"late"}}]}` + "\n")
+	if err == nil {
+		t.Fatal("a content frame after the terminal frame must fail the stream")
+	}
+	if strings.Contains(err.Error(), "Y-CLIENT-VISIBLE") || strings.Contains(err.Error(), "\n") {
+		t.Errorf("the client-visible error must carry no upstream text and no line break: %v", err)
+	}
+
+	// A trailing FAILURE report fails the stream on this profile too. chat's
+	// sealed set is only ["choices"], so an OpenAI-style `{"error": …}` behind
+	// [DONE] used to take the drop branch and leave the client believing the turn
+	// completed — the same swallowed downstream failure the Anthropic `error` case
+	// guards against, missed only because the taxonomy does not name chat's.
+	if _, err := sealer.sealSSELine(`data: {"id":"a","error":{"type":"server_error","message":"upstream aborted"}}` + "\n"); err == nil {
+		t.Error("a trailing error report must fail the stream, not be dropped")
+	}
+	// An empty or null one is not a report and stays droppable.
+	for _, line := range []string{
+		`data: {"id":"a","error":null}` + "\n",
+		`data: {"id":"a","error":{}}` + "\n",
+	} {
+		if _, err := sealer.sealSSELine(line); err != nil {
+			t.Errorf("sealSSELine(%q) reports no failure, so it must be dropped: %v", strings.TrimSpace(line), err)
+		}
+	}
+
+	// And the drop path logs once per stream, not once per frame — every drop is
+	// still counted, which is what logDroppedAfterFinal reports at stream end.
+	before := sealer.droppedAfterFinal
+	for i := 0; i < 5; i++ {
+		if _, err := sealer.sealSSELine(`data: {"type":"ping","choices":[]}` + "\n"); err != nil {
+			t.Fatalf("drop %d: %v", i, err)
+		}
+	}
+	if got := sealer.droppedAfterFinal - before; got != 5 {
+		t.Errorf("droppedAfterFinal advanced by %d, want 5: every drop must be counted even though only the first is logged", got)
+	}
+}
+
+// The space after an SSE field's colon is OPTIONAL, so the sentinel has to be
+// recognized from the parsed payload. It was matched against the raw line, which
+// meant `data:[DONE]` fell through to the fail-closed branch and destroyed a turn
+// that had already delivered every content frame: no final frame reached the
+// client (§7 makes that a wholesale rejection) and a JSON error body was appended
+// behind the sealed frames.
+func TestStreamFrameSealer_DoneSentinelSpacing(t *testing.T) {
+	for _, done := range []string{"data: [DONE]\n", "data:[DONE]\n", "data:  [DONE]\n", "data: [DONE]  \n"} {
+		t.Run(strings.TrimSpace(done), func(t *testing.T) {
+			f := newE2EEFixture(t)
+			ctx := newGinCtx()
+			ctx.Set(CtxKeyE2EESealed, true)
+			ctx.Set(CtxKeyE2EEProfile, wire.ProfileChat)
+			ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+			ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
+			sealer, err := f.c.newResponseFrameSealer(ctx)
+			if err != nil {
+				t.Fatalf("newResponseFrameSealer: %v", err)
+			}
+			if _, err := sealer.sealSSELine(`data: {"id":"a","choices":[{"delta":{"content":"hi"}}]}` + "\n"); err != nil {
+				t.Fatalf("content frame: %v", err)
+			}
+			out, err := sealer.sealSSELine(done)
+			if err != nil {
+				t.Fatalf("the sentinel must be recognized whatever the spacing: %v", err)
+			}
+			if !sealer.emittedFinal {
+				t.Error("the sentinel must trigger the synthetic final frame")
+			}
+			if !strings.Contains(out, "[DONE]") {
+				t.Errorf("the sentinel line must still reach the client, got %q", out)
+			}
+		})
+	}
+}
+
+// An empty `data:` line carries no frame and no content, so it is dropped rather
+// than failing the stream — there is nothing to seal and nothing to leak.
+func TestStreamFrameSealer_EmptyDataLineIsDropped(t *testing.T) {
+	f := newE2EEFixture(t)
+	ctx := newGinCtx()
+	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEProfile, wire.ProfileChat)
+	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
+	sealer, err := f.c.newResponseFrameSealer(ctx)
+	if err != nil {
+		t.Fatalf("newResponseFrameSealer: %v", err)
+	}
+	for _, line := range []string{"data:\n", "data: \n"} {
+		out, err := sealer.sealSSELine(line)
+		if err != nil {
+			t.Errorf("sealSSELine(%q) must be dropped, not fail the stream: %v", strings.TrimSpace(line), err)
+		}
+		if out != "" {
+			t.Errorf("sealSSELine(%q) must emit nothing, got %q", strings.TrimSpace(line), out)
+		}
+	}
+}
+
+// A `data:` payload that is neither [DONE] nor a JSON object has no frame to
+// seal and nothing that could check it — the same hole as a forwarded `event:`
+// line, except that clients RENDER `data:` payloads. A sealed stream fails
+// closed rather than passing arbitrary text to the client and every
+// intermediary in the clear.
+func TestStreamFrameSealer_NonObjectDataLineFailsClosed(t *testing.T) {
+	f := newE2EEFixture(t)
+	ctx := newGinCtx()
+	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEProfile, wire.ProfileChat)
+	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
+	sealer, err := f.c.newResponseFrameSealer(ctx)
+	if err != nil {
+		t.Fatalf("newResponseFrameSealer: %v", err)
+	}
+	for _, line := range []string{
+		`data: "SECRET-IN-A-BARE-STRING"` + "\n",
+		"data: 42\n",
+		`data: [{"not":"an object"}]` + "\n",
+	} {
+		out, err := sealer.sealSSELine(line)
+		if err == nil {
+			t.Errorf("sealSSELine(%q) must fail closed, got %q", strings.TrimSpace(line), out)
+		}
+		if out != "" {
+			t.Errorf("sealSSELine(%q) must emit nothing on failure, got %q", strings.TrimSpace(line), out)
+		}
+	}
+	// [DONE] is still the one non-object payload that passes: it is a sentinel,
+	// not content, and the client needs it.
+	if out, err := sealer.sealSSELine("data: [DONE]\n"); err != nil || !strings.Contains(out, "[DONE]") {
+		t.Errorf("[DONE] must still pass through, got %q (%v)", out, err)
+	}
+}
+
+// A provider that ignores `stream: true` and answers with a whole non-streaming
+// body is the worst input for the drop branch, because the body's first colon
+// makes `{"type"` look like an SSE field name: the line was dropped as if it were
+// an `id:` line, the ENTIRE answer went in the bin, and the stream was then capped
+// with a synthetic terminal frame — so the client got a sealed, signed,
+// well-formed turn reporting normal completion with nothing in it, off the same
+// bytes billing was computed from. Only a real SSE field line may be dropped;
+// anything else fails closed.
+func TestStreamFrameSealer_NonSSEBodyFailsClosed(t *testing.T) {
+	for _, profile := range []wire.Profile{wire.ProfileChat, wire.ProfileAnthropic} {
+		t.Run(string(profile), func(t *testing.T) {
+			f := newE2EEFixture(t)
+			ctx := newGinCtx()
+			ctx.Set(CtxKeyE2EESealed, true)
+			ctx.Set(CtxKeyE2EEProfile, profile)
+			ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+			ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
+			sealer, err := f.c.newResponseFrameSealer(ctx)
+			if err != nil {
+				t.Fatalf("newResponseFrameSealer: %v", err)
+			}
+			for _, line := range []string{
+				// The reachable one: `stream: true` ignored, non-streaming body returned.
+				`{"type":"message","content":[{"type":"text","text":"THE WHOLE ANSWER"}]}` + "\n",
+				`{"id":"c1","choices":[{"message":{"content":"THE WHOLE ANSWER"}}]}` + "\n",
+				`[{"choices":[]}]` + "\n",
+				"<html><body>502 Bad Gateway</body></html>\n",
+				"Internal Server Error\n",
+			} {
+				out, err := sealer.sealSSELine(line)
+				if err == nil {
+					t.Errorf("sealSSELine(%q) must fail closed, got %q", strings.TrimSpace(line), out)
+				}
+				if out != "" {
+					t.Errorf("sealSSELine(%q) must emit nothing on failure, got %q", strings.TrimSpace(line), out)
+				}
+				// The error reaches the client, so it must carry no upstream bytes.
+				if err != nil && strings.Contains(err.Error(), "ANSWER") {
+					t.Errorf("the error must not quote upstream text: %v", err)
+				}
+			}
+			// Real SSE field lines are still dropped silently, unknown names included
+			// (the SSE spec has receivers ignore those, so an upstream may send one and
+			// no answer lives there), and so is an SSE comment.
+			for _, line := range []string{
+				"event: content_block_delta\n",
+				"id: 1\n",
+				"retry: 10000\n",
+				"unknown-field: whatever\n",
+				"bare-name-no-colon\n",
+				": keepalive ping\n",
+			} {
+				out, err := sealer.sealSSELine(line)
+				if err != nil || out != "" {
+					t.Errorf("sealSSELine(%q) must be dropped silently, got %q (%v)", strings.TrimSpace(line), out, err)
+				}
+			}
+		})
+	}
+}
+
+// The chat path's own post-final case, and the reason the drop-vs-fail decision
+// reads what a frame CARRIES rather than what its shape may seal: chat's sealed
+// set is ["choices"] for every frame whatever it holds, and no chat frame is ever
+// terminal, so a shape-based test failed the stream on every chunk behind [DONE]
+// — including the trailing usage-only one that legitimately carries no `choices`
+// (the frame ensureSealedFieldsPresent exists to accommodate). Before this PR
+// that chunk was sealed and forwarded; failing it would append a JSON error body
+// behind the sealed final frame and report a fully delivered turn as an error.
+func TestStreamFrameSealer_ChatFrameAfterDone(t *testing.T) {
+	f := newE2EEFixture(t)
+	ctx := newGinCtx()
+	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEProfile, wire.ProfileChat)
+	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
+	sealer, err := f.c.newResponseFrameSealer(ctx)
+	if err != nil {
+		t.Fatalf("newResponseFrameSealer: %v", err)
+	}
+	for _, line := range []string{
+		`data: {"id":"a","choices":[{"delta":{"content":"hi"}}]}` + "\n",
+		"data: [DONE]\n", // emits the synthetic final frame
+	} {
+		if _, err := sealer.sealSSELine(line); err != nil {
+			t.Fatalf("sealSSELine(%q): %v", strings.TrimSpace(line), err)
+		}
+	}
+	atFinal, _, err := sealer.signedText()
+	if err != nil {
+		t.Fatalf("signedText: %v", err)
+	}
+	boundAtFinal := sealer.frameCount
+
+	// Carries no answer → dropped, not fatal. The FIRST of these is the shape
+	// OpenAI actually sends: `choices` present but EMPTY. A presence-only test
+	// failed exactly the frame this branch was written for — and `[]` is how this
+	// file itself writes "nothing here" (ensureSealedFieldsPresent manufactures
+	// that very placeholder), so an empty field and an absent one must take the
+	// same branch.
+	for _, line := range []string{
+		`data: {"id":"a","object":"chat.completion.chunk","choices":[],"usage":{"total_tokens":3}}` + "\n",
+		`data: {"id":"a","usage":{"total_tokens":3}}` + "\n",
+		`data: {"id":"a","choices":null}` + "\n",
+	} {
+		out, err := sealer.sealSSELine(line)
+		if err != nil {
+			t.Errorf("a usage-only chunk after [DONE] must be dropped, not fail the stream: %q: %v", strings.TrimSpace(line), err)
+		}
+		if out != "" {
+			t.Errorf("a dropped frame must emit nothing, got %q", out)
+		}
+	}
+
+	// Carries `choices` → still fatal: dropping it would lose an answer, and
+	// sealing it would break the binding.
+	if _, err := sealer.sealSSELine(`data: {"id":"a","choices":[{"delta":{"content":"late"}}]}` + "\n"); err == nil {
+		t.Error("a chunk carrying `choices` after [DONE] must fail the stream")
+	}
+
+	// Either way the §8 binding still covers exactly what the client received.
+	after, _, err := sealer.signedText()
+	if err != nil {
+		t.Fatalf("signedText: %v", err)
+	}
+	if sealer.frameCount != boundAtFinal || after != atFinal {
+		t.Errorf("the binding changed after the final frame: frames %d→%d\n  at final: %s\n  after:    %s",
+			boundAtFinal, sealer.frameCount, atFinal, after)
+	}
+}
+
 func assertExactlyOneFinalLast(t *testing.T, frames []wire.Response) {
 	t.Helper()
 	finalCount := 0
@@ -719,6 +1175,7 @@ func TestStreamFrameSealer_ExactlyOneFinal(t *testing.T) {
 	f := newE2EEFixture(t)
 	ctx := newGinCtx()
 	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEProfile, wire.ProfileChat)
 	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
 	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
 
@@ -764,6 +1221,7 @@ func TestStreamFrameSealer_FinalFrameLineIdempotent(t *testing.T) {
 	f := newE2EEFixture(t)
 	ctx := newGinCtx()
 	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEProfile, wire.ProfileChat)
 	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
 	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
 
@@ -790,12 +1248,13 @@ func TestSealNonStreamResponse_NullBodyFailsClosed(t *testing.T) {
 	f := newE2EEFixture(t)
 	ctx := newGinCtx()
 	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEProfile, wire.ProfileChat)
 	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
 	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
 
 	// A literal JSON null unmarshals to a nil map without error — must fail closed,
 	// not panic.
-	_, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, []byte("null"), wire.ProfileChat)
+	_, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, []byte("null"))
 	if !isSealed {
 		t.Fatal("expected isSealed=true for a sealed request")
 	}
@@ -866,6 +1325,7 @@ func TestStreamFrameSealer_EventsBlankLineDelimited(t *testing.T) {
 	f := newE2EEFixture(t)
 	ctx := newGinCtx()
 	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEProfile, wire.ProfileChat)
 	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
 	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
 

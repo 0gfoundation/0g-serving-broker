@@ -101,28 +101,46 @@ func TestMaybeUnsealImageRequestRejectsSealedSetWithoutPrompt(t *testing.T) {
 // and which endpoints accept a sealed request at all. The RULE each profile
 // then applies lives in the protocol package (wire.ValidateSealedFieldsFor,
 // reached via wire.OpenRequestFor) — this only decides which rule to apply.
-func TestProfileForServiceType(t *testing.T) {
+//
+// The key is (service type, API SURFACE), not the service type alone: one
+// chatbot service answers on both /v1/chat/completions and /v1/messages, whose
+// payload and response shapes differ, so keyed on the type alone an Anthropic
+// sealed request resolved to the chat profile and its content rode in the clear.
+func TestProfileForRequest(t *testing.T) {
 	tests := []struct {
 		name         string
 		svcType      string
+		surface      string
 		wantProfile  wire.Profile
 		wantSealable bool
 	}{
-		{"chatbot", constant.ServiceTypeChatbot, wire.ProfileChat, true},
-		{"text-to-image", constant.ServiceTypeTextToImage, wire.ProfileImage, true},
+		{"chatbot on the openai surface", constant.ServiceTypeChatbot, config.APIFormatOpenAI, wire.ProfileChat, true},
+		{"chatbot on the anthropic surface", constant.ServiceTypeChatbot, config.APIFormatAnthropic, wire.ProfileAnthropic, true},
+		// An unrecognized path is REFUSED, not read as chat's own case. It is the
+		// likelier mistake of the two: adding a chat route means adding to
+		// constant.TargetRoute, and teaching apiFormatForPath about it is a
+		// separate edit nothing forces — and chat's rules applied to an unanalyzed
+		// request shape is the silent bug the surface key exists to prevent. It
+		// costs nothing today: every chatbot route in TargetRoute is matched.
+		{"chatbot on an unrecognized path", constant.ServiceTypeChatbot, "", "", false},
+		{"chatbot on a surface that does not exist yet", constant.ServiceTypeChatbot, "some-future-format", "", false},
+		// The image endpoint is not a chat surface at all, so the surface is
+		// whatever the path happened to be and must not change the answer.
+		{"text-to-image", constant.ServiceTypeTextToImage, "", wire.ProfileImage, true},
+		{"text-to-image on a chat path", constant.ServiceTypeTextToImage, config.APIFormatOpenAI, wire.ProfileImage, true},
 		// An ALLOWLIST, not a switch with a default. The multipart shapes cannot
 		// be envelopes at all; video-generation and anything added later simply
 		// have no profile specified, and guessing one would apply the wrong rule
 		// to a request shape nobody has analyzed.
-		{"speech-to-text", constant.ServiceTypeSpeechToText, "", false},
-		{"image-editing", constant.ServiceTypeImageEditing, "", false},
-		{"video-generation", constant.ServiceTypeVideoGeneration, "", false},
-		{"a service type that does not exist yet", "some-future-type", "", false},
-		{"unset", "", "", false},
+		{"speech-to-text", constant.ServiceTypeSpeechToText, "", "", false},
+		{"image-editing", constant.ServiceTypeImageEditing, "", "", false},
+		{"video-generation", constant.ServiceTypeVideoGeneration, "", "", false},
+		{"a service type that does not exist yet", "some-future-type", "", "", false},
+		{"unset", "", "", "", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotProfile, gotSealable := profileForServiceType(tt.svcType)
+			gotProfile, gotSealable := profileForRequest(tt.svcType, tt.surface)
 			if gotSealable != tt.wantSealable {
 				t.Fatalf("sealable = %v, want %v", gotSealable, tt.wantSealable)
 			}
@@ -130,6 +148,86 @@ func TestProfileForServiceType(t *testing.T) {
 				t.Fatalf("profile = %q, want %q", gotProfile, tt.wantProfile)
 			}
 		})
+	}
+}
+
+// What makes refusing an unrecognized surface free rather than a regression:
+// every CHAT route the proxy serves is one apiFormatForPath recognizes. Adding a
+// chat route means adding to constant.TargetRoute, and teaching apiFormatForPath
+// about it is a separate edit nothing forces — so this is the guard that forces
+// it. A new NON-chat route has to be listed here, which is a deliberate act.
+func TestEveryChatRouteHasARecognizedSurface(t *testing.T) {
+	nonChatRoutes := map[string]struct{}{
+		"/images/edits":         {},
+		"/images/generations":   {},
+		"/audio/transcriptions": {},
+		"/videos":               {},
+	}
+	for route := range constant.TargetRoute {
+		if _, nonChat := nonChatRoutes[route]; nonChat {
+			continue
+		}
+		if surface := apiFormatForPath(route); surface == "" {
+			t.Errorf("chat route %q resolves to no API surface: teach apiFormatForPath about it, "+
+				"or list it above if it is not a chat route — a sealed request on it is refused today", route)
+		}
+	}
+}
+
+// Which profiles can be sealed as a STREAM, and what makes the answer
+// trustworthy: the frame a truncated stream would be capped with must actually
+// SEAL, which newResponseFrameSealer establishes by sealing it through a
+// throwaway context. Resolving its sealed set — what this test used to assert —
+// proves much less: SealFrame also requires every declared field to be present
+// and runs the profile's final-frame cleartext checks, so the image profile
+// passed the resolve-only probe and would have failed at EOF instead.
+//
+// So the expectation is per profile, and "image cannot" is the honest answer
+// rather than a gap: §7.1 requires a cleartext `usage.output_images` on a sealed
+// image response, which a synthesized placeholder has no way to carry. Only the
+// chatbot path streams today, so it is unreachable — but if text-to-image ever
+// gains a stream, it fails at setup with that reason instead of leaving a client
+// a stream with no final frame.
+func TestProfileStreamabilityIsProvenBySealing(t *testing.T) {
+	f := newE2EEFixture(t)
+	tests := []struct {
+		profile    wire.Profile
+		canCap     bool
+		wantReason string
+	}{
+		{wire.ProfileChat, true, ""},
+		{wire.ProfileAnthropic, true, ""},
+		{wire.ProfileImage, false, "usage.output_images"},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.profile), func(t *testing.T) {
+			err := dryRunSealFinalFrame(tt.profile, f.clientEphPub, synthFinalFrameFor(tt.profile))
+			if tt.canCap {
+				if err != nil {
+					t.Fatalf("profile %q must be able to seal the frame that caps a truncated stream: %v", tt.profile, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("profile %q has no legal way to cap a truncated stream, so setup must refuse it", tt.profile)
+			}
+			if !strings.Contains(err.Error(), tt.wantReason) {
+				t.Errorf("error should carry the profile's own reason (%q), got: %v", tt.wantReason, err)
+			}
+		})
+	}
+
+	// And the profiles profileForRequest can hand a STREAM to are exactly the ones
+	// that can cap one, so a frame-typed profile added there without an entry in
+	// synthFinalFrameFor fails here rather than in production.
+	for _, surface := range []string{config.APIFormatOpenAI, config.APIFormatAnthropic} {
+		profile, sealable := profileForRequest(constant.ServiceTypeChatbot, surface)
+		if !sealable {
+			t.Fatalf("precondition: the chatbot service must be sealable on the %q surface", surface)
+		}
+		if err := dryRunSealFinalFrame(profile, f.clientEphPub, synthFinalFrameFor(profile)); err != nil {
+			t.Errorf("profile %q is reachable as a stream but cannot cap one: %v", profile, err)
+		}
 	}
 }
 
@@ -174,7 +272,7 @@ func TestSealedImageResponseHidesImagesAndPublishesBillableCount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("withImageUsage: %v", err)
 	}
-	out, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, withUsage, wire.ProfileImage)
+	out, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, withUsage)
 	if err != nil || !isSealed {
 		t.Fatalf("seal image response: sealed=%v err=%v", isSealed, err)
 	}
@@ -232,7 +330,7 @@ func TestSealedImageResponseDetectsTamperedBillableCount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("withImageUsage: %v", err)
 	}
-	out, _, _, err := f.c.maybeSealNonStreamResponse(ctx, withUsage, wire.ProfileImage)
+	out, _, _, err := f.c.maybeSealNonStreamResponse(ctx, withUsage)
 	if err != nil {
 		t.Fatalf("seal: %v", err)
 	}
@@ -351,15 +449,27 @@ func TestWithImageUsage(t *testing.T) {
 // so a frame legitimately missing one (a usage-only chat chunk) still seals.
 func TestEnsureSealedFieldsPresent(t *testing.T) {
 	frame := wire.Response{"usage": json.RawMessage(`{}`)}
-	ensureSealedFieldsPresent(frame, wire.DefaultResponseSealedFieldsFor(wire.ProfileChat))
+	ensureSealedFieldsPresent(wire.ProfileChat, frame, wire.DefaultResponseSealedFieldsFor(wire.ProfileChat))
 	if string(frame["choices"]) != "[]" {
 		t.Fatalf("choices = %s, want an injected empty array", frame["choices"])
 	}
 
 	frame = wire.Response{"data": json.RawMessage(`[{"b64_json":"x"}]`)}
-	ensureSealedFieldsPresent(frame, wire.DefaultResponseSealedFieldsFor(wire.ProfileImage))
+	ensureSealedFieldsPresent(wire.ProfileImage, frame, wire.DefaultResponseSealedFieldsFor(wire.ProfileImage))
 	if string(frame["data"]) != `[{"b64_json":"x"}]` {
 		t.Fatalf("an existing sealed field must not be overwritten, got %s", frame["data"])
+	}
+
+	// The permission belongs to (profile, field), not to the name: the same name
+	// under a profile that did not grant it gets no placeholder. `data` is the
+	// image profile's, and a frame-typed profile with a `data`-shaped content
+	// field must fail closed rather than inherit it.
+	frame = wire.Response{"type": json.RawMessage(`"content_block_delta"`)}
+	ensureSealedFieldsPresent(wire.ProfileAnthropic, frame, []string{"data", "delta"})
+	for _, f := range []string{"data", "delta"} {
+		if _, injected := frame[f]; injected {
+			t.Errorf("%q must not be placeholdered under the %q profile", f, wire.ProfileAnthropic)
+		}
 	}
 }
 
@@ -454,7 +564,7 @@ func TestSealedImageResponseWithoutBillableCountIsRefused(t *testing.T) {
 
 	// withImageUsage was skipped (or the count could not be determined).
 	noCount := []byte(`{"created":1700000000,"data":[{"b64_json":"aW1hZ2VieXRlcw"}]}`)
-	out, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, noCount, wire.ProfileImage)
+	out, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, noCount)
 	if err == nil {
 		t.Fatal("an image response with no billable count must not be sealed")
 	}

@@ -14,7 +14,6 @@ import (
 	"compress/flate"
 	"compress/gzip"
 
-	"github.com/0gfoundation/0g-pc-e2ee/protocol/wire"
 	"github.com/google/uuid"
 
 	"github.com/andybalholm/brotli"
@@ -216,7 +215,7 @@ func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, acc
 	// signature instead binds the on-wire aad‖ciphertext of the sealed frame.
 	outBody := clientBody
 	var e2eeSignedText string
-	if sealed, isSealed, respBindHash, sealErr := c.maybeSealNonStreamResponse(ctx, clientBody, wire.ProfileChat); isSealed {
+	if sealed, isSealed, respBindHash, sealErr := c.maybeSealNonStreamResponse(ctx, clientBody); isSealed {
 		if sealErr != nil {
 			// Fail-closed: never forward plaintext for a sealed request.
 			c.handleBrokerError(ctx, sealErr, "seal response")
@@ -331,7 +330,14 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 					// still receives exactly one completion marker (a missing final frame
 					// is a truncation on the client). Skip if the client already left.
 					if frameSealer != nil && !clientDisconnected {
-						if fin, ferr := frameSealer.finalFrameLine(); ferr == nil && fin != "" {
+						fin, ferr := frameSealer.finalFrameLine()
+						switch {
+						case ferr != nil:
+							// Nothing can be sent to the client at EOF, so the one thing
+							// that must not happen is silence: the client will reject this
+							// stream as a truncation (§7) and only this log says why.
+							c.logger.Errorf("e2ee stream: could not synthesize the final frame at EOF, the client will see a truncated stream: %v", ferr)
+						case fin != "":
 							if _, werr := w.Write([]byte(fin)); werr == nil {
 								ctx.Writer.Flush()
 							}
@@ -409,6 +415,7 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 	// stream, so we skip caching a signature rather than bind sha256("").
 	var e2eeSignedText string
 	if frameSealer != nil {
+		frameSealer.logDroppedAfterFinal()
 		if text, ok, terr := frameSealer.signedText(); terr != nil {
 			c.logger.Errorf("e2ee stream signing text: %v", terr)
 		} else if ok {
