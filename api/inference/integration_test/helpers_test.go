@@ -252,10 +252,15 @@ func setupTestEnvOpts(t *testing.T, e2eeEnabled bool, opts ...func(*config.Confi
 	// checks (see testEnv).
 	//
 	// It is installed on the SAME teeService the signer lives on, and a sealed
-	// request needs both: MaybeUnsealRequest opens with EncPrivateKey and pins
-	// e2ee.signer_addr against teeService.Address. A centralized service already
-	// has one; for a decentralized (TargetSeparated) service this is what creates
-	// it, since sealing does not depend on that axis.
+	// request needs BOTH halves: MaybeUnsealRequest opens with EncPrivateKey and
+	// pins e2ee.signer_addr against teeService.Address, and the response path signs
+	// the §8 binding with ProviderSigner.
+	//
+	// So the signer is required here even for a decentralized (TargetSeparated)
+	// service, which is the opposite of the plain case above. The §8 branch in
+	// processResponse tests e2eeActive BEFORE Service.IsCentralized(), so a sealed
+	// request always signs; leaving ProviderSigner nil would fail the request at
+	// SignHash, after inference, as a broker fault.
 	if e2eeEnabled {
 		if teeService == nil {
 			teeKey, err := crypto.GenerateKey()

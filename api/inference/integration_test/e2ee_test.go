@@ -55,11 +55,18 @@ type sealedClient struct {
 // have to reach for a foreign key rather than a bad string.
 func sealFor(t *testing.T, env *testEnv, profile wire.Profile, req wire.Request, sealedFields []string) sealedClient {
 	t.Helper()
+	return sealToKey(t, env.encPub, env.teeSigner, profile, req, sealedFields)
+}
+
+// sealToKey is sealFor with the recipient named explicitly, for the one test
+// that must seal to a key this enclave does NOT hold.
+func sealToKey(t *testing.T, encPub pccrypto.PublicKey, signerAddr string, profile wire.Profile, req wire.Request, sealedFields []string) sealedClient {
+	t.Helper()
 	ephPriv, ephPub, err := pccrypto.GenerateRecipientKey()
 	if err != nil {
 		t.Fatalf("generate client ephemeral key: %v", err)
 	}
-	envelope, err := wire.SealRequestFor(profile, env.encPub, req, sealedFields, env.teeSigner, ephPub)
+	envelope, err := wire.SealRequestFor(profile, encPub, req, sealedFields, signerAddr, ephPub)
 	if err != nil {
 		t.Fatalf("seal request: %v", err)
 	}
@@ -82,20 +89,22 @@ func postSealed(t *testing.T, env *testEnv, path string, sc sealedClient) *httpt
 	return w
 }
 
-// billedFee returns the fee on this user's most recent request row, and fails if
-// there is none. Reading it out of MySQL is the point: a sealed request the
-// broker could not bill would still return a perfectly good response.
+// billedFee returns the fee on this user's one request row. Reading it out of
+// MySQL is the point: a sealed request the broker could not bill would still
+// return a perfectly good response.
+//
+// It requires EXACTLY one row rather than taking the newest of several. Each
+// setupTestEnv generates a fresh user key, so a test that made one billable
+// request has one row — which makes "exactly one" a free assertion against
+// double-billing, and avoids depending on list order (ListRequest defaults to
+// created_at DESC, so the LAST element is the oldest, not the latest).
 func billedFee(t *testing.T, env *testEnv) string {
 	t.Helper()
-	requests, _, err := env.ctrl.ListRequest(model.RequestListOptions{})
-	if err != nil {
-		t.Fatalf("list requests: %v", err)
+	mine := filterUserRequests(t, env)
+	if len(mine) != 1 {
+		t.Fatalf("want exactly 1 billing record for one sealed request, got %d: %v", len(mine), mine)
 	}
-	mine := filterRequestsByUser(requests, env.userAddr)
-	if len(mine) == 0 {
-		t.Fatal("no billing record for a served sealed request: the broker answered but metered nothing")
-	}
-	return mine[len(mine)-1].Fee
+	return mine[0].Fee
 }
 
 // newMockAnthropicProvider is the upstream model server for the Anthropic
@@ -235,6 +244,39 @@ func TestE2EE_SealedAnthropicRequest_RealRouteRealDB(t *testing.T) {
 	if _, ok := sealedResp["usage"]; !ok {
 		t.Error("the sealed response withheld `usage`, which the router must read without a key")
 	}
+
+	// (5) The response is ATTESTABLE: the §8 signature over the on-wire ciphertext
+	// is stored and fetchable under the ZG-Res-Key handle.
+	//
+	// Above ctrl for two reasons. The signature endpoint is a real route, and the
+	// §8 branch runs BEFORE the centralized/decentralized split — so a sealed
+	// request signs on every provider shape, and a broker whose signer was missing
+	// would fail here, post-inference, as a broker fault rather than a client one.
+	chatKey := w.Header().Get("ZG-Res-Key")
+	if chatKey == "" {
+		t.Fatal("no ZG-Res-Key on a sealed response: the client has no handle to fetch the §8 signature with")
+	}
+	sigW := httptest.NewRecorder()
+	env.engine.ServeHTTP(sigW, httptest.NewRequest("GET", "/v1/proxy/signature/"+chatKey, nil))
+	if sigW.Code != http.StatusOK {
+		t.Fatalf("signature endpoint = %d, want 200: %s", sigW.Code, sigW.Body.String())
+	}
+	var sig struct {
+		Text                string `json:"text"`
+		SignatureEcdsa      string `json:"signatureEcdsa"`
+		SigningAddressEcdsa string `json:"signingAddressEcdsa"`
+	}
+	if err := json.Unmarshal(sigW.Body.Bytes(), &sig); err != nil {
+		t.Fatalf("parse signature: %v (%s)", err, sigW.Body.String())
+	}
+	if sig.SignatureEcdsa == "" {
+		t.Error("the §8 signature is empty")
+	}
+	// It signs the CIPHERTEXT binding, so the answer must not be inside the signed
+	// text either — the one place a sealed exchange could still spill it.
+	if strings.Contains(sig.Text, "Hello world") {
+		t.Errorf("the §8 signed text carries the plaintext answer: %s", sig.Text)
+	}
 }
 
 // The same chain on the OpenAI chat surface, which is what makes the profile
@@ -316,9 +358,7 @@ func TestE2EE_SealedToAForeignKey_Returns409AndBillsNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate foreign key: %v", err)
 	}
-	stale := *env
-	stale.encPub = foreignPub
-	sc := sealFor(t, &stale, wire.ProfileAnthropic, wire.Request{
+	sc := sealToKey(t, foreignPub, env.teeSigner, wire.ProfileAnthropic, wire.Request{
 		"model":      json.RawMessage(`"claude-x"`),
 		"max_tokens": json.RawMessage(`16`),
 		"messages":   json.RawMessage(`[{"role":"user","content":"hi"}]`),
