@@ -552,6 +552,34 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 			// validation and passes through here, instead of being misrouted into
 			// extractVideoJobID and rejected with a nonsensical "missing video job id".
 			if strings.HasPrefix(strings.ToLower(targetPath), videoStatusPathPrefix) {
+				// This branch forwards with charging=false and writes no Request row, so
+				// anything reaching it is served for free. That is correct for reading a job
+				// back; it is not correct for a method that makes the vendor RENDER.
+				//
+				// POST /videos/{id}/remix does render, and it lands here rather than in the
+				// billing switch because it matches this prefix while POST /videos (the create,
+				// an exact-match TargetRoute) does not. AuthorizeVideoJobAccess passes for any
+				// job the caller owns, so the loop is: pay for one clip, then POST remix on its
+				// id without bound — every render billed to the provider by the vendor and to
+				// nobody by the broker.
+				//
+				// An allowlist rather than "refuse POST", because the hole is the shape and not
+				// the verb: any future method added under this prefix that produces output would
+				// be free again by default, and a free render should be a decision somebody made
+				// rather than a route nobody noticed. Remix becomes servable again by giving it
+				// a reserve and a Request row in the billing switch, which is a feature and not
+				// this fix.
+				//
+				// Scoped to the video prefix, inside the block that already does the video
+				// ownership check, so the generic auth-required branch stays generic — a future
+				// non-video prefix added to AuthRequiredPrefixes is unaffected.
+				switch ctx.Request.Method {
+				case http.MethodGet, http.MethodHead, http.MethodDelete:
+				default:
+					ctx.Set("ignoreError", true)
+					p.handleBrokerError(ctx, errors.NewBadRequest("%s is not served on %s: this route is read-only, and a request that renders has to be billed", ctx.Request.Method, targetPath), "video read-only route")
+					return
+				}
 				jobID := extractVideoJobID(targetPath)
 				if jobID == "" {
 					ctx.Set("ignoreError", true)

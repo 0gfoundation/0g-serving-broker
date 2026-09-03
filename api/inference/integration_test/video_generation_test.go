@@ -1362,3 +1362,78 @@ func TestVideoGeneration_ResKeyReplayAfterCompletion(t *testing.T) {
 		}
 	})
 }
+
+// POST /videos/{id}/remix renders a clip and is not billed, so it is refused.
+//
+// It lands on the auth-only route because it matches the "/videos/" prefix while POST /videos
+// (the create, an exact-match TargetRoute) does not, and that route forwards with
+// charging=false and writes no Request row. Ownership passes for any job the caller owns, so
+// the loop was: pay for one clip, then POST remix on its id without bound — every render
+// billed to the provider by the vendor and to nobody by the broker.
+//
+// Refused rather than billed because billing it is a feature (it needs a reserve, a Request
+// row and a poll job of its own), while the hole is unbounded cost today. Reading a job back
+// has to keep working, which is the second half of this test.
+func TestVideoRemixIsRefusedRatherThanServedFree(t *testing.T) {
+	mockProvider, jobID := newMockVideoProvider(t)
+	t.Cleanup(func() { mockProvider.Close() })
+
+	env := setupTestEnv(t, func(cfg *config.Config) {
+		cfg.Service.TargetURL = mockProvider.URL
+		cfg.Service.Type = "video-generation"
+		cfg.Service.ModelType = "sora-2"
+	})
+
+	// Own a job, so the ownership check is not what refuses the remix — otherwise this test
+	// would pass with the method check removed.
+	boundary := "----TestBoundary"
+	var body strings.Builder
+	for name, value := range map[string]string{"model": "sora-2", "prompt": "a cat", "seconds": "5", "size": "720x1280"} {
+		body.WriteString("--" + boundary + "\r\n")
+		body.WriteString(fmt.Sprintf("Content-Disposition: form-data; name=\"%s\"\r\n\r\n%s\r\n", name, value))
+	}
+	body.WriteString("--" + boundary + "--")
+	create := httptest.NewRequest("POST", "/v1/proxy/videos", strings.NewReader(body.String()))
+	create.Header.Set("Content-Type", "multipart/form-data; boundary="+boundary)
+	create.Header.Set("Authorization", createAuthHeader(t, env.privateKey, env.providerAddr))
+	cw := httptest.NewRecorder()
+	env.engine.ServeHTTP(cw, create)
+	if cw.Code != http.StatusOK {
+		t.Fatalf("seed create: expected 200, got %d: %s", cw.Code, cw.Body.String())
+	}
+	before, _, err := env.ctrl.ListRequest(model.RequestListOptions{})
+	if err != nil {
+		t.Fatalf("list requests: %v", err)
+	}
+	seeded := len(filterRequestsByUser(before, env.userAddr))
+
+	remix := httptest.NewRequest("POST", "/v1/proxy/videos/"+jobID+"/remix", strings.NewReader(`{"prompt":"now with a dog"}`))
+	remix.Header.Set("Content-Type", "application/json")
+	remix.Header.Set("Authorization", createAuthHeader(t, env.privateKey, env.providerAddr))
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, remix)
+
+	if w.Code == http.StatusOK {
+		t.Errorf("POST remix returned 200: it rendered a clip nobody was billed for")
+	}
+	// And it must not have quietly created a billing row either, which would be the other
+	// way to pass the assertion above while still being wrong.
+	after, _, err := env.ctrl.ListRequest(model.RequestListOptions{})
+	if err != nil {
+		t.Fatalf("list requests: %v", err)
+	}
+	if got := len(filterRequestsByUser(after, env.userAddr)); got != seeded {
+		t.Errorf("request rows = %d after the refused remix, want %d", got, seeded)
+	}
+
+	// Reading the job back still works — the route is read-only, not closed.
+	for _, path := range []string{"/v1/proxy/videos/" + jobID, "/v1/proxy/videos/" + jobID + "/content"} {
+		get := httptest.NewRequest("GET", path, nil)
+		get.Header.Set("Authorization", createAuthHeader(t, env.privateKey, env.providerAddr))
+		gw := httptest.NewRecorder()
+		env.engine.ServeHTTP(gw, get)
+		if gw.Code != http.StatusOK {
+			t.Errorf("GET %s = %d, want 200: the method check must not close the read routes", path, gw.Code)
+		}
+	}
+}
