@@ -581,20 +581,33 @@ func (c *Ctrl) signChatResponse(ctx context.Context, reqBody, signData []byte, c
 			return nil
 		}
 		c.logger.Debug("E2EE sealed request, signing on-wire ciphertext (§8)")
-		return c.signChatE2EE(e2eeSignedText, chatKey)
+		// A sealed request to a CENTRALIZED provider needs both proofs, not one:
+		// §8 attests that this enclave produced the ciphertext the client
+		// decrypted, and the routing proof attests which vendor the upstream hop
+		// actually terminated TLS at. Neither implies the other, and the routing
+		// proof is the primary trust artifact of a centralized route — before
+		// this it was simply dropped on sealed traffic, because this branch
+		// returns before the IsCentralized() one below ever runs.
+		//
+		// nil on failure, never fatal: §8 is the load-bearing signature here (the
+		// E2EE client refuses the response without it), so it must not be lost
+		// because the vendor evidence could not be assembled. Same posture the
+		// unsealed centralized path takes a few lines down.
+		var routing *RoutingProof
+		if c.Service.IsCentralized() {
+			var err error
+			if routing, err = c.buildCentralizedRoutingProof(reqBody, signData,
+				c.upstreamCertFingerprintFromCtx(ctx), providerIdentity); err != nil {
+				c.logger.Errorf("sealed response carries no routing proof: %v", err)
+			}
+		}
+		return c.signChatE2EE(e2eeSignedText, chatKey, routing)
 	}
 
 	if c.Service.IsCentralized() {
 		// Centralized provider: broker TEE signs a routing proof with the TLS cert
 		// fingerprint captured on the upstream request (available before the flush).
-		var fingerprint string
-		if ginCtx, ok := ctx.(*gin.Context); ok {
-			if fingerprint = ginCtx.GetString(CtxKeyUpstreamCertFingerprint); fingerprint == "" {
-				c.logger.Warn("upstream cert fingerprint not found in context")
-			}
-		} else {
-			c.logger.Warn("context is not *gin.Context, cannot retrieve upstream cert fingerprint")
-		}
+		fingerprint := c.upstreamCertFingerprintFromCtx(ctx)
 		c.logger.Debug("Centralized provider, signing routing proof")
 		// Signing failure is non-fatal: without a cached signature the SDK gets a
 		// 404 on /v1/proxy/signature/{chatID}, which is more honest than a
@@ -611,6 +624,29 @@ func (c *Ctrl) signChatResponse(ctx context.Context, reqBody, signData []byte, c
 	}
 
 	return nil
+}
+
+// upstreamCertFingerprintFromCtx reads the upstream TLS certificate fingerprint
+// captured on the provider request (proxy.go, before the flush).
+//
+// Extracted because signChatResponse now needs the same answer on two branches —
+// the sealed one and the unsealed centralized one — and a routing proof is only
+// as good as its evidence: two copies of this read is how one of them ends up
+// consulting a different source and signing a proof over an empty fingerprint.
+// Callers get "" when there is none; buildCentralizedRoutingProof refuses to
+// sign on that, so the absence fails closed rather than producing a proof with
+// no TLS evidence in it.
+func (c *Ctrl) upstreamCertFingerprintFromCtx(ctx context.Context) string {
+	ginCtx, ok := ctx.(*gin.Context)
+	if !ok {
+		c.logger.Warn("context is not *gin.Context, cannot retrieve upstream cert fingerprint")
+		return ""
+	}
+	fingerprint := ginCtx.GetString(CtxKeyUpstreamCertFingerprint)
+	if fingerprint == "" {
+		c.logger.Warn("upstream cert fingerprint not found in context")
+	}
+	return fingerprint
 }
 
 func (c *Ctrl) processSingleResponse(ctx context.Context, decodedBody []byte, outputPrice string, output *string, requestHash string, usage **Usage, isWhitelisted bool) error {

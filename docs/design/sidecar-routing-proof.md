@@ -97,6 +97,58 @@ quote. That is the same trust boundary the rest of the deployment already rests 
 — and it is why the sidecar must be declared in the **same measured compose** as
 the broker, not started separately.
 
+### On an end-to-end-encrypted request the proof travels nested
+
+A sealed (`_e2ee`) request already has a signature of its own — the 0g-pc SPEC §8
+ciphertext binding — and `/v1/proxy/signature/{chatID}` has room for exactly one
+top-level signed statement. On a sealed request that statement has to stay §8:
+it is what the E2EE client verifies, and it is the signature the client refuses
+the response without.
+
+So the routing proof is served **alongside** it, under `routing_proof`, carrying
+its own `text` and `signature`:
+
+```jsonc
+{
+  "text": "zg-sig-v1/e2ee-ct:<reqHash>:<respHash>",   // §8, unchanged
+  "signature": "0x…",
+  "signing_address": "0x…",
+  "signing_algo": "ecdsa",
+  "routing_proof": {                                   // present only when sealed AND centralized
+    "text": "<req>:<resp>:centralized:<identity>:<fingerprint>",
+    "signature": "0x…",                                // its OWN signature, over its own text
+    "signing_address": "0x…",
+    "provider_type": "centralized",
+    "provider_identity": "api.vendor.example",
+    "tls_cert_fingerprint": "…"
+  }
+}
+```
+
+Three properties are deliberate:
+
+- **Nested, not merged.** Every field inside `routing_proof` is covered by
+  `routing_proof.signature`. Hoisting the fingerprint next to a §8 signature that
+  does not cover it would hand verifiers a value with nothing behind it — the same
+  false confidence the signer refuses to create when the fingerprint is missing.
+- **The same text format** as an unsealed proof, so no verifier needs new code for
+  the nested case. On a sealed request its two hashes are over the on-wire
+  ciphertext, so the pair chains end to end: the routing proof says which vendor's
+  TLS connection produced exactly those bytes, and §8 says those bytes are the
+  ciphertext the client decrypted.
+- **Unsealed responses are untouched.** There the routing proof *is* the whole
+  signature and stays flat at the top level, `routing_proof` absent. Both shapes
+  are asserted, so neither can drift into the other.
+
+Why it needed doing: `signChatResponse` returns from its E2EE branch before the
+centralized one, so before this a sealed request to a centralized provider got
+**no routing proof at all** — the vendor attestation that is the primary trust
+artifact of a centralized route, dropped on exactly the traffic that asked for
+the most confidentiality, and (per the section below) not counted as a skip
+either. Assembly failure is non-fatal: §8 still gets cached, because losing the
+load-bearing signature over missing vendor evidence would turn an absent extra
+into a failed request.
+
 ### When a proof is not produced
 
 Every path that cannot produce a proof — no TLS, no sidecar report, a malformed

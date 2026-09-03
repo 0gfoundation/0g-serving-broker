@@ -1390,7 +1390,7 @@ func TestSignChatE2EE_NonStream(t *testing.T) {
 	}
 	text := proof.SignedTextE2EEFromHashes(reqH, respH)
 
-	if err := f.c.signChatE2EE(text, "ck-ns"); err != nil {
+	if err := f.c.signChatE2EE(text, "ck-ns", nil); err != nil {
 		t.Fatalf("signChatE2EE: %v", err)
 	}
 	sig, err := f.c.GetChatSignature("ck-ns")
@@ -1459,7 +1459,7 @@ func TestSignChatE2EE_Stream(t *testing.T) {
 		t.Fatalf("binder.Text: %v", err)
 	}
 
-	if err := f.c.signChatE2EE(text, "ck-s"); err != nil {
+	if err := f.c.signChatE2EE(text, "ck-s", nil); err != nil {
 		t.Fatalf("signChatE2EE: %v", err)
 	}
 	sig, err := f.c.GetChatSignature("ck-s")

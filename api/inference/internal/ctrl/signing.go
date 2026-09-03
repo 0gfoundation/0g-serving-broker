@@ -40,6 +40,43 @@ type ChatSignature struct {
 	ProviderType       string `json:"provider_type,omitempty"`
 	ProviderIdentity   string `json:"provider_identity,omitempty"`
 	TLSCertFingerprint string `json:"tls_cert_fingerprint,omitempty"`
+	// RoutingProof carries the centralized routing proof ALONGSIDE a §8
+	// ciphertext binding, for a sealed request to a centralized provider. Absent
+	// on every other shape: an unsealed centralized response carries its routing
+	// proof in the fields above (this struct IS the proof there), and no other
+	// provider type has one to serve.
+	RoutingProof *RoutingProof `json:"routing_proof,omitempty"`
+}
+
+// RoutingProof is a TEE-signed centralized routing proof — request/response
+// hashes bound to the upstream's TLS certificate fingerprint and the identity
+// that actually served the request.
+//
+// It is a type of its own, rather than more fields on ChatSignature, because a
+// sealed request needs the routing proof IN ADDITION TO its §8 binding and the
+// two cannot share one envelope. ChatSignature's Text/Signature carry exactly
+// one signed statement, and on a sealed response that has to stay the §8 pair
+// the E2EE client verifies — so the routing proof travels nested, carrying its
+// OWN text and signature. That is the whole point: a verifier checks it on its
+// own terms, and nothing inside it is a claim the enclosing signature fails to
+// cover. No field is omitempty: a proof that exists at all has every one of them
+// populated (buildCentralizedRoutingProof refuses to sign without a well-formed
+// fingerprint, and falls back to the service-level identity), so an absent field
+// here would mean a malformed proof rather than an inapplicable one.
+//
+// The signed text is the SAME format an unsealed centralized response uses
+// (teeutil.FormatRoutingProofText), deliberately: a verifier needs no new code
+// for the nested case, and on a sealed request the two hashes are over the
+// on-wire ciphertext, so this proof says "this TLS connection to that vendor
+// produced exactly the bytes §8 binds to your plaintext". The two chain.
+type RoutingProof struct {
+	Text                string         `json:"text"`
+	SignatureEcdsa      string         `json:"signature"`
+	SigningAddressEcdsa common.Address `json:"signing_address"`
+	SigningAlgo         string         `json:"signing_algo"`
+	ProviderType        string         `json:"provider_type"`
+	ProviderIdentity    string         `json:"provider_identity"`
+	TLSCertFingerprint  string         `json:"tls_cert_fingerprint"`
 }
 
 func (*Ctrl) chatCacheKey(chatID string) string {
@@ -74,7 +111,13 @@ func jcsSha256Hex(b []byte) (string, error) {
 // proof.StreamBinder for a stream. Assembling it there (not here) is what keeps
 // the broker's signed bytes and the client's recomputed bytes byte-for-byte
 // identical; this function is a thin signer over the finished text.
-func (c *Ctrl) signChatE2EE(text, chatKey string) error {
+//
+// routing is the centralized routing proof to carry alongside, or nil when there
+// is none (any non-centralized provider, or a centralized one whose TLS evidence
+// could not be assembled). It is nested rather than merged: §8 stays this
+// response's top-level signed statement, so an E2EE client verifies exactly what
+// it verified before this field existed.
+func (c *Ctrl) signChatE2EE(text, chatKey string, routing *RoutingProof) error {
 	sig, err := c.teeService.SignHash(accounts.TextHash([]byte(text)))
 	if err != nil {
 		return err
@@ -88,6 +131,7 @@ func (c *Ctrl) signChatE2EE(text, chatKey string) error {
 		SignatureEcdsa:      hexutil.Encode(sig),
 		SigningAddressEcdsa: c.teeService.Address,
 		SigningAlgo:         ECDSA.String(),
+		RoutingProof:        routing,
 	}
 	key := c.chatCacheKey(chatKey)
 	c.logger.Debugf("e2ee chat signature key: %v", key)
@@ -189,6 +233,37 @@ func (c *Ctrl) signImageResponse(reqBody []byte, images [][]byte, chatKey string
 // back to the service-level ProviderIdentity, so callers with no resolved model
 // (and single-upstream providers) get the previous behaviour unchanged.
 func (c *Ctrl) signCentralizedRoutingProof(reqBody, respData []byte, chatKey, tlsFingerprint string, providerIdentity string) error {
+	rp, err := c.buildCentralizedRoutingProof(reqBody, respData, tlsFingerprint, providerIdentity)
+	if err != nil {
+		return err
+	}
+
+	// The unsealed shape: the routing proof IS this response's one signed
+	// statement, so it goes at the top level. (A sealed response nests it under
+	// RoutingProof instead, because there the top level is the §8 binding.)
+	chatSignature := ChatSignature{
+		Text:                rp.Text,
+		SignatureEcdsa:      rp.SignatureEcdsa,
+		SigningAddressEcdsa: rp.SigningAddressEcdsa,
+		SigningAlgo:         rp.SigningAlgo,
+		ProviderType:        rp.ProviderType,
+		ProviderIdentity:    rp.ProviderIdentity,
+		TLSCertFingerprint:  rp.TLSCertFingerprint,
+	}
+
+	key := c.chatCacheKey(chatKey)
+	c.logger.Debugf("key: %v, centralized chat signature: %v", key, chatSignature)
+	c.svcCache.Set(key, chatSignature, c.chatCacheExpiration)
+	return nil
+}
+
+// buildCentralizedRoutingProof assembles and signs the routing proof without
+// caching it, so the same evidence and the same signed-text format serve both
+// callers: signCentralizedRoutingProof, which publishes it as an unsealed
+// response's whole signature, and the sealed path, which nests it beside the §8
+// binding. Splitting build from publish is what keeps those two from drifting
+// into two proof formats.
+func (c *Ctrl) buildCentralizedRoutingProof(reqBody, respData []byte, tlsFingerprint string, providerIdentity string) (*RoutingProof, error) {
 	if providerIdentity == "" {
 		providerIdentity = c.Service.ProviderIdentity
 	}
@@ -213,7 +288,7 @@ func (c *Ctrl) signCentralizedRoutingProof(reqBody, respData []byte, chatKey, tl
 		if tlsFingerprint != "" {
 			monitor.RecordRoutingProofSkipped(monitor.RoutingProofSkipSignError)
 		}
-		return fmt.Errorf("no usable upstream TLS certificate fingerprint for centralized provider routing proof (response and billing are unaffected)")
+		return nil, fmt.Errorf("no usable upstream TLS certificate fingerprint for centralized provider routing proof (response and billing are unaffected)")
 	}
 	tlsFingerprint = normalized
 
@@ -228,14 +303,14 @@ func (c *Ctrl) signCentralizedRoutingProof(reqBody, respData []byte, chatKey, tl
 	sig, err := c.teeService.SignHash(accounts.TextHash([]byte(text)))
 	if err != nil {
 		monitor.RecordRoutingProofSkipped(monitor.RoutingProofSkipSignError)
-		return fmt.Errorf("failed to sign routing proof: %w", err)
+		return nil, fmt.Errorf("failed to sign routing proof: %w", err)
 	}
 
 	if sig[64] == 0 || sig[64] == 1 {
 		sig[64] += 27
 	}
 
-	chatSignature := ChatSignature{
+	return &RoutingProof{
 		Text:                text,
 		SignatureEcdsa:      hexutil.Encode(sig),
 		SigningAddressEcdsa: c.teeService.Address,
@@ -243,10 +318,5 @@ func (c *Ctrl) signCentralizedRoutingProof(reqBody, respData []byte, chatKey, tl
 		ProviderType:        c.Service.ProviderType,
 		ProviderIdentity:    providerIdentity,
 		TLSCertFingerprint:  tlsFingerprint,
-	}
-
-	key := c.chatCacheKey(chatKey)
-	c.logger.Debugf("key: %v, centralized chat signature: %v", key, chatSignature)
-	c.svcCache.Set(key, chatSignature, c.chatCacheExpiration)
-	return nil
+	}, nil
 }
