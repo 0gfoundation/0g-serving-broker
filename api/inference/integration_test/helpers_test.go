@@ -5,6 +5,7 @@ package integration_test
 import (
 	"context"
 	"crypto/ecdsa"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -23,6 +24,7 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 
+	pccrypto "github.com/0gfoundation/0g-pc-e2ee/protocol/crypto"
 	commonconfig "github.com/0glabs/0g-serving-broker/common/config"
 	brokerlog "github.com/0glabs/0g-serving-broker/common/log"
 	teeutil "github.com/0glabs/0g-serving-broker/common/tee"
@@ -131,9 +133,38 @@ type testEnv struct {
 	privateKey   *ecdsa.PrivateKey
 	userAddr     string
 	providerAddr string
+
+	// The enclave's E2EE identity (0g-pc SPEC §4), populated only for a test that
+	// asked for it via setupSealedTestEnv. A sealed-request test needs all three: encPub to
+	// seal to, keyID so verifyEncKeyID accepts the envelope, and teeSigner as the
+	// signer_addr the enclave pins itself against.
+	//
+	// Held on the env rather than derived by each test because the broker checks
+	// all three and a test that guessed any of them would fail on a message that
+	// says nothing about which one it got wrong.
+	encPub    pccrypto.PublicKey
+	keyID     []byte
+	teeSigner string
 }
 
+// setupTestEnv stands up the broker with no E2EE enclave key: the shape every
+// pre-existing test uses, where a sealed request would be refused for want of a
+// key rather than opened.
 func setupTestEnv(t *testing.T, opts ...func(*config.Config)) *testEnv {
+	t.Helper()
+	return setupTestEnvOpts(t, false, opts...)
+}
+
+// setupSealedTestEnv is setupTestEnv plus an E2EE enclave key, for a test that
+// seals a request to this broker. It is a separate entry point rather than a
+// config option because the key must exist BEFORE ctrl.New — the ctrl holds the
+// teeService — so it cannot be installed by a caller afterwards.
+func setupSealedTestEnv(t *testing.T, opts ...func(*config.Config)) *testEnv {
+	t.Helper()
+	return setupTestEnvOpts(t, true, opts...)
+}
+
+func setupTestEnvOpts(t *testing.T, e2eeEnabled bool, opts ...func(*config.Config)) *testEnv {
 	t.Helper()
 
 	// Ethereum key pair
@@ -216,6 +247,40 @@ func setupTestEnv(t *testing.T, opts ...func(*config.Config)) *testEnv {
 			Address:        crypto.PubkeyToAddress(teeKey.PublicKey),
 		}
 	}
+	// The E2EE enclave key, for a test that seals a request. Generated here rather
+	// than in each test so the env can hand back the three values the broker
+	// checks (see testEnv).
+	//
+	// It is installed on the SAME teeService the signer lives on, and a sealed
+	// request needs BOTH halves: MaybeUnsealRequest opens with EncPrivateKey and
+	// pins e2ee.signer_addr against teeService.Address, and the response path signs
+	// the §8 binding with ProviderSigner.
+	//
+	// So the signer is required here even for a decentralized (TargetSeparated)
+	// service, which is the opposite of the plain case above. The §8 branch in
+	// processResponse tests e2eeActive BEFORE Service.IsCentralized(), so a sealed
+	// request always signs; leaving ProviderSigner nil would fail the request at
+	// SignHash, after inference, as a broker fault.
+	if e2eeEnabled {
+		if teeService == nil {
+			teeKey, err := crypto.GenerateKey()
+			if err != nil {
+				t.Fatalf("generate TEE key: %v", err)
+			}
+			teeService = &teeutil.TeeService{
+				ProviderSigner: teeKey,
+				Address:        crypto.PubkeyToAddress(teeKey.PublicKey),
+			}
+		}
+		encPriv, encPub, err := pccrypto.GenerateRecipientKey()
+		if err != nil {
+			t.Fatalf("generate e2ee recipient key: %v", err)
+		}
+		sum := sha256.Sum256(encPub)
+		teeService.EncPrivateKey = encPriv
+		teeService.EncPublicKey = encPub
+		teeService.KeyID = sum[:8] // key_id = SHA-256(enc_pub)[0:8] (§4.3)
+	}
 
 	c := ctrl.New(database, provContract, cfg, svcCache, teeService, nil, logger)
 
@@ -245,7 +310,7 @@ func setupTestEnv(t *testing.T, opts ...func(*config.Config)) *testEnv {
 		t.Fatalf("start proxy: %v", err)
 	}
 
-	return &testEnv{
+	env := &testEnv{
 		engine:       engine,
 		db:           database,
 		ctrl:         c,
@@ -254,6 +319,12 @@ func setupTestEnv(t *testing.T, opts ...func(*config.Config)) *testEnv {
 		userAddr:     userAddr.Hex(),
 		providerAddr: providerAddr,
 	}
+	if teeService != nil {
+		env.encPub = teeService.EncPublicKey
+		env.keyID = teeService.KeyID
+		env.teeSigner = teeService.Address.Hex()
+	}
+	return env
 }
 
 // filterRequestsByUser returns only the requests belonging to the given user address.
