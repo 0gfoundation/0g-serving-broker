@@ -48,8 +48,11 @@ type ChatSignature struct {
 	// proof in the fields above (this struct IS the proof there), and no other
 	// provider type has one to serve.
 	//
-	// A VERIFIER MUST CROSS-CHECK THE TWO. See RoutingProof's doc: they are two
-	// independent signatures, and JSON adjacency is not attested.
+	// A VERIFIER MUST CROSS-CHECK THE TWO, and MUST REQUIRE THIS FIELD on a route
+	// it knows to be centralized. See RoutingProof's doc: they are two independent
+	// signatures, JSON adjacency is not attested, and no signature covers this
+	// field's presence — so absent-because-stripped and absent-because-unavailable
+	// look identical on the wire.
 	RoutingProof *RoutingProof `json:"routing_proof,omitempty"`
 }
 
@@ -103,12 +106,37 @@ type ChatSignature struct {
 //
 // Note what this buys and what it does not: it binds the two statements by
 // EQUALITY OF VALUES a verifier checks, not by one signature covering the other.
+//
+// # …and MUST require it to be present on a centralized route
+//
+// Comparing the halves only catches a MISMATCHED proof. The cheaper move for the
+// same intermediary is to delete this object outright, leaving a §8 signature
+// that verifies perfectly, from the right enclave, over the right ciphertext. No
+// signature covers the field's presence, and the broker legitimately omits it on
+// several shapes (decentralized provider, no TLS evidence, an unreadable §8
+// text), so stripped and unavailable are byte-identical:
+//
+//	A verifier that knows the route is centralized MUST require routing_proof to
+//	be present. Its absence is a failed verification, not "no vendor evidence
+//	available".
+//
+// The route type has to come from provider metadata, not from the signature
+// response under attack: GET /v1/models publishes provider_type per model
+// (omitted for decentralized), the same value signed into ProviderType below.
+//
+// This asymmetry is introduced by the NESTING. On the unsealed shape the evidence
+// is inside the one signed text and cannot be stripped — the router can only
+// withhold the whole signature, which is detectable as no signature at all. Here
+// it is an unsigned optional sibling of a signature that stays valid without it.
+//
 // Folding the routing evidence into the §8 signed text is the strictly stronger
-// end state; it is deferred to the routing proof's next version because it is a
-// protocol change across every verifier. Until then the obligation above is the
-// contract, and it is stated in docs/design/sidecar-routing-proof.md too, since
-// that doc — not the 0g-pc protocol package, which has no routing-proof concept
-// — is where verifier implementors read it.
+// end state — it makes both rules unnecessary, since absence and mismatch alike
+// become a §8 verification failure — and it is deferred to the routing proof's
+// next version because it is a protocol change across every verifier. Until then
+// the two obligations above are the contract, and they are stated in
+// docs/design/sidecar-routing-proof.md too, since that doc — not the 0g-pc
+// protocol package, which has no routing-proof concept — is where verifier
+// implementors read them.
 type RoutingProof struct {
 	Text                string         `json:"text"`
 	SignatureEcdsa      string         `json:"signature"`
@@ -343,6 +371,26 @@ func (c *Ctrl) buildSealedRoutingProof(e2eeSignedText, tlsFingerprint, providerI
 		return nil, fmt.Errorf("sealed §8 text %q is not <scheme>:<reqHhex>:<respHhex>, so there are no on-wire hashes to bind", truncateForLog([]byte(e2eeSignedText), 80))
 	}
 	return c.routingProofOverHashes(reqHash, respHash, tlsFingerprint, providerIdentity)
+}
+
+// sealedProofSkipCause names why buildSealedRoutingProof refused, for
+// logProofSkip's throttle key. Called only on the error path, so re-splitting
+// the §8 text costs nothing on a healthy deployment.
+//
+// It classifies from the inputs rather than the error text because the two
+// causes an operator actually hits — a §8 text this cannot read, and no TLS
+// evidence captured upstream — need different fixes and must not share a memo
+// key. The rest (a non-empty but malformed fingerprint, or an enclave signing
+// failure) are caller/enclave bugs rather than deployment faults, and share one
+// key deliberately: distinguishing them would mean matching on error strings.
+func sealedProofSkipCause(e2eeSignedText, tlsFingerprint string) string {
+	if _, _, ok := e2eeBindingHashes(e2eeSignedText); !ok {
+		return "unusable_e2ee_text"
+	}
+	if tlsFingerprint == "" {
+		return "no_fingerprint"
+	}
+	return "sign_failed"
 }
 
 // e2eeBindingHashes splits a §8 signed text into its two hex binding hashes.

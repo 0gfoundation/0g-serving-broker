@@ -602,13 +602,20 @@ func (c *Ctrl) signChatResponse(ctx context.Context, reqBody, signData []byte, c
 		// unsealed centralized path takes a few lines down.
 		var routing *RoutingProof
 		if c.Service.IsCentralized() {
+			fingerprint := c.upstreamCertFingerprintFromCtx(ctx)
 			var err error
 			if routing, err = c.buildSealedRoutingProof(e2eeSignedText,
-				c.upstreamCertFingerprintFromCtx(ctx), providerIdentity); err != nil {
+				fingerprint, providerIdentity); err != nil {
 				// Throttled: this fires at full request rate on a misconfigured
 				// deployment, which is the log-volume failure mode logProofSkip and
-				// the skip counter exist to replace.
-				c.logProofSkip(monitor.RoutingProofSkipSignError, "sealed",
+				// the skip counter exist to replace. The detail is the CAUSE, not the
+				// shape ("sealed" is already in the message): logProofSkip memoizes on
+				// reason|detail, so a constant detail would let whichever cause fires
+				// first suppress the others for the whole window — and they have
+				// completely different fixes. Same use of the argument as proxy.go's
+				// absent/malformed and no_sidecar_report/no_sidecar_host.
+				c.logProofSkip(monitor.RoutingProofSkipSignError,
+					sealedProofSkipCause(e2eeSignedText, fingerprint),
 					"sealed response carries no routing proof: %v", err)
 			}
 		}

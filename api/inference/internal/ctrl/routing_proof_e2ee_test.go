@@ -128,55 +128,67 @@ func TestSealedResponseCarriesRoutingProofOnCentralizedProvider(t *testing.T) {
 // Asserting the hashes are PRESENT would not catch either: the fix and the bug
 // both produce a well-formed 5-field proof. So this asserts both directions —
 // the §8 on-wire halves are in, and the plaintext digests are out.
+//
+// Run over BOTH ciphertext-binding schemes, because e2eeBindingHashes accepts a
+// two-clause disjunction and a disjunction needs a positive case per clause: a
+// mutation dropping the stream clause alone deletes the routing proof from every
+// sealed STREAMING centralized response (chatbot.go's stream path signs a
+// StreamBinder.Text(), whose aggregate is order-, count- and
+// truncation-sensitive) while a non-stream-only suite stays green. Refusals are
+// covered by the malformed-text table below; this is the positive half.
 func TestSealedRoutingProofBindsOnWireHashesNotPlaintext(t *testing.T) {
-	f := centralizedFixture(t)
-	ctx := sealedCtx(t, f, testFingerprint)
+	for _, scheme := range []string{proof.SchemeE2EECiphertext, proof.SchemeE2EECiphertextStream} {
+		t.Run(scheme, func(t *testing.T) {
+			f := centralizedFixture(t)
+			ctx := sealedCtx(t, f, testFingerprint)
 
-	// Distinguishable stand-ins for the plaintext the broker holds. Their sha256
-	// is what a naive implementation would sign.
-	reqPlaintext := []byte(`{"model":"m","messages":[{"role":"user","content":"SECRET PROMPT"}]}`)
-	respPlaintext := []byte(`{"choices":[{"message":{"content":"SECRET ANSWER"}}]}`)
-	const e2eeText = "zg-sig-v1/e2ee-ct:" + onWireReqHash + ":" + onWireRespHash
+			// Distinguishable stand-ins for the plaintext the broker holds. Their
+			// sha256 is what a naive implementation would sign.
+			reqPlaintext := []byte(`{"model":"m","messages":[{"role":"user","content":"SECRET PROMPT"}]}`)
+			respPlaintext := []byte(`{"choices":[{"message":{"content":"SECRET ANSWER"}}]}`)
+			e2eeText := scheme + ":" + onWireReqHash + ":" + onWireRespHash
 
-	if err := f.c.signChatResponse(ctx, reqPlaintext, respPlaintext, "ck-onwire", e2eeText, ""); err != nil {
-		t.Fatalf("signChatResponse: %v", err)
-	}
-	sig, err := f.c.GetChatSignature("ck-onwire")
-	if err != nil {
-		t.Fatalf("GetChatSignature: %v", err)
-	}
-	if sig.RoutingProof == nil {
-		t.Fatal("no routing proof to inspect")
-	}
-	got := sig.RoutingProof.Text
+			if err := f.c.signChatResponse(ctx, reqPlaintext, respPlaintext, "ck-onwire", e2eeText, ""); err != nil {
+				t.Fatalf("signChatResponse: %v", err)
+			}
+			sig, err := f.c.GetChatSignature("ck-onwire")
+			if err != nil {
+				t.Fatalf("GetChatSignature: %v", err)
+			}
+			if sig.RoutingProof == nil {
+				t.Fatal("no routing proof to inspect")
+			}
+			got := sig.RoutingProof.Text
 
-	// In: the same hashes §8 bound. This is what a verifier's mandatory
-	// cross-check compares — the two signatures are independent statements by one
-	// key, so a client that checks both and stops can be served §8 from one chat
-	// beside a routing proof from another. Asserting it the way a verifier runs
-	// it (parse both, compare the halves) is what keeps that obligation
-	// satisfiable; see RoutingProof's godoc and the design doc.
-	e2eeParts := strings.Split(sig.Text, ":")
-	rpParts := strings.Split(got, ":")
-	if len(e2eeParts) != 3 || len(rpParts) != 5 {
-		t.Fatalf("unexpected text shapes: §8 %q, routing proof %q", sig.Text, got)
-	}
-	if rpParts[0] != e2eeParts[1] || rpParts[1] != e2eeParts[2] {
-		t.Errorf("the two statements are not cross-checkable: §8 binds (%s, %s), routing proof binds (%s, %s)",
-			e2eeParts[1], e2eeParts[2], rpParts[0], rpParts[1])
-	}
-	// Out: no digest of anything the client cannot reproduce.
-	for _, leak := range []struct {
-		what string
-		hash string
-	}{
-		{"the plaintext request", sha256Hex(reqPlaintext)},
-		{"the plaintext response", sha256Hex(respPlaintext)},
-	} {
-		if strings.Contains(got, leak.hash) {
-			t.Errorf("routing proof publishes sha256 of %s (%s) on an unauthenticated endpoint: %q",
-				leak.what, leak.hash, got)
-		}
+			// In: the same hashes §8 bound. This is what a verifier's mandatory
+			// cross-check compares — the two signatures are independent statements by
+			// one key, so a client that checks both and stops can be served §8 from
+			// one chat beside a routing proof from another. Asserting it the way a
+			// verifier runs it (parse both, compare the halves) is what keeps that
+			// obligation satisfiable; see RoutingProof's godoc and the design doc.
+			e2eeParts := strings.Split(sig.Text, ":")
+			rpParts := strings.Split(got, ":")
+			if len(e2eeParts) != 3 || len(rpParts) != 5 {
+				t.Fatalf("unexpected text shapes: §8 %q, routing proof %q", sig.Text, got)
+			}
+			if rpParts[0] != e2eeParts[1] || rpParts[1] != e2eeParts[2] {
+				t.Errorf("the two statements are not cross-checkable: §8 binds (%s, %s), routing proof binds (%s, %s)",
+					e2eeParts[1], e2eeParts[2], rpParts[0], rpParts[1])
+			}
+			// Out: no digest of anything the client cannot reproduce.
+			for _, leak := range []struct {
+				what string
+				hash string
+			}{
+				{"the plaintext request", sha256Hex(reqPlaintext)},
+				{"the plaintext response", sha256Hex(respPlaintext)},
+			} {
+				if strings.Contains(got, leak.hash) {
+					t.Errorf("routing proof publishes sha256 of %s (%s) on an unauthenticated endpoint: %q",
+						leak.what, leak.hash, got)
+				}
+			}
+		})
 	}
 }
 
@@ -248,6 +260,36 @@ func TestSealedRoutingProofRefusesAMalformedE2EEText(t *testing.T) {
 			}
 			if sig.RoutingProof != nil {
 				t.Errorf("a proof was signed over hashes taken from an unusable §8 text: %+v", sig.RoutingProof)
+			}
+		})
+	}
+}
+
+// TestSealedProofSkipCauseSeparatesTheThrottleKeys pins the classification
+// logProofSkip memoizes on. A constant detail would let whichever cause fires
+// first suppress the others for the whole window, and an unusable §8 text and a
+// missing upstream fingerprint have completely different fixes — so the value
+// has to actually vary with the cause, and the two deployment faults must not
+// collapse into each other or into the caller-bug bucket.
+func TestSealedProofSkipCauseSeparatesTheThrottleKeys(t *testing.T) {
+	const goodText = proof.SchemeE2EECiphertext + ":" + onWireReqHash + ":" + onWireRespHash
+
+	for _, tc := range []struct {
+		name        string
+		text        string
+		fingerprint string
+		want        string
+	}{
+		{"unreadable §8 text wins, even with no fingerprint either", "nonsense", "", "unusable_e2ee_text"},
+		{"readable text, no evidence captured upstream", goodText, "", "no_fingerprint"},
+		// Both inputs usable, so the refusal came from further in: a malformed
+		// (non-empty) fingerprint or an enclave signing failure. One key on purpose
+		// — separating those would mean matching on error strings.
+		{"both inputs usable", goodText, "not-a-fingerprint", "sign_failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sealedProofSkipCause(tc.text, tc.fingerprint); got != tc.want {
+				t.Errorf("sealedProofSkipCause(%q, %q) = %q, want %q", tc.text, tc.fingerprint, got, tc.want)
 			}
 		})
 	}

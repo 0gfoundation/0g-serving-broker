@@ -156,10 +156,43 @@ constrain.
 > trusting §8 alone plus an unbound fingerprint.
 
 This binds the statements by **equality of values the verifier checks**, not by
-one signature covering the other. Folding the routing evidence into the §8
-signed text is strictly stronger and is the intended end state, deferred to the
-routing proof's next version because it changes the format for every verifier.
-Until then the rule above is the contract — and this document is where it lives,
+one signature covering the other.
+
+### …and MUST require the proof to be present on a centralized route
+
+Comparing the halves only catches a *mismatched* proof. The cheaper move for the
+same intermediary is to delete the whole `routing_proof` object: what remains is
+a §8 signature that verifies perfectly, from the right enclave, over the right
+ciphertext. No signature covers the field's presence, so a stripped proof and a
+legitimately unavailable one are byte-identical — the broker omits the field on
+several shapes (decentralized provider, no TLS evidence captured, a §8 text it
+cannot read), and `routing_proof` is `omitempty`.
+
+This asymmetry is **introduced by the nesting**. On the unsealed shape the
+evidence lives inside the one signed text, so it cannot be stripped — the router
+can only withhold the entire signature, which is detectable as *no signature at
+all*. On the sealed shape the evidence became an unsigned optional sibling of a
+signature that stays valid without it. Hence a second rule:
+
+> A verifier that knows the route is centralized MUST require `routing_proof` to
+> be present. Treat its absence as a failed verification, not as "no vendor
+> evidence available" — no signature covers the field's presence, so an
+> intermediary can remove it and leave a §8 that still verifies.
+
+Knowing the route is the precondition, so read it from provider metadata rather
+than from the signature response that is itself under attack: `GET /v1/models`
+publishes `provider_type` per model (`"centralized"` / `"standard"`, omitted for
+decentralized), which is the same value the broker signs into
+`routing_proof.provider_type` and the field a client should pin its expectation
+to. A client that cannot establish the route's type cannot enforce this rule —
+which is the honest limit of a two-signature design, and one more reason folding
+the evidence into §8 is the end state.
+
+Folding the routing evidence into the §8 signed text is strictly stronger — it
+makes both rules unnecessary, since absence and mismatch alike become a §8
+verification failure — and is the intended end state, deferred to the routing
+proof's next version because it changes the format for every verifier. Until
+then the two rules above are the contract, and this document is where they live,
 since the `0g-pc-e2ee` protocol package has no routing-proof concept at all.
 
 One related shape note, not exploitable but worth knowing: `FormatRoutingProofText`
