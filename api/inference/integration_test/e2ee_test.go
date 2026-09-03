@@ -3,7 +3,9 @@
 package integration_test
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -118,20 +120,26 @@ func billedFee(t *testing.T, env *testEnv) string {
 // `system` must be here in the clear and `_e2ee` must be gone. An upstream that
 // received the envelope would mean the broker forwarded a request it never
 // opened.
-// respHeaders, when given, are set on the upstream response before it is
-// written. Variadic so the existing callers are untouched; the one caller that
-// passes it stands in for an in-enclave TLS-translating sidecar, which is the
-// only way to get a certificate fingerprint into the routing proof without
-// standing up real TLS in a test (see upstreamCertFingerprint's targetTLSProxy
-// branch — under that flag the header is the ONLY witness it will accept).
-func newMockAnthropicProvider(t *testing.T, saw *map[string]any, respHeaders ...map[string]string) *httptest.Server {
+func newMockAnthropicProvider(t *testing.T, saw *map[string]any) *httptest.Server {
 	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		for _, hs := range respHeaders {
-			for k, v := range hs {
-				w.Header().Set(k, v)
-			}
-		}
+	return httptest.NewServer(anthropicProviderHandler(t, saw))
+}
+
+// newMockAnthropicTLSProvider is the same upstream over real TLS, so a test can
+// exercise the fingerprint witness a centralized chatbot deployment actually
+// uses — resp.TLS, read in Ctrl.upstreamCertFingerprint. The caller must hand
+// srv.Client() to Ctrl.SetHTTPClient or the broker will not trust the test CA.
+func newMockAnthropicTLSProvider(t *testing.T, saw *map[string]any) *httptest.Server {
+	t.Helper()
+	return httptest.NewTLSServer(anthropicProviderHandler(t, saw))
+}
+
+// anthropicProviderHandler answers one non-streaming Anthropic turn, shared by
+// the plaintext and TLS servers above so the two cannot drift in what they
+// return — only in how they are reached.
+func anthropicProviderHandler(t *testing.T, saw *map[string]any) http.HandlerFunc {
+	t.Helper()
+	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" || !strings.HasSuffix(strings.TrimRight(r.URL.Path, "/"), "/messages") {
 			t.Errorf("unexpected upstream request: %s %s", r.Method, r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
@@ -156,7 +164,7 @@ func newMockAnthropicProvider(t *testing.T, saw *map[string]any, respHeaders ...
 			"content": []map[string]string{{"type": "text", "text": "Hello world"}},
 			"usage":   map[string]any{"input_tokens": 10, "output_tokens": 2},
 		})
-	}))
+	}
 }
 
 // A sealed Anthropic request, end to end through the real broker.
@@ -482,17 +490,6 @@ func TestE2EE_SealedResponseSignatureIsFetchable(t *testing.T) {
 	}
 }
 
-// sidecarFingerprint is the certificate fingerprint the fake in-enclave sidecar
-// reports. Any 64 hex chars will do — it only has to survive
-// teeutil.NormalizeCertFingerprint.
-const sidecarFingerprint = "1f2e3d4c5b6a79880f1e2d3c4b5a69780f1e2d3c4b5a69781f2e3d4c5b6a7988"
-
-// sidecarDomain is both what the sidecar claims it dialed and what the broker
-// publishes as its upstream domain. They MUST match or upstreamCertFingerprint
-// refuses the evidence as drift, which would leave this test asserting the
-// absence it is here to rule out.
-const sidecarDomain = "api.vendor.example"
-
 // TestE2EE_SealedResponseCarriesRoutingProof is the sealed counterpart of the
 // vendor attestation an unsealed centralized response has always carried.
 //
@@ -508,28 +505,35 @@ const sidecarDomain = "api.vendor.example"
 // handleSignatureRoute, and JSON round-tripping into the real ChatSignature type
 // before a client sees it. The per-field correctness of the proof itself is
 // asserted in ctrl (routing_proof_e2ee_test.go), where the fingerprint can be
-// injected directly instead of travelling through a fake sidecar.
+// injected into the context directly.
+//
+// The upstream is a REAL TLS server, so the witness under test is the one a
+// sealed chatbot deployment actually uses: resp.TLS, read by
+// Ctrl.upstreamCertFingerprint. The sidecar header path (targetTLSProxy) would
+// have been easier to fake, but config validation restricts that flag to
+// video-generation — it is the only modality whose ZG-Res-Key advertisement is
+// gated on the proof being producible — so a chatbot fixture using it would be
+// driving a deployment that cannot be loaded, and this test would prove nothing
+// about the real one.
 func TestE2EE_SealedResponseCarriesRoutingProof(t *testing.T) {
 	var upstreamSaw map[string]any
-	provider := newMockAnthropicProvider(t, &upstreamSaw, map[string]string{
-		teeutil.HeaderUpstreamCertFingerprint: sidecarFingerprint,
-		teeutil.HeaderUpstreamCertHost:        sidecarDomain,
-	})
+	provider := newMockAnthropicTLSProvider(t, &upstreamSaw)
 	t.Cleanup(provider.Close)
 
 	env := setupSealedTestEnv(t, func(cfg *config.Config) {
-		cfg.Service.TargetURL = provider.URL
+		cfg.Service.TargetURL = provider.URL // https://…
 		cfg.Service.Type = "chatbot"
 		cfg.Service.ModelType = "claude-x"
 		cfg.Service.TargetSeparated = true
 		cfg.Service.ProviderType = constant.ProviderTypeCentralized
-		cfg.Service.ProviderIdentity = sidecarDomain
-		// The sidecar shape: the vendor TLS connection was made by an in-enclave
-		// translator, so the broker takes its fingerprint from the header rather
-		// than from its own (plaintext, in-CVM) hop.
-		cfg.Service.TargetTLSProxy = true
-		cfg.Service.UpstreamDomain = sidecarDomain
+		// The lowercase machine key the validator requires (validProviderIdentity
+		// is ^[a-z0-9]+(-[a-z0-9]+)*$) — NOT a hostname. The host travels
+		// separately as upstreamDomain.
+		cfg.Service.ProviderIdentity = "minimax"
 	})
+	// The broker must trust the test CA, or the request never reaches the
+	// upstream and resp.TLS is never populated.
+	env.ctrl.SetHTTPClient(provider.Client())
 
 	sc := sealFor(t, env, wire.ProfileAnthropic, wire.Request{
 		"model":      json.RawMessage(`"claude-x"`),
@@ -567,21 +571,64 @@ func TestE2EE_SealedResponseCarriesRoutingProof(t *testing.T) {
 		t.Fatalf("sealed response carries no routing proof; the vendor attestation is lost (body: %s)", sigW.Body.String())
 	}
 	rp := sig.RoutingProof
-	if rp.TLSCertFingerprint != sidecarFingerprint {
-		t.Errorf("routing proof fingerprint = %q, want the one the sidecar reported (%q)", rp.TLSCertFingerprint, sidecarFingerprint)
+
+	// The fingerprint is the REAL leaf certificate of the TLS connection the
+	// broker made, resolved the same way the broker resolves it — so this asserts
+	// the production witness (resp.TLS) end to end, not a value a fixture handed
+	// in.
+	wantFingerprint := leafFingerprint(t, provider)
+	if rp.TLSCertFingerprint != wantFingerprint {
+		t.Errorf("routing proof fingerprint = %q, want the upstream's real leaf cert (%q)", rp.TLSCertFingerprint, wantFingerprint)
 	}
-	if rp.ProviderIdentity != sidecarDomain {
-		t.Errorf("routing proof identity = %q, want %q", rp.ProviderIdentity, sidecarDomain)
+	if rp.ProviderIdentity != "minimax" {
+		t.Errorf("routing proof identity = %q, want %q", rp.ProviderIdentity, "minimax")
 	}
 	// Its own signed statement, distinct from §8's, and signed by this enclave —
 	// the property that makes reading the fingerprint out of it sound.
 	if rp.Text == sig.Text || rp.SignatureEcdsa == sig.SignatureEcdsa {
 		t.Error("the nested proof did not carry its own text and signature")
 	}
-	if !strings.Contains(rp.Text, sidecarFingerprint) {
+	if !strings.Contains(rp.Text, wantFingerprint) {
 		t.Errorf("routing proof text %q does not bind the reported fingerprint", rp.Text)
 	}
 	if !strings.EqualFold(rp.SigningAddressEcdsa.Hex(), env.teeSigner) {
 		t.Errorf("routing proof signed by %q, want this enclave %q", rp.SigningAddressEcdsa.Hex(), env.teeSigner)
 	}
+
+	// THE VERIFIER OBLIGATION, run here exactly as a client must run it. The two
+	// signatures are independent statements by one key; nothing signed says they
+	// describe the same exchange, so a client that checks both and stops can be
+	// served §8 from one chat beside a routing proof from another. The check is
+	// that the §8 text's two hash halves equal the routing proof's first two
+	// colon-separated fields — possible only because the sealed proof reuses §8's
+	// hashes instead of computing its own, which is what this asserts.
+	e2eeParts := strings.Split(sig.Text, ":")
+	rpParts := strings.Split(rp.Text, ":")
+	if len(e2eeParts) != 3 {
+		t.Fatalf("§8 text is not <scheme>:<reqH>:<respH>: %q", sig.Text)
+	}
+	if len(rpParts) != 5 {
+		t.Fatalf("routing proof text is not the 5-field shape: %q", rp.Text)
+	}
+	if rpParts[0] != e2eeParts[1] || rpParts[1] != e2eeParts[2] {
+		t.Errorf("the two statements are not cross-checkable: §8 binds (%s, %s) but the routing proof binds (%s, %s) — a client cannot tell this pair from a spliced one",
+			e2eeParts[1], e2eeParts[2], rpParts[0], rpParts[1])
+	}
+}
+
+// leafFingerprint is the upstream's real leaf-certificate fingerprint, resolved
+// through the same helper the broker uses, so the expected value cannot drift
+// from the produced one by formatting alone.
+func leafFingerprint(t *testing.T, srv *httptest.Server) string {
+	t.Helper()
+	fp, ok := teeutil.NormalizeCertFingerprint(hex.EncodeToString(sha256Of(srv.Certificate().Raw)))
+	if !ok {
+		t.Fatalf("test server certificate produced no usable fingerprint")
+	}
+	return fp
+}
+
+func sha256Of(b []byte) []byte {
+	sum := sha256.Sum256(b)
+	return sum[:]
 }

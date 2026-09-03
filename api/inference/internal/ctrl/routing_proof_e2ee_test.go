@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/0gfoundation/0g-pc-e2ee/protocol/proof"
+
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/gin-gonic/gin"
 )
@@ -28,7 +30,7 @@ func centralizedFixture(t *testing.T) *e2eeTestFixture {
 	t.Helper()
 	f := newE2EEFixture(t)
 	f.c.Service.ProviderType = constant.ProviderTypeCentralized
-	f.c.Service.ProviderIdentity = "api.vendor.example"
+	f.c.Service.ProviderIdentity = "minimax"
 	return f
 }
 
@@ -97,8 +99,8 @@ func TestSealedResponseCarriesRoutingProofOnCentralizedProvider(t *testing.T) {
 	if rp.TLSCertFingerprint != testFingerprint {
 		t.Errorf("fingerprint = %q, want %q", rp.TLSCertFingerprint, testFingerprint)
 	}
-	if rp.ProviderIdentity != "api.vendor.example" {
-		t.Errorf("provider identity = %q, want the service-level fallback", rp.ProviderIdentity)
+	if rp.ProviderIdentity != "minimax" {
+		t.Errorf("provider identity = %q, want the service-level fallback (a lowercase machine key, not a host)", rp.ProviderIdentity)
 	}
 	if rp.ProviderType != constant.ProviderTypeCentralized {
 		t.Errorf("provider type = %q, want %q", rp.ProviderType, constant.ProviderTypeCentralized)
@@ -148,9 +150,20 @@ func TestSealedRoutingProofBindsOnWireHashesNotPlaintext(t *testing.T) {
 	}
 	got := sig.RoutingProof.Text
 
-	// In: the same hashes §8 bound, so the two statements chain over one exchange.
-	if want := onWireReqHash + ":" + onWireRespHash; !strings.HasPrefix(got, want+":") {
-		t.Errorf("routing proof text %q does not open with the §8 on-wire hashes %q", got, want)
+	// In: the same hashes §8 bound. This is what a verifier's mandatory
+	// cross-check compares — the two signatures are independent statements by one
+	// key, so a client that checks both and stops can be served §8 from one chat
+	// beside a routing proof from another. Asserting it the way a verifier runs
+	// it (parse both, compare the halves) is what keeps that obligation
+	// satisfiable; see RoutingProof's godoc and the design doc.
+	e2eeParts := strings.Split(sig.Text, ":")
+	rpParts := strings.Split(got, ":")
+	if len(e2eeParts) != 3 || len(rpParts) != 5 {
+		t.Fatalf("unexpected text shapes: §8 %q, routing proof %q", sig.Text, got)
+	}
+	if rpParts[0] != e2eeParts[1] || rpParts[1] != e2eeParts[2] {
+		t.Errorf("the two statements are not cross-checkable: §8 binds (%s, %s), routing proof binds (%s, %s)",
+			e2eeParts[1], e2eeParts[2], rpParts[0], rpParts[1])
 	}
 	// Out: no digest of anything the client cannot reproduce.
 	for _, leak := range []struct {
@@ -212,6 +225,12 @@ func TestSealedRoutingProofRefusesAMalformedE2EEText(t *testing.T) {
 		{"non-hex half", "zg-sig-v1/e2ee-ct:" + onWireReqHash + ":" + strings.Repeat("z", 64)},
 		{"too few fields", "zg-sig-v1/e2ee-ct:" + onWireReqHash},
 		{"extra delimiter", "zg-sig-v1/e2ee-ct:" + onWireReqHash + ":" + onWireRespHash + ":extra"},
+		// A DIFFERENT scheme of the same arity, whose hashes mean something else
+		// entirely (plaintext, not aad‖ciphertext). Arity alone cannot tell them
+		// apart, so accepting this would attest on-wire bytes over plaintext
+		// hashes — the exact confusion this whole change exists to end.
+		{"foreign scheme, same arity", proof.SchemePlaintext + ":" + onWireReqHash + ":" + onWireRespHash},
+		{"empty scheme", ":" + onWireReqHash + ":" + onWireRespHash},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := centralizedFixture(t)

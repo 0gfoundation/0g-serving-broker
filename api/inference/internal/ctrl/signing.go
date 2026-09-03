@@ -11,6 +11,8 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/gowebpki/jcs"
 
+	"github.com/0gfoundation/0g-pc-e2ee/protocol/proof"
+
 	teeutil "github.com/0glabs/0g-serving-broker/common/tee"
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
@@ -45,6 +47,9 @@ type ChatSignature struct {
 	// on every other shape: an unsealed centralized response carries its routing
 	// proof in the fields above (this struct IS the proof there), and no other
 	// provider type has one to serve.
+	//
+	// A VERIFIER MUST CROSS-CHECK THE TWO. See RoutingProof's doc: they are two
+	// independent signatures, and JSON adjacency is not attested.
 	RoutingProof *RoutingProof `json:"routing_proof,omitempty"`
 }
 
@@ -69,11 +74,41 @@ type ChatSignature struct {
 // for the nested case. What the two hashes commit to differs by shape, and the
 // difference is the whole correctness question — unsealed hashes the plaintext
 // the client holds; SEALED reuses §8's own on-wire binding hashes, lifted from
-// the signed text rather than recomputed (buildSealedRoutingProof), so this
-// proof says "this TLS connection to that vendor produced exactly the bytes §8
-// binds to your plaintext" and the two chain. Hashing the plaintext on a sealed
-// request would be both unverifiable by the client and a plaintext-digest leak
-// on an unauthenticated endpoint; see buildSealedRoutingProof.
+// the signed text rather than recomputed (buildSealedRoutingProof). Hashing the
+// plaintext on a sealed request would be both unverifiable by the client and a
+// plaintext-digest leak on an unauthenticated endpoint; see
+// buildSealedRoutingProof.
+//
+// # A verifier MUST cross-check the nested proof against the §8 text
+//
+// This and the enclosing ChatSignature are TWO INDEPENDENT STATEMENTS by the
+// same key. Neither signature covers the other, and nothing signed says they
+// describe the same exchange — the chaining is true at the SIGNER, by
+// construction, but adjacency in one JSON object is not attested. So a verifier
+// that checks both signatures and stops has verified less than it thinks:
+//
+//	an intermediary holding cached signature responses for chats A and B — the
+//	router does hold them; the chatID travels in ZG-Res-Key and the endpoint is
+//	unauthenticated — can serve §8 from A with routing_proof from B. Both
+//	signatures verify, signing_address is the right enclave, the fingerprint is a
+//	real vendor fingerprint, and the client concludes "the ciphertext I decrypted
+//	arrived over TLS to that vendor", which no signature ever said.
+//
+// The check that closes it is one comparison, and it works only because the
+// sealed proof reuses §8's hashes rather than computing its own:
+//
+//	Text's two hash halves MUST equal routing_proof.Text's first two
+//	colon-separated fields. Reject the pair otherwise — do not fall back to
+//	trusting §8 alone plus an unbound fingerprint.
+//
+// Note what this buys and what it does not: it binds the two statements by
+// EQUALITY OF VALUES a verifier checks, not by one signature covering the other.
+// Folding the routing evidence into the §8 signed text is the strictly stronger
+// end state; it is deferred to the routing proof's next version because it is a
+// protocol change across every verifier. Until then the obligation above is the
+// contract, and it is stated in docs/design/sidecar-routing-proof.md too, since
+// that doc — not the 0g-pc protocol package, which has no routing-proof concept
+// — is where verifier implementors read it.
 type RoutingProof struct {
 	Text                string         `json:"text"`
 	SignatureEcdsa      string         `json:"signature"`
@@ -319,9 +354,21 @@ func (c *Ctrl) buildSealedRoutingProof(e2eeSignedText, tlsFingerprint, providerI
 // text that escapes nothing, so a value that could smuggle a delimiter, or a
 // caller that passed some other string entirely, has to fail closed rather than
 // end up inside an attested statement.
+//
+// The SCHEME is checked too, not just the arity, and that is the load-bearing
+// part rather than belt-and-braces: proof.SchemePlaintext has the same 3-field
+// shape with hashes that mean something else entirely (plaintext, not
+// aad‖ciphertext). Accepting any 3-field text would let a future caller hand
+// this a plaintext binding and get a routing proof attesting on-wire bytes over
+// hashes that commit to plaintext — the same "per-path mechanisms bind different
+// things" failure buildSealedRoutingProof exists to end, reintroduced one scheme
+// later.
 func e2eeBindingHashes(signedText string) (reqHash, respHash string, ok bool) {
 	parts := strings.Split(signedText, ":")
 	if len(parts) != 3 {
+		return "", "", false
+	}
+	if parts[0] != proof.SchemeE2EECiphertext && parts[0] != proof.SchemeE2EECiphertextStream {
 		return "", "", false
 	}
 	for _, h := range parts[1:] {

@@ -120,11 +120,55 @@ its own `text` and `signature`:
     "signing_address": "0x…",
     "signing_algo": "ecdsa",
     "provider_type": "centralized",
-    "provider_identity": "api.vendor.example",
+    "provider_identity": "minimax",
     "tls_cert_fingerprint": "…"
   }
 }
 ```
+
+`provider_identity` is the lowercase machine key (`minimax`, `anthropic`), not a
+hostname — the host travels separately as `serving_domain` / `upstreamDomain`,
+which is the distinction the [MiniMax two-domain case](#what-stops-an-operator-pointing-this-at-something-that-isnt-in-enclave)
+below turns on.
+
+### A verifier MUST cross-check the two statements
+
+The §8 signature and `routing_proof.signature` are **two independent statements
+by the same key**. Neither covers the other, and nothing signed says they
+describe the same exchange — the chaining is true at the *signer*, by
+construction, but adjacency in one JSON object is not attested.
+
+A verifier that checks both signatures and stops has therefore verified less
+than it appears to. An intermediary holding cached signature responses for two
+chats — and the router does hold them: the chatID travels in `ZG-Res-Key` and
+this endpoint is unauthenticated — can serve §8 from chat A alongside
+`routing_proof` from chat B. Both signatures verify, `signing_address` is the
+right enclave, the fingerprint is a genuine vendor fingerprint, and the client
+concludes "the ciphertext I decrypted arrived over TLS to that vendor", which no
+signature ever said. The router is precisely the party this proof exists to
+constrain.
+
+**The obligation**, one comparison, possible only because the sealed proof reuses
+§8's hashes instead of computing its own:
+
+> The two hash halves of `text` MUST equal the first two colon-separated fields
+> of `routing_proof.text`. If they differ, reject the pair — do not fall back to
+> trusting §8 alone plus an unbound fingerprint.
+
+This binds the statements by **equality of values the verifier checks**, not by
+one signature covering the other. Folding the routing evidence into the §8
+signed text is strictly stronger and is the intended end state, deferred to the
+routing proof's next version because it changes the format for every verifier.
+Until then the rule above is the contract — and this document is where it lives,
+since the `0g-pc-e2ee` protocol package has no routing-proof concept at all.
+
+One related shape note, not exploitable but worth knowing: `FormatRoutingProofText`
+carries no scheme tag, so a sealed and an unsealed proof text are
+byte-shape-identical while their hashes commit to different things (on-wire
+ciphertext vs plaintext). Only JSON position distinguishes them, and no signature
+covers position. Inverting a ciphertext binding hash to a plaintext preimage is
+infeasible, so this is a clarity gap rather than an attack — and it disappears
+when the evidence folds into §8.
 
 Three properties are deliberate:
 
