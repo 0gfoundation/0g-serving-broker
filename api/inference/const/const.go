@@ -112,9 +112,45 @@ const (
 	// cumulatives to after settlement (SPML payout step 10).
 	AssayInvoicePath = "/v1/payout/invoice"
 
+	// AssayVouchersPath is the verifier endpoint listing the latest voucher per
+	// node. GPU nodes used to call it directly; they no longer can — the assay
+	// publishes no interface a node can reach, so the broker relays it (see
+	// RelayAssayVoucher). The broker is the only party that dials the assay.
+	AssayVouchersPath = "/v1/payout/vouchers"
+
+	// AssayVouchersFetchDomain is what the broker signs to read the assay's
+	// voucher ledger. GET /v1/payout/vouchers is authenticated the same way as
+	// the money POSTs — same key, same ZG-Body-Sig header, same on-chain
+	// teeSigner check — but a GET has no body, and a signature over an empty
+	// one is a constant: capture it once and it reads the ledger forever. So a
+	// timestamped payload stands in for the body:
+	//
+	//	AssayVouchersFetchDomain + "|" + <unix seconds>
+	//
+	// with the same seconds echoed in HeaderZGBodyTs so the assay can bound
+	// how long the signature stays good.
+	AssayVouchersFetchDomain = "assay-vouchers-v1"
+
+	// HeaderZGBodyTs carries the timestamp inside the signed fetch payload.
+	HeaderZGBodyTs = "ZG-Body-Ts"
+
 	// AssayVerdictDomain domain-separates verdict signatures from the GPU
 	// node's commitment signatures ("assay-commitment-v1").
 	AssayVerdictDomain = "assay-verdict-v1"
+
+	// AssayVoucherFetchDomain domain-separates the signature a GPU node makes
+	// when it asks the broker for its voucher, so that signature can never be
+	// replayed as a commitment ("assay-commitment-v1"), a TLS-fingerprint
+	// endorsement ("assay-node-tls-v1"), or a verdict.
+	AssayVoucherFetchDomain = "assay-voucher-fetch-v1"
+
+	// HeaderZGNodeSig / HeaderZGNodeTs authenticate a GPU node to the broker on
+	// GET /v1/payout/voucher: an EIP-191 signature by the node's PAYOUT key
+	// over AssayVoucherFetchDomain|<provider>|<unix seconds>. The recovered
+	// address IS the identity — the broker returns only the voucher that pays
+	// it — so no node roster has to be configured on the broker.
+	HeaderZGNodeSig = "ZG-Node-Sig"
+	HeaderZGNodeTs  = "ZG-Node-Ts"
 
 	// Assay verdict values reported via HeaderZGVerdict. UNVERIFIED means the
 	// request was sampled out of auditing; REJECT and INVALID_SIG are acted on
