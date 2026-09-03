@@ -115,9 +115,10 @@ its own `text` and `signature`:
   "signing_address": "0x…",
   "signing_algo": "ecdsa",
   "routing_proof": {                                   // present only when sealed AND centralized
-    "text": "<req>:<resp>:centralized:<identity>:<fingerprint>",
+    "text": "<reqHash>:<respHash>:centralized:<identity>:<fingerprint>",
     "signature": "0x…",                                // its OWN signature, over its own text
     "signing_address": "0x…",
+    "signing_algo": "ecdsa",
     "provider_type": "centralized",
     "provider_identity": "api.vendor.example",
     "tls_cert_fingerprint": "…"
@@ -132,10 +133,22 @@ Three properties are deliberate:
   does not cover it would hand verifiers a value with nothing behind it — the same
   false confidence the signer refuses to create when the fingerprint is missing.
 - **The same text format** as an unsealed proof, so no verifier needs new code for
-  the nested case. On a sealed request its two hashes are over the on-wire
-  ciphertext, so the pair chains end to end: the routing proof says which vendor's
-  TLS connection produced exactly those bytes, and §8 says those bytes are the
-  ciphertext the client decrypted.
+  the nested case — but **not the same hashes**. An unsealed proof hashes the
+  plaintext the client holds; a sealed one reuses **§8's own on-wire binding
+  hashes**, the identical `<reqHash>`/`<respHash>` from the text above rather than
+  digests recomputed over anything. So the pair chains end to end: the routing
+  proof says which vendor's TLS connection produced exactly those bytes, and §8
+  says those bytes are the ciphertext the client decrypted.
+
+  This is load-bearing, not incidental. Hashing what the broker has in hand at
+  signing time would hash **plaintext** — both handlers keep their `clientBody`
+  plaintext for billing while the sealed frames go to the wire — which fails
+  twice over: a sealed client holds ciphertext and could never recompute those
+  digests, and `/v1/proxy/signature/{chatID}` is unauthenticated with its chatID
+  carried in `ZG-Res-Key`, so publishing `sha256(plaintext)` there hands a
+  confirmation oracle to the one party E2EE exists to exclude. A §8 text whose
+  halves are not 32-byte hex yields no proof at all rather than an attested
+  fragment.
 - **Unsealed responses are untouched.** There the routing proof *is* the whole
   signature and stays flat at the top level, `routing_proof` absent. Both shapes
   are asserted, so neither can drift into the other.

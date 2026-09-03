@@ -66,9 +66,14 @@ type ChatSignature struct {
 //
 // The signed text is the SAME format an unsealed centralized response uses
 // (teeutil.FormatRoutingProofText), deliberately: a verifier needs no new code
-// for the nested case, and on a sealed request the two hashes are over the
-// on-wire ciphertext, so this proof says "this TLS connection to that vendor
-// produced exactly the bytes §8 binds to your plaintext". The two chain.
+// for the nested case. What the two hashes commit to differs by shape, and the
+// difference is the whole correctness question — unsealed hashes the plaintext
+// the client holds; SEALED reuses §8's own on-wire binding hashes, lifted from
+// the signed text rather than recomputed (buildSealedRoutingProof), so this
+// proof says "this TLS connection to that vendor produced exactly the bytes §8
+// binds to your plaintext" and the two chain. Hashing the plaintext on a sealed
+// request would be both unverifiable by the client and a plaintext-digest leak
+// on an unauthenticated endpoint; see buildSealedRoutingProof.
 type RoutingProof struct {
 	Text                string         `json:"text"`
 	SignatureEcdsa      string         `json:"signature"`
@@ -263,12 +268,81 @@ func (c *Ctrl) signCentralizedRoutingProof(reqBody, respData []byte, chatKey, tl
 // response's whole signature, and the sealed path, which nests it beside the §8
 // binding. Splitting build from publish is what keeps those two from drifting
 // into two proof formats.
+// It hashes the bytes it is given, which on an UNSEALED response is exactly
+// right: the client holds that plaintext and can recompute. A sealed response
+// must NOT come through here — see buildSealedRoutingProof.
 func (c *Ctrl) buildCentralizedRoutingProof(reqBody, respData []byte, tlsFingerprint string, providerIdentity string) (*RoutingProof, error) {
+	return c.routingProofOverHashes(sha256Hex(reqBody), sha256Hex(respData), tlsFingerprint, providerIdentity)
+}
+
+// buildSealedRoutingProof is the sealed-path builder: it takes the two binding
+// hashes out of the §8 signed text instead of hashing anything itself.
+//
+// Hashing the bytes signChatResponse is handed would be wrong here in two ways
+// that compound. On both chatbot paths those bytes are `clientBody`, which the
+// handlers deliberately keep PLAINTEXT for billing while the sealed frames go to
+// the wire (see the comments at their declarations), so:
+//
+//  1. The hashes would be UNVERIFIABLE. A sealed client holds ciphertext and
+//     cannot reproduce those plaintext bytes byte-for-byte — nothing
+//     canonicalizes them, which is the very reason §8 binds on-wire bytes. Two
+//     hashes nobody can check are the "value with nothing behind it" this whole
+//     nesting design refuses to publish.
+//  2. They would LEAK. /v1/proxy/signature/{chatID} is unauthenticated and the
+//     chatID travels in ZG-Res-Key, so the router holds it — and the router is
+//     precisely the party E2EE exists to keep plaintext from. Publishing
+//     sha256(plaintext request) and sha256(plaintext response) there is a
+//     confirmation oracle over low-entropy prompts.
+//
+// Reading the halves back out of the §8 text also makes the chaining property
+// true BY CONSTRUCTION rather than by two call sites agreeing: whatever §8
+// bound, this binds, because it is the same string. That is why this takes the
+// assembled text rather than hashes plumbed in separately — the streaming binder
+// finalizes its aggregate inside Text() and never exposes the halves, so
+// plumbing would need a different mechanism per path, and per-path mechanisms
+// are how the two sealed surfaces came to bind different things to begin with.
+func (c *Ctrl) buildSealedRoutingProof(e2eeSignedText, tlsFingerprint, providerIdentity string) (*RoutingProof, error) {
+	reqHash, respHash, ok := e2eeBindingHashes(e2eeSignedText)
+	if !ok {
+		monitor.RecordRoutingProofSkipped(monitor.RoutingProofSkipSignError)
+		return nil, fmt.Errorf("sealed §8 text %q is not <scheme>:<reqHhex>:<respHhex>, so there are no on-wire hashes to bind", truncateForLog([]byte(e2eeSignedText), 80))
+	}
+	return c.routingProofOverHashes(reqHash, respHash, tlsFingerprint, providerIdentity)
+}
+
+// e2eeBindingHashes splits a §8 signed text into its two hex binding hashes.
+//
+// The format is proof.formatText's "<scheme>:<reqHhex>:<respHhex>" and the
+// scheme contains no ':' (only '/'), so a 3-way split is exact. The shape is
+// re-validated here rather than trusted — 32 hex bytes each — for the same
+// reason the fingerprint is: these values are joined into a ':'-delimited signed
+// text that escapes nothing, so a value that could smuggle a delimiter, or a
+// caller that passed some other string entirely, has to fail closed rather than
+// end up inside an attested statement.
+func e2eeBindingHashes(signedText string) (reqHash, respHash string, ok bool) {
+	parts := strings.Split(signedText, ":")
+	if len(parts) != 3 {
+		return "", "", false
+	}
+	for _, h := range parts[1:] {
+		if len(h) != 2*sha256.Size {
+			return "", "", false
+		}
+		if _, err := hex.DecodeString(h); err != nil {
+			return "", "", false
+		}
+	}
+	return parts[1], parts[2], true
+}
+
+// routingProofOverHashes signs the routing proof for two already-hex request and
+// response hashes, whatever bytes they commit to. Shared so the sealed and
+// unsealed builders differ ONLY in that choice, and cannot diverge in the
+// signed-text format, the fingerprint validation, or the metric.
+func (c *Ctrl) routingProofOverHashes(requestSha256, responseSha256, tlsFingerprint string, providerIdentity string) (*RoutingProof, error) {
 	if providerIdentity == "" {
 		providerIdentity = c.Service.ProviderIdentity
 	}
-	requestSha256 := sha256Hex(reqBody)
-	responseSha256 := sha256Hex(respData)
 
 	// Refuse to sign without a well-formed fingerprint. An empty one carries a TEE
 	// signature with no TLS evidence at all, giving verifiers false confidence.

@@ -589,6 +589,13 @@ func (c *Ctrl) signChatResponse(ctx context.Context, reqBody, signData []byte, c
 		// this it was simply dropped on sealed traffic, because this branch
 		// returns before the IsCentralized() one below ever runs.
 		//
+		// It binds the §8 ON-WIRE hashes, taken from e2eeSignedText — NOT
+		// hashes of reqBody/signData. Those are plaintext on this path (both
+		// handlers keep clientBody plaintext for billing while the sealed frames
+		// go to the wire), and hashing them would publish plaintext digests on an
+		// unauthenticated endpoint whose chatID the router holds. See
+		// buildSealedRoutingProof.
+		//
 		// nil on failure, never fatal: §8 is the load-bearing signature here (the
 		// E2EE client refuses the response without it), so it must not be lost
 		// because the vendor evidence could not be assembled. Same posture the
@@ -596,9 +603,13 @@ func (c *Ctrl) signChatResponse(ctx context.Context, reqBody, signData []byte, c
 		var routing *RoutingProof
 		if c.Service.IsCentralized() {
 			var err error
-			if routing, err = c.buildCentralizedRoutingProof(reqBody, signData,
+			if routing, err = c.buildSealedRoutingProof(e2eeSignedText,
 				c.upstreamCertFingerprintFromCtx(ctx), providerIdentity); err != nil {
-				c.logger.Errorf("sealed response carries no routing proof: %v", err)
+				// Throttled: this fires at full request rate on a misconfigured
+				// deployment, which is the log-volume failure mode logProofSkip and
+				// the skip counter exist to replace.
+				c.logProofSkip(monitor.RoutingProofSkipSignError, "sealed",
+					"sealed response carries no routing proof: %v", err)
 			}
 		}
 		return c.signChatE2EE(e2eeSignedText, chatKey, routing)
@@ -636,15 +647,23 @@ func (c *Ctrl) signChatResponse(ctx context.Context, reqBody, signData []byte, c
 // Callers get "" when there is none; buildCentralizedRoutingProof refuses to
 // sign on that, so the absence fails closed rather than producing a proof with
 // no TLS evidence in it.
+// Both misses log through logProofSkip rather than the logger directly: they are
+// per-request conditions on a misconfigured deployment, and unthrottled logging
+// on exactly this condition is what logProofSkip and the skip counter were added
+// to replace. No counter tick here — upstreamCertFingerprint already counted the
+// lost evidence at capture time with the precise reason, and counting again would
+// double-count one lost proof.
 func (c *Ctrl) upstreamCertFingerprintFromCtx(ctx context.Context) string {
 	ginCtx, ok := ctx.(*gin.Context)
 	if !ok {
-		c.logger.Warn("context is not *gin.Context, cannot retrieve upstream cert fingerprint")
+		c.logProofSkip(monitor.RoutingProofSkipNoTLS, "no-gin-context",
+			"context is not *gin.Context, cannot retrieve upstream cert fingerprint")
 		return ""
 	}
 	fingerprint := ginCtx.GetString(CtxKeyUpstreamCertFingerprint)
 	if fingerprint == "" {
-		c.logger.Warn("upstream cert fingerprint not found in context")
+		c.logProofSkip(monitor.RoutingProofSkipNoTLS, "absent",
+			"upstream cert fingerprint not found in context")
 	}
 	return fingerprint
 }

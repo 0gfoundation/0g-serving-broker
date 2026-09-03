@@ -13,10 +13,18 @@ import (
 // before any of these assertions could run.
 const testFingerprint = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90"
 
-// sealedCentralizedFixture is newE2EEFixture with the provider shape that owns
-// BOTH proofs: centralized (so a routing proof exists at all) and serving a
-// sealed request (so the §8 binding is the top-level signature).
-func sealedCentralizedFixture(t *testing.T) *e2eeTestFixture {
+// The two §8 on-wire binding hashes a sealed exchange produces (32-byte hex, as
+// proof.formatText emits them). Distinct from each other and from
+// testFingerprint so no assertion below can pass on a substring coincidence.
+const (
+	onWireReqHash  = "1111111111111111111111111111111111111111111111111111111111111111"
+	onWireRespHash = "2222222222222222222222222222222222222222222222222222222222222222"
+)
+
+// centralizedFixture is newE2EEFixture with the provider shape that has a
+// routing proof to offer at all. It does NOT make a request sealed — sealedCtx
+// does that, separately, so the unsealed test below can share this fixture.
+func centralizedFixture(t *testing.T) *e2eeTestFixture {
 	t.Helper()
 	f := newE2EEFixture(t)
 	f.c.Service.ProviderType = constant.ProviderTypeCentralized
@@ -48,16 +56,12 @@ func sealedCtx(t *testing.T, f *e2eeTestFixture, fingerprint string) *gin.Contex
 // enclave produced the ciphertext the client decrypted; the routing proof says
 // which vendor the upstream hop actually terminated TLS at.
 func TestSealedResponseCarriesRoutingProofOnCentralizedProvider(t *testing.T) {
-	f := sealedCentralizedFixture(t)
+	f := centralizedFixture(t)
 	ctx := sealedCtx(t, f, testFingerprint)
 
 	reqBody := []byte(`{"model":"m","_e2ee":{"v":1}}`)
 	respData := []byte(`{"_e2ee":{"v":1,"ciphertext":"c2VhbGVk"}}`)
-	// Placeholder binding hashes, deliberately NOT the fingerprint: the
-	// assertions below distinguish the two signed texts by content, and reusing
-	// one value across both would let a substring coincidence stand in for a
-	// real match.
-	const e2eeText = "zg-sig-v1/e2ee-ct:reqhash:resphash"
+	const e2eeText = "zg-sig-v1/e2ee-ct:" + onWireReqHash + ":" + onWireRespHash
 
 	if err := f.c.signChatResponse(ctx, reqBody, respData, "ck-both", e2eeText, ""); err != nil {
 		t.Fatalf("signChatResponse: %v", err)
@@ -107,6 +111,62 @@ func TestSealedResponseCarriesRoutingProofOnCentralizedProvider(t *testing.T) {
 	}
 }
 
+// TestSealedRoutingProofBindsOnWireHashesNotPlaintext is the regression guard
+// for the mistake this design actively invites: hashing the bytes
+// signChatResponse is handed. On both chatbot paths those bytes are `clientBody`,
+// which the handlers deliberately keep PLAINTEXT for billing while the sealed
+// frames go to the wire — so hashing them produces two hashes that
+//
+//   - no sealed client can verify (it holds ciphertext, and nothing
+//     canonicalizes the plaintext for it to reproduce), and
+//   - leak: /v1/proxy/signature/{chatID} is unauthenticated and the router holds
+//     the chatID from ZG-Res-Key, so plaintext digests published there hand a
+//     confirmation oracle to the one party E2EE exists to exclude.
+//
+// Asserting the hashes are PRESENT would not catch either: the fix and the bug
+// both produce a well-formed 5-field proof. So this asserts both directions —
+// the §8 on-wire halves are in, and the plaintext digests are out.
+func TestSealedRoutingProofBindsOnWireHashesNotPlaintext(t *testing.T) {
+	f := centralizedFixture(t)
+	ctx := sealedCtx(t, f, testFingerprint)
+
+	// Distinguishable stand-ins for the plaintext the broker holds. Their sha256
+	// is what a naive implementation would sign.
+	reqPlaintext := []byte(`{"model":"m","messages":[{"role":"user","content":"SECRET PROMPT"}]}`)
+	respPlaintext := []byte(`{"choices":[{"message":{"content":"SECRET ANSWER"}}]}`)
+	const e2eeText = "zg-sig-v1/e2ee-ct:" + onWireReqHash + ":" + onWireRespHash
+
+	if err := f.c.signChatResponse(ctx, reqPlaintext, respPlaintext, "ck-onwire", e2eeText, ""); err != nil {
+		t.Fatalf("signChatResponse: %v", err)
+	}
+	sig, err := f.c.GetChatSignature("ck-onwire")
+	if err != nil {
+		t.Fatalf("GetChatSignature: %v", err)
+	}
+	if sig.RoutingProof == nil {
+		t.Fatal("no routing proof to inspect")
+	}
+	got := sig.RoutingProof.Text
+
+	// In: the same hashes §8 bound, so the two statements chain over one exchange.
+	if want := onWireReqHash + ":" + onWireRespHash; !strings.HasPrefix(got, want+":") {
+		t.Errorf("routing proof text %q does not open with the §8 on-wire hashes %q", got, want)
+	}
+	// Out: no digest of anything the client cannot reproduce.
+	for _, leak := range []struct {
+		what string
+		hash string
+	}{
+		{"the plaintext request", sha256Hex(reqPlaintext)},
+		{"the plaintext response", sha256Hex(respPlaintext)},
+	} {
+		if strings.Contains(got, leak.hash) {
+			t.Errorf("routing proof publishes sha256 of %s (%s) on an unauthenticated endpoint: %q",
+				leak.what, leak.hash, got)
+		}
+	}
+}
+
 // TestSealedResponseWithoutTLSEvidenceStillCarriesTheE2EESignature pins the
 // fail-closed posture in BOTH directions at once. No fingerprint means no proof
 // — never a proof with an empty fingerprint, which would give a verifier false
@@ -115,10 +175,10 @@ func TestSealedResponseCarriesRoutingProofOnCentralizedProvider(t *testing.T) {
 // without it. Losing §8 because the vendor evidence was unavailable would turn a
 // missing nicety into a failed request.
 func TestSealedResponseWithoutTLSEvidenceStillCarriesTheE2EESignature(t *testing.T) {
-	f := sealedCentralizedFixture(t)
+	f := centralizedFixture(t)
 	ctx := sealedCtx(t, f, "") // proxy captured nothing: no TLS, or a 4xx from a sidecar
 
-	const e2eeText = "zg-sig-v1/e2ee-ct:aa:bb"
+	const e2eeText = "zg-sig-v1/e2ee-ct:" + onWireReqHash + ":" + onWireRespHash
 	if err := f.c.signChatResponse(ctx, []byte(`{}`), []byte(`{}`), "ck-notls", e2eeText, ""); err != nil {
 		t.Fatalf("signChatResponse must not fail when only the routing proof is unavailable: %v", err)
 	}
@@ -134,6 +194,46 @@ func TestSealedResponseWithoutTLSEvidenceStillCarriesTheE2EESignature(t *testing
 	}
 }
 
+// TestSealedRoutingProofRefusesAMalformedE2EEText pins the fail-closed half of
+// reading the hashes out of the §8 text: if that text is not
+// "<scheme>:<reqHhex>:<respHhex>" with 32 hex bytes in each half, there are no
+// on-wire hashes to bind and the proof must not be produced at all.
+//
+// Signing a truncated or non-hex half instead would put an attested value in a
+// ':'-delimited text that escapes nothing — the same class of mistake the
+// fingerprint validation exists to prevent. §8 itself must survive, for the same
+// reason as the no-TLS case: it is the load-bearing signature.
+func TestSealedRoutingProofRefusesAMalformedE2EEText(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		text string
+	}{
+		{"truncated hashes", "zg-sig-v1/e2ee-ct:aa:bb"},
+		{"non-hex half", "zg-sig-v1/e2ee-ct:" + onWireReqHash + ":" + strings.Repeat("z", 64)},
+		{"too few fields", "zg-sig-v1/e2ee-ct:" + onWireReqHash},
+		{"extra delimiter", "zg-sig-v1/e2ee-ct:" + onWireReqHash + ":" + onWireRespHash + ":extra"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := centralizedFixture(t)
+			ctx := sealedCtx(t, f, testFingerprint) // evidence IS present; only the text is bad
+
+			if err := f.c.signChatResponse(ctx, []byte(`{}`), []byte(`{}`), "ck-bad", tc.text, ""); err != nil {
+				t.Fatalf("signChatResponse must not fail over an unusable routing proof: %v", err)
+			}
+			sig, err := f.c.GetChatSignature("ck-bad")
+			if err != nil {
+				t.Fatalf("the §8 signature was not cached: %v", err)
+			}
+			if sig.Text != tc.text {
+				t.Errorf("top-level text = %q, want the §8 text as given", sig.Text)
+			}
+			if sig.RoutingProof != nil {
+				t.Errorf("a proof was signed over hashes taken from an unusable §8 text: %+v", sig.RoutingProof)
+			}
+		})
+	}
+}
+
 // TestSealedResponseOnDecentralizedProviderCarriesNoRoutingProof keeps the
 // nesting scoped to the shape that has vendor evidence to offer. A decentralized
 // provider has no external vendor hop to attest, so a routing proof there would
@@ -144,7 +244,7 @@ func TestSealedResponseOnDecentralizedProviderCarriesNoRoutingProof(t *testing.T
 	f := newE2EEFixture(t) // ProviderType left unset: not centralized
 	ctx := sealedCtx(t, f, testFingerprint)
 
-	const e2eeText = "zg-sig-v1/e2ee-ct:aa:bb"
+	const e2eeText = "zg-sig-v1/e2ee-ct:" + onWireReqHash + ":" + onWireRespHash
 	if err := f.c.signChatResponse(ctx, []byte(`{}`), []byte(`{}`), "ck-dec", e2eeText, ""); err != nil {
 		t.Fatalf("signChatResponse: %v", err)
 	}
@@ -164,7 +264,7 @@ func TestSealedResponseOnDecentralizedProviderCarriesNoRoutingProof(t *testing.T
 // there, not a behaviour change, and a client reading provider_type off the top
 // level keeps working.
 func TestUnsealedCentralizedSignatureShapeUnchanged(t *testing.T) {
-	f := sealedCentralizedFixture(t)
+	f := centralizedFixture(t)
 	ctx := newGinCtx() // NOT marked sealed
 	ctx.Set(CtxKeyUpstreamCertFingerprint, testFingerprint)
 
