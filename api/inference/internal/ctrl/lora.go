@@ -136,12 +136,32 @@ func ExtractModelName(body []byte, contentType string) string {
 	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(contentType)), "multipart/") {
 		return extractModelFromMultipart(body, contentType)
 	}
-	var bodyMap map[string]interface{}
-	if err := json.Unmarshal(body, &bodyMap); err != nil {
+	// Decoder over a NARROW struct, not Unmarshal over a map, because the upstream reads
+	// this same body with a Decoder and Unmarshal is stricter: it validates the WHOLE
+	// input, so a body the upstream reads fine is one this side reads as naming no model
+	// at all. `{"model":"premium-4k","seconds":5} x` fails here on the trailing byte while
+	// videotranslator/internal/handler/video.go's json.NewDecoder(r.Body).Decode reads
+	// premium-4k and renders it.
+	//
+	// That is a money divergence, not a cosmetic one. "" means "use the default model" —
+	// ResolveModelForBilling substitutes c.Service.ModelType (proxy.go:1597) — so the
+	// pre-flight reserve and the bill both price the DEFAULT tier while the upstream
+	// renders the premium one, and ResolveRequestedModel's per-model allowlist is bypassed
+	// along with the price. Nothing downstream catches it: the video path forwards the body
+	// verbatim (PrepareHTTPRequest rewrites only chatbot), so the request the vendor reads
+	// still names the premium model.
+	//
+	// This is the same correction videoSecondsSizeFromRequest already carries for the
+	// DURATION reader, on the axis that decides the PRICE instead. See its note for the
+	// four earlier variants of one defect: the broker and the upstream reading the same
+	// request with different strictness, and billing taking the cheaper answer.
+	var narrow struct {
+		Model string `json:"model"`
+	}
+	if err := json.NewDecoder(bytes.NewReader(body)).Decode(&narrow); err != nil {
 		return ""
 	}
-	modelName, _ := bodyMap["model"].(string)
-	return modelName
+	return narrow.Model
 }
 
 // extractModelFromMultipart reads the "model" form field from a multipart/form-data
