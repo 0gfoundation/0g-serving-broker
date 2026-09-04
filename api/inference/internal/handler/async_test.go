@@ -55,7 +55,7 @@ func (m *mockAsyncCtrl) IsAsyncEnabled() bool {
 // mock would have kept this test green while the route leaked.
 //
 // The method reads no Ctrl state, so a zero value is a legitimate receiver.
-func (m *mockAsyncCtrl) IsSealedRequest(contentType string, reqBody []byte) bool {
+func (m *mockAsyncCtrl) IsSealedRequest(contentType string, reqBody []byte) (bool, string) {
 	return (&ctrl.Ctrl{}).IsSealedRequest(contentType, reqBody)
 }
 
@@ -785,6 +785,44 @@ func TestSubmitAsync_RejectsSealedEnvelopeSmuggledIntoMultipart(t *testing.T) {
 	}
 	if mock.capturedReqBody != nil {
 		t.Errorf("a smuggled envelope must not be submitted, got body: %s", mock.capturedReqBody)
+	}
+	// And the message says WHICH case it is. A genuinely named part is the one
+	// case for which "use the synchronous endpoint" is the right advice, so the
+	// reason has to reach the response rather than be discarded for a single
+	// fixed sentence.
+	if !strings.Contains(rec.Body.String(), `named \"_e2ee\"`) {
+		t.Errorf("the refusal must name the reason it found, got: %s", rec.Body.String())
+	}
+}
+
+// The same route, refusing for a DIFFERENT reason: a malformed multipart body
+// that could be naming the marker. This is not a sealed request, so the old
+// fixed message — "use the synchronous endpoint" — sent the caller to a route
+// that refuses it too, with different wording. The reason must distinguish them.
+func TestSubmitAsync_MalformedMultipartRefusalSaysWhy(t *testing.T) {
+	// A body that mentions the marker, with a Content-Type carrying no boundary,
+	// so the parts cannot be enumerated at all.
+	body := "--x\r\nContent-Disposition: form-data; name=\"_e2ee\"\r\n\r\n{}\r\n--x--\r\n"
+
+	mock := &mockAsyncCtrl{asyncEnabled: true, sessionUser: "0xUser1", submitJobID: "job-1"}
+	h := newTestHandler(mock)
+	rec := performRequest(h.SubmitAsyncImageEdit, "POST", "/v1/async/images/edits", body,
+		map[string]string{"Content-Type": "multipart/form-data"})
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if mock.capturedReqBody != nil {
+		t.Errorf("must not be submitted, got body: %s", mock.capturedReqBody)
+	}
+	got := rec.Body.String()
+	if !strings.Contains(got, "boundary is missing") {
+		t.Errorf("the refusal must say the boundary was missing, got: %s", got)
+	}
+	// The two causes that share this branch need distinct wording: formatting a
+	// nil error rendered a parseable-but-boundaryless Content-Type as "(<nil>)".
+	if strings.Contains(got, "<nil>") {
+		t.Errorf("a nil parse error must not be rendered, got: %s", got)
 	}
 }
 

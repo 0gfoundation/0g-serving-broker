@@ -119,7 +119,7 @@ func TestMultipartCarryingASealedEnvelopeIsRefused(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			body, contentType := buildMultipart(t, tt.parts)
 
-			if !c.IsSealedRequest(contentType, body) {
+			if sealed, _ := c.IsSealedRequest(contentType, body); !sealed {
 				t.Error("IsSealedRequest must see it: the async routes refuse on this, and a miss there enqueues the envelope")
 			}
 
@@ -157,7 +157,7 @@ func TestMultipartWithAnEncodedE2EEPartNameIsRefused(t *testing.T) {
 				t.Fatal("fixture no longer tests the encoded case: the literal marker is present")
 			}
 
-			if !c.IsSealedRequest(contentType, body) {
+			if sealed, _ := c.IsSealedRequest(contentType, body); !sealed {
 				t.Error("an encoded part name must be seen: the parser resolves it, so a downstream parser does too")
 			}
 			if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err == nil {
@@ -190,7 +190,7 @@ func TestMultipartWithAnUppercaseEncodedPartNameIsRefused(t *testing.T) {
 				t.Fatal("fixture no longer tests the case-folded path")
 			}
 
-			if !c.IsSealedRequest(contentType, body) {
+			if sealed, _ := c.IsSealedRequest(contentType, body); !sealed {
 				t.Error("the parser resolves this name, so a downstream parser does too")
 			}
 			if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err == nil {
@@ -220,7 +220,7 @@ func TestUnparseableMultipartContentTypeStillReachesTheGuard(t *testing.T) {
 		`MULTIPART/FORM-DATA; boundary=x; boundary=y`,
 	} {
 		t.Run(contentType, func(t *testing.T) {
-			if !c.IsSealedRequest(contentType, body) {
+			if sealed, _ := c.IsSealedRequest(contentType, body); !sealed {
 				t.Error("a Content-Type that claims multipart must not skip the guard by failing to parse")
 			}
 			if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err == nil {
@@ -244,7 +244,7 @@ func TestMultipartWithADuplicateDispositionIsRefused(t *testing.T) {
 		sealedEnvelopeJSON + "\r\n--x--\r\n")
 	const contentType = `multipart/form-data; boundary=x`
 
-	if !c.IsSealedRequest(contentType, body) {
+	if sealed, _ := c.IsSealedRequest(contentType, body); !sealed {
 		t.Error("a part declaring the marker in any of its dispositions must be seen")
 	}
 	if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err == nil {
@@ -266,7 +266,7 @@ func TestMismatchedBoundaryMentioningTheMarkerIsRefused(t *testing.T) {
 		sealedEnvelopeJSON + "\r\n--x--\r\n")
 	const contentType = `multipart/form-data; boundary=WRONGBOUND`
 
-	if !c.IsSealedRequest(contentType, body) {
+	if sealed, _ := c.IsSealedRequest(contentType, body); !sealed {
 		t.Error("a body whose parts were never enumerated must be treated as carrying an envelope")
 	}
 	if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err == nil {
@@ -291,7 +291,7 @@ func TestUnparseableBoundaryWithAnUppercaseEncodedNameIsRefused(t *testing.T) {
 		t.Fatal("fixture no longer tests the case-folded path")
 	}
 
-	if !c.IsSealedRequest(contentType, body) {
+	if sealed, _ := c.IsSealedRequest(contentType, body); !sealed {
 		t.Error("a body that cannot be shown NOT to carry an envelope must be treated as one")
 	}
 	if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err == nil {
@@ -311,7 +311,7 @@ func TestUnparseableContentTypeWithoutTheMarkerIsStillForwarded(t *testing.T) {
 	})
 	const contentType = `multipart/form-data; boundary=x; boundary=y`
 
-	if c.IsSealedRequest(contentType, body) {
+	if sealed, _ := c.IsSealedRequest(contentType, body); sealed {
 		t.Error("a body that could not be naming the marker is not a sealed request")
 	}
 	if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err != nil {
@@ -334,7 +334,7 @@ func TestNonFormDataMultipartSubtypeIsStillChecked(t *testing.T) {
 		t.Fatal("fixture did not change the subtype")
 	}
 
-	if !c.IsSealedRequest(mixed, body) {
+	if sealed, _ := c.IsSealedRequest(mixed, body); !sealed {
 		t.Error("a multipart/mixed body carrying the envelope must be seen too")
 	}
 	if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(mixed), body); err == nil {
@@ -352,7 +352,7 @@ func TestMalformedMultipartWithoutTheMarkerIsStillForwarded(t *testing.T) {
 	body := []byte(`{"prompt":"a json body sent with a multipart content type"}`)
 	const contentType = "multipart/form-data; boundary=abc123"
 
-	if c.IsSealedRequest(contentType, body) {
+	if sealed, _ := c.IsSealedRequest(contentType, body); sealed {
 		t.Error("a malformed body that cannot be naming the marker is not a sealed request")
 	}
 	got, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body)
@@ -377,7 +377,7 @@ func TestMultipartMentioningTheMarkerInContentIsForwarded(t *testing.T) {
 				}
 			})
 
-			if c.IsSealedRequest(contentType, body) {
+			if sealed, _ := c.IsSealedRequest(contentType, body); sealed {
 				t.Error("a field whose VALUE mentions the marker is not a sealed request")
 			}
 
@@ -398,7 +398,7 @@ func TestOrdinaryMultipartIsUntouched(t *testing.T) {
 	c := &Ctrl{}
 	body, contentType := buildMultipart(t, func(*multipart.Writer) {})
 
-	if c.IsSealedRequest(contentType, body) {
+	if sealed, _ := c.IsSealedRequest(contentType, body); sealed {
 		t.Error("an ordinary transcription is not a sealed request")
 	}
 	got, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body)
@@ -436,7 +436,7 @@ func TestUnparseableMultipartMentioningTheMarkerIsRefused(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if !c.IsSealedRequest(tt.contentType, []byte(tt.body)) {
+			if sealed, _ := c.IsSealedRequest(tt.contentType, []byte(tt.body)); !sealed {
 				t.Error("a body that cannot be shown NOT to carry an envelope must be treated as one")
 			}
 			if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(tt.contentType), []byte(tt.body)); err == nil {
@@ -457,7 +457,7 @@ func TestMultipartWithATruncatedHeaderIsForwarded(t *testing.T) {
 		"--x\r\nContent-Disposition: form-data; name=\"_e2ee"
 	const contentType = `multipart/form-data; boundary=x`
 
-	if c.IsSealedRequest(contentType, []byte(body)) {
+	if sealed, _ := c.IsSealedRequest(contentType, []byte(body)); sealed {
 		t.Error("a header that never terminates carries no envelope")
 	}
 	if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), []byte(body)); err != nil {
@@ -476,7 +476,7 @@ func TestJSONRequestsAreNotJudgedByTheMultipartRule(t *testing.T) {
 	if carries, _ := multipartCarriesE2EEPart("application/json", body); carries {
 		t.Error("the multipart rule must not claim a JSON body")
 	}
-	if !c.IsSealedRequest("application/json", body) {
+	if sealed, _ := c.IsSealedRequest("application/json", body); !sealed {
 		t.Error("a JSON envelope is still a sealed request")
 	}
 }
@@ -575,7 +575,7 @@ func TestMultipartWithAnUndecodableEncodedNameIsRefused(t *testing.T) {
 				t.Fatal("fixture no longer tests the encoded case: the literal marker is present")
 			}
 
-			if !c.IsSealedRequest(contentType, body) {
+			if sealed, _ := c.IsSealedRequest(contentType, body); !sealed {
 				t.Error("a name the parser refused to decode cannot be ruled out; the async route would enqueue this")
 			}
 			if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err == nil {
@@ -600,7 +600,7 @@ func TestMultipartWithAnEncodedFilenameIsForwarded(t *testing.T) {
 			body, contentType := buildMultipart(t, func(w *multipart.Writer) {
 				rawPart(t, w, disposition, "RIFF....audio....")
 			})
-			if c.IsSealedRequest(contentType, body) {
+			if sealed, _ := c.IsSealedRequest(contentType, body); sealed {
 				t.Error("an encoded FILENAME is not an encoded field name")
 			}
 			got, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body)
@@ -632,7 +632,7 @@ func TestUnparseablePartDispositionWithoutTheMarkerIsForwarded(t *testing.T) {
 		t.Fatal("fixture must not mention the marker in any form")
 	}
 
-	if c.IsSealedRequest(contentType, body) {
+	if sealed, _ := c.IsSealedRequest(contentType, body); sealed {
 		t.Error("a malformed disposition that cannot be naming the marker is not a sealed request")
 	}
 	got, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body)
@@ -650,7 +650,7 @@ func TestUnparseablePartDispositionMentioningTheMarkerIsRefused(t *testing.T) {
 	body := []byte("--x\r\nContent-Disposition: form-data; name=\"notes\"; filename=\"a\"b.txt\"\r\n\r\n_e2ee\r\n--x--\r\n")
 	const contentType = `multipart/form-data; boundary=x`
 
-	if !c.IsSealedRequest(contentType, body) {
+	if sealed, _ := c.IsSealedRequest(contentType, body); !sealed {
 		t.Error("malformed AND mentioning the marker must fail closed")
 	}
 	if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err == nil {
@@ -737,7 +737,7 @@ func TestMultipartWithNameStarInsideAQuotedValueIsForwarded(t *testing.T) {
 			body, contentType := buildMultipart(t, func(w *multipart.Writer) {
 				rawPart(t, w, disposition, "RIFF....audio....")
 			})
-			if c.IsSealedRequest(contentType, body) {
+			if sealed, _ := c.IsSealedRequest(contentType, body); sealed {
 				t.Error("a name* inside a quoted value does not declare an encoded field name")
 			}
 			got, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body)
@@ -781,7 +781,7 @@ func TestMultipartWithAQuotedPairInTheNameIsRefused(t *testing.T) {
 			body, contentType := buildMultipart(t, func(w *multipart.Writer) {
 				rawPart(t, w, tt.disposition, sealedEnvelopeJSON)
 			})
-			if !c.IsSealedRequest(contentType, body) {
+			if sealed, _ := c.IsSealedRequest(contentType, body); !sealed {
 				t.Error("a conformant parser reads this as the marker, so it cannot be ruled out")
 			}
 			if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err == nil {
@@ -821,7 +821,7 @@ func TestMultipartWithAnUnrelatedQuotedPairIsForwarded(t *testing.T) {
 			body, contentType := buildMultipart(t, func(w *multipart.Writer) {
 				rawPart(t, w, tt.disposition, "some field value")
 			})
-			if c.IsSealedRequest(contentType, body) {
+			if sealed, _ := c.IsSealedRequest(contentType, body); sealed {
 				t.Error("a quoted pair in a name that is not the marker is not a sealed request")
 			}
 			if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err != nil {
@@ -853,7 +853,7 @@ func TestBareEncodedNameDispositionIsRefused(t *testing.T) {
 		t.Fatal("fixture no longer tests the encoded case")
 	}
 
-	if !c.IsSealedRequest(contentType, body) {
+	if sealed, _ := c.IsSealedRequest(contentType, body); !sealed {
 		t.Error("the marker cannot be ruled out, so this must fail closed via the unparseable-disposition branch")
 	}
 	if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err == nil {

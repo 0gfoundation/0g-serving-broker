@@ -140,24 +140,17 @@ func hasE2EEMarker(reqBody []byte) bool {
 // couldNameE2EEPart reports whether a body that could NOT be enumerated might
 // still be hiding a part named "_e2ee".
 //
-// It gates only the FAIL-CLOSED branches, never the detection itself, and that
-// separation is the correction of a bug rather than a tidy-up. When this was the
-// gate on the whole check, every spelling it did not anticipate was a leak: first
-// the RFC 2231 encodings, which decode to the marker without ever spelling it,
-// and then — because `mime.ParseMediaType` lowercases parameter NAMES while this
-// scans raw bytes — `NAME*=` and `Name*0=`, which are the same forms one shift
-// key over. The forms were exhaustive; the spellings were not, and a heuristic
-// over spellings is not a thing that converges.
+// It gates the FAIL-CLOSED branches only, never detection. This is a heuristic
+// over SPELLINGS, and spellings do not enumerate: it cannot see a name the
+// parser resolves from an encoding, so anything that gates detection on it leaks
+// whatever it failed to anticipate. Detection asks the parser instead
+// (multipartCarriesE2EEPart), which is exact for every body Go can parse; this
+// covers the bodies it cannot, where the failure direction is forwarding a
+// MALFORMED request rather than an envelope.
 //
-// So detection no longer consults it: multipartCarriesE2EEPart enumerates the
-// parts and asks the parser what each name decodes to, which is exact for every
-// body Go can parse. This is left for the bodies it CANNOT, where the failure
-// direction is forwarding a malformed request — which is what the broker did
-// before this check existed — rather than forwarding an envelope.
-//
-// Case is folded for "name*" because the parser folds it; the literal marker is
-// matched exactly because parameter VALUES are not folded, so a part named
-// `_E2EE` is a different field no parser resolves to the marker.
+// Case is folded for "name*" because the parser folds parameter names; the
+// literal marker is matched exactly because parameter VALUES are not folded, so
+// a part named `_E2EE` is a different field no parser resolves to the marker.
 func couldNameE2EEPart(reqBody []byte) bool {
 	return hasE2EEMarker(reqBody) || mentionsEncodedName(reqBody)
 }
@@ -166,32 +159,20 @@ func couldNameE2EEPart(reqBody []byte) bool {
 // prefix "name*" in any case. One pass, one byte at a time, no allocation — the
 // body may be tens of megabytes of audio.
 //
-// It replaces a walk of every offset calling bytes.EqualFold, which was correct
-// but paid ~5 bytes of comparison per position and defeated vectorisation.
-// Measured at 32 MiB (the proxy's body limit), against a '*'-dense body as the
-// adversarial shape:
+// Cost is FLAT by design, ~51 ms per 32 MiB (the proxy's body limit) whatever
+// the body contains. An anchored bytes.IndexByte scan is 9x faster on typical
+// input and 8x slower on a '*'-dense one, which is the wrong trade for a check
+// that runs before inference on requests it exists to reject: a cliff an
+// attacker picks the body for is worse than a higher floor. Keep it flat.
 //
-//	implementation                   typical    '*'-dense
-//	walk every offset (before)        159 ms      150 ms
-//	bytes.IndexByte-anchored          5.6 ms      407 ms
-//	this one                           51 ms       54 ms
-//
-// The middle row is the tempting fix and was written first: '*' is the one byte
-// of the needle with no case counterpart, so bytes.IndexByte's SIMD scan can
-// skip to candidates and only those pay the fold. It is 28x faster on a typical
-// body — and 2.7x SLOWER than the code it replaces on a body chosen to defeat
-// it, because a candidate per byte turns the scan into a call per byte. That is
-// the wrong direction for a check whose complaint was CPU spent ahead of
-// inference on requests it exists to REJECT, and a cliff an attacker picks the
-// body for. Flat beats fast-with-a-cliff here; this row is uniformly ~3x better
-// than what it replaces and has no shape that changes that.
+// It is also not where this check spends its time. Enumerating the parts costs
+// ~22 ms for one 32 MiB part and ~750 ms for 32 MiB of ~300 000 tiny ones, so a
+// later reader optimising CPU should look at multipartCarriesE2EEPart, not here.
 //
 // The fold is letters-only rather than the usual `b|0x20` trick, and that is not
 // stylistic: 0x20 maps '\n' (0x0A) onto '*' (0x2A), so the trick reports
-// "name\n" as a mention. Found by sweeping all 256 bytes through each of the
-// five positions against the walk, which is what TestMentionsEncodedName does —
-// the same "as written vs as it decodes" mistake this whole guard is about,
-// one layer down in the bytes.
+// "name\n" as a mention. TestMentionsEncodedName sweeps all 256 bytes through
+// each of the five positions to hold that.
 //
 // "name" has no repeated prefix byte — 'n' occurs only at index 0 — so a
 // mismatch needs no backtracking beyond restarting at 1 when the byte that
@@ -224,33 +205,18 @@ func mentionsEncodedName(reqBody []byte) bool {
 // `name*0=` / `name*0*=` continuation segments, case-insensitively because
 // parameter names are.
 //
-// Whether a match sits at a PARAMETER POSITION is the whole difficulty, and
-// getting it half-right cost a round of review. `filename*=iso-8859-1”x`
-// CONTAINS "name*" and is both legitimate and common, so a plain substring match
-// refuses ordinary uploads. Checking only the byte BEFORE the match fixes that
-// one and leaves the mirror image open — a `name*` inside a quoted VALUE, which
-// is just as ordinary and was just as refused:
+// The match must sit at a PARAMETER POSITION, and neither neighbour of the match
+// establishes that. `filename*=` and `filename="name*.wav"` both contain "name*"
+// and both are ordinary, and so does `filename="name*=x.wav"`, which satisfies
+// any check on what FOLLOWS as well. So this walks the disposition tracking
+// quoted strings and tests only after a `;` outside quotes. Desyncing requires a
+// disposition that does not parse, which the caller's gated fail-closed branch
+// covers.
 //
-//	filename="name*.wav"              -> preceded by `"`, read as a parameter
-//	filename="recording (name*).wav"  -> preceded by ` `, same
-//	filename="name*=x.wav"            -> survives a follow-the-match shape check
-//	                                     too, which is why the scan has to track
-//	                                     quoting rather than look at neighbours
-//
-// So this walks the disposition tracking quoted strings and tests for the
-// attribute only where an attribute may actually begin: after a `;`, outside
-// quotes. Desyncing requires a disposition that does not parse, which the
-// caller's gated fail-closed branch already covers.
-//
-// This is a tokeniser, not a decoder, and that distinction is why writing one
-// here is not the mistake refused a few lines up in multipartCarriesE2EEPart:
-// deciding what an encoded name MEANS is the parser's job and second-guessing it
-// is how bugs get layered, but deciding where a parameter STARTS is unambiguous
-// grammar with no charset in it.
-//
-// A disposition is a header, not a body, so walking it costs nothing worth
-// optimising; the body scan in mentionsEncodedName is the one that had to be
-// measured.
+// This is a tokeniser, not a decoder, and that is why writing one here is not
+// the mistake refused in multipartCarriesE2EEPart: what an encoded name MEANS is
+// the parser's job, but where a parameter STARTS is unambiguous grammar with no
+// charset in it.
 func declaresEncodedName(disposition string) bool {
 	inQuotes := false
 	atParamStart := false
@@ -343,89 +309,48 @@ func looksMultipart(contentType string) bool {
 	return strings.HasPrefix(strings.ToLower(strings.TrimLeft(contentType, " \t")), "multipart/")
 }
 
-// multipartCarriesE2EEPart reports whether a multipart/form-data body declares a
-// part named "_e2ee" — a sealed envelope smuggled into the one request shape the
-// JSON checks cannot see (SPEC §5.3.1). The string is the reason, for the
-// rejection message.
+// multipartCarriesE2EEPart reports whether a multipart body declares a part named
+// "_e2ee" — a sealed envelope smuggled into the one request shape the JSON checks
+// cannot see (SPEC §5.3.1). The string is the reason, for the rejection message.
 //
-// Why this exists at all. Every other sealed-request check starts by parsing the
-// body as JSON, and a multipart body is not JSON, so the natural implementation
-// of "detect _e2ee, else pass through" reads a parse failure as NOT SEALED and
-// forwards the request in the clear — envelope included. That is the one mistake
-// §5.3.1 is written to prevent, in the SPEC's words: a body that cannot be
-// parsed as an envelope is not thereby an unsealed body.
+// Why it exists: every other sealed-request check starts by parsing the body as
+// JSON, and a multipart body is not JSON, so "detect _e2ee, else pass through"
+// reads the parse failure as NOT SEALED and forwards the envelope in the clear.
+// §5.3.1 states the rule this violates — a body that cannot be parsed as an
+// envelope is not thereby an unsealed body.
 //
-// The check is on PART NAMES, never on the raw bytes, and the distinction cuts
-// both ways. A substring rule would REFUSE a transcription whose `prompt`
-// legitimately mentions "_e2ee", on a field whose whole purpose is to carry
-// arbitrary caller text — and it would also MISS the name when it is encoded,
-// which is the direction that leaks:
+// The check is on PART NAMES, never the raw bytes, and that cuts both ways: a
+// substring rule would refuse a transcription whose `prompt` legitimately
+// mentions the marker, and would miss the name whenever it is encoded.
 //
-//	name*=utf-8''%5Fe2ee        -> ParseMediaType yields "_e2ee"; the literal is absent
-//	name*0="_e2"; name*1="ee"   -> same, via RFC 2231 continuation
+// Three things about what "declares a name" means here, each measured:
 //
-// So the pre-filter is couldNameE2EEPart, not hasE2EEMarker: gating on the
-// literal alone would have handed both encodings straight through. See that
-// function for why its two substrings are exhaustive rather than a guess.
+//   - It reads Content-Disposition's `name` DIRECTLY, not via Part.FormName(),
+//     which returns "" for any part whose disposition is not exactly `form-data`
+//     — so `attachment; name="_e2ee"` carries the name and answers "" to the
+//     accessor. Lenient parsers downstream read `name` regardless of the type.
+//   - It reads EVERY Content-Disposition value the part declares; Header.Get
+//     answers with the first, and a part may declare the header twice.
+//   - It covers every part whose HEADER COMPLETES, which is the set any parser
+//     can name. A header truncated mid-name is NOT covered and needs no cover:
+//     Go drops it with a plain io.EOF (so there is nothing to fail closed on),
+//     and a header that never terminates has no body after it to hold an
+//     envelope. Its adversarial neighbour — a header that terminates with a
+//     malformed name, `name="_e2ee` — makes ParseMediaType error, and is refused.
 //
-// It reads the `name` parameter of Content-Disposition DIRECTLY rather than
-// through mime/multipart's Part.FormName(), because FormName returns "" for any
-// part whose disposition is not exactly `form-data` — so a part declared
-// `Content-Disposition: attachment; name="_e2ee"` carries the name and answers ""
-// to the accessor. Measured, not assumed:
+// Where an error IS reported (an unreadable boundary, an unparseable
+// Content-Disposition) it fails closed, gated on couldNameE2EEPart so the set is
+// "malformed AND could be naming the marker" rather than "malformed": refusing
+// costs a clear error on a request an upstream would reject anyway.
 //
-//	FormName()="_e2ee"  disposition=`form-data; name="_e2ee"`
-//	FormName()="_e2ee"  disposition=`form-data; name="_e2ee"; filename="env.json"`
-//	FormName()=""       disposition=`attachment; name="_e2ee"`     <-- missed
+// One branch is deliberately NOT gated, because it is exact rather than
+// heuristic: a disposition that RFC 2231-encodes its `name` is refused outright,
+// since the parser resolves those only for us-ascii and utf-8 and silently drops
+// — or partially decodes — anything else. Measurements are on the branch.
 //
-// The third row is the spelling someone smuggling an envelope would reach for,
-// and lenient parsers downstream do read `name` regardless of the disposition
-// type. So the question asked here is "does any part DECLARE this name", which is
-// strictly broader than "would Go's form parser expose this field".
-//
-// Broader in a second way that the first attempt at this got wrong: it reads
-// EVERY Content-Disposition value the part declares, because a part may declare
-// the header twice and Header.Get answers with the first. See the loop below.
-//
-// What it covers is every part whose HEADER COMPLETES, which is exactly the set
-// of parts any parser can name — and the boundary of that claim was measured
-// rather than assumed:
-//
-//	complete header, truncated body    -> the part IS returned, then NextPart errors
-//	truncated header (mid-name)        -> silently dropped; NextPart returns plain io.EOF
-//	name="_e2ee  (unterminated quote)  -> ParseMediaType errors -> refused below
-//
-// The middle row is why "fail closed on anything unparseable" is NOT what this
-// does, despite being the tempting thing to claim: Go does not report a truncated
-// trailing header as an error at all, so there is nothing to fail closed ON. That
-// case is sound anyway, and for a reason rather than by luck — a header that
-// never terminates has no body after it, so there is no envelope in it to leak,
-// and no downstream parser sees a part there either. Its adversarial neighbour, a
-// header that DOES terminate but whose name is malformed, is the third row, and
-// that one is refused.
-//
-// Where an error IS reported — an unreadable boundary, an unparseable
-// Content-Disposition — it fails closed, and all three of those branches are
-// gated on couldNameE2EEPart, so the affected set is "malformed, AND could be
-// naming the reserved marker": refusing costs a clear error on a request an
-// upstream would reject anyway, where forwarding costs the guarantee this
-// function exists for. (The Content-Disposition branch was NOT gated when this
-// paragraph first claimed it was, which is how a part with an unescaped quote in
-// its `filename` came to be refused with an e2ee error. A comment asserting a
-// property the code lacks is worse than no comment: it is what a later reader
-// checks instead of the code.)
-//
-// One branch is deliberately NOT gated, because it is not a heuristic: a
-// disposition that RFC 2231-encodes its `name` is refused outright. The parser
-// resolves those only for us-ascii and utf-8 and silently drops — or partially
-// decodes — anything else, so a clean parse with a harmless-looking `name` is no
-// evidence at all there. See the branch itself for the measurements.
-//
-// The name comparison is EXACT. Form field names are case-sensitive, so a part
-// named `_E2EE` is a different field that no parser resolves to the marker;
-// matching case-insensitively would refuse requests over a name nothing treats as
-// reserved. (Parameter names are another matter — `NAME=` and `name=` are the
-// same parameter, and mime.ParseMediaType already normalises that.)
+// The name comparison is EXACT: form field names are case-sensitive, so `_E2EE`
+// is a different field no parser resolves to the marker. (Parameter names are
+// another matter, and ParseMediaType already folds those.)
 func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string) {
 	if !looksMultipart(contentType) {
 		return false, ""
@@ -433,7 +358,15 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 	_, params, err := mime.ParseMediaType(contentType)
 	if err != nil || params["boundary"] == "" {
 		if couldNameE2EEPart(reqBody) {
-			return true, fmt.Sprintf("the body could be naming the reserved marker and its multipart boundary could not be read (%v), so a smuggled envelope cannot be ruled out", err)
+			// Two distinct causes reach here and they need distinct wording: a
+			// Content-Type that does not parse, and one that parses with no
+			// boundary parameter at all. Formatting err in both cases rendered
+			// the second as "could not be read (<nil>)".
+			why := "its multipart boundary is missing from the Content-Type"
+			if err != nil {
+				why = fmt.Sprintf("its multipart boundary could not be read (%v)", err)
+			}
+			return true, "the body could be naming the reserved marker and " + why + ", so a smuggled envelope cannot be ruled out"
 		}
 		return false, ""
 	}
@@ -466,24 +399,19 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 		}
 		// EVERY Content-Disposition the part declares, not Header.Get's first
 		// one. A part may declare the header twice — innocuous first, marker
-		// second — and Get returns only the first, so the part enumerated
-		// cleanly, named nothing reserved, and was forwarded with the envelope
-		// in it. Measured on that body:
+		// second — and Get sees only the first. Measured on that body:
 		//
 		//	Get()      = `form-data; name="file"`
 		//	Values()   = [`form-data; name="file"` `form-data; name="_e2ee"`]
 		//	FormName() = "file"
 		//
 		// Which parser wins is not ours to assume — Go and Python's email take
-		// the first, others take the last — and the contract here does not
-		// depend on the answer: the body demonstrably DECLARES the name, so it
-		// cannot be shown not to carry an envelope. Reading one value was the
-		// same mistake `attachment; name=` was caught for, one level down: that
-		// one reasoned about the disposition TYPE, this one about the
-		// disposition as a single VALUE.
+		// the first, others the last — and the contract does not depend on the
+		// answer: the body demonstrably DECLARES the name, so it cannot be shown
+		// not to carry an envelope.
 		//
 		// Values returns an empty slice for a part with no disposition, so the
-		// loop covers the skip that used to need its own guard.
+		// loop needs no separate skip.
 		for _, disposition := range part.Header.Values("Content-Disposition") {
 			_, dparams, derr := mime.ParseMediaType(disposition)
 			if derr != nil {
@@ -515,9 +443,9 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 			//	name="a\"b"      -> yields `a"b`; the tspecial one IS unescaped
 			//
 			// Nothing in this stack demonstrably decodes it that way today, so
-			// this is a smaller claim than the charset gap — but it costs one
-			// comparison and the alternative is relying on every upstream
-			// agreeing with Go about a backslash.
+			// this is a smaller claim than the charset gap above — but the
+			// alternative is trusting every upstream to agree with Go about a
+			// backslash.
 			if unquotePairs(dparams["name"]) == e2eeBodyMarker {
 				return true, fmt.Sprintf("a multipart part is named %q once RFC 2045 quoted pairs are resolved, which mime.ParseMediaType leaves in place before a non-tspecial but a conformant parser does not", e2eeBodyMarker)
 			}
@@ -526,7 +454,7 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 			// reports no error at all (its decode2231Enc simply returns on
 			// `// TODO: unsupported encoding`), so `name` comes back "" — or,
 			// worse, partially decoded — on a part that plainly declares one.
-			// Measured, every row forwarded before this branch existed:
+			// Measured:
 			//
 			//	name*=utf-8''%5Fe2ee                     -> name="_e2ee"  refused
 			//	name*=iso-8859-1''%5Fe2ee                -> name=""       FORWARDED
@@ -579,19 +507,21 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 // and a JSON-only test says "not sealed" to a body carrying the envelope in a
 // multipart part — the same hole this function was written to close, one request
 // shape over. See multipartCarriesE2EEPart.
-func (c *Ctrl) IsSealedRequest(contentType string, reqBody []byte) bool {
-	if carries, _ := multipartCarriesE2EEPart(contentType, reqBody); carries {
-		return true
+func (c *Ctrl) IsSealedRequest(contentType string, reqBody []byte) (bool, string) {
+	if carries, why := multipartCarriesE2EEPart(contentType, reqBody); carries {
+		return true, why
 	}
 	if !hasE2EEMarker(reqBody) {
-		return false
+		return false, ""
 	}
 	var env wire.Request
 	if err := json.Unmarshal(reqBody, &env); err != nil {
-		return false // not a JSON object → cannot be an envelope
+		return false, "" // not a JSON object → cannot be an envelope
 	}
-	_, ok := env[e2eeBodyMarker]
-	return ok
+	if _, ok := env[e2eeBodyMarker]; ok {
+		return true, fmt.Sprintf("the body carries a top-level %q object", e2eeBodyMarker)
+	}
+	return false, ""
 }
 
 // MaybeUnsealRequest unseals a sealed E2EE request in-enclave and returns the

@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -47,10 +48,17 @@ func (h *Handler) submitAsyncJob(ctx *gin.Context, svcType string) {
 	// rather than of which route the client happened to pick. The synchronous
 	// proxy reaches the same conclusion via MaybeUnsealRequest; these routes never
 	// touch it, which is exactly how they came to be a hole.
-	if h.asyncCtrl.IsSealedRequest(ctx.GetHeader("Content-Type"), reqBody) {
+	//
+	// The REASON is reported, not just the verdict. "Use the synchronous endpoint"
+	// is right for a part genuinely named `_e2ee` and wrong for the fail-closed
+	// branches, which refuse a body that is malformed and COULD be naming the
+	// marker: those are not sealed requests, and sending that caller to a route
+	// which refuses them too, with different wording, is worse than saying what is
+	// actually wrong.
+	if sealed, why := h.asyncCtrl.IsSealedRequest(ctx.GetHeader("Content-Type"), reqBody); sealed {
 		ctx.Set("ignoreError", true)
 		ctx.JSON(http.StatusBadRequest, gin.H{
-			"error": "e2ee: sealed requests are not supported on the async endpoints; use the synchronous endpoint",
+			"error": fmt.Sprintf("e2ee: this request cannot be served on the async endpoints because %s. A genuinely sealed request goes to the synchronous endpoint; a malformed multipart body has to be corrected", why),
 		})
 		return
 	}
