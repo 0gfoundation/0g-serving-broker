@@ -996,42 +996,116 @@ func TestNestedMultipartPartIsRefused(t *testing.T) {
 //	one 32 MiB part (a legitimate upload) ->   16 ms
 //	3,728,269 empty parts                 -> 2230 ms
 //
-// Both fixtures are sized to the REQUEST LIMIT, not to maxPartsEnumerated,
-// which matters: a first version derived the many-parts fixture from the
-// constant, so the mutation "raise the cap past what fits in the limit" made the
-// test try to allocate an absurd body and error out instead of failing. A test
-// whose fixture scales with the thing under test cannot catch that thing being
-// widened.
+// The assertion is on the REASON, not on elapsed time, and that is a correction:
+// a timing version of this test passed locally and failed in CI, because CI runs
+// integration with -covermode=atomic -coverpkg=./..., a body past the cap pays
+// one couldName() scan, and that scan is a byte-at-a-time loop INSIDE the
+// instrumented package. So the ratio measured coverage instrumentation (50x
+// locally under those flags) rather than enumeration. Reproduced with the CI
+// flags before rewriting.
 //
-// Asserted as a ratio against the one-part case rather than an absolute time,
-// so it is machine-independent: uncapped it is ~139x, capped it is under 1x.
+// The reason string pins the cap's MAGNITUDE, which is what actually matters and
+// which no timing bound establishes: a marker placed past the cap must be
+// refused for "declares more than N parts" and not found by name. Raise the cap
+// above that part index and the reason changes, so the test fails.
 func TestEnumerationIsBoundedByPartCount(t *testing.T) {
-	if testing.Short() {
-		t.Skip("allocates two 32 MiB bodies")
-	}
 	const contentType = `multipart/form-data; boundary=B`
-	const requestLimit = 32 << 20 // RequestSizeLimitMiddleware, the only bound in front
+	const unit = "--B\r\n\r\n\r\n" // 9 bytes: the minimum well-formed part
 
-	// One legitimate upload, at the limit.
-	var onePart bytes.Buffer
-	onePart.WriteString("--B\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.wav\"\r\n\r\n")
-	onePart.Write(bytes.Repeat([]byte("A"), requestLimit-onePart.Len()-16))
-	onePart.WriteString("\r\n--B--\r\n")
-
-	// As many minimum-size, well-formed, marker-free parts as fit at the limit:
-	// they reach neither a parse error nor a name, so only the cap can stop the
-	// loop.
-	const unit = "--B\r\n\r\n\r\n"
-	var manyParts bytes.Buffer
-	for manyParts.Len()+len(unit)+8 <= requestLimit {
-		manyParts.WriteString(unit)
-	}
-	manyParts.WriteString("--B--\r\n")
-
-	for _, body := range [][]byte{onePart.Bytes(), manyParts.Bytes()} {
-		if couldNameE2EEPart(body) {
-			t.Fatal("fixture must not trip the gate: past the cap it would be refused, not measured")
+	// n empty parts, then one named part, then the terminator.
+	build := func(n int, name string) []byte {
+		var b bytes.Buffer
+		for i := 0; i < n; i++ {
+			b.WriteString(unit)
 		}
+		b.WriteString("--B\r\nContent-Disposition: form-data; name=\"" + name + "\"\r\n\r\n" +
+			sealedEnvelopeJSON + "\r\n--B--\r\n")
+		return b.Bytes()
+	}
+
+	// Both indices are FIXED, not derived from maxPartsEnumerated, and that is
+	// the second time this test needed the correction: a version that built
+	// `maxPartsEnumerated+1000` parts moved with the constant, so raising the cap
+	// to 20000 left it green and raising it to 1<<40 made it try to allocate a
+	// trillion parts and hang. Together these two pin 10 <= cap < 8192 — which is
+	// the claim worth holding, since real transcription and image-edit forms have
+	// well under a hundred parts.
+	const withinIndex, pastIndex = 10, 8192
+
+	// Within the cap, the marker is found by NAME: the loop reaches it.
+	within := build(withinIndex, e2eeBodyMarker)
+	carries, why := multipartCarriesE2EEPart(contentType, within)
+	if !carries {
+		t.Fatal("a marker within the cap must be found")
+	}
+	if !strings.Contains(why, "is named") {
+		t.Errorf("within the cap the marker should be found by name, got %q", why)
+	}
+
+	// Past the cap, the same body is refused for a DIFFERENT reason: the loop
+	// stopped before reaching that part, so the marker was never seen and the
+	// refusal comes from the gate. If the cap were raised past this index, the
+	// name would be found instead and this assertion fails.
+	past := build(pastIndex, e2eeBodyMarker)
+	carries, why = multipartCarriesE2EEPart(contentType, past)
+	if !carries {
+		t.Fatal("past the cap, a body that could be naming the marker must fail closed")
+	}
+	if !strings.Contains(why, "more than") {
+		t.Errorf("past the cap the refusal should cite the part count, not the name, got %q", why)
+	}
+
+	// And the cap does not turn every large form into a refusal: past the cap
+	// with nothing that could be naming the marker, the body is still forwarded.
+	// This is what keeps the cap from being a behaviour change for real traffic.
+	var quiet bytes.Buffer
+	for i := 0; i < pastIndex; i++ {
+		quiet.WriteString(unit)
+	}
+	quiet.WriteString("--B--\r\n")
+	if couldNameE2EEPart(quiet.Bytes()) {
+		t.Fatal("fixture must not trip the gate")
+	}
+	if carries, _ := multipartCarriesE2EEPart(contentType, quiet.Bytes()); carries {
+		t.Error("past the cap, a body that cannot be naming the marker must still be forwarded")
+	}
+
+	// The cost claim, asserted only where instrumentation cancels: two bodies of
+	// the SAME SIZE, both past the cap, differing only in how many parts they
+	// split into. Both pay exactly one gate scan, so the difference is the
+	// enumeration alone. Uncapped, the second enumerates ~450x more parts.
+	if testing.Short() {
+		return
+	}
+	const requestLimit = 32 << 20
+	const terminator = "--B--\r\n"
+
+	// As many minimum-size parts as fit under the limit.
+	var more bytes.Buffer
+	for more.Len()+len(unit)+len(terminator) <= requestLimit {
+		more.WriteString(unit)
+	}
+	more.WriteString(terminator)
+
+	// The same NUMBER OF BYTES, split into far fewer parts: pastIndex of them plus one
+	// padded part. Its length is derived from `more` rather than computed
+	// independently — a first version computed both against the limit and they
+	// landed 39 bytes apart, which the guard below caught.
+	var fewer bytes.Buffer
+	for i := 0; i < pastIndex; i++ {
+		fewer.WriteString(unit)
+	}
+	const padHeader = "--B\r\nContent-Disposition: form-data; name=\"pad\"\r\n\r\n"
+	fewer.WriteString(padHeader)
+	pad := more.Len() - fewer.Len() - len("\r\n") - len(terminator)
+	if pad < 0 {
+		t.Fatalf("the padded fixture already exceeds the other: %d vs %d", fewer.Len(), more.Len())
+	}
+	fewer.Write(bytes.Repeat([]byte("A"), pad))
+	fewer.WriteString("\r\n" + terminator)
+
+	if fewer.Len() != more.Len() {
+		t.Fatalf("fixtures must be the same size for instrumentation to cancel: %d vs %d", fewer.Len(), more.Len())
 	}
 
 	measure := func(body []byte) time.Duration {
@@ -1045,24 +1119,13 @@ func TestEnumerationIsBoundedByPartCount(t *testing.T) {
 		}
 		return best
 	}
-
-	one, many := measure(onePart.Bytes()), measure(manyParts.Bytes())
-	if one <= 0 {
+	a, b := measure(fewer.Bytes()), measure(more.Bytes())
+	if a <= 0 {
 		t.Skip("timer resolution too coarse to compare")
 	}
-	if ratio := float64(many) / float64(one); ratio > 8 {
-		t.Errorf("a body of %d minimum-size parts cost %v against %v for one part of the same total size (%.0fx): the enumeration is not bounded by part count",
-			manyParts.Len()/len(unit), many, one, ratio)
-	}
-
-	// And the fail-closed side of the cap: past it, a body that COULD be naming
-	// the marker is refused rather than forwarded, because its parts were never
-	// all enumerated.
-	withMarker := append(bytes.TrimSuffix(manyParts.Bytes(), []byte("--B--\r\n")),
-		[]byte("--B\r\nContent-Disposition: form-data; name=\"_e2ee\"\r\n\r\n"+
-			sealedEnvelopeJSON+"\r\n--B--\r\n")...)
-	if carries, _ := multipartCarriesE2EEPart(contentType, withMarker); !carries {
-		t.Error("past the cap, a body that could be naming the marker must fail closed")
+	if ratio := float64(b) / float64(a); ratio > 4 {
+		t.Errorf("%d parts cost %v against %v for %d parts at the same body size (%.1fx): the enumeration is not bounded by part count",
+			more.Len()/len(unit), b, pastIndex, a, ratio)
 	}
 }
 
