@@ -129,11 +129,25 @@ const (
 //   - "x_0g_trace": observability metadata the router injects downstream.
 var e2eeResponseUnboundFields = []string{"model", "x_0g_trace"}
 
-// maxPartsEnumerated bounds how many multipart parts multipartCarriesE2EEPart
-// will read before it stops and takes its fail-closed path. Three orders of
-// magnitude above any real transcription or image-edit form, and ~1000x below
-// the 3.7 million minimum-size parts that fit in the 32 MiB request limit.
-const maxPartsEnumerated = 4096
+// maxHeadersExamined bounds how many multipart parts AND Content-Disposition
+// headers multipartCarriesE2EEPart will read before it stops and refuses. One
+// shared budget, because both loops are separately unbounded: the outer over
+// parts, the inner over the dispositions a single part declares.
+//
+// Three orders of magnitude above any real transcription or image-edit form,
+// and ~1000x below the 3.7 million minimum-size parts that fit in 32 MiB.
+//
+// About that "32 MiB": it is RequestSizeLimitMiddleware, and it is registered on
+// the sync proxy's serviceGroup ONLY (proxy.go). The async submit routes hang
+// off r.Group("/v1") with cors and the rate limiter and no size limit, so on
+// /v1/async/images/edits neither the part count nor the body length is bounded
+// by anything but what the client sends. This budget is what bounds the
+// AMPLIFICATION on both paths — the cost of this check against the cost of
+// reading the body at all — and on the sync path the size limit also bounds the
+// absolute cost. The unbounded read on the async route predates this check and
+// is not widened by it; adding a size limit there would reject bodies that work
+// today, which is a decision for its own change rather than a comment.
+const maxHeadersExamined = 4096
 
 // hasE2EEMarker is a cheap substring pre-check to skip the JSON parse on the vast
 // majority of (non-sealed) requests. A match is not proof of a sealed request —
@@ -173,7 +187,8 @@ func couldNameE2EEPart(reqBody []byte) bool {
 // prefix "name*" in any case. One pass, one byte at a time, no allocation — the
 // body may be tens of megabytes of audio.
 //
-// Cost is FLAT by design, ~51 ms per 32 MiB (the proxy's body limit) whatever
+// Cost is FLAT by design, ~51 ms per 32 MiB (see the note on that bound at
+// maxHeadersExamined) whatever
 // the body contains. An anchored bytes.IndexByte scan is 9x faster on typical
 // input and 8x slower on a '*'-dense one, which is the wrong trade for a check
 // that runs before inference on requests it exists to reject: a cliff an
@@ -399,7 +414,8 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 	// part cost parts x len(body) and recomputed an identical answer every time.
 	// Measured before this closure existed, on a 32 MiB body of 33-byte malformed
 	// parts: 97 ms for one, 4.1 s for 50, 16.4 s for 200 — linear at ~82 ms each,
-	// and 1,016,800 such parts fit inside the 32 MiB request limit.
+	// and 1,016,800 such parts fit inside the 32 MiB request limit — on the sync
+	// proxy; see the note on that bound at maxHeadersExamined.
 	//
 	// That is reachable with no session: the sync proxy calls MaybeUnsealRequest
 	// (proxy.go) about ninety lines BEFORE ValidateSession, so the body-size limit
@@ -408,6 +424,7 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 	//
 	// Lazily, not eagerly: the gate exists so a well-formed body never pays the
 	// scan at all, which is the common case.
+	examined := 0
 	gateKnown, gate := false, false
 	couldName := func() bool {
 		if !gateKnown {
@@ -417,7 +434,6 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 	}
 
 	reader := multipart.NewReader(bytes.NewReader(reqBody), params["boundary"])
-	parts := 0
 	for {
 		part, err := reader.NextPart()
 		// `== io.EOF`, and NOT errors.Is, is load-bearing. mime/multipart
@@ -443,31 +459,38 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 			}
 			return false, ""
 		}
-		parts++
-		if parts > maxPartsEnumerated {
-			// The ENUMERATION is unbounded in part count, and memoizing the gate
-			// did not bound it: the gate is never even consulted on a well-formed
-			// body, so nothing stopped this loop. A minimum well-formed part is 9
-			// bytes ("--B\r\n\r\n\r\n"), so 3,728,269 fit inside the 32 MiB
-			// limit. Measured, both bodies exactly at the limit:
+		examined++
+		if examined > maxHeadersExamined {
+			// UNGATED, unlike the three fail-closed branches that ask
+			// couldName(). Gating this one was incoherent and exploitable: the
+			// heuristic sees the literal marker or a `name*` attribute, and the
+			// whole premise of this branch is that a name past the budget was
+			// never read — so the one spelling the gate provably cannot see is
+			// the one that evades it. Measured on the gated version, a part named
+			// `=?utf-8?B?X2UyZWU=?=` (RFC 2047 for `_e2ee`):
 			//
-			//	one 32 MiB part (a legitimate upload) ->   16 ms
-			//	3,728,269 empty parts                 -> 2230 ms
+			//	past the budget                -> gate=false, FORWARDED
+			//	inside a nested multipart part -> gate=false, FORWARDED
+			//	enumerable and not nested      -> refused by the isEncodedWord branch
 			//
-			// ~139x, unauthenticated: the sync proxy unseals ~90 lines before
-			// ValidateSession, so only the size limit and the global concurrency
-			// cap are in front — and the cap converts this into shed legitimate
-			// traffic rather than absorbing it.
+			// Widening the gate to `=?` instead is worse, and measurably: in
+			// 32 MiB of random bytes `=?` occurs ~516 times by chance while
+			// `name*` occurs 0, so the gate would be always-true and the
+			// narrowing that keeps a malformed `filename` from being refused as
+			// an e2ee error would be undone.
 			//
-			// Past the cap this takes the SAME fail-closed path as everything
-			// else it cannot enumerate, on the same justification the nested
-			// multipart branch below uses: parts that cannot be enumerated from
-			// here are parts that cannot be shown not to carry an envelope. The
-			// cap is what makes the claim affordable; the gate decides.
-			if couldName() {
-				return true, fmt.Sprintf("the body declares more than %d parts, so its parts cannot all be enumerated from here, and the body could be naming the reserved marker", maxPartsEnumerated)
-			}
-			return false, ""
+			// Refusing outright costs nothing real: no client on
+			// /audio/transcriptions, /images/edits or /v1/async/images/edits
+			// sends a form with thousands of parts or thousands of dispositions
+			// on one part.
+			//
+			// Why the budget covers HEADERS and not just parts: the inner loop
+			// pays a mime.ParseMediaType (map allocation) and a
+			// declaresEncodedName walk per declared disposition, and nothing
+			// bounded how many a part declares. Measured at 32 MiB against one
+			// legitimate 32 MiB part: 35x. Same unbounded-dimension shape as the
+			// two amplifications already fixed here, one level in.
+			return true, fmt.Sprintf("the body declares more than %d parts or part headers, so they cannot all be enumerated from here", maxHeadersExamined)
 		}
 		// EVERY Content-Disposition the part declares, not Header.Get's first
 		// one. A part may declare the header twice — innocuous first, marker
@@ -485,11 +508,23 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 		// Values returns an empty slice for a part with no disposition, so the
 		// loop needs no separate skip.
 		for _, disposition := range part.Header.Values("Content-Disposition") {
+			examined++
+			if examined > maxHeadersExamined {
+				return true, fmt.Sprintf("the body declares more than %d parts or part headers, so they cannot all be enumerated from here", maxHeadersExamined)
+			}
 			_, dparams, derr := mime.ParseMediaType(disposition)
 			if derr != nil {
-				// Gated like the two boundary branches above, and for the same
-				// reason: without the gate this refused any part whose
-				// disposition merely fails to parse, marker or no marker.
+				// Gated, unlike the budget and nested branches, and the
+				// asymmetry is deliberate rather than an oversight. Evading THIS
+				// gate needs the marker-bearing disposition to itself be
+				// unparseable, which makes the name a guess either way — so the
+				// heuristic gives up nothing here, while it demonstrably did
+				// there. The gated set is not closed: an encoding the heuristic
+				// cannot see slips past it, and that is accepted on this branch
+				// and not on those.
+				//
+				// Without the gate this refused any part whose disposition merely
+				// fails to parse, marker or no marker.
 				// `form-data; name="notes"; filename="my"file.txt"` — an
 				// unescaped quote, sloppy but real — was refused with an e2ee
 				// error though the body mentions neither the marker nor `name*`,
@@ -585,11 +620,14 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 		// (see mentionsEncodedName), so it would want its own bound and its own
 		// measurement to be worth the reach.
 		//
-		// Gated, so an innocent nested body that mentions nothing is still
-		// forwarded, and via the memoized gate, so it costs no extra scan.
+		// UNGATED, for the reason spelled out at the budget branch above: the
+		// premise here is that the inner names were never read, so a heuristic
+		// over spellings cannot narrow it honestly — an RFC 2047 encoded word one
+		// level down evaded the gated version. Nothing on these endpoints sends a
+		// nested multipart body, so refusing outright costs nothing real.
 		for _, partType := range part.Header.Values("Content-Type") {
-			if looksMultipart(partType) && couldName() {
-				return true, "a part declares a nested multipart body, whose own parts cannot be enumerated from here, and the body could be naming the reserved marker"
+			if looksMultipart(partType) {
+				return true, "a part declares a nested multipart body, whose own parts cannot be enumerated from here"
 			}
 		}
 	}

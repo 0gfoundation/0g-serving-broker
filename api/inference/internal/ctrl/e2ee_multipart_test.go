@@ -967,23 +967,43 @@ func TestNestedMultipartPartIsRefused(t *testing.T) {
 		}
 	})
 
-	// The complement: nesting alone is not grounds for refusal. Without this the
-	// rule would reject any nested body, which is a behaviour change for requests
-	// that have nothing to do with sealing.
-	t.Run("inner part mentioning nothing", func(t *testing.T) {
+	// Nesting alone IS grounds for refusal, and that changed deliberately. The
+	// branch used to be gated on couldNameE2EEPart, which made it evadable by the
+	// one spelling that heuristic provably cannot see: an inner part named
+	// `=?utf-8?B?X2UyZWU=?=` was forwarded, because the gate looks for the
+	// literal marker or `name*` and finds neither. A heuristic over spellings
+	// cannot narrow a branch whose premise is that the names were never read.
+	//
+	// So the cost of the un-gating is asserted here rather than left implicit: a
+	// nested body mentioning nothing reserved is now refused too. Nothing on
+	// /audio/transcriptions, /images/edits or /v1/async/images/edits sends a
+	// nested multipart body, so that costs no real traffic.
+	t.Run("inner part mentioning nothing is refused too", func(t *testing.T) {
 		body := nested(`form-data; name="notes"`, "an ordinary nested field")
 		if couldNameE2EEPart(body) {
 			t.Fatal("fixture must not mention the marker in any form")
 		}
-		if sealed, _ := c.IsSealedRequest(contentType, body); sealed {
-			t.Error("a nested body that cannot be naming the marker is not a sealed request")
+		if sealed, _ := c.IsSealedRequest(contentType, body); !sealed {
+			t.Error("nesting hides its own part names, so it cannot be cleared")
 		}
-		got, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body)
-		if err != nil {
-			t.Fatalf("must be forwarded, got %v", err)
+		if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err == nil {
+			t.Fatal("must refuse rather than forward")
 		}
-		if !bytes.Equal(got, body) {
-			t.Error("the body must be forwarded unchanged")
+	})
+
+	// The evasion the un-gating closes: an RFC 2047 encoded word one level down.
+	// The gate is false on this body — no literal marker, no `name*` — so the
+	// gated version forwarded it.
+	t.Run("inner part named by an encoded word", func(t *testing.T) {
+		body := nested(`form-data; name="=?utf-8?B?X2UyZWU=?="`, sealedEnvelopeJSON)
+		if couldNameE2EEPart(body) {
+			t.Fatal("fixture must not trip the gate, or it is not testing the evasion")
+		}
+		if sealed, _ := c.IsSealedRequest(contentType, body); !sealed {
+			t.Error("an encoded-word name one level down must not be forwarded")
+		}
+		if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err == nil {
+			t.Fatal("must refuse rather than forward")
 		}
 	})
 }
@@ -1023,9 +1043,9 @@ func TestEnumerationIsBoundedByPartCount(t *testing.T) {
 		return b.Bytes()
 	}
 
-	// Both indices are FIXED, not derived from maxPartsEnumerated, and that is
+	// Both indices are FIXED, not derived from maxHeadersExamined, and that is
 	// the second time this test needed the correction: a version that built
-	// `maxPartsEnumerated+1000` parts moved with the constant, so raising the cap
+	// `maxHeadersExamined+1000` parts moved with the constant, so raising the cap
 	// to 20000 left it green and raising it to 1<<40 made it try to allocate a
 	// trillion parts and hang. Together these two pin 10 <= cap < 8192 — which is
 	// the claim worth holding, since real transcription and image-edit forms have
@@ -1055,19 +1075,53 @@ func TestEnumerationIsBoundedByPartCount(t *testing.T) {
 		t.Errorf("past the cap the refusal should cite the part count, not the name, got %q", why)
 	}
 
-	// And the cap does not turn every large form into a refusal: past the cap
-	// with nothing that could be naming the marker, the body is still forwarded.
-	// This is what keeps the cap from being a behaviour change for real traffic.
-	var quiet bytes.Buffer
-	for i := 0; i < pastIndex; i++ {
-		quiet.WriteString(unit)
+	// Past the budget the refusal is UNGATED, and that changed deliberately.
+	// Gating it made it evadable by the one spelling couldNameE2EEPart provably
+	// cannot see: a part named `=?utf-8?B?X2eyZWU=?=` placed past the budget was
+	// forwarded, because the gate looks for the literal marker or `name*` and
+	// finds neither. A heuristic over spellings cannot narrow a branch whose
+	// premise is that the name was never read.
+	//
+	// So the cost is asserted rather than left implicit: a body past the budget
+	// with nothing reserved in it is refused too. No client on these endpoints
+	// sends thousands of parts, so that costs no real traffic.
+	quiet := build(pastIndex, "ordinary")
+	if couldNameE2EEPart(quiet) {
+		t.Fatal("fixture must not trip the gate, or it is not testing the un-gating")
 	}
-	quiet.WriteString("--B--\r\n")
-	if couldNameE2EEPart(quiet.Bytes()) {
+	if carries, why := multipartCarriesE2EEPart(contentType, quiet); !carries {
+		t.Error("past the budget, a body whose parts were never enumerated cannot be cleared")
+	} else if !strings.Contains(why, "more than") {
+		t.Errorf("the refusal should cite the budget, got %q", why)
+	}
+
+	// The evasion the un-gating closes.
+	evasive := build(pastIndex, `=?utf-8?B?X2UyZWU=?=`)
+	if couldNameE2EEPart(evasive) {
+		t.Fatal("fixture must not trip the gate, or it is not testing the evasion")
+	}
+	if carries, _ := multipartCarriesE2EEPart(contentType, evasive); !carries {
+		t.Error("an encoded-word name past the budget must not be forwarded")
+	}
+
+	// The budget covers HEADERS, not just parts: the inner loop over the
+	// dispositions a part declares was separately unbounded, and each one pays a
+	// mime.ParseMediaType plus a declaresEncodedName walk. Measured at 32 MiB
+	// before the shared budget: 35x a legitimate one-part body. One part with
+	// more dispositions than the budget must be refused on the same branch.
+	var manyDispositions bytes.Buffer
+	manyDispositions.WriteString("--B\r\n")
+	for i := 0; i <= maxHeadersExamined; i++ {
+		manyDispositions.WriteString("Content-Disposition: form-data; name=\"f\"\r\n")
+	}
+	manyDispositions.WriteString("\r\n\r\n--B--\r\n")
+	if couldNameE2EEPart(manyDispositions.Bytes()) {
 		t.Fatal("fixture must not trip the gate")
 	}
-	if carries, _ := multipartCarriesE2EEPart(contentType, quiet.Bytes()); carries {
-		t.Error("past the cap, a body that cannot be naming the marker must still be forwarded")
+	if carries, why := multipartCarriesE2EEPart(contentType, manyDispositions.Bytes()); !carries {
+		t.Error("one part declaring more dispositions than the budget must hit the same branch")
+	} else if !strings.Contains(why, "more than") {
+		t.Errorf("the refusal should cite the budget, got %q", why)
 	}
 
 	// The cost claim, asserted only where instrumentation cancels: two bodies of
