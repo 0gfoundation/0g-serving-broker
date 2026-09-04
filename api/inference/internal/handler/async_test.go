@@ -54,9 +54,13 @@ func (m *mockAsyncCtrl) IsAsyncEnabled() bool {
 // multipart part, which these async routes accept, and a mirrored JSON-only
 // mock would have kept this test green while the route leaked.
 //
-// The method reads no Ctrl state, so a zero value is a legitimate receiver.
+// It calls the receiver-free ctrl.IsSealedRequest rather than constructing a
+// zero Ctrl. The zero value worked — the predicate reads no enclave state — but
+// it encoded that assumption HERE, so the day the predicate starts reading a
+// field this fails as a nil-map panic inside a handler test instead of as a
+// compile error where the change was made.
 func (m *mockAsyncCtrl) IsSealedRequest(contentType string, reqBody []byte) (bool, string) {
-	return (&ctrl.Ctrl{}).IsSealedRequest(contentType, reqBody)
+	return ctrl.IsSealedRequest(contentType, reqBody)
 }
 
 func (m *mockAsyncCtrl) ValidateSession(ctx *gin.Context) (string, error) {

@@ -550,6 +550,22 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 // multipart part — the same hole this function was written to close, one request
 // shape over. See multipartCarriesE2EEPart.
 func (c *Ctrl) IsSealedRequest(contentType string, reqBody []byte) (bool, string) {
+	return IsSealedRequest(contentType, reqBody)
+}
+
+// IsSealedRequest is the receiver-free form, exported so a caller that has no
+// Ctrl — the handler tests, which mock the rest of the interface — can ask the
+// real question instead of reimplementing it.
+//
+// The method above forwards to it, which makes "this predicate reads no enclave
+// state" structural rather than a comment. It was a comment, and the test held
+// it up with `(&ctrl.Ctrl{})`: correct, but it encodes the assumption at the
+// call site, where the day the predicate starts reading a field it fails as a
+// nil-map panic inside an unrelated handler test rather than as a compile error
+// here. The split is also what the predicate's meaning already implies — it
+// answers a question about the BYTES, and the enclave's keys have no bearing on
+// whether the client sent an envelope.
+func IsSealedRequest(contentType string, reqBody []byte) (bool, string) {
 	if carries, why := multipartCarriesE2EEPart(contentType, reqBody); carries {
 		return true, why
 	}
