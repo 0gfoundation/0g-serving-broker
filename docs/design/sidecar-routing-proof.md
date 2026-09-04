@@ -97,6 +97,148 @@ quote. That is the same trust boundary the rest of the deployment already rests 
 — and it is why the sidecar must be declared in the **same measured compose** as
 the broker, not started separately.
 
+### On an end-to-end-encrypted request the proof travels nested
+
+A sealed (`_e2ee`) request already has a signature of its own — the 0g-pc SPEC §8
+ciphertext binding — and `/v1/proxy/signature/{chatID}` has room for exactly one
+top-level signed statement. On a sealed request that statement has to stay §8:
+it is what the E2EE client verifies, and it is the signature the client refuses
+the response without.
+
+So the routing proof is served **alongside** it, under `routing_proof`, carrying
+its own `text` and `signature`:
+
+```jsonc
+{
+  "text": "zg-sig-v1/e2ee-ct:<reqHash>:<respHash>",   // §8, unchanged
+  "signature": "0x…",
+  "signing_address": "0x…",
+  "signing_algo": "ecdsa",
+  "routing_proof": {                                   // present only when sealed AND centralized
+    "text": "<reqHash>:<respHash>:centralized:<identity>:<fingerprint>",
+    "signature": "0x…",                                // its OWN signature, over its own text
+    "signing_address": "0x…",
+    "signing_algo": "ecdsa",
+    "provider_type": "centralized",
+    "provider_identity": "minimax",
+    "tls_cert_fingerprint": "…"
+  }
+}
+```
+
+`provider_identity` is the lowercase machine key (`minimax`, `anthropic`), not a
+hostname — the host travels separately as `serving_domain` / `upstreamDomain`,
+which is the distinction the [MiniMax two-domain case](#what-stops-an-operator-pointing-this-at-something-that-isnt-in-enclave)
+below turns on.
+
+### A verifier MUST cross-check the two statements
+
+The §8 signature and `routing_proof.signature` are **two independent statements
+by the same key**. Neither covers the other, and nothing signed says they
+describe the same exchange — the chaining is true at the *signer*, by
+construction, but adjacency in one JSON object is not attested.
+
+A verifier that checks both signatures and stops has therefore verified less
+than it appears to. An intermediary holding cached signature responses for two
+chats — and the router does hold them: the chatID travels in `ZG-Res-Key` and
+this endpoint is unauthenticated — can serve §8 from chat A alongside
+`routing_proof` from chat B. Both signatures verify, `signing_address` is the
+right enclave, the fingerprint is a genuine vendor fingerprint, and the client
+concludes "the ciphertext I decrypted arrived over TLS to that vendor", which no
+signature ever said. The router is precisely the party this proof exists to
+constrain.
+
+**The obligation**, one comparison, possible only because the sealed proof reuses
+§8's hashes instead of computing its own:
+
+> The two hash halves of `text` MUST equal the first two colon-separated fields
+> of `routing_proof.text`. If they differ, reject the pair — do not fall back to
+> trusting §8 alone plus an unbound fingerprint.
+
+This binds the statements by **equality of values the verifier checks**, not by
+one signature covering the other.
+
+### …and MUST require the proof to be present on a centralized route
+
+Comparing the halves only catches a *mismatched* proof. The cheaper move for the
+same intermediary is to delete the whole `routing_proof` object: what remains is
+a §8 signature that verifies perfectly, from the right enclave, over the right
+ciphertext. No signature covers the field's presence, so a stripped proof and a
+legitimately unavailable one are byte-identical — the broker omits the field on
+several shapes (decentralized provider, no TLS evidence captured, a §8 text it
+cannot read), and `routing_proof` is `omitempty`.
+
+This asymmetry is **introduced by the nesting**. On the unsealed shape the
+evidence lives inside the one signed text, so it cannot be stripped — the router
+can only withhold the entire signature, which is detectable as *no signature at
+all*. On the sealed shape the evidence became an unsigned optional sibling of a
+signature that stays valid without it. Hence a second rule:
+
+> A verifier that knows the route is centralized MUST require `routing_proof` to
+> be present. Treat its absence as a failed verification, not as "no vendor
+> evidence available" — no signature covers the field's presence, so an
+> intermediary can remove it and leave a §8 that still verifies.
+
+Knowing the route is the precondition, so read it from provider metadata rather
+than from the signature response that is itself under attack: `GET /v1/models`
+publishes `provider_type` per model (`"centralized"` / `"standard"`, omitted for
+decentralized), which is the same value the broker signs into
+`routing_proof.provider_type` and the field a client should pin its expectation
+to. A client that cannot establish the route's type cannot enforce this rule —
+which is the honest limit of a two-signature design, and one more reason folding
+the evidence into §8 is the end state.
+
+Folding the routing evidence into the §8 signed text is strictly stronger — it
+makes both rules unnecessary, since absence and mismatch alike become a §8
+verification failure — and is the intended end state, deferred to the routing
+proof's next version because it changes the format for every verifier. Until
+then the two rules above are the contract, and this document is where they live,
+since the `0g-pc-e2ee` protocol package has no routing-proof concept at all.
+
+One related shape note, not exploitable but worth knowing: `FormatRoutingProofText`
+carries no scheme tag, so a sealed and an unsealed proof text are
+byte-shape-identical while their hashes commit to different things (on-wire
+ciphertext vs plaintext). Only JSON position distinguishes them, and no signature
+covers position. Inverting a ciphertext binding hash to a plaintext preimage is
+infeasible, so this is a clarity gap rather than an attack — and it disappears
+when the evidence folds into §8.
+
+Three properties are deliberate:
+
+- **Nested, not merged.** Every field inside `routing_proof` is covered by
+  `routing_proof.signature`. Hoisting the fingerprint next to a §8 signature that
+  does not cover it would hand verifiers a value with nothing behind it — the same
+  false confidence the signer refuses to create when the fingerprint is missing.
+- **The same text format** as an unsealed proof, so no verifier needs new code for
+  the nested case — but **not the same hashes**. An unsealed proof hashes the
+  plaintext the client holds; a sealed one reuses **§8's own on-wire binding
+  hashes**, the identical `<reqHash>`/`<respHash>` from the text above rather than
+  digests recomputed over anything. So the pair chains end to end: the routing
+  proof says which vendor's TLS connection produced exactly those bytes, and §8
+  says those bytes are the ciphertext the client decrypted.
+
+  This is load-bearing, not incidental. Hashing what the broker has in hand at
+  signing time would hash **plaintext** — both handlers keep their `clientBody`
+  plaintext for billing while the sealed frames go to the wire — which fails
+  twice over: a sealed client holds ciphertext and could never recompute those
+  digests, and `/v1/proxy/signature/{chatID}` is unauthenticated with its chatID
+  carried in `ZG-Res-Key`, so publishing `sha256(plaintext)` there hands a
+  confirmation oracle to the one party E2EE exists to exclude. A §8 text whose
+  halves are not 32-byte hex yields no proof at all rather than an attested
+  fragment.
+- **Unsealed responses are untouched.** There the routing proof *is* the whole
+  signature and stays flat at the top level, `routing_proof` absent. Both shapes
+  are asserted, so neither can drift into the other.
+
+Why it needed doing: `signChatResponse` returns from its E2EE branch before the
+centralized one, so before this a sealed request to a centralized provider got
+**no routing proof at all** — the vendor attestation that is the primary trust
+artifact of a centralized route, dropped on exactly the traffic that asked for
+the most confidentiality, and (per the section below) not counted as a skip
+either. Assembly failure is non-fatal: §8 still gets cached, because losing the
+load-bearing signature over missing vendor evidence would turn an absent extra
+into a failed request.
+
 ### When a proof is not produced
 
 Every path that cannot produce a proof — no TLS, no sidecar report, a malformed

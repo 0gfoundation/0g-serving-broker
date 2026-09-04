@@ -581,20 +581,58 @@ func (c *Ctrl) signChatResponse(ctx context.Context, reqBody, signData []byte, c
 			return nil
 		}
 		c.logger.Debug("E2EE sealed request, signing on-wire ciphertext (§8)")
-		return c.signChatE2EE(e2eeSignedText, chatKey)
+		// A sealed request to a CENTRALIZED provider needs both proofs, not one:
+		// §8 attests that this enclave produced the ciphertext the client
+		// decrypted, and the routing proof attests which vendor the upstream hop
+		// actually terminated TLS at. Neither implies the other, and the routing
+		// proof is the primary trust artifact of a centralized route — before
+		// this it was simply dropped on sealed traffic, because this branch
+		// returns before the IsCentralized() one below ever runs.
+		//
+		// It binds the §8 ON-WIRE hashes, taken from e2eeSignedText — NOT
+		// hashes of reqBody/signData. Those are plaintext on this path (both
+		// handlers keep clientBody plaintext for billing while the sealed frames
+		// go to the wire), and hashing them would publish plaintext digests on an
+		// unauthenticated endpoint whose chatID the router holds. See
+		// buildSealedRoutingProof.
+		//
+		// nil on failure, never fatal: §8 is the load-bearing signature here (the
+		// E2EE client refuses the response without it), so it must not be lost
+		// because the vendor evidence could not be assembled. Same posture the
+		// unsealed centralized path takes a few lines down.
+		// Deferred, not built here: signChatE2EE runs this only AFTER §8 is signed,
+		// so the optional proof's signer call cannot delay — or, on a wedged
+		// controller, time out ahead of — the mandatory one. See signChatE2EE.
+		// The fingerprint is read now, while ctx is in hand, and closed over.
+		var buildRouting func() *RoutingProof
+		if c.Service.IsCentralized() {
+			fingerprint := c.upstreamCertFingerprintFromCtx(ctx)
+			buildRouting = func() *RoutingProof {
+				routing, err := c.buildSealedRoutingProof(e2eeSignedText, fingerprint, providerIdentity)
+				if err != nil {
+					// Throttled: this fires at full request rate on a misconfigured
+					// deployment, which is the log-volume failure mode logProofSkip and
+					// the skip counter exist to replace. The detail is the CAUSE, not the
+					// shape ("sealed" is already in the message): logProofSkip memoizes on
+					// reason|detail, so a constant detail would let whichever cause fires
+					// first suppress the others for the whole window — and they have
+					// completely different fixes. Same use of the argument as proxy.go's
+					// absent/malformed and no_sidecar_report/no_sidecar_host.
+					c.logProofSkip(monitor.RoutingProofSkipSignError,
+						sealedProofSkipCause(e2eeSignedText, fingerprint),
+						"sealed response carries no routing proof: %v", err)
+					return nil
+				}
+				return routing
+			}
+		}
+		return c.signChatE2EE(e2eeSignedText, chatKey, buildRouting)
 	}
 
 	if c.Service.IsCentralized() {
 		// Centralized provider: broker TEE signs a routing proof with the TLS cert
 		// fingerprint captured on the upstream request (available before the flush).
-		var fingerprint string
-		if ginCtx, ok := ctx.(*gin.Context); ok {
-			if fingerprint = ginCtx.GetString(CtxKeyUpstreamCertFingerprint); fingerprint == "" {
-				c.logger.Warn("upstream cert fingerprint not found in context")
-			}
-		} else {
-			c.logger.Warn("context is not *gin.Context, cannot retrieve upstream cert fingerprint")
-		}
+		fingerprint := c.upstreamCertFingerprintFromCtx(ctx)
 		c.logger.Debug("Centralized provider, signing routing proof")
 		// Signing failure is non-fatal: without a cached signature the SDK gets a
 		// 404 on /v1/proxy/signature/{chatID}, which is more honest than a
@@ -611,6 +649,37 @@ func (c *Ctrl) signChatResponse(ctx context.Context, reqBody, signData []byte, c
 	}
 
 	return nil
+}
+
+// upstreamCertFingerprintFromCtx reads the upstream TLS certificate fingerprint
+// captured on the provider request (proxy.go, before the flush).
+//
+// Extracted because signChatResponse now needs the same answer on two branches —
+// the sealed one and the unsealed centralized one — and a routing proof is only
+// as good as its evidence: two copies of this read is how one of them ends up
+// consulting a different source and signing a proof over an empty fingerprint.
+// Callers get "" when there is none; buildCentralizedRoutingProof refuses to
+// sign on that, so the absence fails closed rather than producing a proof with
+// no TLS evidence in it.
+// Both misses log through logProofSkip rather than the logger directly: they are
+// per-request conditions on a misconfigured deployment, and unthrottled logging
+// on exactly this condition is what logProofSkip and the skip counter were added
+// to replace. No counter tick here — upstreamCertFingerprint already counted the
+// lost evidence at capture time with the precise reason, and counting again would
+// double-count one lost proof.
+func (c *Ctrl) upstreamCertFingerprintFromCtx(ctx context.Context) string {
+	ginCtx, ok := ctx.(*gin.Context)
+	if !ok {
+		c.logProofSkip(monitor.RoutingProofSkipNoTLS, "no-gin-context",
+			"context is not *gin.Context, cannot retrieve upstream cert fingerprint")
+		return ""
+	}
+	fingerprint := ginCtx.GetString(CtxKeyUpstreamCertFingerprint)
+	if fingerprint == "" {
+		c.logProofSkip(monitor.RoutingProofSkipNoTLS, "absent",
+			"upstream cert fingerprint not found in context")
+	}
+	return fingerprint
 }
 
 func (c *Ctrl) processSingleResponse(ctx context.Context, decodedBody []byte, outputPrice string, output *string, requestHash string, usage **Usage, isWhitelisted bool) error {
