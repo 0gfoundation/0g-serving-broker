@@ -187,41 +187,32 @@ func couldNameE2EEPart(reqBody []byte) bool {
 // prefix "name*" AT A PARAMETER POSITION, in any case. One pass, one byte at a
 // time, no allocation — the body may be tens of megabytes of audio.
 //
-// The parameter position is what makes this selective, because `filename*` also
-// contains "name*" and is what browsers emit for a non-ASCII upload name
-// (RFC 8187). Matching it made the gate true for essentially every
-// internationalised form — and the gate decides the fail-closed branches, so an
-// ordinary filename in one part settled the verdict for an unparseable
-// disposition in another. Measured on two bodies differing only in that
-// filename:
+// The parameter position is what makes this selective. `filename*` also contains
+// "name*" and is what browsers emit for a non-ASCII upload name (RFC 8187), so
+// matching it anywhere makes the gate true for essentially every
+// internationalised form — and the gate decides the fail-closed branches:
 //
 //	filename*=UTF-8''caf%C3%A9.png  -> gate=true,  REFUSED
 //	filename="cafe.png"             -> gate=false, forwarded
 //
-// So the selectivity has to be measured against real form bodies rather than
-// random ones: `name*` does not occur in 32 MiB of random bytes, but `filename*`
-// occurs in most internationalised uploads. declaresEncodedName excludes it on a
-// token boundary for the same reason.
+// Selectivity therefore has to be measured against real form bodies, not random
+// ones: `name*` does not occur in 32 MiB of random bytes, but `filename*` occurs
+// in most internationalised uploads. declaresEncodedName excludes it on a token
+// boundary for the same reason.
 //
-// Cost is FLAT by design, ~51 ms per 32 MiB (see the note on that bound at
-// maxHeadersExamined) whatever the body contains. An anchored bytes.IndexByte
-// scan is 9x faster on typical input and 8x slower on a '*'-dense one, which is
-// the wrong trade for a check that runs before inference on requests it exists
-// to reject: a cliff an attacker picks the body for is worse than a higher
-// floor. Keep it flat.
+// Cost is FLAT by design, ~51 ms per 32 MiB whatever the body contains. An
+// anchored bytes.IndexByte scan is 9x faster on typical input and 8x slower on a
+// '*'-dense one — the wrong trade for a check that runs before inference on
+// requests it exists to reject, since a cliff an attacker picks the body for is
+// worse than a higher floor. It is also not where this check spends its time:
+// enumerating the parts costs ~750 ms for 32 MiB of tiny ones against ~22 ms for
+// one large part, so optimise multipartCarriesE2EEPart instead.
 //
-// It is also not where this check spends its time. Enumerating the parts costs
-// ~22 ms for one 32 MiB part and ~750 ms for 32 MiB of ~300 000 tiny ones, so a
-// later reader optimising CPU should look at multipartCarriesE2EEPart, not here.
-//
-// The fold is letters-only rather than the usual `b|0x20` trick, and that is not
-// stylistic: 0x20 maps '\n' (0x0A) onto '*' (0x2A), so the trick reports
-// "name\n" as a mention. TestMentionsEncodedName sweeps all 256 bytes through
-// each of the five positions to hold that.
-//
-// "name" has no repeated prefix byte — 'n' occurs only at index 0 — so a
-// mismatch needs no backtracking beyond restarting at 1 when the byte that
-// failed is itself an 'n'.
+// The fold is letters-only rather than the usual `b|0x20`, which is not
+// stylistic: 0x20 maps '\n' (0x0A) onto '*' (0x2A), reporting "name\n" as a
+// mention. TestMentionsEncodedName sweeps all 256 bytes through each of the five
+// positions to hold that. Restarting needs no backtracking beyond index 1,
+// because 'n' occurs only at index 0 of the needle.
 func mentionsEncodedName(reqBody []byte) bool {
 	const needle = "name*"
 	matched := 0
@@ -421,46 +412,38 @@ func looksMultipart(contentType string) bool {
 // "_e2ee" — a sealed envelope smuggled into the one request shape the JSON checks
 // cannot see (SPEC §5.3.1). The string is the reason, for the rejection message.
 //
-// Why it exists: every other sealed-request check starts by parsing the body as
-// JSON, and a multipart body is not JSON, so "detect _e2ee, else pass through"
-// reads the parse failure as NOT SEALED and forwards the envelope in the clear.
-// §5.3.1 states the rule this violates — a body that cannot be parsed as an
-// envelope is not thereby an unsealed body.
+// It exists because every other sealed-request check parses the body as JSON, and
+// a multipart body is not JSON: "detect _e2ee, else pass through" reads the parse
+// failure as NOT SEALED and forwards the envelope in the clear. §5.3.1 names the
+// rule that breaks — a body that cannot be parsed as an envelope is not thereby
+// an unsealed body.
 //
 // The check is on PART NAMES, never the raw bytes, and that cuts both ways: a
 // substring rule would refuse a transcription whose `prompt` legitimately
 // mentions the marker, and would miss the name whenever it is encoded.
 //
-// Three things about what "declares a name" means here, each measured:
+// "Declares a name" means both headers that can carry one (Content-Disposition,
+// and Content-Type per RFC 2045 §5), read directly rather than via
+// Part.FormName() — which answers "" for any disposition that is not exactly
+// `form-data`, while lenient parsers read `name` regardless of the type — and
+// read across every value the part declares, since Header.Get answers with the
+// first of several.
 //
-//   - It reads Content-Disposition's `name` DIRECTLY, not via Part.FormName(),
-//     which returns "" for any part whose disposition is not exactly `form-data`
-//     — so `attachment; name="_e2ee"` carries the name and answers "" to the
-//     accessor. Lenient parsers downstream read `name` regardless of the type.
-//   - It reads EVERY Content-Disposition value the part declares; Header.Get
-//     answers with the first, and a part may declare the header twice.
-//   - It covers every part whose HEADER COMPLETES, which is the set any parser
-//     can name. A header truncated mid-name is NOT covered and needs no cover:
-//     Go drops it with a plain io.EOF (so there is nothing to fail closed on),
-//     and a header that never terminates has no body after it to hold an
-//     envelope. Its adversarial neighbour — a header that terminates with a
-//     malformed name, `name="_e2ee` — makes ParseMediaType error, and is refused.
+// Comparison is CASE-SENSITIVE, because form field names are: `_E2EE` is a
+// different field. It is not literal, though — resolvesToMarker compares every
+// reading a conformant parser might give the value.
 //
-// Where an error IS reported (an unreadable boundary, an unparseable
-// Content-Disposition) it fails closed, gated on couldNameE2EEPart so the set is
-// "malformed AND could be naming the marker" rather than "malformed": refusing
-// costs a clear error on a request an upstream would reject anyway.
+// Two kinds of branch below, and the distinction carries the design. EXACT ones
+// (a resolved name, a header that demonstrably encodes one, names that were
+// never read at all) refuse outright. HEURISTIC ones — where a header cannot be
+// parsed, so nothing can be asked — refuse only when couldNameE2EEPart also
+// holds, making the set "malformed AND could be naming the marker" rather than
+// "malformed". That gated set is deliberately not closed; see the branches.
 //
-// One branch is deliberately NOT gated, because it is exact rather than
-// heuristic: a disposition that RFC 2231-encodes its `name` is refused outright,
-// since the parser resolves those only for us-ascii and utf-8 and silently drops
-// — or partially decodes — anything else. Measurements are on the branch.
-//
-// The name comparison is CASE-SENSITIVE: form field names are, so `_E2EE` is a
-// different field no parser resolves to the marker. (Parameter names are another
-// matter, and ParseMediaType already folds those.) It is not, however, literal —
-// it compares every reading a conformant parser might give the value, which is
-// resolvesToMarker's business.
+// Parts whose header never completes are not covered and need no cover: Go drops
+// one with a plain io.EOF, and a header that never terminates has no body after
+// it to hold an envelope. Its neighbour — a header that terminates with a
+// malformed name — makes ParseMediaType error and is refused.
 func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string) {
 	if !looksMultipart(contentType) {
 		return false, ""
@@ -468,10 +451,9 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 	_, params, err := mime.ParseMediaType(contentType)
 	if err != nil || params["boundary"] == "" {
 		if couldNameE2EEPart(reqBody) {
-			// Two distinct causes reach here and they need distinct wording: a
-			// Content-Type that does not parse, and one that parses with no
-			// boundary parameter at all. Formatting err in both cases rendered
-			// the second as "could not be read (<nil>)".
+			// Two causes, two wordings: a Content-Type that does not parse, and
+			// one that parses with no boundary at all. Formatting err in both
+			// renders the second as "could not be read (<nil>)".
 			why := "its multipart boundary is missing from the Content-Type"
 			if err != nil {
 				why = fmt.Sprintf("its multipart boundary could not be read (%v)", err)
@@ -481,22 +463,13 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 		return false, ""
 	}
 
-	// couldNameE2EEPart scans the WHOLE body, and its answer depends on nothing
-	// but reqBody — so compute it at most once. The Content-Disposition branch
-	// below `continue`s on a false result rather than returning, so calling it per
-	// part costs parts x len(body) for an identical answer every time. Measured
-	// uncached, on a 32 MiB body of 33-byte malformed parts:
-	// 97 ms for one, 4.1 s for 50, 16.4 s for 200 — linear at ~82 ms each,
-	// and 1,016,800 such parts fit inside the 32 MiB request limit — on the sync
-	// proxy; see the note on that bound at maxHeadersExamined.
-	//
-	// That is reachable with no session: the sync proxy calls MaybeUnsealRequest
-	// (proxy.go) about ninety lines BEFORE ValidateSession, so the body-size limit
-	// and the global concurrency cap are the only things in front of it — and the
-	// cap converts the attack into shed legitimate traffic.
-	//
-	// Lazily, not eagerly: the gate exists so a well-formed body never pays the
-	// scan at all, which is the common case.
+	// The gate scans the whole body and depends on nothing but reqBody, so it is
+	// computed at most once — and lazily, so a well-formed body never pays for it
+	// at all. The disposition branch `continue`s rather than returning, so a
+	// per-part call costs parts x len(body) for an identical answer: 97 ms / 4.1 s
+	// / 16.4 s at 1 / 50 / 200 malformed parts in 32 MiB, pre-authentication (the
+	// sync proxy reaches here ~90 lines before ValidateSession). See
+	// maxHeadersExamined for what bounds the rest.
 	examined := 0
 	gateKnown, gate := false, false
 	couldName := func() bool {
@@ -509,20 +482,17 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 	reader := multipart.NewReader(bytes.NewReader(reqBody), params["boundary"])
 	for {
 		part, err := reader.NextPart()
-		// `== io.EOF`, and NOT errors.Is, is load-bearing. mime/multipart
-		// reports "no more parts" as a bare io.EOF but wraps the failure to ever
-		// find the declared boundary with %w:
+		// `== io.EOF`, NOT errors.Is, is load-bearing. mime/multipart reports "no
+		// more parts" as a bare io.EOF but WRAPS the failure to ever find the
+		// declared boundary:
 		//
-		//	clean end of parts             -> "EOF"                    == io.EOF
-		//	boundary never found in body   -> "multipart: NextPart: EOF" != io.EOF, errors.Is -> true
+		//	clean end of parts            -> "EOF"                     == io.EOF
+		//	boundary never found in body  -> "multipart: NextPart: EOF" != io.EOF
 		//
-		// The second is a body whose parts nobody enumerated, which must reach
-		// the fail-closed branch below; errors.Is cannot tell it from the first
-		// and would read it as a clean end and forward the envelope. So the
-		// identity comparison is deliberate: switching to errors.Is here — the
-		// change a linter or a tidy-up will propose — silently reopens the hole,
-		// which is why TestMismatchedBoundaryMentioningTheMarkerIsRefused exists
-		// to fail when it does.
+		// The second is a body nobody enumerated, which must reach the fail-closed
+		// branch below. errors.Is matches both and would forward it — so this is
+		// the rare place where the change a linter proposes reopens a hole, and
+		// TestMismatchedBoundaryMentioningTheMarkerIsRefused fails when it does.
 		if err == io.EOF { //nolint:errorlint // see above: errors.Is would match the wrapped boundary failure too
 			return false, ""
 		}
@@ -534,51 +504,24 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 		}
 		examined++
 		if examined > maxHeadersExamined {
-			// UNGATED, unlike the branches that ask couldName(). The heuristic
-			// sees the literal marker or a `name*` attribute, and the premise of
-			// this branch is that a name past the budget is never read — so the
-			// one spelling the gate cannot see is the one that would evade it.
-			// Measured with this branch gated, on a part named
-			// `=?utf-8?B?X2UyZWU=?=` (RFC 2047 for `_e2ee`):
+			// UNGATED: the premise is that a name past the budget is never read,
+			// so the one spelling the gate cannot see is the one that would evade
+			// it — an RFC 2047 encoded word was forwarded from here while the
+			// isEncodedWord branch refused the same name inside the budget.
+			// Widening the gate instead is worse: `=?` occurs ~516 times by chance
+			// in 32 MiB of random bytes, which makes it always-true.
 			//
-			//	past the budget                -> gate=false, FORWARDED
-			//	inside a nested multipart part -> gate=false, FORWARDED
-			//	enumerable and not nested      -> refused by the isEncodedWord branch
-			//
-			// Widening the gate to `=?` instead is worse, and measurably: in
-			// 32 MiB of random bytes `=?` occurs ~516 times by chance while
-			// `name*` occurs 0, so the gate would be always-true and the
-			// narrowing that keeps a malformed `filename` from being refused as
-			// an e2ee error would be undone.
-			//
-			// Refusing outright costs nothing real: no client on
-			// /audio/transcriptions, /images/edits or /v1/async/images/edits
-			// sends a form with thousands of parts or thousands of dispositions
-			// on one part.
-			//
-			// Why the budget covers HEADERS and not just parts: the inner loop
-			// pays a mime.ParseMediaType (map allocation) and a
-			// declaresEncodedName walk per declared disposition, and nothing
-			// bounded how many a part declares. Measured at 32 MiB against one
-			// legitimate 32 MiB part: 35x. Same unbounded-dimension shape as the
-			// two amplifications already fixed here, one level in.
+			// Costs nothing real — no client on these endpoints sends thousands of
+			// parts — and it counts HEADERS, not just parts, because the inner
+			// loops pay a ParseMediaType and a declaresEncodedName walk per
+			// declared header: 35x at 32 MiB against one legitimate part.
 			return true, fmt.Sprintf("the body declares more than %d parts or part headers, so they cannot all be enumerated from here", maxHeadersExamined)
 		}
-		// EVERY Content-Disposition the part declares, not Header.Get's first
-		// one. A part may declare the header twice — innocuous first, marker
-		// second — and Get sees only the first. Measured on that body:
-		//
-		//	Get()      = `form-data; name="file"`
-		//	Values()   = [`form-data; name="file"` `form-data; name="_e2ee"`]
-		//	FormName() = "file"
-		//
-		// Which parser wins is not ours to assume — Go and Python's email take
-		// the first, others the last — and the contract does not depend on the
-		// answer: the body demonstrably DECLARES the name, so it cannot be shown
-		// not to carry an envelope.
-		//
-		// Values returns an empty slice for a part with no disposition, so the
-		// loop needs no separate skip.
+		// EVERY value, not Header.Get's first: a part may declare the header twice,
+		// innocuous first and marker second, and parsers disagree about which wins
+		// (Go and Python's email take the first, others the last). The contract
+		// does not depend on the answer — the body demonstrably declares the name.
+		// Values returns empty for a part with no disposition, so no separate skip.
 		for _, disposition := range part.Header.Values("Content-Disposition") {
 			examined++
 			if examined > maxHeadersExamined {
@@ -586,21 +529,15 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 			}
 			_, dparams, derr := mime.ParseMediaType(disposition)
 			if derr != nil {
-				// Gated, unlike the budget and nested branches, and the asymmetry
-				// is deliberate. Evading THIS gate needs the marker-bearing
-				// disposition to itself be unparseable, which makes the name a
-				// guess either way — so the heuristic gives up nothing here, where
-				// on those branches it gives up the whole refusal. The gated set
-				// is not closed: an encoding the heuristic cannot see slips past
-				// it, accepted on this branch and not on those.
+				// Gated, unlike the budget and nested branches. Evading THIS gate
+				// needs the marker-bearing disposition to itself be unparseable,
+				// so the name is a guess either way and the heuristic gives up
+				// nothing; on those branches it gives up the whole refusal.
 				//
 				// Ungated, this refuses any part whose disposition merely fails to
-				// parse — `form-data; name="notes"; filename="my"file.txt"`, an
-				// unescaped quote, sloppy but real and forwarded by every other
-				// path through this broker — with an e2ee error, though the body
-				// mentions neither the marker nor `name*`.
-				// TestMalformedMultipartWithoutTheMarkerIsStillForwarded guards
-				// that.
+				// parse — `filename="my"file.txt"`, an unescaped quote, sloppy but
+				// real and forwarded by every other path here.
+				// TestMalformedMultipartWithoutTheMarkerIsStillForwarded guards it.
 				if couldName() {
 					return true, "the body could be naming the reserved marker and a part's Content-Disposition could not be parsed, so the name it declares cannot be ruled out"
 				}
@@ -609,147 +546,87 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 			if dparams["name"] == e2eeBodyMarker {
 				return true, fmt.Sprintf("a multipart part is named %q", e2eeBodyMarker)
 			}
-			// The same name as a CONFORMANT parser reads it: white space trimmed,
-			// quoted pairs resolved, or both. Go does neither. It unescapes a
-			// backslash only before a tspecial and reports the value with its
-			// padding, so each of these compares unequal above while javax.mail,
-			// Ruby's mail or any parser that trims reads the marker. Measured:
+			// The same name as a CONFORMANT parser reads it. Go trims nothing and
+			// unescapes a backslash only before a tspecial, so each of these
+			// compares unequal above while a parser that trims, or resolves quoted
+			// pairs, reads the marker:
 			//
-			//	name=" _e2ee"    -> ParseMediaType yields ` _e2ee`
-			//	name="_e2ee "    -> yields `_e2ee `
-			//	name="\_e2ee"    -> yields `\_e2ee`
-			//	name="\ _e2ee"   -> yields `\ _e2ee`
-			//	name="a\"b"      -> yields `a"b`; the tspecial one IS unescaped
+			//	name=" _e2ee"   -> ` _e2ee`    name="\_e2ee"   -> `\_e2ee`
+			//	name="_e2ee "   -> `_e2ee `    name="\ _e2ee"  -> `\ _e2ee`
 			//
-			// The trim is not a smaller claim than the rest of this function: a
-			// parser that trims a parameter value does so BEFORE it decodes
-			// anything, so every upstream that makes the padded encoded word in
-			// isEncodedWord reachable makes the padded literal reachable first —
-			// as does any parser that trims and does no RFC 2047 decoding at all.
+			// The trim is not a smaller claim than the rest: a parser trims BEFORE
+			// it decodes, so every upstream that makes the padded encoded word
+			// below reachable makes the padded literal reachable first.
 			if resolvesToMarker(dparams["name"]) {
 				return true, fmt.Sprintf("a multipart part's form-field name reads as %q to a conformant parser, which trims linear white space and resolves RFC 2045 quoted pairs where mime.ParseMediaType does neither, so the name it declares cannot be ruled out", e2eeBodyMarker)
 			}
-			// An RFC 2047 encoded word, which Go hands back verbatim: the name is
-			// `=?utf-8?B?X2UyZWU=?=`, no error, and the raw bytes spell neither
-			// the marker nor `name*`, so the gate is false too. Measured:
-			//
-			//	name="=?utf-8?B?X2UyZWU=?="       -> that string, err=nil
-			//	name="=?iso-8859-1?Q?=5Fe2ee?="   -> that string, err=nil
-			//
-			// RFC 2231 §5 forbids encoded words in parameter values, so this is a
-			// smaller claim than the charset gap below — but no smaller than the
-			// quoted-pair one, and javax.mail decodes these under
-			// mail.mime.decodeparameters. Refused without deciding what the word
-			// meant, exactly as the charset branch does.
+			// An RFC 2047 encoded word, which Go hands back verbatim with no error
+			// — and whose raw bytes spell neither the marker nor `name*`, so the
+			// gate is false too. RFC 2231 §5 forbids these in parameter values, but
+			// javax.mail decodes them under mail.mime.decodeparameters. Refused
+			// without deciding what the word meant, as the charset branch is.
 			if isEncodedWord(dparams["name"]) {
 				return true, "a part's form-field name is an RFC 2047 encoded word, which mime.ParseMediaType returns undecoded but other parsers resolve, so the name it declares cannot be ruled out"
 			}
-			// A clean parse is not the same as an answer. mime.ParseMediaType
-			// DROPS an RFC 2231 parameter whose charset it cannot decode and
-			// reports no error at all (its decode2231Enc simply returns on
-			// `// TODO: unsupported encoding`), so `name` comes back "" — or,
-			// worse, partially decoded — on a part that plainly declares one.
-			// Measured:
+			// A clean parse is not an answer. ParseMediaType DROPS an RFC 2231
+			// parameter whose charset it cannot decode, reporting no error (its
+			// decode2231Enc returns on `// TODO: unsupported encoding`) — so a part
+			// that plainly declares a name yields "" or, worse, a partial decode:
 			//
-			//	name*=utf-8''%5Fe2ee                     -> name="_e2ee"  refused
-			//	name*=iso-8859-1''%5Fe2ee                -> name=""       FORWARDED
-			//	name*=windows-1252''%5Fe2ee              -> name=""       FORWARDED
-			//	name*=''%5Fe2ee                          -> name=""       FORWARDED
-			//	name*=utf-8''%ZZe2ee                     -> name=""       FORWARDED
-			//	name*0*=utf-8''%5Fe2; name*1*=ee         -> name="_e2ee"  refused
-			//	name*0*=iso-8859-1''%5Fe2; name*1*=ee    -> name="ee"     FORWARDED
+			//	name*=utf-8''%5Fe2ee                   -> "_e2ee"  refused
+			//	name*=iso-8859-1''%5Fe2ee              -> ""       FORWARDED
+			//	name*0*=iso-8859-1''%5Fe2; name*1*=ee  -> "ee"     FORWARDED
 			//
-			// The last row is why the fix cannot be "refuse when the name came
-			// back empty": the parser silently kept one segment and dropped the
-			// other, so its value is neither the name nor absent. And no error
-			// means neither fail-closed branch runs — couldNameE2EEPart, which
-			// matches `name*`, is never consulted.
-			//
-			// Python's email and Node's busboy do decode latin-1/windows-1252 and
-			// resolve these to `_e2ee`. So: if the disposition RFC 2231-encodes
-			// its `name` AT ALL, this refuses, without trying to decide what the
-			// encoding meant. Re-implementing RFC 2231 to second-guess the parser
-			// would be another layer of the same mistake; the parser's silence is
-			// not evidence of absence.
-			//
-			// The cost is near zero: form clients emit a plain `name="…"` — only
-			// `filename` is ever 2231-encoded in the wild, and declaresEncodedName
-			// excludes it on a token boundary rather than a substring.
+			// The last row rules out "refuse when the name came back empty": the
+			// parser kept one segment and dropped the other, so the value is
+			// neither the name nor absent. And with no error, neither fail-closed
+			// branch runs. Python's email and Node's busboy resolve all three to
+			// `_e2ee`, so a 2231-encoded `name` is refused AT ALL rather than
+			// re-implementing RFC 2231 to second-guess the parser. Near-zero cost:
+			// only `filename` is 2231-encoded in the wild, and declaresEncodedName
+			// excludes it on a token boundary.
 			if declaresEncodedName(disposition) {
 				return true, "a part RFC 2231-encodes its form-field name, which mime.ParseMediaType resolves only for us-ascii and utf-8 (dropping the rest silently), so the name it declares cannot be ruled out"
 			}
 		}
-		// A part that is ITSELF multipart hides its own parts from this
-		// enumeration: mime/multipart does not descend, so the inner part named
-		// `_e2ee` parses cleanly, raises no error, and is forwarded.
-		//
-		// That needs no recursion to close, because it is already the condition
-		// this function fails closed on everywhere else — a body whose parts
-		// cannot be enumerated is a body that cannot be shown NOT to carry an
-		// envelope. Descending instead would multiply the enumeration cost by the
-		// nesting depth, and the enumeration is the expensive half of this check
-		// (see mentionsEncodedName), so it would want its own bound and its own
-		// measurement to be worth the reach.
-		//
-		// UNGATED, for the reason spelled out at the budget branch above: the
-		// premise here is that the inner names are never read, so a heuristic over
-		// spellings cannot narrow it honestly — with this branch gated, an RFC 2047
-		// encoded word one level down evades it.
-		//
-		// The cost is not quite nothing: `multipart/mixed` inside a form part is
-		// the RFC 1867 way to send several files under one field name. HTML5
-		// dropped it and no OpenAI-compatible client emits it, but this is a hard
-		// 400 on a shape every other path forwards, so it belongs in release
-		// notes rather than only here.
-		//
-		// It is not the only unenumerated content, and the others are NOT closed.
-		// mime/multipart is symmetric about the delimiters: it skips everything
-		// before the first one (an RFC 2046 §5.1 preamble) and stops at the
-		// closing `--boundary--` (the epilogue), so a part-shaped block in either
-		// position is never read here. Measured:
-		//
-		//	block before the first delimiter  -> carries=false, FORWARDED
-		//	block after the close delimiter   -> carries=false, FORWARDED
-		//
-		// Both are left open deliberately — RFC 2046 §5.1.1 says both MUST be
-		// ignored, so reaching either needs an upstream that splits on
-		// `--boundary` while honouring neither, where descending into a nested
-		// part is what a lenient parser does naturally. Named with the other
-		// residuals in the PR description rather than fixed.
 		for _, partType := range part.Header.Values("Content-Type") {
-			// Counted against the same budget, for the reason the disposition
-			// loop is: a per-part loop is a per-part multiplier.
 			examined++
 			if examined > maxHeadersExamined {
 				return true, fmt.Sprintf("the body declares more than %d parts or part headers, so they cannot all be enumerated from here", maxHeadersExamined)
 			}
+			// A part that is ITSELF multipart hides its own parts: mime/multipart
+			// does not descend, so an inner part named `_e2ee` parses cleanly and
+			// is forwarded. Closed without recursion, because "the parts were not
+			// enumerated" is already the condition this function fails closed on —
+			// and descending would multiply the enumeration cost by the nesting
+			// depth, wanting its own bound. UNGATED for the reason at the budget
+			// branch above.
+			//
+			// Not quite free: `multipart/mixed` in a form part is the RFC 1867
+			// multi-file field, dropped by HTML5 and emitted by no
+			// OpenAI-compatible client, but this is a hard 400 on a shape every
+			// other path forwards. Release notes, not just here.
+			//
+			// The other unenumerated content is NOT closed. mime/multipart is
+			// symmetric about the delimiters — it skips everything before the
+			// first and stops at the close — so a part-shaped block in the
+			// preamble or the epilogue is never read here. Both are left open
+			// deliberately: RFC 2046 §5.1.1 says both MUST be ignored, so reaching
+			// either needs an upstream honouring neither delimiter, where
+			// descending into a nested part is what a lenient parser does anyway.
 			if looksMultipart(partType) {
 				return true, "a part declares a nested multipart body, whose own parts cannot be enumerated from here"
 			}
-			// Content-Type carries a `name` too. RFC 2045 §5 defines it for
-			// exactly this purpose, javax.mail's getFileName() still reads it as
-			// a fallback, and a part may declare it with NO Content-Disposition
-			// at all — in which case the loop above never runs and every check in
-			// it is skipped. Measured:
-			//
-			//	Content-Type: text/plain; name="_e2ee"                -> FORWARDED
-			//	Content-Type: text/plain; name=" _e2ee"               -> FORWARDED
-			//	Content-Type: text/plain; name*=iso-8859-1''%5Fe2ee   -> FORWARDED
-			//
-			// So the same three readings apply here, on the same premise as the
-			// disposition: a name a lenient parser resolves to the marker cannot
-			// be ruled out. Refusing a nested part and a >4096-part form while
-			// forwarding a part that plainly declares the marker in a parameter
-			// defined to name it is not a defensible line.
-			//
-			// The cost is one ParseMediaType per part Content-Type, against a
-			// prefix test alone for the nested check. The budget above counts this
-			// loop, so the amplification bound is unchanged.
+			// RFC 2045 §5 puts a `name` on Content-Type too, javax.mail's
+			// getFileName() reads it as a fallback, and a part may declare it with
+			// NO Content-Disposition — in which case the loop above never runs and
+			// every check in it is skipped. So the same three readings apply here,
+			// and not only when a disposition is absent: which header a lenient
+			// parser prefers is not ours to assume. The parse failure is gated as
+			// the disposition's is. One ParseMediaType per part Content-Type,
+			// against the prefix test alone above; the budget already covers it.
 			_, tparams, terr := mime.ParseMediaType(partType)
 			if terr != nil {
-				// Gated, like the disposition's parse failure and for the same
-				// reason: evading it needs the marker-bearing Content-Type to
-				// itself be unparseable, so the name is a guess either way.
 				if couldName() {
 					return true, "the body could be naming the reserved marker and a part's Content-Type could not be parsed, so the name it declares cannot be ruled out"
 				}
