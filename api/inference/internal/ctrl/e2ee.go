@@ -143,8 +143,16 @@ func hasE2EEMarker(reqBody []byte) bool {
 	return bytes.Contains(reqBody, []byte(e2eeBodyMarker))
 }
 
-// couldNameE2EEPart reports whether a body that could NOT be enumerated might
-// still be hiding a part named "_e2ee".
+// couldNameE2EEPart reports whether a body SPELLS something that a part named
+// "_e2ee" would have to spell — the literal marker, or an RFC 2231 `name*`
+// attribute in any case.
+//
+// It does NOT report whether the body might be hiding such a part, and the
+// difference is the whole reason it gates nothing but the fail-closed branches.
+// It cannot see an encoded word, or a quoted pair, or any other spelling that
+// resolves to the marker without containing it; three separate rounds of review
+// found one of those. A summary of "might be hiding it" would be a claim this
+// function is structurally unable to make.
 //
 // It gates the FAIL-CLOSED branches only, never detection. This is a heuristic
 // over SPELLINGS, and spellings do not enumerate: it cannot see a name the
