@@ -1,8 +1,11 @@
 package ctrl
 
 import (
+	"encoding/hex"
 	"strings"
 	"testing"
+
+	"github.com/0glabs/0g-serving-broker/common/tee"
 
 	"github.com/0gfoundation/0g-pc-e2ee/protocol/proof"
 
@@ -263,6 +266,105 @@ func TestSealedRoutingProofRefusesAMalformedE2EEText(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSealedRoutingProofIsNotBuiltUntilTheE2EESignatureSucceeds pins the ORDER
+// of the two signer calls, which is a latency and availability property no other
+// assertion here can see.
+//
+// Both signatures are produced before the body is flushed (issue #619), and with
+// TEE_SOCKET each SignHash is a controller round trip bounded by
+// remoteSignerTimeout. Building the optional routing proof first therefore let a
+// wedged controller burn that timeout ahead of §8 — the signature the E2EE
+// client refuses the response without — and on the non-stream path, where a
+// signing failure fails the request closed, doubled the time to that failure.
+//
+// The observable consequence of the fix is that a failed §8 signature means the
+// routing proof is never built at all. A zero TeeService makes SignHash fail
+// cleanly ("provider signer not initialized"), so this asserts exactly that: the
+// error surfaces, and the builder was never invoked. Restoring the old order
+// makes the builder run and fails this test.
+func TestSealedRoutingProofIsNotBuiltUntilTheE2EESignatureSucceeds(t *testing.T) {
+	f := centralizedFixture(t)
+	f.c.SetTeeServiceForTest(&tee.TeeService{}) // no signer: SignHash fails
+
+	built := false
+	err := f.c.signChatE2EE(proof.SchemeE2EECiphertext+":"+onWireReqHash+":"+onWireRespHash,
+		"ck-order", func() *RoutingProof {
+			built = true
+			return nil
+		})
+
+	if err == nil {
+		t.Fatal("signChatE2EE succeeded with no signer; this test can no longer observe the ordering")
+	}
+	if built {
+		t.Error("the optional routing proof was built even though the mandatory §8 signature failed — the signer calls are back in the wrong order")
+	}
+}
+
+// TestE2EEBindingHashesAcceptsWhatTheProtocolProduces couples the scheme
+// allowlist to the protocol's actual producers instead of to a hand-copy of its
+// constants.
+//
+// Every other sealed §8 text in these tests is assembled by hand, so they all
+// agree with each other by construction and none of them would notice the
+// protocol changing what it emits — a renamed scheme value, a different arity, a
+// different hex encoding would leave the suite green while production stopped
+// producing a routing proof for sealed traffic, which is the exact regression
+// this change exists to fix. So drive the two entry points the broker itself
+// calls and require e2eeBindingHashes to accept their output and split it
+// correctly.
+//
+// What this does NOT cover: a protocol bump adding a THIRD ciphertext-binding
+// scheme. No test can, because the protocol exports its schemes as individual
+// constants with no enumerable set of "ciphertext-binding" ones — parseScheme's
+// own doc puts that judgement on the caller. Making it mechanical needs an
+// exported set upstream; until then the allowlist is a hand-maintained mirror
+// and adding a scheme means updating it here too.
+func TestE2EEBindingHashesAcceptsWhatTheProtocolProduces(t *testing.T) {
+	var reqH, respH [32]byte
+	mustDecodeInto(t, reqH[:], onWireReqHash)
+	mustDecodeInto(t, respH[:], onWireRespHash)
+
+	streamText, err := proof.NewStreamBinderFromReqHash(reqH).Text()
+	if err != nil {
+		t.Fatalf("StreamBinder.Text: %v", err)
+	}
+
+	for _, tc := range []struct {
+		producer string
+		text     string
+	}{
+		{"proof.SignedTextE2EEFromHashes", proof.SignedTextE2EEFromHashes(reqH, respH)},
+		{"proof.StreamBinder.Text", streamText},
+	} {
+		t.Run(tc.producer, func(t *testing.T) {
+			gotReq, gotResp, ok := e2eeBindingHashes(tc.text)
+			if !ok {
+				t.Fatalf("e2eeBindingHashes rejected %s output %q — the allowlist has drifted from the protocol, so sealed responses get no routing proof",
+					tc.producer, tc.text)
+			}
+			// Split the produced text independently and require the same answer, so
+			// this pins the halves rather than trusting the function under test.
+			parts := strings.Split(tc.text, ":")
+			if len(parts) != 3 {
+				t.Fatalf("%s produced %q, which is not <scheme>:<reqH>:<respH>", tc.producer, tc.text)
+			}
+			if gotReq != parts[1] || gotResp != parts[2] {
+				t.Errorf("halves = (%s, %s), want (%s, %s)", gotReq, gotResp, parts[1], parts[2])
+			}
+		})
+	}
+}
+
+func mustDecodeInto(t *testing.T, dst []byte, hexStr string) {
+	t.Helper()
+	b, err := hex.DecodeString(hexStr)
+	if err != nil || len(b) != len(dst) {
+		t.Fatalf("bad test hash %q: %v", hexStr, err)
+	}
+	copy(dst, b)
 }
 
 // TestSealedProofSkipCauseSeparatesTheThrottleKeys pins the classification

@@ -180,12 +180,27 @@ func jcsSha256Hex(b []byte) (string, error) {
 // the broker's signed bytes and the client's recomputed bytes byte-for-byte
 // identical; this function is a thin signer over the finished text.
 //
-// routing is the centralized routing proof to carry alongside, or nil when there
-// is none (any non-centralized provider, or a centralized one whose TLS evidence
-// could not be assembled). It is nested rather than merged: §8 stays this
-// response's top-level signed statement, so an E2EE client verifies exactly what
-// it verified before this field existed.
-func (c *Ctrl) signChatE2EE(text, chatKey string, routing *RoutingProof) error {
+// buildRouting, when non-nil, produces the centralized routing proof to carry
+// alongside (nil from it means there is none — a centralized provider whose TLS
+// evidence could not be assembled). It is nested rather than merged: §8 stays
+// this response's top-level signed statement, so an E2EE client verifies exactly
+// what it verified before this field existed.
+//
+// It is a FUNCTION rather than a finished proof so that ORDER is enforced here:
+// §8 is signed first, and buildRouting — which costs a second signer call —
+// only runs once §8 is in hand. Both signatures happen before the body is
+// flushed (issue #619), and with TEE_SOCKET each SignHash is a controller round
+// trip bounded by remoteSignerTimeout, so signing the optional proof first would
+// let a wedged controller burn that timeout ahead of the signature the client
+// refuses the response without — and on the non-stream path, where a signing
+// failure fails the request closed, would double the time to that failure.
+// Passing a finished proof cannot express this: building it is the cost.
+//
+// The result is attached to the SAME cache entry, in one Set. Setting §8 first
+// and re-Setting with the proof would publish, for that window, a §8 with no
+// routing_proof — which RoutingProof's own MUST-present rule tells a verifier on
+// a centralized route to reject.
+func (c *Ctrl) signChatE2EE(text, chatKey string, buildRouting func() *RoutingProof) error {
 	sig, err := c.teeService.SignHash(accounts.TextHash([]byte(text)))
 	if err != nil {
 		return err
@@ -199,7 +214,9 @@ func (c *Ctrl) signChatE2EE(text, chatKey string, routing *RoutingProof) error {
 		SignatureEcdsa:      hexutil.Encode(sig),
 		SigningAddressEcdsa: c.teeService.Address,
 		SigningAlgo:         ECDSA.String(),
-		RoutingProof:        routing,
+	}
+	if buildRouting != nil {
+		chatSignature.RoutingProof = buildRouting()
 	}
 	key := c.chatCacheKey(chatKey)
 	c.logger.Debugf("e2ee chat signature key: %v", key)

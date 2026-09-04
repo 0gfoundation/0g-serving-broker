@@ -48,7 +48,10 @@ func newRemoteSigner(socket string) *remoteSigner {
 		socket: socket,
 		// One client, built once. A per-call http.Client leaves its Transport's idle
 		// connection — and that Transport's read and write loops — reachable forever, and
-		// SignHash runs once per response.
+		// SignHash runs at least once per response (twice on a sealed centralized one,
+		// which signs the §8 binding and then a routing proof), so the leak would be
+		// per-signature rather than incidental. Reusing one Transport is also what lets
+		// the second call take the idle connection the first left.
 		client: &http.Client{Transport: &http.Transport{
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 				return (&net.Dialer{}).DialContext(ctx, "unix", socket)

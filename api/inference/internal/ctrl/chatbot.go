@@ -600,26 +600,33 @@ func (c *Ctrl) signChatResponse(ctx context.Context, reqBody, signData []byte, c
 		// E2EE client refuses the response without it), so it must not be lost
 		// because the vendor evidence could not be assembled. Same posture the
 		// unsealed centralized path takes a few lines down.
-		var routing *RoutingProof
+		// Deferred, not built here: signChatE2EE runs this only AFTER §8 is signed,
+		// so the optional proof's signer call cannot delay — or, on a wedged
+		// controller, time out ahead of — the mandatory one. See signChatE2EE.
+		// The fingerprint is read now, while ctx is in hand, and closed over.
+		var buildRouting func() *RoutingProof
 		if c.Service.IsCentralized() {
 			fingerprint := c.upstreamCertFingerprintFromCtx(ctx)
-			var err error
-			if routing, err = c.buildSealedRoutingProof(e2eeSignedText,
-				fingerprint, providerIdentity); err != nil {
-				// Throttled: this fires at full request rate on a misconfigured
-				// deployment, which is the log-volume failure mode logProofSkip and
-				// the skip counter exist to replace. The detail is the CAUSE, not the
-				// shape ("sealed" is already in the message): logProofSkip memoizes on
-				// reason|detail, so a constant detail would let whichever cause fires
-				// first suppress the others for the whole window — and they have
-				// completely different fixes. Same use of the argument as proxy.go's
-				// absent/malformed and no_sidecar_report/no_sidecar_host.
-				c.logProofSkip(monitor.RoutingProofSkipSignError,
-					sealedProofSkipCause(e2eeSignedText, fingerprint),
-					"sealed response carries no routing proof: %v", err)
+			buildRouting = func() *RoutingProof {
+				routing, err := c.buildSealedRoutingProof(e2eeSignedText, fingerprint, providerIdentity)
+				if err != nil {
+					// Throttled: this fires at full request rate on a misconfigured
+					// deployment, which is the log-volume failure mode logProofSkip and
+					// the skip counter exist to replace. The detail is the CAUSE, not the
+					// shape ("sealed" is already in the message): logProofSkip memoizes on
+					// reason|detail, so a constant detail would let whichever cause fires
+					// first suppress the others for the whole window — and they have
+					// completely different fixes. Same use of the argument as proxy.go's
+					// absent/malformed and no_sidecar_report/no_sidecar_host.
+					c.logProofSkip(monitor.RoutingProofSkipSignError,
+						sealedProofSkipCause(e2eeSignedText, fingerprint),
+						"sealed response carries no routing proof: %v", err)
+					return nil
+				}
+				return routing
 			}
 		}
-		return c.signChatE2EE(e2eeSignedText, chatKey, routing)
+		return c.signChatE2EE(e2eeSignedText, chatKey, buildRouting)
 	}
 
 	if c.Service.IsCentralized() {
