@@ -184,15 +184,36 @@ func couldNameE2EEPart(reqBody []byte) bool {
 }
 
 // mentionsEncodedName reports whether the body contains the RFC 2231 parameter
-// prefix "name*" in any case. One pass, one byte at a time, no allocation — the
-// body may be tens of megabytes of audio.
+// prefix "name*" AT A PARAMETER POSITION, in any case. One pass, one byte at a
+// time, no allocation — the body may be tens of megabytes of audio.
+//
+// The parameter position is not decoration. Without it this matched `filename*`,
+// which contains "name*" and is what browsers and most HTTP clients emit for a
+// non-ASCII upload name (RFC 8187). So the gate was true for essentially every
+// internationalised form, and since it gates the fail-closed branches, an
+// ordinary `filename*=UTF-8”caf%C3%A9.png` in one part decided an
+// e2ee-flavoured 400 for an unparseable disposition in another. Measured on two
+// bodies differing only in that filename:
+//
+//	filename*=UTF-8''caf%C3%A9.png  -> gate=true,  REFUSED
+//	filename="cafe.png"             -> gate=false, forwarded
+//
+// That is the same regression declaresEncodedName got the token-boundary
+// treatment for, one level up: the exact check learned it and the heuristic did
+// not.
+//
+// It also corrects a claim made for this function elsewhere. "`name*` occurs 0
+// times in 32 MiB of random bytes" is true and was used to argue the gate is
+// selective — but real form bodies are not random, and `filename*` put it in
+// most of them. The boundary is what makes the selectivity real rather than an
+// artifact of the corpus it was measured against.
 //
 // Cost is FLAT by design, ~51 ms per 32 MiB (see the note on that bound at
-// maxHeadersExamined) whatever
-// the body contains. An anchored bytes.IndexByte scan is 9x faster on typical
-// input and 8x slower on a '*'-dense one, which is the wrong trade for a check
-// that runs before inference on requests it exists to reject: a cliff an
-// attacker picks the body for is worse than a higher floor. Keep it flat.
+// maxHeadersExamined) whatever the body contains. An anchored bytes.IndexByte
+// scan is 9x faster on typical input and 8x slower on a '*'-dense one, which is
+// the wrong trade for a check that runs before inference on requests it exists
+// to reject: a cliff an attacker picks the body for is worse than a higher
+// floor. Keep it flat.
 //
 // It is also not where this check spends its time. Enumerating the parts costs
 // ~22 ms for one 32 MiB part and ~750 ms for 32 MiB of ~300 000 tiny ones, so a
@@ -209,22 +230,41 @@ func couldNameE2EEPart(reqBody []byte) bool {
 func mentionsEncodedName(reqBody []byte) bool {
 	const needle = "name*"
 	matched := 0
-	for _, b := range reqBody {
+	atBoundary := false
+	for i := 0; i < len(reqBody); i++ {
+		b := reqBody[i]
 		if b >= 'A' && b <= 'Z' {
 			b += 'a' - 'A'
 		}
 		if b == needle[matched] {
+			if matched == 0 {
+				atBoundary = i == 0 || isParamBoundary(reqBody[i-1])
+			}
 			matched++
 			if matched == len(needle) {
-				return true
+				if atBoundary {
+					return true
+				}
+				matched = 0 // the tail of a longer attribute, e.g. filename*
 			}
 			continue
 		}
 		if b == needle[0] {
 			matched = 1
+			atBoundary = i == 0 || isParamBoundary(reqBody[i-1])
 		} else {
 			matched = 0
 		}
+	}
+	return false
+}
+
+// isParamBoundary reports whether b can precede the start of a header
+// parameter: a semicolon, linear whitespace, or a header fold.
+func isParamBoundary(b byte) bool {
+	switch b {
+	case ';', ' ', '\t', '\r', '\n':
+		return true
 	}
 	return false
 }
@@ -300,7 +340,21 @@ func isEncodedNameAttr(s string) bool {
 // `=?charset?encoding?text?=`. Only the delimiters are checked, deliberately:
 // what the word decodes to is the question this guard refuses to answer for
 // itself, here as in declaresEncodedName.
+//
+// Surrounding whitespace is trimmed first, because RFC 2047 §2 permits linear
+// white space around an encoded word and a prefix/suffix test does not:
+//
+//	name="=?utf-8?B?X2UyZWU=?="    -> refused
+//	name=" =?utf-8?B?X2UyZWU=?="   -> FORWARDED, before the trim
+//	name="=?utf-8?B?X2UyZWU=?= "   -> FORWARDED, before the trim
+//
+// Weaker than the charset gap: exploiting it needs an upstream that both decodes
+// encoded words in parameter values AND trims the result (javax.mail keeps the
+// leading space, yielding " _e2ee"). But the branch's contract is to refuse
+// without deciding what the word meant, and a spelling this branch was written
+// for should not turn on a space.
 func isEncodedWord(value string) bool {
+	value = strings.TrimSpace(value)
 	return len(value) > 4 && strings.HasPrefix(value, "=?") && strings.HasSuffix(value, "?=")
 }
 

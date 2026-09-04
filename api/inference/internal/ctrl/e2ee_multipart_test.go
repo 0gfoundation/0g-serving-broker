@@ -491,11 +491,25 @@ func TestJSONRequestsAreNotJudgedByTheMultipartRule(t *testing.T) {
 // `b|0x20` trick, which maps '\n' (0x0A) onto '*' (0x2A) and so reported
 // "name\n" as a mention. The sweep is what found it.
 func TestMentionsEncodedName(t *testing.T) {
-	// The implementation being replaced: walk every offset, fold 5 bytes.
+	// The obvious implementation of the SAME rule: walk every offset, fold 5
+	// bytes, and require the match to sit at a parameter position. The boundary
+	// clause is not optional here — without it the reference matched `filename*`,
+	// which is what browsers emit for a non-ASCII upload name, and a differential
+	// test against a reference implementing a DIFFERENT rule proves nothing.
+	//
+	// The boundary set is spelled out rather than calling isParamBoundary: a
+	// differential test that shares a helper with the code under test moves with
+	// it, so a change to that helper would agree with itself and prove nothing
+	// either. This is the same failure the two tests below were added for.
 	walk := func(body []byte) bool {
 		needle := []byte("name*")
 		for i := 0; i+len(needle) <= len(body); i++ {
-			if bytes.EqualFold(body[i:i+len(needle)], needle) {
+			if !bytes.EqualFold(body[i:i+len(needle)], needle) {
+				continue
+			}
+			// IndexByte, not ContainsRune: a byte >= 0x80 becomes a multi-byte
+			// rune, which would be looked up as its UTF-8 encoding.
+			if i == 0 || bytes.IndexByte([]byte("; \t\r\n"), body[i-1]) >= 0 {
 				return true
 			}
 		}
@@ -519,6 +533,18 @@ func TestMentionsEncodedName(t *testing.T) {
 		"nname*", "nnnname*", "namname*", "namenam*", "name\n", "name+",
 		`form-data; name*=utf-8''%5Fe2ee`, `form-data; NAME*0="_e2"; Name*1="ee"`,
 		"an ordinary prompt about names and stars *", "\x00\xff\xfename*",
+		// The parameter-position boundary. `filename*` is RFC 8187, which
+		// browsers emit for a non-ASCII upload name, so matching it made the gate
+		// true for most internationalised forms — and the gate decides the
+		// fail-closed branches.
+		`form-data; name="x"; filename*=UTF-8''caf%C3%A9.png`,
+		"filename*=x", "FILENAME*=x", "xname*=x", `filename="name*.wav"`,
+		// The spellings the boundary must still admit.
+		"Content-Disposition: form-data; name*=utf-8''%5Fe2ee",
+		"form-data;name*=x", "\r\nname*=x", "\tname*=x", "name*=x",
+		// A rejected match must not end the scan: the real one comes after it.
+		`form-data; filename*=UTF-8''x; name*=utf-8''%5Fe2ee`,
+		"filename*filename*name*=x", "filename* name*=x",
 	} {
 		if got, want := mentionsEncodedName([]byte(s)), walk([]byte(s)); got != want {
 			t.Errorf("%q: got %v, walk says %v", s, got, want)
@@ -635,6 +661,45 @@ func TestUnparseablePartDispositionWithoutTheMarkerIsForwarded(t *testing.T) {
 
 	if sealed, _ := c.IsSealedRequest(contentType, body); sealed {
 		t.Error("a malformed disposition that cannot be naming the marker is not a sealed request")
+	}
+	got, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body)
+	if err != nil {
+		t.Fatalf("must be forwarded, got %v", err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Error("the body must be forwarded unchanged")
+	}
+}
+
+// The behaviour the parameter-position boundary in mentionsEncodedName exists
+// for, which no differential test against a reference can pin: an RFC 8187
+// `filename*` is not a mention of `name*`, so it must not arm the fail-closed
+// branches for an unrelated part in the same body.
+//
+// This is the shape a real internationalised form takes: one part naming its
+// upload with a percent-encoded filename, another with a sloppy unescaped quote
+// that Go declines to parse. Before the boundary the first part made the gate
+// true and the second one turned that into an e2ee-flavoured 400 — a request the
+// broker forwarded before this check existed, refused for a reason that had
+// nothing to do with the request.
+func TestEncodedFilenameDoesNotArmTheFailClosedBranches(t *testing.T) {
+	c := &Ctrl{}
+	const sloppy = `form-data; name="notes"; filename="my"file.txt"`
+	if _, _, err := mime.ParseMediaType(sloppy); err == nil {
+		t.Fatal("fixture assumes the second disposition does NOT parse")
+	}
+
+	body := []byte("--x\r\nContent-Disposition: form-data; name=\"file\"; filename*=UTF-8''caf%C3%A9.png\r\n\r\n\x89PNG\r\n" +
+		"--x\r\nContent-Disposition: " + sloppy + "\r\n\r\nhello\r\n--x--\r\n")
+	const contentType = `multipart/form-data; boundary=x`
+
+	// Not an assumption: the gate is what decides the branch, and the whole
+	// point is that this body no longer trips it.
+	if couldNameE2EEPart(body) {
+		t.Error("an RFC 8187 filename* is not a mention of the RFC 2231 name*")
+	}
+	if sealed, why := c.IsSealedRequest(contentType, body); sealed {
+		t.Errorf("an ordinary internationalised form is not a sealed request: %s", why)
 	}
 	got, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body)
 	if err != nil {
@@ -1199,6 +1264,11 @@ func TestMultipartWithAnEncodedWordNameIsRefused(t *testing.T) {
 		// Refused too: what the word decodes to is the question this guard
 		// declines to answer for itself, here as for RFC 2231.
 		{"an encoded word that is not the marker", `form-data; name="=?utf-8?Q?ordinary?="`, `=?utf-8?Q?ordinary?=`},
+		// RFC 2047 §2 permits linear white space around an encoded word, and a
+		// prefix/suffix test does not. Before the trim these two were forwarded
+		// while the row above was refused — the same word, one space over.
+		{"leading space", `form-data; name=" =?utf-8?B?X2UyZWU=?="`, ` =?utf-8?B?X2UyZWU=?=`},
+		{"trailing space", `form-data; name="=?utf-8?B?X2UyZWU=?= "`, `=?utf-8?B?X2UyZWU=?= `},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1241,6 +1311,15 @@ func TestIsEncodedWord(t *testing.T) {
 		`file`:                 false,
 		``:                     false,
 		`=?=`:                  false,
+		// RFC 2047 §2 linear white space, which the delimiters sit inside.
+		` =?utf-8?B?X2UyZWU=?=`:      true,
+		`=?utf-8?B?X2UyZWU=?= `:      true,
+		"\t=?utf-8?B?X2UyZWU=?=\r\n": true,
+		`  =?a?b?c?=  `:              true,
+		// Trimming must not manufacture one out of whitespace alone.
+		`   `:    false,
+		"\t":     false,
+		` =?=  `: false,
 	}
 	for value, want := range tests {
 		if got := isEncodedWord(value); got != want {
