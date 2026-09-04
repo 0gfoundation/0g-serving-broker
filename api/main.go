@@ -24,6 +24,7 @@ func main() {
 		"0g-dashscope-video-translator": videoTranslatorServer.Main,
 		"0g-minimax-video-translator":   videoTranslatorServer.MiniMaxMain,
 		"0g-seedance-video-translator":  videoTranslatorServer.SeedanceMain,
+		"0g-kling-video-translator":     videoTranslatorServer.KlingMain,
 	}
 
 	names := []string{}
