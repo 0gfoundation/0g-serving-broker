@@ -159,18 +159,61 @@ func hasE2EEMarker(reqBody []byte) bool {
 // matched exactly because parameter VALUES are not folded, so a part named
 // `_E2EE` is a different field no parser resolves to the marker.
 func couldNameE2EEPart(reqBody []byte) bool {
-	return hasE2EEMarker(reqBody) || containsFold(reqBody, []byte("name*"))
+	return hasE2EEMarker(reqBody) || mentionsEncodedName(reqBody)
 }
 
-// containsFold is bytes.Contains with ASCII case folding, without allocating a
-// lowercased copy of a body that may be megabytes of audio.
-func containsFold(haystack, needle []byte) bool {
-	if len(needle) == 0 {
-		return true
-	}
-	for i := 0; i+len(needle) <= len(haystack); i++ {
-		if bytes.EqualFold(haystack[i:i+len(needle)], needle) {
-			return true
+// mentionsEncodedName reports whether the body contains the RFC 2231 parameter
+// prefix "name*" in any case. One pass, one byte at a time, no allocation — the
+// body may be tens of megabytes of audio.
+//
+// It replaces a walk of every offset calling bytes.EqualFold, which was correct
+// but paid ~5 bytes of comparison per position and defeated vectorisation.
+// Measured at 32 MiB (the proxy's body limit), against a '*'-dense body as the
+// adversarial shape:
+//
+//	implementation                   typical    '*'-dense
+//	walk every offset (before)        159 ms      150 ms
+//	bytes.IndexByte-anchored          5.6 ms      407 ms
+//	this one                           51 ms       54 ms
+//
+// The middle row is the tempting fix and was written first: '*' is the one byte
+// of the needle with no case counterpart, so bytes.IndexByte's SIMD scan can
+// skip to candidates and only those pay the fold. It is 28x faster on a typical
+// body — and 2.7x SLOWER than the code it replaces on a body chosen to defeat
+// it, because a candidate per byte turns the scan into a call per byte. That is
+// the wrong direction for a check whose complaint was CPU spent ahead of
+// inference on requests it exists to REJECT, and a cliff an attacker picks the
+// body for. Flat beats fast-with-a-cliff here; this row is uniformly ~3x better
+// than what it replaces and has no shape that changes that.
+//
+// The fold is letters-only rather than the usual `b|0x20` trick, and that is not
+// stylistic: 0x20 maps '\n' (0x0A) onto '*' (0x2A), so the trick reports
+// "name\n" as a mention. Found by sweeping all 256 bytes through each of the
+// five positions against the walk, which is what TestMentionsEncodedName does —
+// the same "as written vs as it decodes" mistake this whole guard is about,
+// one layer down in the bytes.
+//
+// "name" has no repeated prefix byte — 'n' occurs only at index 0 — so a
+// mismatch needs no backtracking beyond restarting at 1 when the byte that
+// failed is itself an 'n'.
+func mentionsEncodedName(reqBody []byte) bool {
+	const needle = "name*"
+	matched := 0
+	for _, b := range reqBody {
+		if b >= 'A' && b <= 'Z' {
+			b += 'a' - 'A'
+		}
+		if b == needle[matched] {
+			matched++
+			if matched == len(needle) {
+				return true
+			}
+			continue
+		}
+		if b == needle[0] {
+			matched = 1
+		} else {
+			matched = 0
 		}
 	}
 	return false
@@ -241,6 +284,10 @@ func looksMultipart(contentType string) bool {
 // type. So the question asked here is "does any part DECLARE this name", which is
 // strictly broader than "would Go's form parser expose this field".
 //
+// Broader in a second way that the first attempt at this got wrong: it reads
+// EVERY Content-Disposition value the part declares, because a part may declare
+// the header twice and Header.Get answers with the first. See the loop below.
+//
 // What it covers is every part whose HEADER COMPLETES, which is exactly the set
 // of parts any parser can name — and the boundary of that claim was measured
 // rather than assumed:
@@ -285,7 +332,21 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 	reader := multipart.NewReader(bytes.NewReader(reqBody), params["boundary"])
 	for {
 		part, err := reader.NextPart()
-		if err == io.EOF {
+		// `== io.EOF`, and NOT errors.Is, is load-bearing. mime/multipart
+		// reports "no more parts" as a bare io.EOF but wraps the failure to ever
+		// find the declared boundary with %w:
+		//
+		//	clean end of parts             -> "EOF"                    == io.EOF
+		//	boundary never found in body   -> "multipart: NextPart: EOF" != io.EOF, errors.Is -> true
+		//
+		// The second is a body whose parts nobody enumerated, which must reach
+		// the fail-closed branch below; errors.Is cannot tell it from the first
+		// and would read it as a clean end and forward the envelope. So the
+		// identity comparison is deliberate: switching to errors.Is here — the
+		// change a linter or a tidy-up will propose — silently reopens the hole,
+		// which is why TestMismatchedBoundaryMentioningTheMarkerIsRefused exists
+		// to fail when it does.
+		if err == io.EOF { //nolint:errorlint // see above: errors.Is would match the wrapped boundary failure too
 			return false, ""
 		}
 		if err != nil {
@@ -294,16 +355,34 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 			}
 			return false, ""
 		}
-		disposition := part.Header.Get("Content-Disposition")
-		if disposition == "" {
-			continue
-		}
-		_, dparams, derr := mime.ParseMediaType(disposition)
-		if derr != nil {
-			return true, "a part's Content-Disposition could not be parsed, so the name it declares cannot be ruled out"
-		}
-		if dparams["name"] == e2eeBodyMarker {
-			return true, fmt.Sprintf("a multipart part is named %q", e2eeBodyMarker)
+		// EVERY Content-Disposition the part declares, not Header.Get's first
+		// one. A part may declare the header twice — innocuous first, marker
+		// second — and Get returns only the first, so the part enumerated
+		// cleanly, named nothing reserved, and was forwarded with the envelope
+		// in it. Measured on that body:
+		//
+		//	Get()      = `form-data; name="file"`
+		//	Values()   = [`form-data; name="file"` `form-data; name="_e2ee"`]
+		//	FormName() = "file"
+		//
+		// Which parser wins is not ours to assume — Go and Python's email take
+		// the first, others take the last — and the contract here does not
+		// depend on the answer: the body demonstrably DECLARES the name, so it
+		// cannot be shown not to carry an envelope. Reading one value was the
+		// same mistake `attachment; name=` was caught for, one level down: that
+		// one reasoned about the disposition TYPE, this one about the
+		// disposition as a single VALUE.
+		//
+		// Values returns an empty slice for a part with no disposition, so the
+		// loop covers the skip that used to need its own guard.
+		for _, disposition := range part.Header.Values("Content-Disposition") {
+			_, dparams, derr := mime.ParseMediaType(disposition)
+			if derr != nil {
+				return true, "a part's Content-Disposition could not be parsed, so the name it declares cannot be ruled out"
+			}
+			if dparams["name"] == e2eeBodyMarker {
+				return true, fmt.Sprintf("a multipart part is named %q", e2eeBodyMarker)
+			}
 		}
 	}
 }

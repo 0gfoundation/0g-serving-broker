@@ -229,6 +229,50 @@ func TestUnparseableMultipartContentTypeStillReachesTheGuard(t *testing.T) {
 	}
 }
 
+// A part may declare Content-Disposition TWICE — innocuous first, marker second
+// — and Header.Get answers with the first, so the part enumerated cleanly, named
+// nothing reserved, and was forwarded with the envelope in it. No parse error, so
+// the fail-closed heuristic never ran either. Which value a downstream parser
+// honours is not the question: the body declares the name, so the guard cannot
+// show it carries no envelope.
+func TestMultipartWithADuplicateDispositionIsRefused(t *testing.T) {
+	c := &Ctrl{}
+	body := []byte("--x\r\n" +
+		"Content-Disposition: form-data; name=\"file\"\r\n" +
+		"Content-Disposition: form-data; name=\"_e2ee\"\r\n\r\n" +
+		sealedEnvelopeJSON + "\r\n--x--\r\n")
+	const contentType = `multipart/form-data; boundary=x`
+
+	if !c.IsSealedRequest(contentType, body) {
+		t.Error("a part declaring the marker in any of its dispositions must be seen")
+	}
+	if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err == nil {
+		t.Fatal("must refuse rather than forward")
+	}
+}
+
+// The mismatched-boundary case, which exists to pin `err == io.EOF` against a
+// change to errors.Is. mime/multipart reports a clean end of parts as a bare
+// io.EOF but WRAPS the failure to ever find the declared boundary, so errors.Is
+// matches both — and reading this body as a clean end forwards an envelope
+// nobody enumerated. Measured:
+//
+//	clean end                    -> "EOF"                     == io.EOF
+//	boundary never found in body -> "multipart: NextPart: EOF" != io.EOF
+func TestMismatchedBoundaryMentioningTheMarkerIsRefused(t *testing.T) {
+	c := &Ctrl{}
+	body := []byte("--x\r\nContent-Disposition: form-data; name=\"_e2ee\"\r\n\r\n" +
+		sealedEnvelopeJSON + "\r\n--x--\r\n")
+	const contentType = `multipart/form-data; boundary=WRONGBOUND`
+
+	if !c.IsSealedRequest(contentType, body) {
+		t.Error("a body whose parts were never enumerated must be treated as carrying an envelope")
+	}
+	if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err == nil {
+		t.Fatal("must refuse rather than forward")
+	}
+}
+
 // The two failures compose, and the composition is the case the pre-filter has
 // to fold case for. When the boundary cannot be read, no part can be enumerated,
 // so the exact check is unavailable and the fail-closed branch decides on the raw
@@ -433,5 +477,49 @@ func TestJSONRequestsAreNotJudgedByTheMultipartRule(t *testing.T) {
 	}
 	if !c.IsSealedRequest("application/json", body) {
 		t.Error("a JSON envelope is still a sealed request")
+	}
+}
+
+// mentionsEncodedName gates the fail-closed branches, so a false NEGATIVE leaks
+// an envelope and a false POSITIVE refuses an innocent malformed request. Both
+// directions are pinned by differential comparison against the obvious-but-slow
+// implementation it replaced, swept over every byte value in every position.
+//
+// This is not test-for-its-own-sake: the first hand-rolled fold used the usual
+// `b|0x20` trick, which maps '\n' (0x0A) onto '*' (0x2A) and so reported
+// "name\n" as a mention. The sweep is what found it.
+func TestMentionsEncodedName(t *testing.T) {
+	// The implementation being replaced: walk every offset, fold 5 bytes.
+	walk := func(body []byte) bool {
+		needle := []byte("name*")
+		for i := 0; i+len(needle) <= len(body); i++ {
+			if bytes.EqualFold(body[i:i+len(needle)], needle) {
+				return true
+			}
+		}
+		return false
+	}
+
+	for pos := 0; pos < len("name*"); pos++ {
+		for b := 0; b < 256; b++ {
+			body := []byte("name*")
+			body[pos] = byte(b)
+			if got, want := mentionsEncodedName(body), walk(body); got != want {
+				t.Errorf("byte %#02x at position %d: got %v, walk says %v", b, pos, got, want)
+			}
+		}
+	}
+
+	// Shapes the single-position sweep cannot reach: restart-after-partial-match,
+	// the spellings the parser actually resolves, and the near-misses.
+	for _, s := range []string{
+		"", "n", "na", "nam", "name", "name*", "NAME*", "Name*0=", "nAmE*",
+		"nname*", "nnnname*", "namname*", "namenam*", "name\n", "name+",
+		`form-data; name*=utf-8''%5Fe2ee`, `form-data; NAME*0="_e2"; Name*1="ee"`,
+		"an ordinary prompt about names and stars *", "\x00\xff\xfename*",
+	} {
+		if got, want := mentionsEncodedName([]byte(s)), walk([]byte(s)); got != want {
+			t.Errorf("%q: got %v, walk says %v", s, got, want)
+		}
 	}
 }
