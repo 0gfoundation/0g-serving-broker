@@ -447,6 +447,135 @@ func TestGetModels_ImagePricingForImageTypes(t *testing.T) {
 	}
 }
 
+// TestGetModels_TPMRateLimit_TokenServiceTypes pins that GET /v1/models
+// advertises the enforced per-user TPM limit for every token-billed service
+// type. Regression guard: "embedding" was missing from this switch — the
+// admission check (CheckPerUserTPMLimit) enforced TPM for embedding, but this
+// endpoint silently omitted tokens_per_minute from the response, so a caller
+// reading /v1/models would see no TPM limit for a model that was in fact
+// throttled by one.
+func TestGetModels_TPMRateLimit_TokenServiceTypes(t *testing.T) {
+	types := []string{"chatbot", "speech-to-text", "embedding"}
+	for _, svcType := range types {
+		t.Run(svcType, func(t *testing.T) {
+			mock := &mockModelsCtrl{
+				service: model.Service{
+					ModelType: "some-model",
+					Type:      svcType,
+				},
+				serviceConfig: config.Service{},
+				concurrencyLimitConfig: config.ConcurrencyLimitConfig{
+					PerUserTPM: 12345,
+				},
+			}
+
+			h := newModelsTestHandler(mock)
+			w := performRequest(h.GetModels, "GET", "/v1/models", "", nil)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected status 200, got %d", w.Code)
+			}
+
+			var resp ModelListResponse
+			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("failed to parse response: %v", err)
+			}
+
+			m := resp.Data[0]
+			if m.RateLimits == nil {
+				t.Fatalf("expected rate_limits to be present for %s", svcType)
+			}
+			if m.RateLimits.TokensPerMinute != 12345 {
+				t.Errorf("expected rate_limits.tokens_per_minute=12345 for %s, got %d", svcType, m.RateLimits.TokensPerMinute)
+			}
+		})
+	}
+}
+
+// TestGetModels_EmbeddingPricing pins that embedding reports completion=0
+// regardless of a configured OutputPrice: updateEmbeddingWithUsage bills
+// PromptTokens × InputPrice only, so surfacing the operator's OutputPrice
+// verbatim (the pre-fix default-branch behavior) would advertise a per-token
+// rate that is never actually charged. Mirrors the image branch's identical
+// convention (TestGetModels_ImagePricingForImageTypes).
+func TestGetModels_EmbeddingPricing(t *testing.T) {
+	mock := &mockModelsCtrl{
+		service: model.Service{
+			ModelType: "qwen3.7-text-embedding",
+			Type:      "embedding",
+			// Deliberately non-zero: on-chain config a service was never supposed
+			// to bill against, to prove it's ignored rather than surfaced.
+			InputPrice:  "100",
+			OutputPrice: "999999999999",
+		},
+		serviceConfig: config.Service{},
+	}
+
+	h := newModelsTestHandler(mock)
+	w := performRequest(h.GetModels, "GET", "/v1/models", "", nil)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+
+	var resp ModelListResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+	m := resp.Data[0]
+
+	if m.Pricing.Prompt != "100" {
+		t.Errorf("pricing.prompt = %q, want 100", m.Pricing.Prompt)
+	}
+	if m.Pricing.Completion != "0" {
+		t.Errorf("pricing.completion = %q, want 0 for embedding (never billed)", m.Pricing.Completion)
+	}
+}
+
+// TestGetModels_EmbeddingPricingUSD pins the USD-denominated embedding shape:
+// prompt derives from InputPriceUSDPerMillionTokens alone and completion is
+// forced to 0, WITHOUT requiring OutputPriceUSDPerMillionTokens to be set —
+// unlike the generic token-priced branch, which requires both. Mirrors
+// TestGetModels_ImagePricingUSD's image-branch convention.
+func TestGetModels_EmbeddingPricingUSD(t *testing.T) {
+	mock := &mockModelsCtrl{
+		service: model.Service{
+			ModelType:  "qwen3.7-text-embedding",
+			Type:       "embedding",
+			InputPrice: "0",
+			// USD per 1M tokens: 0.5 → per-token USD is 0.0000005.
+			InputPriceUSDPerMillionTokens: "0.5",
+			// Deliberately empty: embedding must not require this.
+			OutputPriceUSDPerMillionTokens: "",
+		},
+		serviceConfig:  config.Service{},
+		priceFeedIsUSD: true,
+	}
+
+	h := newModelsTestHandler(mock)
+	w := performRequest(h.GetModels, "GET", "/v1/models", "", nil)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+
+	var resp ModelListResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+	m := resp.Data[0]
+
+	if m.PricingUSD == nil {
+		t.Fatal("expected pricing_usd to be present for USD embedding service")
+	}
+	if m.PricingUSD.Prompt != "0.0000005" {
+		t.Errorf("pricing_usd.prompt = %q, want 0.0000005", m.PricingUSD.Prompt)
+	}
+	if m.PricingUSD.Completion != "0" {
+		t.Errorf("pricing_usd.completion = %q, want 0 for embedding (never billed)", m.PricingUSD.Completion)
+	}
+}
+
 // TestGetModels_ImagePricingUSD pins the USD-denominated image-service shape:
 // the per-image price surfaces under pricing.image (wei) and pricing_usd.image
 // (USD), while the per-token prompt/completion fields report 0 (an image model

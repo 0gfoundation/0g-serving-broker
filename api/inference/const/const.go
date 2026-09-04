@@ -8,10 +8,15 @@ import (
 
 // Service type constants matching on-chain service type values.
 const (
-	ServiceTypeChatbot         = "chatbot"
-	ServiceTypeTextToImage     = "text-to-image"
-	ServiceTypeImageEditing    = "image-editing"
-	ServiceTypeSpeechToText    = "speech-to-text"
+	ServiceTypeChatbot      = "chatbot"
+	ServiceTypeTextToImage  = "text-to-image"
+	ServiceTypeImageEditing = "image-editing"
+	ServiceTypeSpeechToText = "speech-to-text"
+	// ServiceTypeEmbedding is the OpenAI Embeddings API shape (POST
+	// /embeddings): synchronous (no streaming — the real OpenAI Embeddings
+	// API has no `stream` parameter), billed on input tokens only — the
+	// response's `usage` carries no completion_tokens.
+	ServiceTypeEmbedding       = "embedding"
 	ServiceTypeVideoGeneration = "video-generation"
 )
 
@@ -103,6 +108,7 @@ var (
 		"/images/generations":   {},
 		"/audio/transcriptions": {},
 		"/videos":               {}, // Video generation (OpenAI Video API)
+		"/embeddings":           {}, // Text embeddings (OpenAI Embeddings API)
 	}
 
 	// FreePrefixes defines path prefixes that can be accessed without charging

@@ -162,6 +162,7 @@ func TestEveryChatRouteHasARecognizedSurface(t *testing.T) {
 		"/images/generations":   {},
 		"/audio/transcriptions": {},
 		"/videos":               {},
+		"/embeddings":           {}, // OpenAI Embeddings API — no choices/messages, not chat-shaped; E2EE sealing not wired for it, same as images/audio/video above
 	}
 	for route := range constant.TargetRoute {
 		if _, nonChat := nonChatRoutes[route]; nonChat {

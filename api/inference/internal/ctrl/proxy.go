@@ -156,6 +156,13 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 	// resolved model so GetBillingPrices (and, for video, the per-model billing
 	// shape) can price it. Single-model providers keep billing at the configured
 	// on-chain price (resolvedModel unset).
+	//
+	// Embedding is deliberately NOT in this list: multi-model pricing for
+	// embedding is rejected outright at config load (validateModelPricing,
+	// model_pricing.go) rather than supported here, so there is no resolution
+	// path to wire — an embedding service always bills at its single configured
+	// on-chain price. Revisit together if multi-model embedding billing is
+	// ever needed; adding one without the other would silently mis-bill.
 	if (svcType == "speech-to-text" || svcType == "video-generation") && c.Service.HasMultiModelPricing() && len(reqBody) > 0 {
 		userAddr, _ := ctx.Get("userAddress")
 		userAddrStr, _ := userAddr.(string)
@@ -492,6 +499,8 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 		return c.handleSpeechToTextResponse(ctx, resp, account, outputPrice, body, reqModel)
 	case "image-editing":
 		return c.handleImageEditingResponse(ctx, resp, account, outputPrice, body, reqModel)
+	case "embedding":
+		return c.handleEmbeddingResponse(ctx, resp, account, outputPrice, body, reqModel)
 	case "video-generation":
 		return c.handleVideoGenerationResponse(ctx, resp, account, outputPrice, body, reqModel)
 	default:
