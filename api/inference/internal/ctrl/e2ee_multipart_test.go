@@ -2,6 +2,7 @@ package ctrl
 
 import (
 	"bytes"
+	"mime"
 	"mime/multipart"
 	"net/http/httptest"
 	"net/textproto"
@@ -520,6 +521,165 @@ func TestMentionsEncodedName(t *testing.T) {
 	} {
 		if got, want := mentionsEncodedName([]byte(s)), walk([]byte(s)); got != want {
 			t.Errorf("%q: got %v, walk says %v", s, got, want)
+		}
+	}
+}
+
+// A clean parse is not an answer. mime.ParseMediaType drops an RFC 2231
+// parameter whose charset it cannot decode and reports NO error, so `name` comes
+// back "" — or partially decoded — on a part that plainly declares one. With no
+// error, neither fail-closed branch runs either.
+//
+// Only the charset token separates these from TestMultipartWithAnEncodedE2EEPartNameIsRefused,
+// which passes: the guard was closed for utf-8 and open one token over. Lenient
+// parsers (Python's email, Node's busboy via iconv-lite) do decode latin-1 and
+// windows-1252 and resolve the name to the marker.
+func TestMultipartWithAnUndecodableEncodedNameIsRefused(t *testing.T) {
+	tests := []struct {
+		name        string
+		disposition string
+		parsedName  string // what mime.ParseMediaType yields, measured
+	}{
+		{"latin-1 charset", `form-data; name*=iso-8859-1''%5Fe2ee`, ""},
+		// The parameter name folds too, so the spelling axis from round 2 has to
+		// be covered here as well, end to end and not only in TestDeclaresEncodedName.
+		{"uppercase attribute, latin-1 charset", `form-data; NAME*=iso-8859-1''%5Fe2ee`, ""},
+		{"windows-1252 charset", `form-data; name*=windows-1252''%5Fe2ee`, ""},
+		{"empty charset", `form-data; name*=''%5Fe2ee`, ""},
+		{"invalid percent-escape", `form-data; name*=utf-8''%ZZe2ee`, ""},
+		{"not form-data either", `attachment; name*=iso-8859-1''%5Fe2ee`, ""},
+		// The sharpest one: the parser keeps the segment it can decode and drops
+		// the one it cannot, so the name is neither absent nor right. "Refuse
+		// when the name came back empty" would miss exactly this row.
+		{"partially decodable continuation", `form-data; name*0*=iso-8859-1''%5Fe2; name*1*=ee`, "ee"},
+	}
+
+	c := &Ctrl{}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Pin the parser behaviour the case rests on, so this test says why
+			// it exists if a future Go release starts decoding these.
+			_, params, err := mime.ParseMediaType(tt.disposition)
+			if err != nil {
+				t.Fatalf("fixture assumes a CLEAN parse, got %v", err)
+			}
+			if params["name"] != tt.parsedName {
+				t.Fatalf("parser now yields name=%q, not %q: re-check whether this case is still a bypass",
+					params["name"], tt.parsedName)
+			}
+
+			body, contentType := buildMultipart(t, func(w *multipart.Writer) {
+				rawPart(t, w, tt.disposition, sealedEnvelopeJSON)
+			})
+			if bytes.Contains(body, []byte("_e2ee")) {
+				t.Fatal("fixture no longer tests the encoded case: the literal marker is present")
+			}
+
+			if !c.IsSealedRequest(contentType, body) {
+				t.Error("a name the parser refused to decode cannot be ruled out; the async route would enqueue this")
+			}
+			if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err == nil {
+				t.Fatal("must refuse rather than forward")
+			}
+		})
+	}
+}
+
+// The complement, and the reason declaresEncodedName tests a token boundary
+// rather than a substring: `filename*=` CONTAINS "name*", and encoding a
+// filename is both legitimate and common. Refusing these would break ordinary
+// uploads.
+func TestMultipartWithAnEncodedFilenameIsForwarded(t *testing.T) {
+	c := &Ctrl{}
+	for _, disposition := range []string{
+		`form-data; name="file"; filename*=iso-8859-1''caf%E9.wav`,
+		`form-data; name="file"; filename*0*=utf-8''caf%C3%A9; filename*1=".wav"`,
+		`form-data; name="file"; FILENAME*=iso-8859-1''caf%E9.wav`,
+	} {
+		t.Run(disposition, func(t *testing.T) {
+			body, contentType := buildMultipart(t, func(w *multipart.Writer) {
+				rawPart(t, w, disposition, "RIFF....audio....")
+			})
+			if c.IsSealedRequest(contentType, body) {
+				t.Error("an encoded FILENAME is not an encoded field name")
+			}
+			got, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body)
+			if err != nil {
+				t.Fatalf("must be forwarded, got %v", err)
+			}
+			if !bytes.Equal(got, body) {
+				t.Error("the body must be forwarded unchanged")
+			}
+		})
+	}
+}
+
+// The part-level twin of TestMalformedMultipartWithoutTheMarkerIsStillForwarded.
+// An unparseable Content-Disposition used to refuse unconditionally, so an
+// unescaped quote in a filename — sloppy but real, and forwarded by the broker
+// before this check existed — came back as an e2ee error. The branch is gated
+// now; this pins the gate.
+func TestUnparseablePartDispositionWithoutTheMarkerIsForwarded(t *testing.T) {
+	c := &Ctrl{}
+	const disposition = `form-data; name="notes"; filename="my"file.txt"`
+	if _, _, err := mime.ParseMediaType(disposition); err == nil {
+		t.Fatal("fixture assumes this disposition does NOT parse")
+	}
+
+	body := []byte("--x\r\nContent-Disposition: " + disposition + "\r\n\r\nhello\r\n--x--\r\n")
+	const contentType = `multipart/form-data; boundary=x`
+	if couldNameE2EEPart(body) {
+		t.Fatal("fixture must not mention the marker in any form")
+	}
+
+	if c.IsSealedRequest(contentType, body) {
+		t.Error("a malformed disposition that cannot be naming the marker is not a sealed request")
+	}
+	got, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body)
+	if err != nil {
+		t.Fatalf("must be forwarded, got %v", err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Error("the body must be forwarded unchanged")
+	}
+}
+
+// And the same shape WITH the marker, so gating the branch did not disarm it.
+func TestUnparseablePartDispositionMentioningTheMarkerIsRefused(t *testing.T) {
+	c := &Ctrl{}
+	body := []byte("--x\r\nContent-Disposition: form-data; name=\"notes\"; filename=\"a\"b.txt\"\r\n\r\n_e2ee\r\n--x--\r\n")
+	const contentType = `multipart/form-data; boundary=x`
+
+	if !c.IsSealedRequest(contentType, body) {
+		t.Error("malformed AND mentioning the marker must fail closed")
+	}
+	if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err == nil {
+		t.Fatal("must refuse rather than forward")
+	}
+}
+
+// declaresEncodedName decides which dispositions reach the refusal above, so its
+// boundary is worth pinning directly: every 2231 form of `name`, none of the
+// attributes that merely end in it.
+func TestDeclaresEncodedName(t *testing.T) {
+	tests := map[string]bool{
+		`form-data; name*=utf-8''%5Fe2ee`:                 true,
+		`form-data; name*=iso-8859-1''x`:                  true,
+		`form-data; NAME*=iso-8859-1''x`:                  true,
+		`form-data; name*0*=utf-8''a; name*1*=b`:          true,
+		`form-data;name*=x`:                               true, // no space after the semicolon
+		`name*=x`:                                         true, // no disposition type at all
+		`form-data; name="file"`:                          false,
+		`form-data; name=_e2ee`:                           false,
+		`form-data; name="file"; filename*=iso-8859-1''x`: false,
+		`form-data; name="file"; FILENAME*0*=utf-8''x`:    false,
+		`form-data; name="file"; x-my-name*=utf-8''x`:     false,
+		`attachment`:                                      false,
+		``:                                                false,
+	}
+	for disposition, want := range tests {
+		if got := declaresEncodedName(disposition); got != want {
+			t.Errorf("%q: got %v, want %v", disposition, got, want)
 		}
 	}
 }

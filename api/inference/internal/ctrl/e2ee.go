@@ -219,6 +219,44 @@ func mentionsEncodedName(reqBody []byte) bool {
 	return false
 }
 
+// declaresEncodedName reports whether a Content-Disposition RFC 2231-encodes its
+// `name` parameter, in any of the forms that notation has: `name*=`, and the
+// `name*0=` / `name*0*=` continuation segments, case-insensitively because
+// parameter names are.
+//
+// The boundary test is what makes this usable rather than a blanket refusal:
+// `filename*=iso-8859-1”caf%E9.wav` CONTAINS "name*" and is both legitimate and
+// common, so a substring match would refuse ordinary uploads. A match therefore
+// only counts where "name" begins a parameter — the preceding byte is not itself
+// an RFC 2045 token character.
+//
+// A disposition is a header, not a body, so walking it costs nothing worth
+// optimising; the body scan in mentionsEncodedName is the one that had to be
+// measured.
+func declaresEncodedName(disposition string) bool {
+	const attr = "name*"
+	for i := 0; i+len(attr) <= len(disposition); i++ {
+		if !strings.EqualFold(disposition[i:i+len(attr)], attr) {
+			continue
+		}
+		if i > 0 && isTokenChar(disposition[i-1]) {
+			continue // the tail of a longer attribute, e.g. filename*
+		}
+		return true
+	}
+	return false
+}
+
+// isTokenChar reports whether b may appear in an RFC 2045 token, which is what
+// an attribute name is made of.
+func isTokenChar(b byte) bool {
+	switch {
+	case b >= 'a' && b <= 'z', b >= 'A' && b <= 'Z', b >= '0' && b <= '9':
+		return true
+	}
+	return bytes.IndexByte([]byte("!#$%&'*+-.^_`|~"), b) >= 0
+}
+
 // looksMultipart reports whether a Content-Type CLAIMS to be multipart, by a
 // case-insensitive prefix test on the raw string — deliberately without parsing
 // it.
@@ -306,11 +344,21 @@ func looksMultipart(contentType string) bool {
 // that one is refused.
 //
 // Where an error IS reported — an unreadable boundary, an unparseable
-// Content-Disposition — it fails closed. Reaching those requires the "_e2ee"
-// substring to be present in the first place, so the affected set is "malformed,
-// and mentioning the reserved marker": refusing costs a clear error on a request
-// an upstream would reject anyway, where forwarding costs the guarantee this
-// function exists for.
+// Content-Disposition — it fails closed, and all three of those branches are
+// gated on couldNameE2EEPart, so the affected set is "malformed, AND could be
+// naming the reserved marker": refusing costs a clear error on a request an
+// upstream would reject anyway, where forwarding costs the guarantee this
+// function exists for. (The Content-Disposition branch was NOT gated when this
+// paragraph first claimed it was, which is how a part with an unescaped quote in
+// its `filename` came to be refused with an e2ee error. A comment asserting a
+// property the code lacks is worse than no comment: it is what a later reader
+// checks instead of the code.)
+//
+// One branch is deliberately NOT gated, because it is not a heuristic: a
+// disposition that RFC 2231-encodes its `name` is refused outright. The parser
+// resolves those only for us-ascii and utf-8 and silently drops — or partially
+// decodes — anything else, so a clean parse with a harmless-looking `name` is no
+// evidence at all there. See the branch itself for the measurements.
 //
 // The name comparison is EXACT. Form field names are case-sensitive, so a part
 // named `_E2EE` is a different field that no parser resolves to the marker;
@@ -378,10 +426,57 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 		for _, disposition := range part.Header.Values("Content-Disposition") {
 			_, dparams, derr := mime.ParseMediaType(disposition)
 			if derr != nil {
-				return true, "a part's Content-Disposition could not be parsed, so the name it declares cannot be ruled out"
+				// Gated like the two boundary branches above, and for the same
+				// reason: without the gate this refused any part whose
+				// disposition merely fails to parse, marker or no marker.
+				// `form-data; name="notes"; filename="my"file.txt"` — an
+				// unescaped quote, sloppy but real — was refused with an e2ee
+				// error though the body mentions neither the marker nor `name*`,
+				// and the broker forwarded it before this check existed. That is
+				// the regression TestMalformedMultipartWithoutTheMarkerIsStillForwarded
+				// guards one level up, and the doc comment above already
+				// promised this narrowing that the code did not have.
+				if couldNameE2EEPart(reqBody) {
+					return true, "the body could be naming the reserved marker and a part's Content-Disposition could not be parsed, so the name it declares cannot be ruled out"
+				}
+				continue
 			}
 			if dparams["name"] == e2eeBodyMarker {
 				return true, fmt.Sprintf("a multipart part is named %q", e2eeBodyMarker)
+			}
+			// A clean parse is not the same as an answer. mime.ParseMediaType
+			// DROPS an RFC 2231 parameter whose charset it cannot decode and
+			// reports no error at all (its decode2231Enc simply returns on
+			// `// TODO: unsupported encoding`), so `name` comes back "" — or,
+			// worse, partially decoded — on a part that plainly declares one.
+			// Measured, every row forwarded before this branch existed:
+			//
+			//	name*=utf-8''%5Fe2ee                     -> name="_e2ee"  refused
+			//	name*=iso-8859-1''%5Fe2ee                -> name=""       FORWARDED
+			//	name*=windows-1252''%5Fe2ee              -> name=""       FORWARDED
+			//	name*=''%5Fe2ee                          -> name=""       FORWARDED
+			//	name*=utf-8''%ZZe2ee                     -> name=""       FORWARDED
+			//	name*0*=utf-8''%5Fe2; name*1*=ee         -> name="_e2ee"  refused
+			//	name*0*=iso-8859-1''%5Fe2; name*1*=ee    -> name="ee"     FORWARDED
+			//
+			// The last row is why the fix cannot be "refuse when the name came
+			// back empty": the parser silently kept one segment and dropped the
+			// other, so its value is neither the name nor absent. And no error
+			// means neither fail-closed branch runs — couldNameE2EEPart, which
+			// matches `name*`, is never consulted.
+			//
+			// Python's email and Node's busboy do decode latin-1/windows-1252
+			// and resolve these to `_e2ee`. So: if the disposition RFC
+			// 2231-encodes its `name` AT ALL, this refuses, without trying to
+			// decide what the encoding meant. Re-implementing RFC 2231 to
+			// second-guess the parser would be another layer of the same
+			// mistake; the parser's silence is not evidence of absence.
+			//
+			// The cost is near zero: form clients emit a plain `name="…"` — only
+			// `filename` is ever 2231-encoded in the wild, and declaresEncodedName
+			// excludes it on a token boundary rather than a substring.
+			if declaresEncodedName(disposition) {
+				return true, "a part RFC 2231-encodes its form-field name, which mime.ParseMediaType resolves only for us-ascii and utf-8 (dropping the rest silently), so the name it declares cannot be ruled out"
 			}
 		}
 	}
