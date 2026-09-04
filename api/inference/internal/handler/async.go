@@ -47,7 +47,7 @@ func (h *Handler) submitAsyncJob(ctx *gin.Context, svcType string) {
 	// rather than of which route the client happened to pick. The synchronous
 	// proxy reaches the same conclusion via MaybeUnsealRequest; these routes never
 	// touch it, which is exactly how they came to be a hole.
-	if h.asyncCtrl.IsSealedRequest(reqBody) {
+	if h.asyncCtrl.IsSealedRequest(ctx.GetHeader("Content-Type"), reqBody) {
 		ctx.Set("ignoreError", true)
 		ctx.JSON(http.StatusBadRequest, gin.H{
 			"error": "e2ee: sealed requests are not supported on the async endpoints; use the synchronous endpoint",

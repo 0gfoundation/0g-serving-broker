@@ -14,6 +14,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
+	"mime"
+	"mime/multipart"
 	"slices"
 	"strings"
 
@@ -134,6 +137,109 @@ func hasE2EEMarker(reqBody []byte) bool {
 	return bytes.Contains(reqBody, []byte(e2eeBodyMarker))
 }
 
+// isMultipartRequest reports whether a Content-Type names multipart/form-data,
+// per RFC 2045 (case-insensitive type/subtype, parameters stopped at the ';').
+func isMultipartRequest(contentType string) bool {
+	mt, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(mt, "multipart/form-data")
+}
+
+// multipartCarriesE2EEPart reports whether a multipart/form-data body declares a
+// part named "_e2ee" — a sealed envelope smuggled into the one request shape the
+// JSON checks cannot see (SPEC §5.3.1). The string is the reason, for the
+// rejection message.
+//
+// Why this exists at all. Every other sealed-request check starts by parsing the
+// body as JSON, and a multipart body is not JSON, so the natural implementation
+// of "detect _e2ee, else pass through" reads a parse failure as NOT SEALED and
+// forwards the request in the clear — envelope included. That is the one mistake
+// §5.3.1 is written to prevent, in the SPEC's words: a body that cannot be
+// parsed as an envelope is not thereby an unsealed body.
+//
+// The check is on PART NAMES, never on the raw bytes, and the distinction is not
+// pedantic: a transcription whose `prompt` legitimately mentions "_e2ee" would be
+// refused by a substring rule, on a field whose whole purpose is to carry
+// arbitrary caller text. The substring is only a pre-filter for the parse.
+//
+// It reads the `name` parameter of Content-Disposition DIRECTLY rather than
+// through mime/multipart's Part.FormName(), because FormName returns "" for any
+// part whose disposition is not exactly `form-data` — so a part declared
+// `Content-Disposition: attachment; name="_e2ee"` carries the name and answers ""
+// to the accessor. Measured, not assumed:
+//
+//	FormName()="_e2ee"  disposition=`form-data; name="_e2ee"`
+//	FormName()="_e2ee"  disposition=`form-data; name="_e2ee"; filename="env.json"`
+//	FormName()=""       disposition=`attachment; name="_e2ee"`     <-- missed
+//
+// The third row is the spelling someone smuggling an envelope would reach for,
+// and lenient parsers downstream do read `name` regardless of the disposition
+// type. So the question asked here is "does any part DECLARE this name", which is
+// strictly broader than "would Go's form parser expose this field".
+//
+// What it covers is every part whose HEADER COMPLETES, which is exactly the set
+// of parts any parser can name — and the boundary of that claim was measured
+// rather than assumed:
+//
+//	complete header, truncated body    -> the part IS returned, then NextPart errors
+//	truncated header (mid-name)        -> silently dropped; NextPart returns plain io.EOF
+//	name="_e2ee  (unterminated quote)  -> ParseMediaType errors -> refused below
+//
+// The middle row is why "fail closed on anything unparseable" is NOT what this
+// does, despite being the tempting thing to claim: Go does not report a truncated
+// trailing header as an error at all, so there is nothing to fail closed ON. That
+// case is sound anyway, and for a reason rather than by luck — a header that
+// never terminates has no body after it, so there is no envelope in it to leak,
+// and no downstream parser sees a part there either. Its adversarial neighbour, a
+// header that DOES terminate but whose name is malformed, is the third row, and
+// that one is refused.
+//
+// Where an error IS reported — an unreadable boundary, an unparseable
+// Content-Disposition — it fails closed. Reaching those requires the "_e2ee"
+// substring to be present in the first place, so the affected set is "malformed,
+// and mentioning the reserved marker": refusing costs a clear error on a request
+// an upstream would reject anyway, where forwarding costs the guarantee this
+// function exists for.
+//
+// The name comparison is EXACT. Form field names are case-sensitive, so a part
+// named `_E2EE` is a different field that no parser resolves to the marker;
+// matching case-insensitively would refuse requests over a name nothing treats as
+// reserved. (Parameter names are another matter — `NAME=` and `name=` are the
+// same parameter, and mime.ParseMediaType already normalises that.)
+func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string) {
+	if !isMultipartRequest(contentType) || !hasE2EEMarker(reqBody) {
+		return false, ""
+	}
+	_, params, err := mime.ParseMediaType(contentType)
+	if err != nil || params["boundary"] == "" {
+		return true, "the body mentions the reserved marker and its multipart boundary could not be read, so a smuggled envelope cannot be ruled out"
+	}
+
+	reader := multipart.NewReader(bytes.NewReader(reqBody), params["boundary"])
+	for {
+		part, err := reader.NextPart()
+		if err == io.EOF {
+			return false, ""
+		}
+		if err != nil {
+			return true, fmt.Sprintf("the body mentions the reserved marker and could not be parsed as multipart (%v), so a smuggled envelope cannot be ruled out", err)
+		}
+		disposition := part.Header.Get("Content-Disposition")
+		if disposition == "" {
+			continue
+		}
+		_, dparams, derr := mime.ParseMediaType(disposition)
+		if derr != nil {
+			return true, "the body mentions the reserved marker and a part's Content-Disposition could not be parsed, so a smuggled envelope cannot be ruled out"
+		}
+		if dparams["name"] == e2eeBodyMarker {
+			return true, fmt.Sprintf("a multipart part is named %q", e2eeBodyMarker)
+		}
+	}
+}
+
 // IsSealedRequest reports whether reqBody is a sealed envelope (SPEC §5): a JSON
 // object with a top-level "_e2ee" key. It is the same test MaybeUnsealRequest
 // makes before committing to fail-closed, exposed for entry points that cannot
@@ -148,7 +254,16 @@ func hasE2EEMarker(reqBody []byte) bool {
 // sealed throughout, so little was disclosed; what broke is that "a sealed
 // request is fail-closed" stopped being a property of the enclave and became a
 // property of which route the client picked.
-func (c *Ctrl) IsSealedRequest(reqBody []byte) bool {
+// It takes the request's Content-Type because a sealed envelope has two ways in
+// and only one of them is JSON. The async image-editing route accepts
+// multipart/form-data (it preserves the boundary Content-Type for the upstream),
+// and a JSON-only test says "not sealed" to a body carrying the envelope in a
+// multipart part — the same hole this function was written to close, one request
+// shape over. See multipartCarriesE2EEPart.
+func (c *Ctrl) IsSealedRequest(contentType string, reqBody []byte) bool {
+	if carries, _ := multipartCarriesE2EEPart(contentType, reqBody); carries {
+		return true
+	}
 	if !hasE2EEMarker(reqBody) {
 		return false
 	}
@@ -174,6 +289,22 @@ func (c *Ctrl) IsSealedRequest(reqBody []byte) bool {
 // signer_addr is not this enclave, or whose key_id is unknown is rejected.
 func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, reqBody []byte) ([]byte, error) {
 	if !hasE2EEMarker(reqBody) {
+		return reqBody, nil
+	}
+
+	// A multipart body is never a JSON envelope, so the checks below would read it
+	// as "not sealed" and return it for forwarding — envelope and all. Decide it
+	// here instead, on part names (SPEC §5.3.1). Refusing rather than unsealing:
+	// no multipart endpoint has a sealed request profile today, so there is
+	// nothing to open even when the envelope is genuine.
+	contentType := ctx.Request.Header.Get("Content-Type")
+	if carries, why := multipartCarriesE2EEPart(contentType, reqBody); carries {
+		return nil, fmt.Errorf("multipart request must not carry a sealed envelope: %s. A sealed request is sent as JSON, and a body that cannot be parsed as an envelope is not thereby an unsealed body", why)
+	}
+	if isMultipartRequest(contentType) {
+		// Multipart, marker present, no part named `_e2ee`: the substring is in
+		// someone's `prompt` or in the audio. Not sealed, forward unchanged — and do
+		// NOT fall through to the JSON path, which would only fail to parse.
 		return reqBody, nil
 	}
 
