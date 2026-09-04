@@ -1101,6 +1101,174 @@ func TestGateIsNotRecomputedPerPart(t *testing.T) {
 // Closed without recursion, because "parts that cannot be enumerated from here"
 // is already the fail-closed condition. The second row is what keeps that from
 // being a blanket refusal of nested bodies.
+// RFC 2045 §5 puts a `name` on Content-Type, and a part may declare it with NO
+// Content-Disposition at all — in which case the disposition loop never runs and
+// every check inside it is skipped. javax.mail's getFileName() reads it as a
+// fallback. All three readings the disposition gets apply here, on the same
+// premise.
+//
+// Each fixture is asserted to have no Content-Disposition, because that is the
+// whole point of the branch: with one present these would be caught upstream and
+// the test would pass while testing nothing.
+func TestMultipartNamingTheMarkerOnContentTypeIsRefused(t *testing.T) {
+	c := &Ctrl{}
+	for _, tt := range []struct {
+		name        string
+		contentType string
+	}{
+		{"literal name", `text/plain; name="_e2ee"`},
+		{"padded name", `text/plain; name=" _e2ee"`},
+		{"quoted pair in the name", `text/plain; name="\_e2ee"`},
+		{"RFC 2231 in a charset Go drops", `text/plain; name*=iso-8859-1''%5Fe2ee`},
+		{"RFC 2047 encoded word", `text/plain; name="=?utf-8?B?X2UyZWU=?="`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			body := []byte("--B\r\nContent-Type: " + tt.contentType + "\r\n\r\n" +
+				sealedEnvelopeJSON + "\r\n" +
+				"--B\r\nContent-Disposition: form-data; name=\"file\"\r\n\r\naudio\r\n--B--\r\n")
+			const contentType = `multipart/form-data; boundary=B`
+			if bytes.Contains(body, []byte("Content-Disposition: form-data; name=\"_e2ee\"")) {
+				t.Fatal("fixture must declare the name on Content-Type only")
+			}
+
+			if sealed, _ := c.IsSealedRequest(contentType, body); !sealed {
+				t.Error("a name declared on Content-Type cannot be ruled out")
+			}
+			if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err == nil {
+				t.Fatal("must refuse rather than forward")
+			}
+		})
+	}
+}
+
+// Two shapes the first version of this test could not see, both found by a
+// surviving mutation rather than by reading the code.
+//
+// The Content-Type check must not be conditional on the disposition's absence.
+// Scoping it to "no Content-Disposition" survives every fixture above, since
+// none of them has one on the marker-bearing part — but which header a lenient
+// parser prefers is not ours to assume, and a part declaring `name="file"` in
+// one header and the marker in the other is exactly the shape that assumption
+// gets wrong.
+//
+// And an unparseable part Content-Type must fail closed on the same terms as an
+// unparseable disposition: gated, so a sloppy header alone is still forwarded,
+// but refused once the body could be naming the marker.
+func TestContentTypeNameIsCheckedRegardlessOfTheDisposition(t *testing.T) {
+	c := &Ctrl{}
+	const contentType = `multipart/form-data; boundary=B`
+
+	t.Run("a benign disposition does not excuse the Content-Type", func(t *testing.T) {
+		body := []byte("--B\r\nContent-Disposition: form-data; name=\"file\"\r\n" +
+			"Content-Type: text/plain; name=\"_e2ee\"\r\n\r\n" + sealedEnvelopeJSON + "\r\n--B--\r\n")
+		if sealed, _ := c.IsSealedRequest(contentType, body); !sealed {
+			t.Error("the marker on Content-Type cannot be ruled out because another header names something else")
+		}
+	})
+
+	t.Run("unparseable Content-Type, marker in the body", func(t *testing.T) {
+		// The marker has to be in the CONTENT here: sealedEnvelopeJSON is the
+		// envelope's value, and the literal `_e2ee` is the key that wraps it,
+		// which a multipart body carries as the part name rather than in the
+		// bytes. So a body whose only marker is a name the parser could not read
+		// does not trip the gate — which is the whole shape of this branch.
+		body := []byte("--B\r\nContent-Type: text/plain; charset=\"utf\"8\"\r\n\r\n" +
+			`{"_e2ee":` + sealedEnvelopeJSON + "}\r\n--B--\r\n")
+		if _, _, err := mime.ParseMediaType(`text/plain; charset="utf"8"`); err == nil {
+			t.Fatal("fixture assumes this Content-Type does NOT parse")
+		}
+		if !couldNameE2EEPart(body) {
+			t.Fatal("fixture must trip the gate, or it is not testing the gated branch")
+		}
+		if sealed, why := c.IsSealedRequest(contentType, body); !sealed {
+			t.Error("malformed AND could be naming the marker must fail closed")
+		} else if !strings.Contains(why, "Content-Type could not be parsed") {
+			t.Errorf("the refusal should cite the Content-Type parse, got %q", why)
+		}
+	})
+}
+
+// And the complement, so the Content-Type check refuses a NAME rather than the
+// header: `name` on Content-Type is ordinary (old-style uploads and mail clients
+// emit it), and a part whose type merely fails to parse without mentioning
+// anything reserved was forwarded before this branch existed.
+func TestOrdinaryContentTypeNamesAreForwarded(t *testing.T) {
+	c := &Ctrl{}
+	for _, tt := range []struct {
+		name        string
+		contentType string
+		// Whether the fixture is expected to trip couldNameE2EEPart. For most
+		// rows it must not, so that a gated branch cannot be what forwards them.
+		// `filename="_e2ee"` necessarily does — the marker is right there in the
+		// body — and forwarding it anyway is the stronger claim: the gate is true
+		// and no branch fires, because a filename is not a form-field name.
+		tripsGate bool
+	}{
+		{name: "an unrelated name", contentType: `text/plain; name="notes.txt"`},
+		{name: "a filename, not a name", contentType: `text/plain; filename="_e2ee"`, tripsGate: true},
+		{name: "an encoded filename", contentType: `text/plain; filename*=utf-8''%5Fe2ee`},
+		{name: "no parameters at all", contentType: `audio/wav`},
+		{name: "unparseable, nothing reserved", contentType: `text/plain; charset="utf"8"`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			body := []byte("--B\r\nContent-Type: " + tt.contentType + "\r\n\r\nhello\r\n" +
+				"--B\r\nContent-Disposition: form-data; name=\"file\"\r\n\r\naudio\r\n--B--\r\n")
+			const contentType = `multipart/form-data; boundary=B`
+			if got := couldNameE2EEPart(body); got != tt.tripsGate {
+				t.Fatalf("gate = %v, want %v: the fixture is not exercising what this row is for", got, tt.tripsGate)
+			}
+
+			if sealed, why := c.IsSealedRequest(contentType, body); sealed {
+				t.Errorf("must be forwarded, refused because %s", why)
+			}
+			got, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body)
+			if err != nil {
+				t.Fatalf("must be forwarded, got %v", err)
+			}
+			if !bytes.Equal(got, body) {
+				t.Error("the body must be forwarded unchanged")
+			}
+		})
+	}
+}
+
+// The preamble and the epilogue, together, because mime/multipart is symmetric
+// about the delimiters and the residuals list has to be right about both. Named
+// as known-open in the PR description; RFC 2046 §5.1.1 says a conformant
+// upstream ignores both, so reaching either needs a splitter that honours
+// neither delimiter.
+//
+// This test pins what is NOT covered, which is unusual but deliberate: it fails
+// if either position starts being enumerated, which is the moment the residuals
+// list becomes wrong in the other direction.
+func TestUnenumeratedPreambleAndEpilogueAreForwarded(t *testing.T) {
+	const contentType = `multipart/form-data; boundary=B`
+	const partShaped = "Content-Disposition: form-data; name=\"_e2ee\"\r\n\r\n" + sealedEnvelopeJSON + "\r\n"
+	const file = "--B\r\nContent-Disposition: form-data; name=\"file\"\r\n\r\naudio\r\n"
+	const term = "--B--\r\n"
+
+	for _, tt := range []struct {
+		name string
+		body string
+	}{
+		{"preamble, before the first delimiter", partShaped + file + term},
+		{"epilogue, after the close delimiter", file + term + "--B\r\n" + partShaped + term},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			carries, why := multipartCarriesE2EEPart(contentType, []byte(tt.body))
+			if carries {
+				t.Fatalf("this position is enumerated now (%s) — the residuals list needs updating, not this test", why)
+			}
+		})
+	}
+
+	// The control that makes the two rows above meaningful: the same block INSIDE
+	// the delimiters is refused. Without this, a broken fixture would pass both.
+	if carries, _ := multipartCarriesE2EEPart(contentType, []byte(file+"--B\r\n"+partShaped+term)); !carries {
+		t.Fatal("the same block as a real part must be refused, or the fixtures prove nothing")
+	}
+}
+
 func TestNestedMultipartPartIsRefused(t *testing.T) {
 	c := &Ctrl{}
 	nested := func(innerDisposition, innerBody string) []byte {
