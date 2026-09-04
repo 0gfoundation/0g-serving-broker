@@ -303,7 +303,18 @@ func TestUnparseableBoundaryWithAnUppercaseEncodedNameIsRefused(t *testing.T) {
 // The complement, so the branch above is not simply refusing everything it
 // cannot parse: an unparseable multipart Content-Type over a body that could not
 // be naming the marker is still forwarded.
-func TestUnparseableContentTypeWithoutTheMarkerIsStillForwarded(t *testing.T) {
+// INVERTED when the request-level branch stopped consulting the gate. The body
+// here is a real, well-formed multipart body — its parts exist and are readable
+// by any parser that resolves the duplicate boundary parameter — and the reason
+// this enumeration sees none of them is the REQUEST's Content-Type, not anything
+// about the parts. "The names were never read" is exact here, so the spelling
+// heuristic has no business narrowing it: gated, this was the way around the
+// ungated budget and nested branches.
+//
+// Its complement is TestMalformedMultipartWithoutTheMarkerIsStillForwarded: a
+// body with no part-shaped line at all is still forwarded, on the structural
+// fact that no parser reads a part from it under any boundary.
+func TestUnparseableContentTypeWithARealBodyIsRefused(t *testing.T) {
 	c := &Ctrl{}
 	body, _ := buildMultipart(t, func(w *multipart.Writer) {
 		if err := w.WriteField("prompt", "an ordinary transcription"); err != nil {
@@ -311,12 +322,173 @@ func TestUnparseableContentTypeWithoutTheMarkerIsStillForwarded(t *testing.T) {
 		}
 	})
 	const contentType = `multipart/form-data; boundary=x; boundary=y`
-
-	if sealed, _ := c.IsSealedRequest(contentType, body); sealed {
-		t.Error("a body that could not be naming the marker is not a sealed request")
+	if couldNameE2EEPart(body) {
+		t.Fatal("fixture must not trip the gate, or it cannot show the branch is ungated")
 	}
-	if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err != nil {
-		t.Fatalf("must be forwarded, got %v", err)
+
+	if sealed, why := c.IsSealedRequest(contentType, body); !sealed {
+		t.Error("parts that exist and were never enumerated cannot be cleared")
+	} else if !strings.Contains(why, "cannot be enumerated") {
+		t.Errorf("the refusal should cite the unusable boundary, got %q", why)
+	}
+	if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err == nil {
+		t.Fatal("must refuse rather than forward")
+	}
+}
+
+// The five shapes that reached the ungated branches BY WAY of the two that were
+// still gated. Each carries the marker in a part that is byte-identical and
+// perfectly well-formed — named with an RFC 2047 encoded word, the one spelling
+// couldNameE2EEPart provably cannot see — behind one broken, unrelated header.
+//
+// The fixtures must NOT spell the marker literally, which is the trap this test
+// was nearly written into: with a literal `_e2ee` inside, the gate is true and
+// gated and ungated behave identically, so the test would pass against the bug.
+// The gate assertion below is what holds that.
+func TestABrokenHeaderDoesNotHideTheRestOfTheBody(t *testing.T) {
+	c := &Ctrl{}
+	const wordName = `=?utf-8?B?X2UyZWU=?=` // RFC 2047 for `_e2ee`
+	const goodPart = "--B\r\nContent-Disposition: form-data; name=\"file\"\r\n\r\naudio\r\n"
+	const wordPart = "--B\r\nContent-Disposition: form-data; name=\"" + wordName + "\"\r\n\r\n" + sealedEnvelopeJSON + "\r\n"
+	const nestedPart = "--B\r\nContent-Disposition: form-data; name=\"w\"\r\n" +
+		"Content-Type: multipart/mixed; boundary=I\r\n\r\n" +
+		"--I\r\nContent-Disposition: form-data; name=\"" + wordName + "\"\r\n\r\nX\r\n--I--\r\n"
+	const badHeader = "--B\r\nthis-is-not-a-header\r\n\r\njunk\r\n"
+
+	for _, tt := range []struct {
+		name        string
+		contentType string
+		body        string
+	}{
+		{"duplicate boundary parameter", `multipart/form-data; boundary=B; boundary=C`, goodPart + wordPart + "--B--\r\n"},
+		{"unclosed quote in the boundary", `multipart/form-data; boundary="B`, goodPart + wordPart + "--B--\r\n"},
+		{"trailing junk parameter", `multipart/form-data; boundary=B; =junk`, goodPart + wordPart + "--B--\r\n"},
+		{"a part header without a colon, before the marker", `multipart/form-data; boundary=B`, badHeader + wordPart + "--B--\r\n"},
+		{"a part header without a colon, before a nested part", `multipart/form-data; boundary=B`, badHeader + nestedPart + "--B--\r\n"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			body := []byte(tt.body)
+			if couldNameE2EEPart(body) {
+				t.Fatal("fixture spells something the gate can see, so it cannot distinguish gated from ungated")
+			}
+			if sealed, _ := c.IsSealedRequest(tt.contentType, body); !sealed {
+				t.Error("a broken unrelated header does not clear the parts behind it")
+			}
+			if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(tt.contentType), body); err == nil {
+				t.Fatal("must refuse rather than forward")
+			}
+		})
+	}
+
+	// The controls: the same marker-bearing parts, reachable, are refused — so
+	// the rows above are about reachability and not about the name.
+	for _, tt := range []struct {
+		name string
+		body string
+	}{
+		{"encoded-word part alone", wordPart + "--B--\r\n"},
+		{"nested part alone", nestedPart + "--B--\r\n"},
+	} {
+		t.Run("control: "+tt.name, func(t *testing.T) {
+			if sealed, _ := c.IsSealedRequest(`multipart/form-data; boundary=B`, []byte(tt.body)); !sealed {
+				t.Error("the control must be refused, or the rows above prove nothing")
+			}
+		})
+	}
+}
+
+// countLineStartsWith's anchor is the whole point of it, and two mutations
+// survived without this: counting the needle ANYWHERE, and anchoring on CRLF
+// instead of LF. Both change what the two ungated branches decide.
+func TestCountLineStartsWith(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		body string
+		want int
+	}{
+		{"a part and the close", "--B\r\nx\r\n--B--\r\n", 2},
+		// Mid-line occurrences are content, not delimiters. Counting them
+		// overcounts and turns a forwardable body into a refusal.
+		{"the needle inside part content", "--B\r\nCD: x\r\n\r\nsee --B here\r\n--B--\r\n", 2},
+		// Bare LF is malformed but lenient parsers read it. Anchoring on CRLF
+		// undercounts this to 0 and forwards a body with unenumerated parts.
+		{"bare LF line endings", "--B\nx\n--B--\n", 2},
+		{"at the very start only", "--B", 1},
+		{"nowhere", "no delimiters at all", 0},
+		{"empty", "", 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := countLineStartsWith([]byte(tt.body), "--B"); got != tt.want {
+				t.Errorf("got %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+// And the two anchor properties as BEHAVIOUR, since a helper's unit test does
+// not prove the branch reads it the way the branch needs.
+func TestTheDelimiterAnchorDecidesTwoRealBodies(t *testing.T) {
+	const contentType = `multipart/form-data; boundary=B`
+
+	// Bare LF throughout: Go cannot enumerate it, and the marker-bearing part is
+	// unenumerated content. Anchoring on CRLF would count 0 delimiters and
+	// forward this.
+	bareLF := []byte("--B\nthis-is-not-a-header\n\njunk\n" +
+		"--B\nContent-Disposition: form-data; name=\"=?utf-8?B?X2UyZWU=?=\"\n\nX\n--B--\n")
+	if couldNameE2EEPart(bareLF) {
+		t.Fatal("fixture must not trip the gate")
+	}
+	if carries, _ := multipartCarriesE2EEPart(contentType, bareLF); !carries {
+		t.Error("a bare-LF body with unenumerated parts must fail closed")
+	}
+
+	// The other direction: one enumerable part whose CONTENT mentions the
+	// delimiter twice, and no closing delimiter. Nothing is unenumerated, so it
+	// must be forwarded — counting the needle anywhere would make it 3 against 2
+	// and refuse an ordinary truncated upload.
+	contentMentions := []byte("--B\r\nContent-Disposition: form-data; name=\"file\"\r\n\r\nsee --B and --B\r\n")
+	if couldNameE2EEPart(contentMentions) {
+		t.Fatal("fixture must not trip the gate")
+	}
+	if carries, why := multipartCarriesE2EEPart(contentType, contentMentions); carries {
+		t.Errorf("content mentioning the delimiter is not an unenumerated part: %s", why)
+	}
+}
+
+// The NextPart error class is wider than "a part header is malformed", so the
+// branch decides structurally rather than refusing everything that reaches it.
+// This is the whole class, measured, with the verdict each row must get: a
+// client that aborts an upload must not get an e2ee-flavoured 400, while a body
+// that still declares parts nobody enumerated must fail closed.
+func TestUnparseableBodyIsJudgedByWhatRemainsUnenumerated(t *testing.T) {
+	const contentType = `multipart/form-data; boundary=B`
+	const goodPart = "--B\r\nContent-Disposition: form-data; name=\"file\"\r\n\r\naudio\r\n"
+	const badHeader = "--B\r\nthis-is-not-a-header\r\n\r\njunk\r\n"
+	const wordPart = "--B\r\nContent-Disposition: form-data; name=\"=?utf-8?B?X2UyZWU=?=\"\r\n\r\nX\r\n"
+
+	for _, tt := range []struct {
+		name   string
+		body   string
+		refuse bool
+	}{
+		{"bad part header, then more parts", badHeader + wordPart + "--B--\r\n", true},
+		{"bad part header, then the close", badHeader + "--B--\r\n", true},
+		{"declared boundary never appears, body is part-shaped", "--OTHER\r\nContent-Disposition: form-data; name=\"x\"\r\n\r\nX\r\n--OTHER--\r\n", true},
+		{"declared boundary never appears, body is JSON", `{"prompt":"not multipart at all"}`, false},
+		{"no closing delimiter", goodPart, false},
+		{"truncated mid part body", goodPart + "--B\r\nContent-Disposition: form-data; name=\"x\"\r\n\r\npartial", false},
+		{"truncated mid part header", goodPart + "--B\r\nContent-Disposi", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			body := []byte(tt.body)
+			if couldNameE2EEPart(body) {
+				t.Fatal("fixture must not trip the gate: these branches are ungated and the gate would mask that")
+			}
+			carries, why := multipartCarriesE2EEPart(contentType, body)
+			if carries != tt.refuse {
+				t.Fatalf("carries = %v, want %v (%s)", carries, tt.refuse, why)
+			}
+		})
 	}
 }
 

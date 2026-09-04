@@ -408,6 +408,52 @@ func looksMultipart(contentType string) bool {
 	return strings.HasPrefix(strings.ToLower(strings.TrimLeft(contentType, " \t")), "multipart/")
 }
 
+// countLineStartsWith counts the lines of the body that begin with prefix. Both
+// callers use it to ask a structural question about a body that failed to parse:
+// does it still declare part-shaped content that this enumeration never reached?
+//
+// A line start is taken as "at the body start, or after LF" rather than after
+// CRLF, deliberately: a body using bare LF line endings is malformed but lenient
+// parsers read it, and anchoring on CRLF would UNDERCOUNT such a body and
+// forward it. Overcounting only happens when part content contains the prefix at
+// a line start, and where it does, a parser splits there too.
+//
+// bytes.Index rather than the byte-at-a-time scan mentionsEncodedName needs: the
+// needle is a fixed multi-byte string, so the platform's optimised search
+// applies. It runs at most once per request, on an error path that returns
+// immediately.
+func countLineStartsWith(reqBody []byte, prefix string) int {
+	needle := []byte(prefix)
+	n := 0
+	for i := 0; i+len(needle) <= len(reqBody); {
+		j := bytes.Index(reqBody[i:], needle)
+		if j < 0 {
+			break
+		}
+		at := i + j
+		if at == 0 || reqBody[at-1] == '\n' {
+			n++
+		}
+		i = at + len(needle)
+	}
+	return n
+}
+
+// declaresUnreadableParts reports whether a body that could not be enumerated
+// with the declared boundary nonetheless contains something part-shaped: a line
+// opening with `--`, which is where a part begins under SOME boundary. A parser
+// that cannot use the declared boundary may resolve a different one — several
+// take it from the first such line — so those bytes are part headers this
+// enumeration never read.
+//
+// The distinction this draws is the reason it exists rather than an
+// unconditional refusal: a JSON body sent with a multipart Content-Type has no
+// such line, so no parser reads a part from it under any boundary, and it is
+// forwarded on a structural fact rather than on a spelling heuristic.
+func declaresUnreadableParts(reqBody []byte) bool {
+	return countLineStartsWith(reqBody, "--") > 0
+}
+
 // multipartCarriesE2EEPart reports whether a multipart body declares a part named
 // "_e2ee" — a sealed envelope smuggled into the one request shape the JSON checks
 // cannot see (SPEC §5.3.1). The string is the reason, for the rejection message.
@@ -450,15 +496,33 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 	}
 	_, params, err := mime.ParseMediaType(contentType)
 	if err != nil || params["boundary"] == "" {
-		if couldNameE2EEPart(reqBody) {
-			// Two causes, two wordings: a Content-Type that does not parse, and
-			// one that parses with no boundary at all. Formatting err in both
-			// renders the second as "could not be read (<nil>)".
+		// UNGATED, like the budget and nested branches and unlike the per-header
+		// ones. With no readable boundary NOTHING is enumerated, so this is the
+		// strongest form of "the names were never read" — and the gating argument
+		// that holds one branch down does not reach here: what is broken is the
+		// REQUEST's Content-Type, while the marker-bearing part header inside the
+		// body is intact and readable by any parser that resolves the boundary
+		// differently. The name is not a guess; it is simply never looked at.
+		//
+		// Gated, that made this the way around the ungated branches: a duplicate
+		// boundary parameter in front of an otherwise perfect part named
+		// `=?utf-8?B?X2UyZWU=?=` (or in front of a nested multipart part) forwarded
+		// the envelope, because the gate sees neither the literal marker nor
+		// `name*` in an RFC 2047 encoded word.
+		//
+		// STRUCTURAL, not unconditional: refuse when the body still contains a
+		// part-shaped line, forward when it contains none. A JSON body sent with a
+		// multipart Content-Type is the second case and stays forwarded.
+		//
+		// Two causes, two wordings: a Content-Type that does not parse, and one
+		// that parses with no boundary at all. Formatting err in both renders the
+		// second as "could not be read (<nil>)".
+		if declaresUnreadableParts(reqBody) {
 			why := "its multipart boundary is missing from the Content-Type"
 			if err != nil {
 				why = fmt.Sprintf("its multipart boundary could not be read (%v)", err)
 			}
-			return true, "the body could be naming the reserved marker and " + why + ", so a smuggled envelope cannot be ruled out"
+			return true, "the body declares parts that cannot be enumerated because " + why + ", so a smuggled envelope cannot be ruled out"
 		}
 		return false, ""
 	}
@@ -471,6 +535,7 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 	// sync proxy reaches here ~90 lines before ValidateSession). See
 	// maxHeadersExamined for what bounds the rest.
 	examined := 0
+	partsRead := 0
 	gateKnown, gate := false, false
 	couldName := func() bool {
 		if !gateKnown {
@@ -497,11 +562,43 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 			return false, ""
 		}
 		if err != nil {
-			if couldName() {
-				return true, fmt.Sprintf("the body could be naming the reserved marker and could not be parsed as multipart (%v), so a smuggled envelope cannot be ruled out", err)
+			// UNGATED too, and for the same reason: the header that broke is not
+			// the one that would carry the marker. A part header without a colon
+			// stops the enumeration, and every part after it — perfect,
+			// readable, marker-bearing — is never seen. Gated, this was the other
+			// way around the ungated branches.
+			//
+			// But the decision is STRUCTURAL rather than unconditional, because
+			// this error class is wider than "a part header is malformed": a body
+			// with no closing delimiter, one truncated mid-part, and one whose
+			// declared boundary never appears all arrive here too, and a client
+			// that aborts an upload should not get an e2ee-flavoured 400.
+			//
+			// So: refuse when part-shaped content remains that this enumeration
+			// never reached — a delimiter beyond the parts read plus the closing
+			// one — or when the declared boundary appears nowhere, where nothing
+			// was enumerated at all and a lenient parser may resolve a different
+			// boundary. Measured across the whole error class:
+			//
+			//	bad part header, then more parts   -> delims 3, read 0  refuse
+			//	bad part header, then the close    -> delims 2, read 0  refuse
+			//	declared boundary never appears,
+			//	  body has `--other` lines         -> delims 0, read 0  refuse
+			//	  body is JSON, no `--` line       -> delims 0, read 0  forward
+			//	no closing delimiter               -> delims 1, read 1  forward
+			//	truncated mid part body            -> delims 2, read 2  forward
+			//	truncated mid part header          -> delims 2, read 1  forward
+			//
+			// The last row agrees with the io.EOF case above for the same reason:
+			// a header that never terminates has no body after it to hold an
+			// envelope.
+			delims := countLineStartsWith(reqBody, "--"+params["boundary"])
+			if delims > partsRead+1 || (delims == 0 && declaresUnreadableParts(reqBody)) {
+				return true, fmt.Sprintf("the body could not be parsed as multipart (%v) and declares part-shaped content this enumeration never reached, so a smuggled envelope cannot be ruled out", err)
 			}
 			return false, ""
 		}
+		partsRead++
 		examined++
 		if examined > maxHeadersExamined {
 			// UNGATED: the premise is that a name past the budget is never read,
