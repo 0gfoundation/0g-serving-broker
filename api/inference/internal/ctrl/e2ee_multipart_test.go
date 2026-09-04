@@ -668,18 +668,195 @@ func TestDeclaresEncodedName(t *testing.T) {
 		`form-data; NAME*=iso-8859-1''x`:                  true,
 		`form-data; name*0*=utf-8''a; name*1*=b`:          true,
 		`form-data;name*=x`:                               true, // no space after the semicolon
-		`name*=x`:                                         true, // no disposition type at all
+		`form-data; name*0=a; name*1=b`:                   true,
+		`form-data; name*12*=utf-8''a`:                    true,
 		`form-data; name="file"`:                          false,
 		`form-data; name=_e2ee`:                           false,
 		`form-data; name="file"; filename*=iso-8859-1''x`: false,
 		`form-data; name="file"; FILENAME*0*=utf-8''x`:    false,
 		`form-data; name="file"; x-my-name*=utf-8''x`:     false,
-		`attachment`:                                      false,
-		``:                                                false,
+		`attachment`: false,
+		``:           false,
+		// Inside a quoted VALUE, so not a parameter — the finding that made the
+		// scan quote-aware. The third survives a follow-the-match shape check.
+		`form-data; name="file"; filename="name*.wav"`:             false,
+		`form-data; name="file"; filename="recording (name*).wav"`: false,
+		`form-data; name="file"; filename="name*=x.wav"`:           false,
+		`form-data; name="name*=x"`:                                false,
+		// Starts with "name*" but is none of the three RFC 2231 shapes.
+		`form-data; name*foo=x`:  false,
+		`form-data; name*`:       false,
+		`form-data; namespace=x`: false,
+		// No disposition type, so no parameter position: mime.ParseMediaType
+		// rejects this outright ("expected slash after first token"), which puts
+		// the whole header in the caller's gated fail-closed branch rather than
+		// here. TestBareEncodedNameDispositionIsRefused pins that end to end.
+		`name*=x`: false,
 	}
 	for disposition, want := range tests {
 		if got := declaresEncodedName(disposition); got != want {
 			t.Errorf("%q: got %v, want %v", disposition, got, want)
 		}
+	}
+}
+
+// The mirror image of TestMultipartWithAnEncodedFilenameIsForwarded: a `name*`
+// inside a quoted VALUE is not a parameter, and these are ordinary uploads the
+// broker forwarded before this PR. Checking only the byte before the match — the
+// first attempt at the boundary — read all of them as parameters.
+//
+// The last row is why the scan tracks quoting rather than inspecting the match's
+// neighbours: it satisfies any follow-the-match shape check too.
+func TestMultipartWithNameStarInsideAQuotedValueIsForwarded(t *testing.T) {
+	c := &Ctrl{}
+	for _, disposition := range []string{
+		`form-data; name="file"; filename="name*.wav"`,
+		`form-data; name="file"; filename="recording (name*).wav"`,
+		`form-data; name="file"; filename="my name*is.wav"`,
+		`form-data; name="file"; filename="name*=x.wav"`,
+		// These two are the rows the QUOTE TRACKING exists for, and the ones the
+		// four above turn out not to cover: a `;` inside the quoted filename, so
+		// a scan that does not track quoting sees a fresh parameter position and
+		// reads the `name*=` after it as an encoded field name. Both parse
+		// cleanly. Written after a mutation that disabled the quote tracking left
+		// the four above green — they are caught by the parameter-position
+		// tracking alone, so they proved less than they looked like they did.
+		`form-data; name="file"; filename="a; name*=utf-8''%5Fe2ee.wav"`,
+		`form-data; name="file"; filename="report; name*0=x"`,
+		// And these are the rows the ESCAPE SKIP inside the quote tracking
+		// exists for, which the two above still do not reach: an escaped quote
+		// before the `;`, so a scan that treats `\"` as closing the string ends
+		// up outside quotes at the semicolon and reads a parameter again. Go
+		// unescapes a pair before a tspecial, so both parse cleanly with the
+		// whole thing as the filename. Added after a mutation that removed the
+		// skip survived everything else here.
+		`form-data; name="file"; filename="a\"; name*=utf-8''%5Fe2ee.wav"`,
+		`form-data; name="file"; filename="say \"hi\"; name*0=x.wav"`,
+	} {
+		t.Run(disposition, func(t *testing.T) {
+			body, contentType := buildMultipart(t, func(w *multipart.Writer) {
+				rawPart(t, w, disposition, "RIFF....audio....")
+			})
+			if c.IsSealedRequest(contentType, body) {
+				t.Error("a name* inside a quoted value does not declare an encoded field name")
+			}
+			got, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body)
+			if err != nil {
+				t.Fatalf("must be forwarded, got %v", err)
+			}
+			if !bytes.Equal(got, body) {
+				t.Error("the body must be forwarded unchanged")
+			}
+		})
+	}
+}
+
+// Go unescapes an RFC 2045 quoted pair only where it precedes a tspecial, so the
+// name comes back with the backslash still in it and compares unequal to the
+// marker — while javax.mail and Ruby's mail read the marker. Nothing in this
+// stack demonstrably decodes it that way today, which makes this a smaller claim
+// than the charset gap; the comparison costs one call and the alternative is
+// trusting every upstream to agree with Go about a backslash.
+func TestMultipartWithAQuotedPairInTheNameIsRefused(t *testing.T) {
+	c := &Ctrl{}
+	tests := []struct {
+		name        string
+		disposition string
+		parsedName  string // what Go yields, measured
+	}{
+		{"backslash before the underscore", `form-data; name="\_e2ee"`, `\_e2ee`},
+		{"backslash mid-name", `form-data; name="\_e2\ee"`, `\_e2\ee`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, params, err := mime.ParseMediaType(tt.disposition)
+			if err != nil {
+				t.Fatalf("fixture assumes a clean parse, got %v", err)
+			}
+			if params["name"] != tt.parsedName {
+				t.Fatalf("Go now yields name=%q, not %q: re-check whether this is still a divergence",
+					params["name"], tt.parsedName)
+			}
+
+			body, contentType := buildMultipart(t, func(w *multipart.Writer) {
+				rawPart(t, w, tt.disposition, sealedEnvelopeJSON)
+			})
+			if !c.IsSealedRequest(contentType, body) {
+				t.Error("a conformant parser reads this as the marker, so it cannot be ruled out")
+			}
+			if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err == nil {
+				t.Fatal("must refuse rather than forward")
+			}
+		})
+	}
+}
+
+// And the complement, so the quoted-pair comparison refuses the MARKER rather
+// than every backslash. Two rows, and the second is the one that distinguishes
+// them: Go unescapes a pair before a tspecial (so `a\"b` keeps no backslash at
+// all and any rule would forward it), but LEAVES one before a non-tspecial — so
+// `a\b` comes back as `a\b`, and a rule of "refuse any backslash in the name"
+// would reject an ordinary field. Only comparing the unescaped value to the
+// marker forwards it. Written after that over-broad rule survived as a mutation.
+func TestMultipartWithAnUnrelatedQuotedPairIsForwarded(t *testing.T) {
+	c := &Ctrl{}
+	tests := []struct {
+		name        string
+		disposition string
+		parsedName  string // what Go yields, measured
+	}{
+		{"pair before a tspecial, which Go unescapes", `form-data; name="a\"b"`, `a"b`},
+		{"pair before a non-tspecial, which Go leaves in place", `form-data; name="a\b"`, `a\b`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, params, err := mime.ParseMediaType(tt.disposition)
+			if err != nil {
+				t.Fatalf("fixture assumes a clean parse, got %v", err)
+			}
+			if params["name"] != tt.parsedName {
+				t.Fatalf("fixture assumes Go yields name=%q, got %q", tt.parsedName, params["name"])
+			}
+
+			body, contentType := buildMultipart(t, func(w *multipart.Writer) {
+				rawPart(t, w, tt.disposition, "some field value")
+			})
+			if c.IsSealedRequest(contentType, body) {
+				t.Error("a quoted pair in a name that is not the marker is not a sealed request")
+			}
+			if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err != nil {
+				t.Fatalf("must be forwarded, got %v", err)
+			}
+		})
+	}
+}
+
+// A disposition with no type at all — just the encoded parameter. It has no
+// parameter position for declaresEncodedName to find, because mime.ParseMediaType
+// rejects the header outright ("expected slash after first token"), so the
+// refusal has to come from the gated unparseable-disposition branch instead. Both
+// halves of that are worth pinning: the predicate says false, the guard still
+// refuses.
+func TestBareEncodedNameDispositionIsRefused(t *testing.T) {
+	c := &Ctrl{}
+	const disposition = `name*=utf-8''%5Fe2ee`
+	if _, _, err := mime.ParseMediaType(disposition); err == nil {
+		t.Fatal("fixture assumes this disposition does NOT parse")
+	}
+	if declaresEncodedName(disposition) {
+		t.Error("a header with no disposition type has no parameter position")
+	}
+
+	body := []byte("--x\r\nContent-Disposition: " + disposition + "\r\n\r\n" + sealedEnvelopeJSON + "\r\n--x--\r\n")
+	const contentType = `multipart/form-data; boundary=x`
+	if bytes.Contains(body, []byte("_e2ee")) {
+		t.Fatal("fixture no longer tests the encoded case")
+	}
+
+	if !c.IsSealedRequest(contentType, body) {
+		t.Error("the marker cannot be ruled out, so this must fail closed via the unparseable-disposition branch")
+	}
+	if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err == nil {
+		t.Fatal("must refuse rather than forward")
 	}
 }

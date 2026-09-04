@@ -224,37 +224,98 @@ func mentionsEncodedName(reqBody []byte) bool {
 // `name*0=` / `name*0*=` continuation segments, case-insensitively because
 // parameter names are.
 //
-// The boundary test is what makes this usable rather than a blanket refusal:
-// `filename*=iso-8859-1”caf%E9.wav` CONTAINS "name*" and is both legitimate and
-// common, so a substring match would refuse ordinary uploads. A match therefore
-// only counts where "name" begins a parameter — the preceding byte is not itself
-// an RFC 2045 token character.
+// Whether a match sits at a PARAMETER POSITION is the whole difficulty, and
+// getting it half-right cost a round of review. `filename*=iso-8859-1”x`
+// CONTAINS "name*" and is both legitimate and common, so a plain substring match
+// refuses ordinary uploads. Checking only the byte BEFORE the match fixes that
+// one and leaves the mirror image open — a `name*` inside a quoted VALUE, which
+// is just as ordinary and was just as refused:
+//
+//	filename="name*.wav"              -> preceded by `"`, read as a parameter
+//	filename="recording (name*).wav"  -> preceded by ` `, same
+//	filename="name*=x.wav"            -> survives a follow-the-match shape check
+//	                                     too, which is why the scan has to track
+//	                                     quoting rather than look at neighbours
+//
+// So this walks the disposition tracking quoted strings and tests for the
+// attribute only where an attribute may actually begin: after a `;`, outside
+// quotes. Desyncing requires a disposition that does not parse, which the
+// caller's gated fail-closed branch already covers.
+//
+// This is a tokeniser, not a decoder, and that distinction is why writing one
+// here is not the mistake refused a few lines up in multipartCarriesE2EEPart:
+// deciding what an encoded name MEANS is the parser's job and second-guessing it
+// is how bugs get layered, but deciding where a parameter STARTS is unambiguous
+// grammar with no charset in it.
 //
 // A disposition is a header, not a body, so walking it costs nothing worth
 // optimising; the body scan in mentionsEncodedName is the one that had to be
 // measured.
 func declaresEncodedName(disposition string) bool {
-	const attr = "name*"
-	for i := 0; i+len(attr) <= len(disposition); i++ {
-		if !strings.EqualFold(disposition[i:i+len(attr)], attr) {
-			continue
+	inQuotes := false
+	atParamStart := false
+	for i := 0; i < len(disposition); i++ {
+		switch c := disposition[i]; {
+		case inQuotes:
+			switch c {
+			case '\\':
+				i++ // a quoted pair: whatever follows is not a closing quote
+			case '"':
+				inQuotes = false
+			}
+		case c == '"':
+			inQuotes = true
+		case c == ';':
+			atParamStart = true
+		case c == ' ' || c == '\t':
+			// Leading whitespace does not end the parameter position.
+		default:
+			if atParamStart {
+				if isEncodedNameAttr(disposition[i:]) {
+					return true
+				}
+				atParamStart = false
+			}
 		}
-		if i > 0 && isTokenChar(disposition[i-1]) {
-			continue // the tail of a longer attribute, e.g. filename*
-		}
-		return true
 	}
 	return false
 }
 
-// isTokenChar reports whether b may appear in an RFC 2045 token, which is what
-// an attribute name is made of.
-func isTokenChar(b byte) bool {
-	switch {
-	case b >= 'a' && b <= 'z', b >= 'A' && b <= 'Z', b >= '0' && b <= '9':
-		return true
+// isEncodedNameAttr reports whether s BEGINS with an RFC 2231-encoded `name`
+// attribute followed by its `=`. The three shapes are `name*=`, `name*<n>=` and
+// `name*<n>*=`; anything else that merely starts with "name*" — `name*foo=`, or
+// a bare `name*` at the end of the header — is not one, and neither is
+// `namespace=`.
+func isEncodedNameAttr(s string) bool {
+	const attr = "name*"
+	if len(s) < len(attr) || !strings.EqualFold(s[:len(attr)], attr) {
+		return false
 	}
-	return bytes.IndexByte([]byte("!#$%&'*+-.^_`|~"), b) >= 0
+	rest := s[len(attr):]
+	for len(rest) > 0 && rest[0] >= '0' && rest[0] <= '9' {
+		rest = rest[1:] // the continuation index of name*<n>
+	}
+	if strings.HasPrefix(rest, "*") {
+		rest = rest[1:] // the encoding marker of name*<n>*
+	}
+	return strings.HasPrefix(rest, "=")
+}
+
+// unquotePairs removes RFC 2045 quoted-pair backslashes the way a conformant
+// parser does: inside a quoted string every `\` escapes the character after it.
+//
+// Go does not. mime.ParseMediaType unescapes a backslash only where it precedes
+// a tspecial, so `name="\_e2ee"` comes back as `\_e2ee` — while javax.mail and
+// Ruby's mail read `_e2ee`. Same one-encoding-over shape as the RFC 2231 charset
+// gap, so it gets the same treatment: the resolved name is compared both as the
+// parser reports it and as a conformant parser would read it.
+//
+// Dropping every backslash is not a faithful decode of the ORIGINAL header — Go
+// has already consumed some of them — so a name that legitimately contains a
+// backslash is compared as though it did not. That errs toward refusing, on a
+// spelling no form client produces.
+func unquotePairs(name string) string {
+	return strings.ReplaceAll(name, `\`, "")
 }
 
 // looksMultipart reports whether a Content-Type CLAIMS to be multipart, by a
@@ -443,6 +504,22 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 			}
 			if dparams["name"] == e2eeBodyMarker {
 				return true, fmt.Sprintf("a multipart part is named %q", e2eeBodyMarker)
+			}
+			// The same name as a CONFORMANT parser reads it. Go unescapes a
+			// quoted pair only before a tspecial, so `name="\_e2ee"` comes back
+			// as `\_e2ee` and compares unequal above, while javax.mail and Ruby's
+			// mail read `_e2ee`. Measured:
+			//
+			//	name="\_e2ee"    -> ParseMediaType yields `\_e2ee`
+			//	name="\_e2\ee"   -> ParseMediaType yields `\_e2\ee`
+			//	name="a\"b"      -> yields `a"b`; the tspecial one IS unescaped
+			//
+			// Nothing in this stack demonstrably decodes it that way today, so
+			// this is a smaller claim than the charset gap — but it costs one
+			// comparison and the alternative is relying on every upstream
+			// agreeing with Go about a backslash.
+			if unquotePairs(dparams["name"]) == e2eeBodyMarker {
+				return true, fmt.Sprintf("a multipart part is named %q once RFC 2045 quoted pairs are resolved, which mime.ParseMediaType leaves in place before a non-tspecial but a conformant parser does not", e2eeBodyMarker)
 			}
 			// A clean parse is not the same as an answer. mime.ParseMediaType
 			// DROPS an RFC 2231 parameter whose charset it cannot decode and
