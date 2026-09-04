@@ -137,14 +137,50 @@ func hasE2EEMarker(reqBody []byte) bool {
 	return bytes.Contains(reqBody, []byte(e2eeBodyMarker))
 }
 
-// isMultipartRequest reports whether a Content-Type names multipart/form-data,
-// per RFC 2045 (case-insensitive type/subtype, parameters stopped at the ';').
-func isMultipartRequest(contentType string) bool {
+// couldNameE2EEPart is the pre-filter for the multipart check: it reports
+// whether any part in this body could possibly DECODE to a name of "_e2ee".
+//
+// It is two substrings rather than one, and the pair is exhaustive rather than a
+// guess, because mime.ParseMediaType resolves a parameter name in exactly two
+// shapes and each leaves its own trace in the raw bytes:
+//
+//	name="_e2ee" / name=_e2ee   -> the literal "_e2ee" appears
+//	name*=utf-8''%5Fe2ee        -> the literal does NOT; "name*" does
+//	name*0="_e2"; name*1="ee"   -> the literal does NOT; "name*" does
+//
+// The RFC 2231 rows are the reason a plain hasE2EEMarker gate is wrong here:
+// both decode to the marker while never spelling it. The one neighbouring
+// possibility does not arise — Go does not resolve a quoted-pair escape in a
+// parameter, so `name="_e2\ee"` yields `_e2\ee` and not the marker.
+//
+// Why pre-filter at all, when parsing every multipart body costs a measured
+// 2.3ms per 4 MiB against an upstream that takes seconds: not for the time, but
+// to keep the FAIL-CLOSED branches narrow. Without it, every malformed multipart
+// body — a JSON body sent with a multipart Content-Type, say — hits the
+// unparseable branch and is refused, which changes the broker's behaviour for
+// requests that have nothing to do with sealing and that it used to forward. The
+// filter keeps the refusal to "malformed, and could be naming the marker".
+func couldNameE2EEPart(reqBody []byte) bool {
+	// "name*" catches every RFC 2231 form, including `filename*=` on an ordinary
+	// non-ASCII upload — which merely costs that request the parse it would have
+	// paid anyway had it mentioned the marker.
+	return hasE2EEMarker(reqBody) || bytes.Contains(reqBody, []byte("name*"))
+}
+
+// isMultipartBody reports whether a Content-Type names ANY multipart type, per
+// RFC 2045 (case-insensitive, parameters stopped at the ';').
+//
+// Any subtype, not just form-data, because the question this answers is "can
+// this body carry parts", and every multipart/* can. Matching only form-data
+// left `multipart/mixed` carrying an `_e2ee` part to fall through to the JSON
+// branch, fail to parse, and be forwarded — the exact hole the check exists to
+// close, reachable by changing one word of the Content-Type.
+func isMultipartBody(contentType string) bool {
 	mt, _, err := mime.ParseMediaType(contentType)
 	if err != nil {
 		return false
 	}
-	return strings.EqualFold(mt, "multipart/form-data")
+	return strings.HasPrefix(strings.ToLower(mt), "multipart/")
 }
 
 // multipartCarriesE2EEPart reports whether a multipart/form-data body declares a
@@ -159,10 +195,18 @@ func isMultipartRequest(contentType string) bool {
 // §5.3.1 is written to prevent, in the SPEC's words: a body that cannot be
 // parsed as an envelope is not thereby an unsealed body.
 //
-// The check is on PART NAMES, never on the raw bytes, and the distinction is not
-// pedantic: a transcription whose `prompt` legitimately mentions "_e2ee" would be
-// refused by a substring rule, on a field whose whole purpose is to carry
-// arbitrary caller text. The substring is only a pre-filter for the parse.
+// The check is on PART NAMES, never on the raw bytes, and the distinction cuts
+// both ways. A substring rule would REFUSE a transcription whose `prompt`
+// legitimately mentions "_e2ee", on a field whose whole purpose is to carry
+// arbitrary caller text — and it would also MISS the name when it is encoded,
+// which is the direction that leaks:
+//
+//	name*=utf-8''%5Fe2ee        -> ParseMediaType yields "_e2ee"; the literal is absent
+//	name*0="_e2"; name*1="ee"   -> same, via RFC 2231 continuation
+//
+// So the pre-filter is couldNameE2EEPart, not hasE2EEMarker: gating on the
+// literal alone would have handed both encodings straight through. See that
+// function for why its two substrings are exhaustive rather than a guess.
 //
 // It reads the `name` parameter of Content-Disposition DIRECTLY rather than
 // through mime/multipart's Part.FormName(), because FormName returns "" for any
@@ -209,7 +253,7 @@ func isMultipartRequest(contentType string) bool {
 // reserved. (Parameter names are another matter — `NAME=` and `name=` are the
 // same parameter, and mime.ParseMediaType already normalises that.)
 func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string) {
-	if !isMultipartRequest(contentType) || !hasE2EEMarker(reqBody) {
+	if !isMultipartBody(contentType) || !couldNameE2EEPart(reqBody) {
 		return false, ""
 	}
 	_, params, err := mime.ParseMediaType(contentType)
@@ -288,23 +332,31 @@ func (c *Ctrl) IsSealedRequest(contentType string, reqBody []byte) bool {
 // plaintext fallback, SPEC §6) — a sealed request that cannot be opened, whose
 // signer_addr is not this enclave, or whose key_id is unknown is rejected.
 func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, reqBody []byte) ([]byte, error) {
-	if !hasE2EEMarker(reqBody) {
-		return reqBody, nil
-	}
-
-	// A multipart body is never a JSON envelope, so the checks below would read it
-	// as "not sealed" and return it for forwarding — envelope and all. Decide it
-	// here instead, on part names (SPEC §5.3.1). Refusing rather than unsealing:
-	// no multipart endpoint has a sealed request profile today, so there is
-	// nothing to open even when the envelope is genuine.
+	// The multipart decision comes FIRST, before the JSON path's substring gate.
+	// That ordering is load-bearing rather than stylistic: a part name can be
+	// RFC 2231-encoded, so the body carries no literal "_e2ee" and hasE2EEMarker
+	// returns false — putting its early return above this would send the encoded
+	// case straight out for forwarding without the multipart branch ever running.
+	// (It did, until a test for the encoded name caught it.)
+	//
+	// A multipart body is never a JSON envelope, so the checks further down would
+	// read it as "not sealed" and return it for forwarding — envelope and all.
+	// Decide it here instead, on part names (SPEC §5.3.1). Refusing rather than
+	// unsealing: no multipart endpoint has a sealed request profile today, so
+	// there is nothing to open even when the envelope is genuine.
 	contentType := ctx.Request.Header.Get("Content-Type")
 	if carries, why := multipartCarriesE2EEPart(contentType, reqBody); carries {
 		return nil, fmt.Errorf("multipart request must not carry a sealed envelope: %s. A sealed request is sent as JSON, and a body that cannot be parsed as an envelope is not thereby an unsealed body", why)
 	}
-	if isMultipartRequest(contentType) {
-		// Multipart, marker present, no part named `_e2ee`: the substring is in
-		// someone's `prompt` or in the audio. Not sealed, forward unchanged — and do
-		// NOT fall through to the JSON path, which would only fail to parse.
+	if isMultipartBody(contentType) {
+		// Multipart with no part named `_e2ee`: the marker, if the body mentions it
+		// at all, is in someone's `prompt` or in the audio. Not sealed, forward
+		// unchanged — and do NOT fall through to the JSON path, which would only
+		// fail to parse.
+		return reqBody, nil
+	}
+
+	if !hasE2EEMarker(reqBody) {
 		return reqBody, nil
 	}
 

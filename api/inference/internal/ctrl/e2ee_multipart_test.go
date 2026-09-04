@@ -133,6 +133,84 @@ func TestMultipartCarryingASealedEnvelopeIsRefused(t *testing.T) {
 	}
 }
 
+// The name can be ENCODED, and then the literal never appears in the body. Both
+// forms below decode to "_e2ee" through mime.ParseMediaType, so a check gated on
+// the literal substring — which is what every other sealed-request test in this
+// package uses — hands them straight through.
+func TestMultipartWithAnEncodedE2EEPartNameIsRefused(t *testing.T) {
+	tests := []struct {
+		name        string
+		disposition string
+	}{
+		{"RFC 2231 percent-encoded", `form-data; name*=utf-8''%5Fe2ee`},
+		{"RFC 2231 continuation", `form-data; name*0="_e2"; name*1="ee"`},
+	}
+
+	c := &Ctrl{}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body, contentType := buildMultipart(t, func(w *multipart.Writer) {
+				rawPart(t, w, tt.disposition, sealedEnvelopeJSON)
+			})
+			if bytes.Contains(body, []byte("_e2ee")) {
+				t.Fatal("fixture no longer tests the encoded case: the literal marker is present")
+			}
+
+			if !c.IsSealedRequest(contentType, body) {
+				t.Error("an encoded part name must be seen: the parser resolves it, so a downstream parser does too")
+			}
+			if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err == nil {
+				t.Fatal("must refuse rather than forward")
+			}
+		})
+	}
+}
+
+// Any multipart SUBTYPE can carry parts, so the check cannot be scoped to
+// form-data: matching only that left the hole reachable by changing one word of
+// the Content-Type.
+func TestNonFormDataMultipartSubtypeIsStillChecked(t *testing.T) {
+	c := &Ctrl{}
+	body, contentType := buildMultipart(t, func(w *multipart.Writer) {
+		if err := w.WriteField("_e2ee", sealedEnvelopeJSON); err != nil {
+			t.Fatalf("WriteField: %v", err)
+		}
+	})
+	mixed := strings.Replace(contentType, "multipart/form-data", "multipart/mixed", 1)
+	if mixed == contentType {
+		t.Fatal("fixture did not change the subtype")
+	}
+
+	if !c.IsSealedRequest(mixed, body) {
+		t.Error("a multipart/mixed body carrying the envelope must be seen too")
+	}
+	if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(mixed), body); err == nil {
+		t.Fatal("must refuse rather than forward")
+	}
+}
+
+// The pre-filter keeps the fail-closed branches narrow, and this is the case
+// that proves it: a body that is not valid multipart at all, with a multipart
+// Content-Type, and no mention of the marker in any form. The broker forwarded
+// such requests before this change and must keep doing so — refusing them would
+// be a behaviour change for requests that have nothing to do with sealing.
+func TestMalformedMultipartWithoutTheMarkerIsStillForwarded(t *testing.T) {
+	c := &Ctrl{}
+	body := []byte(`{"prompt":"a json body sent with a multipart content type"}`)
+	const contentType = "multipart/form-data; boundary=abc123"
+
+	if c.IsSealedRequest(contentType, body) {
+		t.Error("a malformed body that cannot be naming the marker is not a sealed request")
+	}
+	got, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body)
+	if err != nil {
+		t.Fatalf("must be forwarded, got %v", err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Error("the body must be forwarded unchanged")
+	}
+}
+
 // The rule is on PART NAMES, never on the raw bytes, and this is the case that
 // forces the distinction: `prompt` carries arbitrary caller text, so a substring
 // rule would refuse a legitimate transcription for mentioning the marker.
