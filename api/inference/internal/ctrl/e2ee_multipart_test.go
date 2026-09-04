@@ -987,3 +987,147 @@ func TestNestedMultipartPartIsRefused(t *testing.T) {
 		}
 	})
 }
+
+// The enumeration is unbounded in PART COUNT, and memoizing the gate did not
+// bound it — the gate is never consulted on a well-formed body, so nothing
+// stopped the loop. A minimum well-formed part is 9 bytes, so 3,728,269 fit in
+// the 32 MiB limit. Measured before the cap, both bodies at the limit:
+//
+//	one 32 MiB part (a legitimate upload) ->   16 ms
+//	3,728,269 empty parts                 -> 2230 ms
+//
+// Both fixtures are sized to the REQUEST LIMIT, not to maxPartsEnumerated,
+// which matters: a first version derived the many-parts fixture from the
+// constant, so the mutation "raise the cap past what fits in the limit" made the
+// test try to allocate an absurd body and error out instead of failing. A test
+// whose fixture scales with the thing under test cannot catch that thing being
+// widened.
+//
+// Asserted as a ratio against the one-part case rather than an absolute time,
+// so it is machine-independent: uncapped it is ~139x, capped it is under 1x.
+func TestEnumerationIsBoundedByPartCount(t *testing.T) {
+	if testing.Short() {
+		t.Skip("allocates two 32 MiB bodies")
+	}
+	const contentType = `multipart/form-data; boundary=B`
+	const requestLimit = 32 << 20 // RequestSizeLimitMiddleware, the only bound in front
+
+	// One legitimate upload, at the limit.
+	var onePart bytes.Buffer
+	onePart.WriteString("--B\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.wav\"\r\n\r\n")
+	onePart.Write(bytes.Repeat([]byte("A"), requestLimit-onePart.Len()-16))
+	onePart.WriteString("\r\n--B--\r\n")
+
+	// As many minimum-size, well-formed, marker-free parts as fit at the limit:
+	// they reach neither a parse error nor a name, so only the cap can stop the
+	// loop.
+	const unit = "--B\r\n\r\n\r\n"
+	var manyParts bytes.Buffer
+	for manyParts.Len()+len(unit)+8 <= requestLimit {
+		manyParts.WriteString(unit)
+	}
+	manyParts.WriteString("--B--\r\n")
+
+	for _, body := range [][]byte{onePart.Bytes(), manyParts.Bytes()} {
+		if couldNameE2EEPart(body) {
+			t.Fatal("fixture must not trip the gate: past the cap it would be refused, not measured")
+		}
+	}
+
+	measure := func(body []byte) time.Duration {
+		best := time.Duration(1 << 62)
+		for i := 0; i < 3; i++ {
+			start := time.Now()
+			multipartCarriesE2EEPart(contentType, body)
+			if d := time.Since(start); d < best {
+				best = d
+			}
+		}
+		return best
+	}
+
+	one, many := measure(onePart.Bytes()), measure(manyParts.Bytes())
+	if one <= 0 {
+		t.Skip("timer resolution too coarse to compare")
+	}
+	if ratio := float64(many) / float64(one); ratio > 8 {
+		t.Errorf("a body of %d minimum-size parts cost %v against %v for one part of the same total size (%.0fx): the enumeration is not bounded by part count",
+			manyParts.Len()/len(unit), many, one, ratio)
+	}
+
+	// And the fail-closed side of the cap: past it, a body that COULD be naming
+	// the marker is refused rather than forwarded, because its parts were never
+	// all enumerated.
+	withMarker := append(bytes.TrimSuffix(manyParts.Bytes(), []byte("--B--\r\n")),
+		[]byte("--B\r\nContent-Disposition: form-data; name=\"_e2ee\"\r\n\r\n"+
+			sealedEnvelopeJSON+"\r\n--B--\r\n")...)
+	if carries, _ := multipartCarriesE2EEPart(contentType, withMarker); !carries {
+		t.Error("past the cap, a body that could be naming the marker must fail closed")
+	}
+}
+
+// An RFC 2047 encoded word: Go hands the name back verbatim with no error, and
+// the raw bytes spell neither the marker nor `name*`, so the gate is false too —
+// the same shape as the RFC 2231 charset gap and the quoted pair, one encoding
+// over. Refused without decoding the word.
+func TestMultipartWithAnEncodedWordNameIsRefused(t *testing.T) {
+	c := &Ctrl{}
+	tests := []struct {
+		name        string
+		disposition string
+		parsedName  string // what Go yields, measured
+	}{
+		{"base64 encoded word", `form-data; name="=?utf-8?B?X2UyZWU=?="`, `=?utf-8?B?X2UyZWU=?=`},
+		{"quoted-printable, latin-1", `form-data; name="=?iso-8859-1?Q?=5Fe2ee?="`, `=?iso-8859-1?Q?=5Fe2ee?=`},
+		// Refused too: what the word decodes to is the question this guard
+		// declines to answer for itself, here as for RFC 2231.
+		{"an encoded word that is not the marker", `form-data; name="=?utf-8?Q?ordinary?="`, `=?utf-8?Q?ordinary?=`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, params, err := mime.ParseMediaType(tt.disposition)
+			if err != nil {
+				t.Fatalf("fixture assumes a clean parse, got %v", err)
+			}
+			if params["name"] != tt.parsedName {
+				t.Fatalf("Go now yields name=%q, not %q: re-check whether this is still undecoded",
+					params["name"], tt.parsedName)
+			}
+
+			body, contentType := buildMultipart(t, func(w *multipart.Writer) {
+				rawPart(t, w, tt.disposition, sealedEnvelopeJSON)
+			})
+			if couldNameE2EEPart(body) {
+				t.Fatal("fixture must not trip the gate, or the branch under test is not what refuses it")
+			}
+
+			if sealed, _ := c.IsSealedRequest(contentType, body); !sealed {
+				t.Error("a name other parsers decode cannot be ruled out")
+			}
+			if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err == nil {
+				t.Fatal("must refuse rather than forward")
+			}
+		})
+	}
+}
+
+// isEncodedWord decides which names reach that refusal, so its edges are pinned
+// directly: ordinary names, and the near-misses that are not encoded words.
+func TestIsEncodedWord(t *testing.T) {
+	tests := map[string]bool{
+		`=?utf-8?B?X2UyZWU=?=`: true,
+		`=?a?b?c?=`:            true,
+		`=??=`:                 false, // too short to carry a charset
+		`=?utf-8?B?x`:          false, // no closing delimiter
+		`utf-8?B?x?=`:          false, // no opening delimiter
+		`_e2ee`:                false,
+		`file`:                 false,
+		``:                     false,
+		`=?=`:                  false,
+	}
+	for value, want := range tests {
+		if got := isEncodedWord(value); got != want {
+			t.Errorf("%q: got %v, want %v", value, got, want)
+		}
+	}
+}

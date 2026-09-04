@@ -129,6 +129,12 @@ const (
 //   - "x_0g_trace": observability metadata the router injects downstream.
 var e2eeResponseUnboundFields = []string{"model", "x_0g_trace"}
 
+// maxPartsEnumerated bounds how many multipart parts multipartCarriesE2EEPart
+// will read before it stops and takes its fail-closed path. Three orders of
+// magnitude above any real transcription or image-edit form, and ~1000x below
+// the 3.7 million minimum-size parts that fit in the 32 MiB request limit.
+const maxPartsEnumerated = 4096
+
 // hasE2EEMarker is a cheap substring pre-check to skip the JSON parse on the vast
 // majority of (non-sealed) requests. A match is not proof of a sealed request —
 // the substring could appear inside message content — so MaybeUnsealRequest
@@ -267,6 +273,14 @@ func isEncodedNameAttr(s string) bool {
 	return strings.HasPrefix(rest, "=")
 }
 
+// isEncodedWord reports whether a parameter value is an RFC 2047 encoded word —
+// `=?charset?encoding?text?=`. Only the delimiters are checked, deliberately:
+// what the word decodes to is the question this guard refuses to answer for
+// itself, here as in declaresEncodedName.
+func isEncodedWord(value string) bool {
+	return len(value) > 4 && strings.HasPrefix(value, "=?") && strings.HasSuffix(value, "?=")
+}
+
 // unquotePairs removes RFC 2045 quoted-pair backslashes the way a conformant
 // parser does: inside a quoted string every `\` escapes the character after it.
 //
@@ -395,6 +409,7 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 	}
 
 	reader := multipart.NewReader(bytes.NewReader(reqBody), params["boundary"])
+	parts := 0
 	for {
 		part, err := reader.NextPart()
 		// `== io.EOF`, and NOT errors.Is, is load-bearing. mime/multipart
@@ -417,6 +432,32 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 		if err != nil {
 			if couldName() {
 				return true, fmt.Sprintf("the body could be naming the reserved marker and could not be parsed as multipart (%v), so a smuggled envelope cannot be ruled out", err)
+			}
+			return false, ""
+		}
+		parts++
+		if parts > maxPartsEnumerated {
+			// The ENUMERATION is unbounded in part count, and memoizing the gate
+			// did not bound it: the gate is never even consulted on a well-formed
+			// body, so nothing stopped this loop. A minimum well-formed part is 9
+			// bytes ("--B\r\n\r\n\r\n"), so 3,728,269 fit inside the 32 MiB
+			// limit. Measured, both bodies exactly at the limit:
+			//
+			//	one 32 MiB part (a legitimate upload) ->   16 ms
+			//	3,728,269 empty parts                 -> 2230 ms
+			//
+			// ~139x, unauthenticated: the sync proxy unseals ~90 lines before
+			// ValidateSession, so only the size limit and the global concurrency
+			// cap are in front — and the cap converts this into shed legitimate
+			// traffic rather than absorbing it.
+			//
+			// Past the cap this takes the SAME fail-closed path as everything
+			// else it cannot enumerate, on the same justification the nested
+			// multipart branch below uses: parts that cannot be enumerated from
+			// here are parts that cannot be shown not to carry an envelope. The
+			// cap is what makes the claim affordable; the gate decides.
+			if couldName() {
+				return true, fmt.Sprintf("the body declares more than %d parts, so its parts cannot all be enumerated from here, and the body could be naming the reserved marker", maxPartsEnumerated)
 			}
 			return false, ""
 		}
@@ -503,6 +544,23 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 			// The cost is near zero: form clients emit a plain `name="…"` — only
 			// `filename` is ever 2231-encoded in the wild, and declaresEncodedName
 			// excludes it on a token boundary rather than a substring.
+			// An RFC 2047 encoded word, which Go hands back verbatim: the name
+			// is `=?utf-8?B?X2UyZWU=?=`, no error, and the raw bytes spell
+			// neither the marker nor `name*`, so the gate is false too.
+			// Measured:
+			//
+			//	name="=?utf-8?B?X2UyZWU=?="       -> that string, err=nil
+			//	name="=?iso-8859-1?Q?=5Fe2ee?="   -> that string, err=nil
+			//
+			// RFC 2231 §5 forbids encoded words in parameter values, so this is a
+			// smaller claim than the charset gap — but no smaller than the
+			// quoted-pair one, which was taken because trusting every upstream to
+			// agree with Go about an escape is the wrong bet. javax.mail decodes
+			// these under mail.mime.decodeparameters. Refused without deciding
+			// what the word meant, exactly as the 2231 branch below does.
+			if isEncodedWord(dparams["name"]) {
+				return true, "a part's form-field name is an RFC 2047 encoded word, which mime.ParseMediaType returns undecoded but other parsers resolve, so the name it declares cannot be ruled out"
+			}
 			if declaresEncodedName(disposition) {
 				return true, "a part RFC 2231-encodes its form-field name, which mime.ParseMediaType resolves only for us-ascii and utf-8 (dropping the rest silently), so the name it declares cannot be ruled out"
 			}
