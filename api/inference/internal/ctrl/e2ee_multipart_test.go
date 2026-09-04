@@ -166,6 +166,114 @@ func TestMultipartWithAnEncodedE2EEPartNameIsRefused(t *testing.T) {
 	}
 }
 
+// mime.ParseMediaType lowercases parameter NAMES, so these decode to the marker
+// exactly as their lowercase twins do — while a raw-bytes scan for "name*" sees
+// nothing. Detection therefore cannot be gated on any spelling heuristic: it
+// enumerates and asks the parser.
+func TestMultipartWithAnUppercaseEncodedPartNameIsRefused(t *testing.T) {
+	tests := []struct {
+		name        string
+		disposition string
+	}{
+		{"uppercase parameter name", `form-data; NAME*=utf-8''%5Fe2ee`},
+		{"mixed-case continuation", `form-data; Name*0="_e2"; Name*1="ee"`},
+	}
+
+	c := &Ctrl{}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body, contentType := buildMultipart(t, func(w *multipart.Writer) {
+				rawPart(t, w, tt.disposition, sealedEnvelopeJSON)
+			})
+			if bytes.Contains(body, []byte("_e2ee")) || bytes.Contains(body, []byte("name*")) {
+				t.Fatal("fixture no longer tests the case-folded path")
+			}
+
+			if !c.IsSealedRequest(contentType, body) {
+				t.Error("the parser resolves this name, so a downstream parser does too")
+			}
+			if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err == nil {
+				t.Fatal("must refuse rather than forward")
+			}
+		})
+	}
+}
+
+// A Content-Type that CLAIMS multipart but does not parse must not skip the
+// guard. Deciding "is this our business" by parsing was fail-OPEN: all three
+// below are rejected by mime.ParseMediaType, so the envelope was forwarded
+// intact and the fail-closed branch written for them was unreachable. Lenient
+// upstream parsers read parts out of all three.
+func TestUnparseableMultipartContentTypeStillReachesTheGuard(t *testing.T) {
+	c := &Ctrl{}
+	body, _ := buildMultipart(t, func(w *multipart.Writer) {
+		if err := w.WriteField("_e2ee", sealedEnvelopeJSON); err != nil {
+			t.Fatalf("WriteField: %v", err)
+		}
+	})
+
+	for _, contentType := range []string{
+		`multipart/form-data; boundary=x; boundary=y`,
+		`multipart/form-data; boundary=x; =junk`,
+		`multipart/form-data; boundary="x`,
+		`MULTIPART/FORM-DATA; boundary=x; boundary=y`,
+	} {
+		t.Run(contentType, func(t *testing.T) {
+			if !c.IsSealedRequest(contentType, body) {
+				t.Error("a Content-Type that claims multipart must not skip the guard by failing to parse")
+			}
+			if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err == nil {
+				t.Fatal("must refuse rather than forward")
+			}
+		})
+	}
+}
+
+// The two failures compose, and the composition is the case the pre-filter has
+// to fold case for. When the boundary cannot be read, no part can be enumerated,
+// so the exact check is unavailable and the fail-closed branch decides on the raw
+// bytes alone — and those bytes spell neither the marker (it is percent-encoded)
+// nor the lowercase `name*` (the parameter is uppercase). Only the folded scan
+// sees anything here. Written after a mutation of containsFold back to
+// bytes.Contains left the whole suite green.
+func TestUnparseableBoundaryWithAnUppercaseEncodedNameIsRefused(t *testing.T) {
+	c := &Ctrl{}
+	body := []byte("--x\r\nContent-Disposition: form-data; NAME*=utf-8''%5Fe2ee\r\n\r\n" +
+		sealedEnvelopeJSON + "\r\n--x--\r\n")
+	const contentType = `multipart/form-data; boundary=x; boundary=y`
+
+	if bytes.Contains(body, []byte("_e2ee")) || bytes.Contains(body, []byte("name*")) {
+		t.Fatal("fixture no longer tests the case-folded path")
+	}
+
+	if !c.IsSealedRequest(contentType, body) {
+		t.Error("a body that cannot be shown NOT to carry an envelope must be treated as one")
+	}
+	if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err == nil {
+		t.Fatal("must refuse rather than forward")
+	}
+}
+
+// The complement, so the branch above is not simply refusing everything it
+// cannot parse: an unparseable multipart Content-Type over a body that could not
+// be naming the marker is still forwarded.
+func TestUnparseableContentTypeWithoutTheMarkerIsStillForwarded(t *testing.T) {
+	c := &Ctrl{}
+	body, _ := buildMultipart(t, func(w *multipart.Writer) {
+		if err := w.WriteField("prompt", "an ordinary transcription"); err != nil {
+			t.Fatalf("WriteField: %v", err)
+		}
+	})
+	const contentType = `multipart/form-data; boundary=x; boundary=y`
+
+	if c.IsSealedRequest(contentType, body) {
+		t.Error("a body that could not be naming the marker is not a sealed request")
+	}
+	if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err != nil {
+		t.Fatalf("must be forwarded, got %v", err)
+	}
+}
+
 // Any multipart SUBTYPE can carry parts, so the check cannot be scoped to
 // form-data: matching only that left the hole reachable by changing one word of
 // the Content-Type.

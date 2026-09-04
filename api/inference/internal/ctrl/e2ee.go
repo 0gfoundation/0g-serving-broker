@@ -137,50 +137,68 @@ func hasE2EEMarker(reqBody []byte) bool {
 	return bytes.Contains(reqBody, []byte(e2eeBodyMarker))
 }
 
-// couldNameE2EEPart is the pre-filter for the multipart check: it reports
-// whether any part in this body could possibly DECODE to a name of "_e2ee".
+// couldNameE2EEPart reports whether a body that could NOT be enumerated might
+// still be hiding a part named "_e2ee".
 //
-// It is two substrings rather than one, and the pair is exhaustive rather than a
-// guess, because mime.ParseMediaType resolves a parameter name in exactly two
-// shapes and each leaves its own trace in the raw bytes:
+// It gates only the FAIL-CLOSED branches, never the detection itself, and that
+// separation is the correction of a bug rather than a tidy-up. When this was the
+// gate on the whole check, every spelling it did not anticipate was a leak: first
+// the RFC 2231 encodings, which decode to the marker without ever spelling it,
+// and then — because `mime.ParseMediaType` lowercases parameter NAMES while this
+// scans raw bytes — `NAME*=` and `Name*0=`, which are the same forms one shift
+// key over. The forms were exhaustive; the spellings were not, and a heuristic
+// over spellings is not a thing that converges.
 //
-//	name="_e2ee" / name=_e2ee   -> the literal "_e2ee" appears
-//	name*=utf-8''%5Fe2ee        -> the literal does NOT; "name*" does
-//	name*0="_e2"; name*1="ee"   -> the literal does NOT; "name*" does
+// So detection no longer consults it: multipartCarriesE2EEPart enumerates the
+// parts and asks the parser what each name decodes to, which is exact for every
+// body Go can parse. This is left for the bodies it CANNOT, where the failure
+// direction is forwarding a malformed request — which is what the broker did
+// before this check existed — rather than forwarding an envelope.
 //
-// The RFC 2231 rows are the reason a plain hasE2EEMarker gate is wrong here:
-// both decode to the marker while never spelling it. The one neighbouring
-// possibility does not arise — Go does not resolve a quoted-pair escape in a
-// parameter, so `name="_e2\ee"` yields `_e2\ee` and not the marker.
-//
-// Why pre-filter at all, when parsing every multipart body costs a measured
-// 2.3ms per 4 MiB against an upstream that takes seconds: not for the time, but
-// to keep the FAIL-CLOSED branches narrow. Without it, every malformed multipart
-// body — a JSON body sent with a multipart Content-Type, say — hits the
-// unparseable branch and is refused, which changes the broker's behaviour for
-// requests that have nothing to do with sealing and that it used to forward. The
-// filter keeps the refusal to "malformed, and could be naming the marker".
+// Case is folded for "name*" because the parser folds it; the literal marker is
+// matched exactly because parameter VALUES are not folded, so a part named
+// `_E2EE` is a different field no parser resolves to the marker.
 func couldNameE2EEPart(reqBody []byte) bool {
-	// "name*" catches every RFC 2231 form, including `filename*=` on an ordinary
-	// non-ASCII upload — which merely costs that request the parse it would have
-	// paid anyway had it mentioned the marker.
-	return hasE2EEMarker(reqBody) || bytes.Contains(reqBody, []byte("name*"))
+	return hasE2EEMarker(reqBody) || containsFold(reqBody, []byte("name*"))
 }
 
-// isMultipartBody reports whether a Content-Type names ANY multipart type, per
-// RFC 2045 (case-insensitive, parameters stopped at the ';').
-//
-// Any subtype, not just form-data, because the question this answers is "can
-// this body carry parts", and every multipart/* can. Matching only form-data
-// left `multipart/mixed` carrying an `_e2ee` part to fall through to the JSON
-// branch, fail to parse, and be forwarded — the exact hole the check exists to
-// close, reachable by changing one word of the Content-Type.
-func isMultipartBody(contentType string) bool {
-	mt, _, err := mime.ParseMediaType(contentType)
-	if err != nil {
-		return false
+// containsFold is bytes.Contains with ASCII case folding, without allocating a
+// lowercased copy of a body that may be megabytes of audio.
+func containsFold(haystack, needle []byte) bool {
+	if len(needle) == 0 {
+		return true
 	}
-	return strings.HasPrefix(strings.ToLower(mt), "multipart/")
+	for i := 0; i+len(needle) <= len(haystack); i++ {
+		if bytes.EqualFold(haystack[i:i+len(needle)], needle) {
+			return true
+		}
+	}
+	return false
+}
+
+// looksMultipart reports whether a Content-Type CLAIMS to be multipart, by a
+// case-insensitive prefix test on the raw string — deliberately without parsing
+// it.
+//
+// Parsing here was a fail-OPEN bug. mime.ParseMediaType rejects a duplicate
+// parameter, a trailing junk parameter and an unclosed quote, and returning
+// false on those made them skip the guard entirely: the envelope was forwarded
+// intact, and the fail-closed branch written for exactly that case was
+// unreachable. Measured:
+//
+//	multipart/form-data; boundary=x; boundary=y  -> duplicate parameter
+//	multipart/form-data; boundary=x; =junk       -> invalid media parameter
+//	multipart/form-data; boundary="x             -> invalid media parameter
+//
+// A lenient upstream reads parts out of all three. So whether this is OUR
+// business is decided on the raw header, and the parse — which can fail — only
+// decides which branch inside handles it.
+//
+// Any subtype, not just form-data, because the question is "can this body carry
+// parts" and every multipart/* can. Matching only form-data left the hole
+// reachable by changing one word of the Content-Type.
+func looksMultipart(contentType string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimLeft(contentType, " \t")), "multipart/")
 }
 
 // multipartCarriesE2EEPart reports whether a multipart/form-data body declares a
@@ -253,12 +271,15 @@ func isMultipartBody(contentType string) bool {
 // reserved. (Parameter names are another matter — `NAME=` and `name=` are the
 // same parameter, and mime.ParseMediaType already normalises that.)
 func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string) {
-	if !isMultipartBody(contentType) || !couldNameE2EEPart(reqBody) {
+	if !looksMultipart(contentType) {
 		return false, ""
 	}
 	_, params, err := mime.ParseMediaType(contentType)
 	if err != nil || params["boundary"] == "" {
-		return true, "the body mentions the reserved marker and its multipart boundary could not be read, so a smuggled envelope cannot be ruled out"
+		if couldNameE2EEPart(reqBody) {
+			return true, fmt.Sprintf("the body could be naming the reserved marker and its multipart boundary could not be read (%v), so a smuggled envelope cannot be ruled out", err)
+		}
+		return false, ""
 	}
 
 	reader := multipart.NewReader(bytes.NewReader(reqBody), params["boundary"])
@@ -268,7 +289,10 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 			return false, ""
 		}
 		if err != nil {
-			return true, fmt.Sprintf("the body mentions the reserved marker and could not be parsed as multipart (%v), so a smuggled envelope cannot be ruled out", err)
+			if couldNameE2EEPart(reqBody) {
+				return true, fmt.Sprintf("the body could be naming the reserved marker and could not be parsed as multipart (%v), so a smuggled envelope cannot be ruled out", err)
+			}
+			return false, ""
 		}
 		disposition := part.Header.Get("Content-Disposition")
 		if disposition == "" {
@@ -276,7 +300,7 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 		}
 		_, dparams, derr := mime.ParseMediaType(disposition)
 		if derr != nil {
-			return true, "the body mentions the reserved marker and a part's Content-Disposition could not be parsed, so a smuggled envelope cannot be ruled out"
+			return true, "a part's Content-Disposition could not be parsed, so the name it declares cannot be ruled out"
 		}
 		if dparams["name"] == e2eeBodyMarker {
 			return true, fmt.Sprintf("a multipart part is named %q", e2eeBodyMarker)
@@ -348,7 +372,7 @@ func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, reqBody []byte) ([]byte, err
 	if carries, why := multipartCarriesE2EEPart(contentType, reqBody); carries {
 		return nil, fmt.Errorf("multipart request must not carry a sealed envelope: %s. A sealed request is sent as JSON, and a body that cannot be parsed as an envelope is not thereby an unsealed body", why)
 	}
-	if isMultipartBody(contentType) {
+	if looksMultipart(contentType) {
 		// Multipart with no part named `_e2ee`: the marker, if the body mentions it
 		// at all, is in someone's `prompt` or in the audio. Not sealed, forward
 		// unchanged — and do NOT fall through to the JSON path, which would only
