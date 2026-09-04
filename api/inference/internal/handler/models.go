@@ -7,10 +7,12 @@ import (
 	"net/url"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/0glabs/0g-serving-broker/common/videospec"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
@@ -61,6 +63,142 @@ type ModelObject struct {
 	// decentralized providers. Consumers prepend "https://" if they need a URL.
 	ServingDomain string           `json:"serving_domain,omitempty"`
 	RateLimits    *ModelRateLimits `json:"rate_limits,omitempty"`
+	// Capabilities states the model's own request-shape rules — the duration
+	// range it accepts, whether an out-of-range value is clamped or passed
+	// through, its resolution tiers. Machine-readable so a catalog consumer can
+	// render them per model instead of restating them in prose that has to hedge
+	// across every model it might describe. Omitted when nothing publishes them.
+	Capabilities *ModelCapabilities `json:"capabilities,omitempty"`
+}
+
+// ModelCapabilities holds the per-modality request-shape rules a client needs in
+// order to build a request this model will actually honour.
+//
+// Everything in here is a FACT ABOUT THE MODEL, sourced from the same rules the
+// billing path applies, never an operator's free text: the point is that the
+// catalog and the broker cannot disagree. Blocks are per-modality and absent
+// when they do not apply — a chat model has neither of these today.
+type ModelCapabilities struct {
+	Duration   *CapabilityDuration   `json:"duration,omitempty"`
+	Resolution *CapabilityResolution `json:"resolution,omitempty"`
+}
+
+// CapabilityDuration is the published form of videospec.DurationSpec.
+//
+// Min and Max are omitted when the vendor has no bound, which is a distinct
+// statement from "the bound is zero" — a consumer must read the presence, not
+// the value. OutOfRange says so a second way: a vendor with no bounds reports
+// "pass_through", so the two can never be read as contradicting.
+type CapabilityDuration struct {
+	Min         int64  `json:"min,omitempty"`
+	Max         int64  `json:"max,omitempty"`
+	OutOfRange  string `json:"out_of_range"`
+	Unspecified string `json:"unspecified"`
+	Rounding    string `json:"rounding"`
+}
+
+// CapabilityResolution is the published form of videospec.ResolutionSpec.
+//
+// Tiers is NOT videospec's RecognizedTiers. Recognition is a vendor-wide reading
+// rule and includes tokens a given model REFUSES (see miniMaxResolutionTokens,
+// where 768P/1080P exist so H3 rejects them loudly rather than silently
+// rendering at another tier). Published here is the intersection of that
+// vocabulary with what this deployment actually prices, so the list is one a
+// caller can send and be billed correctly for — see videoResolutionTiers.
+type CapabilityResolution struct {
+	Tiers     []string `json:"tiers,omitempty"`
+	Default   string   `json:"default,omitempty"`
+	PixelSize string   `json:"pixel_size"`
+}
+
+// videoCapabilities projects a video vendor's own rules into the catalog, or nil
+// when they are not published.
+//
+// Two nils, both meaning "not published" and neither an error: a vendor absent
+// from videospec has no recorded rules at all (the same "unknown" every other
+// videospec caller must treat as unknown, never as the common case), and one
+// that records rules without implementing Describer has not stated them
+// declaratively. Both are the pre-change state, which every consumer already
+// handles by finding no block.
+func videoCapabilities(vendor string, billing *config.BillingConfig) *ModelCapabilities {
+	spec, ok := videospec.Get(videospec.Vendor(vendor))
+	if !ok {
+		return nil
+	}
+	d, ok := spec.(videospec.Describer)
+	if !ok {
+		return nil
+	}
+	dur := d.Duration()
+	res := d.Resolution()
+	out := &ModelCapabilities{
+		Duration: &CapabilityDuration{
+			Min:         dur.Min,
+			Max:         dur.Max,
+			OutOfRange:  dur.OutOfRange,
+			Unspecified: dur.Unspecified,
+			Rounding:    dur.Rounding,
+		},
+		Resolution: &CapabilityResolution{PixelSize: res.PixelSize},
+	}
+	out.Resolution.Tiers = videoResolutionTiers(res.RecognizedTiers, billing)
+	// The default is published whether or not it appears in Tiers, and the two
+	// answer different questions: Tiers is what a caller may SEND, Default is what
+	// the vendor renders when they send nothing. Withholding a default that is
+	// absent from Tiers was tried and is backwards — the vendor applies it no
+	// matter what this catalog says, so hiding it does not steer anyone off that
+	// tier, it only removes the warning that omitting `size` lands there. On a
+	// MiniMax deployment pricing 720p alone, a caller who reads the list, assumes
+	// 720p and omits `size` gets 2K at the unpriced baseline rate; the published
+	// default is the one thing that would have told them.
+	out.Resolution.Default = res.Default
+	return out
+}
+
+// videoResolutionTiers narrows a vendor's tier VOCABULARY to the tiers this
+// deployment prices, in the vendor's own canonical spelling and order.
+//
+// The two are not the same set and the gap costs money in both directions. A
+// token the vendor recognises but the operator has not priced bills at the
+// baseline — resolutionMultiplier's 1.0 fallback on per_video_second, or
+// videoTokenUnitPrice's uncovered-tier branch on per_video_token — so a caller
+// steered to it by the catalog pays the wrong rate for the tier they asked for.
+// And a token the vendor does not recognise is read as pixel dimensions instead,
+// which is the failure miniMaxResolutionTokens' doc comment describes.
+//
+// Empty means "publish no list": either the deployment prices tiers uniformly
+// (no table, so no menu is being sold and the vendor's vocabulary is not a
+// support claim for this model), or its table names only tiers this vendor does
+// not read — a config fault that must not become an advertised menu.
+func videoResolutionTiers(recognized []string, billing *config.BillingConfig) []string {
+	if billing == nil {
+		return nil
+	}
+	priced := map[string]struct{}{}
+	add := func(res string) {
+		if r := strings.ToLower(strings.TrimSpace(res)); r != "" {
+			priced[r] = struct{}{}
+		}
+	}
+	for res := range billing.ResolutionMultipliers {
+		add(res)
+	}
+	for _, t := range billing.TokenPriceTiers {
+		add(t.Resolution)
+	}
+	for _, row := range billing.Table {
+		add(row.Resolution)
+	}
+	if len(priced) == 0 {
+		return nil
+	}
+	var out []string
+	for _, tok := range recognized {
+		if _, ok := priced[strings.ToLower(strings.TrimSpace(tok))]; ok {
+			out = append(out, tok)
+		}
+	}
+	return out
 }
 
 // ModelRateLimits exposes per-user rate limit configuration so clients/SDKs
@@ -682,6 +820,24 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 				if obj.TeeType == "" {
 					obj.TeeType = mi.TeeType
 				}
+			}
+
+			// Video request-shape rules, from the vendor's own videospec entry —
+			// the same rules the pre-forward balance gate and the translator
+			// apply, so a model page cannot describe bounds the broker does not
+			// enforce. Multi-model only: a single-model video service carries no
+			// per-model billing config, so it names no vendor and there is
+			// nothing to read (its `variants` are absent for the same reason).
+			//
+			// NOT for a standard provider. The block is a vendor FINGERPRINT —
+			// 4-15s with a 2K default is MiniMax and nothing else — and a
+			// standard provider hides its upstream from every external surface,
+			// this endpoint included (see the providerType 'standard' branch in
+			// config.Validate, and servingDomain's IsCentralized gate above).
+			// Publishing it would name the vendor that providerIdentity and
+			// servingDomain are both withheld to keep unnamed.
+			if svc.Type == constant.ServiceTypeVideoGeneration && mp.Billing != nil && !cfg.IsStandard() {
+				obj.Capabilities = videoCapabilities(mp.Billing.Vendor, mp.Billing)
 			}
 
 			if isUSD && svc.Type == constant.ServiceTypeVideoGeneration {
