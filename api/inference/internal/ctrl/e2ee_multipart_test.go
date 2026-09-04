@@ -832,6 +832,18 @@ func TestMultipartWithAQuotedPairInTheNameIsRefused(t *testing.T) {
 	}{
 		{"backslash before the underscore", `form-data; name="\_e2ee"`, `\_e2ee`},
 		{"backslash mid-name", `form-data; name="\_e2\ee"`, `\_e2\ee`},
+		// Padding, which Go reports as given. isEncodedWord was trimmed for the
+		// same reason and these were not — and this reading needs strictly LESS
+		// of the upstream than that one, because a parser trims before it decodes
+		// anything.
+		{"leading space", `form-data; name=" _e2ee"`, ` _e2ee`},
+		{"trailing space", `form-data; name="_e2ee "`, `_e2ee `},
+		{"padded both sides", `form-data; name="  _e2ee  "`, `  _e2ee  `},
+		// Trim and quoted pair TOGETHER, in the order a single pass gets wrong:
+		// the backslash protects the space that has to go, so trimming first
+		// leaves `\ _e2ee` and resolving first leaves ` _e2ee`.
+		{"a quoted pair protecting the space", `form-data; name="\ _e2ee"`, `\ _e2ee`},
+		{"and padded after it", `form-data; name="\ _e2ee "`, `\ _e2ee `},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -854,6 +866,85 @@ func TestMultipartWithAQuotedPairInTheNameIsRefused(t *testing.T) {
 				t.Fatal("must refuse rather than forward")
 			}
 		})
+	}
+}
+
+// resolvesToMarker claims its four readings are the whole closure under
+// trimming and quoted-pair resolution, not a sample of it. That is a claim about
+// a fixpoint, so it is checked against one: apply both operations until nothing
+// changes, and see whether the marker is anywhere in the resulting set.
+//
+// The reference does NOT call unquotePairs or strings.TrimSpace through the
+// production predicate — it reaches for the same two primitives directly — for
+// the reason the last round's differential had to be rewritten: a reference that
+// shares the code under test agrees with itself under mutation.
+//
+// This exists because the suggested fix for this finding trimmed only BEFORE
+// unquoting, which forwards `\ _e2ee`. A predicate over an unordered set of
+// transformations is exactly the kind that gets a composition wrong, so the
+// composition is what the test pins.
+func TestResolvesToMarker(t *testing.T) {
+	closure := func(s string) bool {
+		seen := map[string]bool{s: true}
+		for grew := true; grew; {
+			grew = false
+			for v := range seen {
+				for _, next := range []string{strings.TrimSpace(v), strings.ReplaceAll(v, `\`, "")} {
+					if !seen[next] {
+						seen[next] = true
+						grew = true
+					}
+				}
+			}
+		}
+		return seen[e2eeBodyMarker]
+	}
+
+	// Every string over the alphabet that matters — the marker's own bytes plus a
+	// backslash, a space and a tab — up to a length that can express the
+	// compositions. Exhaustive beats hand-picked here: the failure this test
+	// exists for was a composition nobody thought to write down.
+	alphabet := []rune{'\\', ' ', '\t', '_', 'e', '2'}
+	var gen func(prefix string, depth int)
+	checked := 0
+	gen = func(prefix string, depth int) {
+		if got, want := resolvesToMarker(prefix), closure(prefix); got != want {
+			t.Errorf("%q: got %v, the closure says %v", prefix, got, want)
+		}
+		checked++
+		if depth == 0 {
+			return
+		}
+		for _, r := range alphabet {
+			gen(prefix+string(r), depth-1)
+		}
+	}
+	gen("", 6)
+	if checked < 40000 {
+		t.Fatalf("the sweep only checked %d strings, so it is not exhaustive over the alphabet", checked)
+	}
+
+	// And the spellings the sweep's alphabet cannot reach, including the
+	// near-misses that must stay forwarded.
+	for value, want := range map[string]bool{
+		`_e2ee`:                true,
+		` _e2ee`:               true,
+		`_e2ee `:               true,
+		"\t_e2ee\r\n":          true,
+		`\_e2ee`:               true,
+		`\ _e2ee`:              true,
+		` \_e2ee `:             true,
+		`file`:                 false,
+		``:                     false,
+		`_e2e`:                 false,
+		`__e2ee`:               false,
+		`_e 2ee`:               false, // interior white space is not trimmed
+		`_e2ee_`:               false,
+		`=?utf-8?B?X2UyZWU=?=`: false, // isEncodedWord's business, not this one
+	} {
+		if got := resolvesToMarker(value); got != want {
+			t.Errorf("%q: got %v, want %v", value, got, want)
+		}
 	}
 }
 
@@ -1185,6 +1276,25 @@ func TestEnumerationIsBoundedByPartCount(t *testing.T) {
 	}
 	if carries, why := multipartCarriesE2EEPart(contentType, manyDispositions.Bytes()); !carries {
 		t.Error("one part declaring more dispositions than the budget must hit the same branch")
+	} else if !strings.Contains(why, "more than") {
+		t.Errorf("the refusal should cite the budget, got %q", why)
+	}
+
+	// And the third per-part loop, over the Content-Type headers that decide the
+	// nested-multipart branch. Cheaper than the dispositions — a prefix test, no
+	// ParseMediaType — but it is a per-part loop, which is the dimension the
+	// budget exists for rather than a cost threshold it clears.
+	var manyTypes bytes.Buffer
+	manyTypes.WriteString("--B\r\nContent-Disposition: form-data; name=\"f\"\r\n")
+	for i := 0; i <= maxHeadersExamined; i++ {
+		manyTypes.WriteString("Content-Type: text/plain\r\n")
+	}
+	manyTypes.WriteString("\r\n\r\n--B--\r\n")
+	if couldNameE2EEPart(manyTypes.Bytes()) {
+		t.Fatal("fixture must not trip the gate")
+	}
+	if carries, why := multipartCarriesE2EEPart(contentType, manyTypes.Bytes()); !carries {
+		t.Error("one part declaring more Content-Types than the budget must hit the same branch")
 	} else if !strings.Contains(why, "more than") {
 		t.Errorf("the refusal should cite the budget, got %q", why)
 	}
