@@ -8,6 +8,7 @@ import (
 	"net/textproto"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -859,4 +860,130 @@ func TestBareEncodedNameDispositionIsRefused(t *testing.T) {
 	if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err == nil {
 		t.Fatal("must refuse rather than forward")
 	}
+}
+
+// The gate's answer depends on nothing but the body, so it must be computed at
+// most once per call — not once per part. The Content-Disposition branch
+// `continue`s on a false result rather than returning, so calling it per part
+// cost parts x len(body):
+//
+//	  1 malformed part  / 32 MiB ->    97 ms
+//	 50 malformed parts / 32 MiB -> 4 107 ms
+//	200 malformed parts / 32 MiB -> 16 370 ms   (~82 ms each, perfectly linear)
+//
+// A malformed part is 33 bytes, so 1,016,800 of them fit inside the 32 MiB
+// request limit — and the sync proxy unseals before ValidateSession, so no
+// session is needed to spend that.
+//
+// Nothing else in this file would have caught it: every other case uses a
+// handful of parts, where the repetition is invisible. So this asserts the
+// SHAPE — cost must not grow with part count — rather than an absolute time,
+// which would be flaky on shared CI. The ratio bound is loose (8x for a 200x
+// increase in parts) because it only has to fail the quadratic version, which
+// exceeded it by two orders of magnitude.
+func TestGateIsNotRecomputedPerPart(t *testing.T) {
+	if testing.Short() {
+		t.Skip("allocates two multi-megabyte bodies")
+	}
+
+	// Parts whose Content-Disposition does not parse, so each one reaches the
+	// gated fail-closed branch, plus padding so the scan has a body to walk.
+	// No marker in any form: the gate must return false, which is what makes the
+	// branch `continue` instead of returning.
+	build := func(parts, size int) []byte {
+		var b bytes.Buffer
+		for i := 0; i < parts; i++ {
+			b.WriteString("--x\r\nContent-Disposition: \"\r\n\r\n\r\n")
+		}
+		b.WriteString("--x\r\nContent-Disposition: form-data; name=\"pad\"\r\n\r\n")
+		if rem := size - b.Len() - 16; rem > 0 {
+			b.Write(bytes.Repeat([]byte("A"), rem))
+		}
+		b.WriteString("\r\n--x--\r\n")
+		return b.Bytes()
+	}
+
+	const contentType = `multipart/form-data; boundary=x`
+	const size = 8 << 20
+
+	few, many := build(1, size), build(200, size)
+	for _, body := range [][]byte{few, many} {
+		if couldNameE2EEPart(body) {
+			t.Fatal("fixture must not trip the gate, or the branch returns instead of continuing")
+		}
+		if carries, _ := multipartCarriesE2EEPart(contentType, body); carries {
+			t.Fatal("fixture must not be refused, or the loop exits early")
+		}
+	}
+
+	measure := func(body []byte) time.Duration {
+		best := time.Duration(1 << 62)
+		for i := 0; i < 3; i++ { // best-of-3, so a scheduling hiccup does not fail the build
+			start := time.Now()
+			multipartCarriesE2EEPart(contentType, body)
+			if d := time.Since(start); d < best {
+				best = d
+			}
+		}
+		return best
+	}
+
+	one, twoHundred := measure(few), measure(many)
+	if one <= 0 {
+		t.Skip("timer resolution too coarse to compare")
+	}
+	if ratio := float64(twoHundred) / float64(one); ratio > 8 {
+		t.Errorf("200 malformed parts cost %v against %v for one (%.0fx): the whole-body gate is being recomputed per part",
+			twoHundred, one, ratio)
+	}
+}
+
+// mime/multipart does not descend, so a part that is itself multipart hides its
+// own parts from the enumeration: the inner part named `_e2ee` parses cleanly,
+// raises no error, and used to be forwarded with the literal marker in the body.
+//
+// Closed without recursion, because "parts that cannot be enumerated from here"
+// is already the fail-closed condition. The second row is what keeps that from
+// being a blanket refusal of nested bodies.
+func TestNestedMultipartPartIsRefused(t *testing.T) {
+	c := &Ctrl{}
+	nested := func(innerDisposition, innerBody string) []byte {
+		return []byte("--OUTER\r\n" +
+			"Content-Disposition: form-data; name=\"wrapper\"\r\n" +
+			"Content-Type: multipart/mixed; boundary=INNER\r\n\r\n" +
+			"--INNER\r\nContent-Disposition: " + innerDisposition + "\r\n\r\n" +
+			innerBody + "\r\n--INNER--\r\n" +
+			"--OUTER--\r\n")
+	}
+	const contentType = `multipart/form-data; boundary=OUTER`
+
+	t.Run("inner part named the marker", func(t *testing.T) {
+		body := nested(`form-data; name="_e2ee"`, sealedEnvelopeJSON)
+		if sealed, _ := c.IsSealedRequest(contentType, body); !sealed {
+			t.Error("an envelope one nesting level down cannot be ruled out")
+		}
+		if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err == nil {
+			t.Fatal("must refuse rather than forward")
+		}
+	})
+
+	// The complement: nesting alone is not grounds for refusal. Without this the
+	// rule would reject any nested body, which is a behaviour change for requests
+	// that have nothing to do with sealing.
+	t.Run("inner part mentioning nothing", func(t *testing.T) {
+		body := nested(`form-data; name="notes"`, "an ordinary nested field")
+		if couldNameE2EEPart(body) {
+			t.Fatal("fixture must not mention the marker in any form")
+		}
+		if sealed, _ := c.IsSealedRequest(contentType, body); sealed {
+			t.Error("a nested body that cannot be naming the marker is not a sealed request")
+		}
+		got, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body)
+		if err != nil {
+			t.Fatalf("must be forwarded, got %v", err)
+		}
+		if !bytes.Equal(got, body) {
+			t.Error("the body must be forwarded unchanged")
+		}
+	})
 }

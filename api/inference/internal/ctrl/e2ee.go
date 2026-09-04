@@ -371,6 +371,29 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 		return false, ""
 	}
 
+	// couldNameE2EEPart scans the WHOLE body, and its answer depends on nothing
+	// but reqBody — so compute it at most once. The Content-Disposition branch
+	// below `continue`s on a false result rather than returning, so calling it per
+	// part cost parts x len(body) and recomputed an identical answer every time.
+	// Measured before this closure existed, on a 32 MiB body of 33-byte malformed
+	// parts: 97 ms for one, 4.1 s for 50, 16.4 s for 200 — linear at ~82 ms each,
+	// and 1,016,800 such parts fit inside the 32 MiB request limit.
+	//
+	// That is reachable with no session: the sync proxy calls MaybeUnsealRequest
+	// (proxy.go) about ninety lines BEFORE ValidateSession, so the body-size limit
+	// and the global concurrency cap are the only things in front of it — and the
+	// cap converts the attack into shed legitimate traffic.
+	//
+	// Lazily, not eagerly: the gate exists so a well-formed body never pays the
+	// scan at all, which is the common case.
+	gateKnown, gate := false, false
+	couldName := func() bool {
+		if !gateKnown {
+			gate, gateKnown = couldNameE2EEPart(reqBody), true
+		}
+		return gate
+	}
+
 	reader := multipart.NewReader(bytes.NewReader(reqBody), params["boundary"])
 	for {
 		part, err := reader.NextPart()
@@ -392,7 +415,7 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 			return false, ""
 		}
 		if err != nil {
-			if couldNameE2EEPart(reqBody) {
+			if couldName() {
 				return true, fmt.Sprintf("the body could be naming the reserved marker and could not be parsed as multipart (%v), so a smuggled envelope cannot be ruled out", err)
 			}
 			return false, ""
@@ -425,7 +448,7 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 				// the regression TestMalformedMultipartWithoutTheMarkerIsStillForwarded
 				// guards one level up, and the doc comment above already
 				// promised this narrowing that the code did not have.
-				if couldNameE2EEPart(reqBody) {
+				if couldName() {
 					return true, "the body could be naming the reserved marker and a part's Content-Disposition could not be parsed, so the name it declares cannot be ruled out"
 				}
 				continue
@@ -482,6 +505,25 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 			// excludes it on a token boundary rather than a substring.
 			if declaresEncodedName(disposition) {
 				return true, "a part RFC 2231-encodes its form-field name, which mime.ParseMediaType resolves only for us-ascii and utf-8 (dropping the rest silently), so the name it declares cannot be ruled out"
+			}
+		}
+		// A part that is ITSELF multipart hides its own parts from this
+		// enumeration: mime/multipart does not descend, so the inner part named
+		// `_e2ee` parses cleanly, raises no error, and is forwarded.
+		//
+		// That needs no recursion to close, because it is already the condition
+		// this function fails closed on everywhere else — a body whose parts
+		// cannot be enumerated is a body that cannot be shown NOT to carry an
+		// envelope. Descending instead would multiply the enumeration cost by the
+		// nesting depth, and the enumeration is the expensive half of this check
+		// (see mentionsEncodedName), so it would want its own bound and its own
+		// measurement to be worth the reach.
+		//
+		// Gated, so an innocent nested body that mentions nothing is still
+		// forwarded, and via the memoized gate, so it costs no extra scan.
+		for _, partType := range part.Header.Values("Content-Type") {
+			if looksMultipart(partType) && couldName() {
+				return true, "a part declares a nested multipart body, whose own parts cannot be enumerated from here, and the body could be naming the reserved marker"
 			}
 		}
 	}
