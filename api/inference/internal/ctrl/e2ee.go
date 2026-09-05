@@ -344,6 +344,41 @@ func isEncodedWord(value string) bool {
 	return len(value) > 4 && strings.HasPrefix(value, "=?") && strings.HasSuffix(value, "?=")
 }
 
+// mentionsEncodedWord reports whether ONE header spells the RFC 2047 encoded-word
+// introducer anywhere in it. It extends couldNameE2EEPart for the two branches
+// that fire when a part header does not parse, and only for those.
+//
+// It exists because the argument that kept those branches gated does not hold.
+// The claim was that making the marker-bearing header unparseable leaves its name
+// a guess, so the heuristic gives up nothing — but the marker can be spelled in an
+// unparseable header as an encoded word, which is precisely the spelling
+// couldNameE2EEPart is structurally unable to see. Every way this file already
+// enumerates for breaking a Content-Type breaks a PART header just as well:
+//
+//	name="=?utf-8?B?X2UyZWU=?="            parses -> refused by isEncodedWord
+//	name=x; name="=?utf-8?B?X2UyZWU=?="    duplicate parameter -> was forwarded
+//	name="=?utf-8?B?X2UyZWU=?=             unclosed quote      -> was forwarded
+//	name="=?utf-8?B?X2UyZWU=?="; =junk     junk parameter      -> was forwarded
+//
+// A lenient parser reads a name out of all three — javax.mail takes the last of a
+// duplicate pair and decodes encoded words in parameter values — so the refusal
+// must not turn on whether Go can parse the header around the marker.
+//
+// The scope is ONE HEADER, and that is the whole reason this is affordable.
+// Widening couldNameE2EEPart itself to "=?" was rejected for good cause: the
+// sequence occurs ~516 times by chance in 32 MiB of random body, which makes the
+// gate always-true. A part header is a few hundred bytes of structured grammar,
+// where "=?" is the RFC 2047 signal and essentially nothing else; the malformed
+// dispositions real clients send (`filename="my"file.txt"`) do not contain it.
+//
+// Deliberately looser than isEncodedWord, which decides an EXACT refusal on a
+// parsed value. Here nothing parsed, so there is no value to anchor to and no
+// position to demand — the question is only whether this broken header could be
+// spelling the marker in the way the other gate misses.
+func mentionsEncodedWord(header string) bool {
+	return strings.Contains(header, "=?")
+}
+
 // unquotePairs removes RFC 2045 quoted-pair backslashes the way a conformant
 // parser does: inside a quoted string every `\` escapes the character after it.
 //
@@ -704,15 +739,16 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 			}
 			_, dparams, derr := mime.ParseMediaType(disposition)
 			if derr != nil {
-				// Gated, unlike the budget and nested branches. Evading THIS gate
-				// needs the marker-bearing disposition to itself be unparseable,
-				// so the name is a guess either way and the heuristic gives up
-				// nothing; on those branches it gives up the whole refusal.
+				// Gated, unlike the budget and nested branches, but on the header
+				// as well as the body — see mentionsEncodedWord. Making the
+				// marker-bearing disposition unparseable does NOT reduce its name
+				// to a guess: the marker can still be spelled in it as an encoded
+				// word, which is the one spelling couldNameE2EEPart cannot see.
 				//
-				// Ungated, this refuses any part whose disposition merely fails to
-				// parse — `filename="my"file.txt"`, an unescaped quote, sloppy but
-				// real and forwarded by every other path here.
-				if couldName() {
+				// Ungated entirely, this refuses any part whose disposition merely
+				// fails to parse — `filename="my"file.txt"`, an unescaped quote,
+				// sloppy but real and forwarded by every other path here.
+				if couldName() || mentionsEncodedWord(disposition) {
 					return true, "the body could be naming the reserved marker and a part's Content-Disposition could not be parsed, so the name it declares cannot be ruled out"
 				}
 				continue
@@ -758,7 +794,7 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 			// against the prefix test alone above; the budget already covers it.
 			_, tparams, terr := mime.ParseMediaType(partType)
 			if terr != nil {
-				if couldName() {
+				if couldName() || mentionsEncodedWord(partType) {
 					return true, "the body could be naming the reserved marker and a part's Content-Type could not be parsed, so the name it declares cannot be ruled out"
 				}
 				continue

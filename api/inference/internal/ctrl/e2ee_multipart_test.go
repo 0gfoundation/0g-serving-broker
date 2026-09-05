@@ -1909,3 +1909,97 @@ func TestIsEncodedWord(t *testing.T) {
 		}
 	}
 }
+
+// The gap that kept the two per-header parse-failure branches gated: making the
+// marker-bearing header unparseable does not reduce its name to a guess, because
+// the marker can be spelled in it as an RFC 2047 encoded word — the one spelling
+// couldNameE2EEPart is structurally unable to see.
+//
+// Each row carries a byte-identical, well-formed part named `=?utf-8?B?X2UyZWU=?=`
+// and differs only in how the header AROUND it is broken. Every break is one this
+// file already enumerates for a request Content-Type (looksMultipart); they work
+// just as well on a part header. Before mentionsEncodedWord, rows 2-5 were
+// forwarded while row 1 — the same name, in a header that happens to parse — was
+// refused.
+//
+// The controls are load-bearing in both directions: the literal marker must stay
+// refused via the body gate, and a malformed header with no encoded word in it
+// must stay forwarded, since that is the false positive the gating exists for.
+func TestUnparseablePartHeaderSpellingAnEncodedWordIsRefused(t *testing.T) {
+	const encodedMarker = `=?utf-8?B?X2UyZWU=?=` // base64("_e2ee")
+
+	tests := []struct {
+		name   string
+		header string // the raw part header line, sans the "Name: " prefix
+		key    string // which header carries it
+		refuse bool
+	}{
+		{"parseable encoded word", `form-data; name="` + encodedMarker + `"`, "Content-Disposition", true},
+		{"duplicate name parameter", `form-data; name=x; name="` + encodedMarker + `"`, "Content-Disposition", true},
+		{"unclosed quote", `form-data; name="` + encodedMarker, "Content-Disposition", true},
+		{"junk trailing parameter", `form-data; name="` + encodedMarker + `"; =junk`, "Content-Disposition", true},
+		{"on Content-Type, duplicate name", `text/plain; name=x; name="` + encodedMarker + `"`, "Content-Type", true},
+		{"on Content-Type, unclosed quote", `text/plain; name="` + encodedMarker, "Content-Type", true},
+		// Controls. The literal is seen by the body gate however the header breaks.
+		{"literal marker, duplicate name", `form-data; name=x; name="_e2ee"`, "Content-Disposition", true},
+		// And the false positive the gating exists for stays forwarded: a real
+		// client's sloppy quote, with no encoded word anywhere in it.
+		{"sloppy quote, no encoded word", `form-data; name="notes"; filename="my"file.txt"`, "Content-Disposition", false},
+		{"ordinary Content-Type", `text/plain; charset="utf-8`, "Content-Type", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := &Ctrl{}
+			// Not an assumption to state loosely: the whole point of rows 2-6 is
+			// that Go declines the header, so the branch under test is the one
+			// that runs.
+			_, _, err := mime.ParseMediaType(tt.header)
+			if tt.name != "parseable encoded word" && err == nil {
+				t.Fatalf("fixture assumes %q does NOT parse", tt.header)
+			}
+
+			body := []byte("--x\r\n" + tt.key + ": " + tt.header + "\r\n\r\n" + sealedEnvelopeJSON + "\r\n--x--\r\n")
+			const contentType = `multipart/form-data; boundary=x`
+
+			// The refusal must come from the header, not from the body gate —
+			// otherwise the test passes for a reason unrelated to the fix.
+			if tt.name != "literal marker, duplicate name" && couldNameE2EEPart(body) {
+				t.Fatal("fixture must not trip the body-wide gate; the header is what is under test")
+			}
+
+			sealed, why := c.IsSealedRequest(contentType, body)
+			if sealed != tt.refuse {
+				t.Errorf("IsSealedRequest = %v (%s), want %v", sealed, why, tt.refuse)
+			}
+			_, uerr := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body)
+			if (uerr != nil) != tt.refuse {
+				t.Errorf("MaybeUnsealRequest err = %v, want refusal=%v", uerr, tt.refuse)
+			}
+		})
+	}
+}
+
+// mentionsEncodedWord is looser than isEncodedWord on purpose — nothing parsed,
+// so there is no value to anchor to — and its cost is false positives on broken
+// headers that merely contain "=?". Pinned directly so that looseness is a
+// decision rather than an accident.
+func TestMentionsEncodedWord(t *testing.T) {
+	tests := map[string]bool{
+		`form-data; name="=?utf-8?B?X2UyZWU=?="`:     true,
+		`form-data; name=x; name="=?utf-8?B?X2U=?="`: true,
+		`form-data; name="=?utf-8?B?X2UyZWU=?=`:      true, // unclosed quote
+		`=?`:                                         true,
+		// The malformed dispositions real clients actually send.
+		`form-data; name="notes"; filename="my"file.txt"`:        false,
+		`form-data; name="file"; filename*=UTF-8''caf%C3%A9.png`: false,
+		`text/plain; charset="utf-8`:                             false,
+		`form-data; name="_e2ee"`:                                false, // the body gate's job
+		``:                                                       false,
+	}
+	for header, want := range tests {
+		if got := mentionsEncodedWord(header); got != want {
+			t.Errorf("%q: got %v, want %v", header, got, want)
+		}
+	}
+}
