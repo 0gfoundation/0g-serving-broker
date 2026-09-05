@@ -6,6 +6,10 @@ import (
 	"testing"
 )
 
+// promptBytes is the prompt half of estimateRequest, which is what most of
+// these cases are about.
+func promptBytes(reqBody []byte) int64 { return estimateRequest(reqBody).PromptBytes }
+
 // The attack this exists to stop: legal JSON whitespace inflates the envelope
 // without reaching the model. Charged on raw bytes, four megabytes of
 // indentation reads as a million tokens, exceeds any budget, and — since an
@@ -133,11 +137,21 @@ func TestPromptBytes_IgnoresWhitespaceInsideToolCalls(t *testing.T) {
 }
 
 // "We could not read it, so it is free" is an invitation to send exactly that.
+//
+// Two shapes reach two different fallbacks: a messages value that is not an
+// array at all, and an array whose elements are not objects. An earlier version
+// of this case used only the second while claiming to cover the first, so
+// deleting the first fallback left it green.
 func TestPromptBytes_UnreadableMessagesAreChargedNotExempted(t *testing.T) {
-	body := []byte(`{"messages":[{"role":"user","content":"` + strings.Repeat("x", 200000) + `"},"junk"]}`)
-
-	if got := promptBytes(body); got < 200000 {
-		t.Fatalf("a messages array this parser cannot read charged %d, want its full length", got)
+	payload := strings.Repeat("x", 200000)
+	for name, body := range map[string]string{
+		"not an array":        `{"messages":{"a":"` + payload + `"}}`,
+		"non-object elements": `{"messages":["` + payload + `"]}`,
+		"mixed elements":      `{"messages":[{"role":"user","content":"` + payload + `"},"junk"]}`,
+	} {
+		if got := promptBytes([]byte(body)); got < 200000 {
+			t.Fatalf("%s: charged %d, want its full length", name, got)
+		}
 	}
 }
 
@@ -149,5 +163,45 @@ func TestPromptBytes_PaddingStaysFreeAcrossShapes(t *testing.T) {
 
 	if base != padded {
 		t.Fatalf("padded text block charged %d, want %d", padded, base)
+	}
+}
+
+// Decode KV grows with every token generated, so a request declaring 30k output
+// tokens really does end up holding that much. Charging it the flat 4096
+// reserve under-counts by nearly an order of magnitude — and reasoning traffic,
+// which routinely generates that much, is exactly what this budget is for.
+func TestRequestedOutputTokens_ReadsTheDeclaredCeiling(t *testing.T) {
+	cases := map[string]struct {
+		body string
+		want int64
+	}{
+		"max_tokens":            {`{"max_tokens":30000}`, 30000},
+		"max_completion_tokens": {`{"max_completion_tokens":25000}`, 25000},
+		"largest of several":    {`{"max_tokens":100,"max_completion_tokens":25000}`, 25000},
+		"anthropic thinking":    {`{"max_tokens":4000,"thinking":{"type":"enabled","budget_tokens":20000}}`, 24000},
+		"n multiplies":          {`{"max_tokens":1000,"n":4}`, 4000},
+		"n is bounded":          {`{"max_tokens":1000,"n":1000}`, 8000},
+		"none declared":         {`{"messages":[]}`, 0},
+		"null":                  {`{"max_tokens":null}`, 0},
+		"string":                {`{"max_tokens":"30000"}`, 0},
+		"negative":              {`{"max_tokens":-1}`, 0},
+	}
+	for name, tc := range cases {
+		if got := estimateRequest([]byte(tc.body)).OutputTokens; got != tc.want {
+			t.Fatalf("%s: OutputTokens = %d, want %d", name, got, tc.want)
+		}
+	}
+}
+
+// Escapes are decoded before counting, so the same text costs the same whether
+// the client sent it raw or with ensure_ascii on. The comment used to claim the
+// opposite, and an operator sizing a budget on that claim would have
+// under-provisioned.
+func TestPromptBytes_EscapesCountTheSameAsRawText(t *testing.T) {
+	raw := promptBytes([]byte(`{"messages":[{"role":"user","content":"` + strings.Repeat("你", 100) + `"}]}`))
+	escaped := promptBytes([]byte(`{"messages":[{"role":"user","content":"` + strings.Repeat(`你`, 100) + `"}]}`))
+
+	if raw != escaped {
+		t.Fatalf("escaped text charged %d, raw charged %d — they decode to the same string", escaped, raw)
 	}
 }

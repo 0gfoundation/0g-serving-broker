@@ -1088,19 +1088,27 @@ type ConcurrencyLimitConfig struct {
 	// Set it to about 80% of the engine's KV pool (sglang reports
 	// sglang_max_total_num_tokens). The headroom absorbs the estimate below.
 	//
-	// A request weighs promptBytes/4 + min(maxCompletionTokens, 4096): an
-	// estimate over the fields that actually become prompt (system, message
-	// content, tool definitions) plus an output reserve mirroring the engine's
-	// own (sglang's PrefillAdder reserves min(max_new_tokens, 4096) per request).
-	// The envelope is deliberately not counted — JSON whitespace and ignored
-	// fields cost the engine nothing, and charging for them would let one padded
-	// body claim the whole budget.
+	// A request weighs promptBytes/4 + an output reserve, capped at the model's
+	// context length. The prompt half counts only the fields that actually become
+	// prompt (system, message content, tool definitions); the envelope is
+	// deliberately excluded, since JSON whitespace and ignored fields cost the
+	// engine nothing and charging for them would let one padded body claim the
+	// whole budget. The reserve is what the request itself declared — max_tokens,
+	// max_completion_tokens, thinking.budget_tokens, times n — because decode KV
+	// grows with every token produced; a flat constant under-counts reasoning
+	// traffic by an order of magnitude. It falls back to 4096 when the caller
+	// declared nothing.
 	//
-	// The /4 divisor is English/JSON-shaped and errs in both directions: CJK sent
-	// as UTF-8 packs near 3 bytes per token so it runs about a quarter low, while
-	// the same text from a client with ensure_ascii on arrives as 6-byte escapes
-	// and runs half high. Lower the budget if the traffic is consistently one of
-	// them rather than adding a second knob.
+	// The /4 divisor is English/JSON-shaped and errs downward for CJK, which
+	// packs near 3 bytes per token — about a quarter low. Escapes do not offset
+	// that: string content is measured after JSON decoding, so \u4f60 and a
+	// literal CJK character count the same. Lower the budget for CJK-heavy
+	// traffic rather than adding a second knob.
+	//
+	// Intended for a self-hosted engine, where KV is a resource this broker
+	// shares with itself. In front of a centralized upstream there is no local KV
+	// pool to bound and the gate only sheds traffic the vendor would have
+	// accepted.
 	//
 	// Chatbot only, and only for text-input models: images arrive as base64 in
 	// the body, where a 3 MB picture reads as ~786k tokens against the thousand

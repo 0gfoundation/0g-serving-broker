@@ -5,8 +5,9 @@ import (
 	"encoding/json"
 )
 
-// promptBytes estimates how many bytes of a chatbot request body actually
-// become prompt tokens.
+// estimateRequest reads a chatbot request body once and returns both numbers
+// the KV budget needs: how many of its bytes actually become prompt, and how
+// many output tokens the caller declared it wants.
 //
 // The raw body length is not that number, and the difference is exploitable.
 // JSON whitespace, fields the upstream ignores, and escape expansion all
@@ -27,15 +28,16 @@ import (
 // because "we could not read it, so it is free" is an invitation to send
 // exactly that.
 //
-// Returns 0 only for a body that is not a JSON object at all. Such a body is
-// rejected by the engine before it holds any KV, so charging it for context
-// would be charging for work that never happens.
-func promptBytes(reqBody []byte) int64 {
+// Returns a zero estimate only for a body that is not a JSON object at all.
+// Such a body is rejected by the engine before it holds any KV, so charging it
+// for context would be charging for work that never happens.
+func estimateRequest(reqBody []byte) requestEstimate {
 	var body map[string]json.RawMessage
 	if err := json.Unmarshal(reqBody, &body); err != nil || body == nil {
-		return 0
+		return requestEstimate{}
 	}
 
+	est := requestEstimate{OutputTokens: requestedOutputTokens(body)}
 	var total int64
 	total += textBytes(body["system"]) // Anthropic, and OpenAI's newer top-level form
 	total += textBytes(body["prompt"]) // legacy completions
@@ -49,14 +51,16 @@ func promptBytes(reqBody []byte) int64 {
 
 	raw, ok := body["messages"]
 	if !ok {
-		return total
+		est.PromptBytes = total
+		return est
 	}
 	var messages []json.RawMessage
 	if err := json.Unmarshal(raw, &messages); err != nil {
 		// Unreadable shape. Charge the whole thing rather than nothing: the
 		// upstream may well accept what this parser did not, and a body that is
 		// free to send is the one an attacker sends.
-		return total + compactLen(raw)
+		est.PromptBytes = total + compactLen(raw)
+		return est
 	}
 	for _, m := range messages {
 		var fields map[string]json.RawMessage
@@ -74,7 +78,78 @@ func promptBytes(reqBody []byte) int64 {
 		// weigh nothing.
 		total += perMessageOverheadBytes
 	}
-	return total
+	est.PromptBytes = total
+	return est
+}
+
+// requestEstimate is what one parse of the body yields: the bytes that become
+// prompt, and how many output tokens the request has asked to generate.
+type requestEstimate struct {
+	PromptBytes int64
+	// OutputTokens is the caller's own declared ceiling on generation, 0 when it
+	// declared none. Decode KV grows with every token produced, so a request that
+	// says it wants 30k of them costs far more than the flat reserve assumes.
+	OutputTokens int64
+}
+
+// requestedOutputTokens reads the caller's declared generation ceiling.
+//
+// It takes the LARGEST of the spellings present, because they are alternatives
+// and the engine will honour whichever it recognises: OpenAI's max_tokens and
+// max_completion_tokens, and Anthropic's thinking.budget_tokens, which declares
+// the thinking allowance on top of the answer. Multiplied by n / best_of, since
+// those generate that many independent sequences and each holds its own KV.
+func requestedOutputTokens(body map[string]json.RawMessage) int64 {
+	var want int64
+	for _, key := range []string{"max_tokens", "max_completion_tokens", "max_output_tokens"} {
+		if v := numberField(body[key]); v > want {
+			want = v
+		}
+	}
+	if thinking := objectField(body["thinking"]); thinking != nil {
+		want += numberField(thinking["budget_tokens"])
+	}
+	if want <= 0 {
+		return 0
+	}
+
+	sequences := int64(1)
+	for _, key := range []string{"n", "best_of"} {
+		if v := numberField(body[key]); v > sequences {
+			sequences = v
+		}
+	}
+	// Bounded so a silly n cannot overflow or swamp the budget on its own; the
+	// weight is clamped to the context window afterwards regardless.
+	if sequences > 8 {
+		sequences = 8
+	}
+	return want * sequences
+}
+
+// numberField reads a JSON number, returning 0 for anything else — a missing
+// field, a null, a string. A declaration this cannot read is no declaration.
+func numberField(raw json.RawMessage) int64 {
+	if len(raw) == 0 {
+		return 0
+	}
+	var f float64
+	if err := json.Unmarshal(raw, &f); err != nil || f <= 0 {
+		return 0
+	}
+	return int64(f)
+}
+
+// objectField reads a nested object, returning nil for anything else.
+func objectField(raw json.RawMessage) map[string]json.RawMessage {
+	if len(raw) == 0 {
+		return nil
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil
+	}
+	return m
 }
 
 // perMessageOverheadBytes approximates the role markers and separators a chat

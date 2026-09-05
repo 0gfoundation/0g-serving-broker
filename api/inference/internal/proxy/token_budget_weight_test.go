@@ -350,3 +350,51 @@ func TestReserveTokenBudget_NoOpReleaseWhenGateSkipped(t *testing.T) {
 	}
 	release() // must not panic
 }
+
+// A body larger than the window could ever hold is clamped to the window
+// whatever the parse says, so the parse — several nested decodes over the whole
+// body — is skipped. At the 32 MB request limit that parse took seconds, which
+// is a free denial of service on the broker's own CPU.
+func TestTokenBudgetWeight_OversizedBodySkipsTheParse(t *testing.T) {
+	p := newBudgetProxy(1_440_000, 32768)
+	p.ctrl.Service.ModelInfo.ContextLength = 262144
+
+	body := make([]byte, 32<<20)
+	start := time.Now()
+	weight, ok := p.tokenBudgetWeight("chatbot", "glm-5.3", newBudgetCtx(), body)
+	elapsed := time.Since(start)
+
+	if !ok {
+		t.Fatal("chatbot traffic must be charged")
+	}
+	if weight != 262144 {
+		t.Fatalf("weight = %d, want the context window %d", weight, 262144)
+	}
+	if elapsed > 100*time.Millisecond {
+		t.Fatalf("took %v — the oversized short-circuit is not firing", elapsed)
+	}
+}
+
+// The reserve must follow what the caller actually asked to generate, not a
+// flat constant: reasoning requests declare tens of thousands of tokens and
+// hold that KV to the end.
+func TestTokenBudgetWeight_ReserveFollowsTheDeclaredOutput(t *testing.T) {
+	p := newBudgetProxy(1_440_000, 32768)
+	p.ctrl.Service.ModelInfo.ContextLength = 262144
+
+	body := []byte(`{"max_tokens":30000,"messages":[{"role":"user","content":"hi"}]}`)
+	weight, ok := p.tokenBudgetWeight("chatbot", "glm-5.3", newBudgetCtx(), body)
+	if !ok {
+		t.Fatal("chatbot traffic must be charged")
+	}
+	if weight < 30000 {
+		t.Fatalf("weight = %d, want at least the 30000 output tokens the caller asked for", weight)
+	}
+
+	// And it is still bounded by what the model can actually generate.
+	p.ctrl.Service.ModelInfo.MaxCompletionTokens = 4096
+	capped, _ := p.tokenBudgetWeight("chatbot", "glm-5.3", newBudgetCtx(), body)
+	if capped > 4096+100 {
+		t.Fatalf("weight = %d, want it clamped to the advertised 4096", capped)
+	}
+}

@@ -286,19 +286,24 @@ func (p *Proxy) globalConcurrencyMiddleware() gin.HandlerFunc {
 // would cost more than the gate saves, and the budget carries explicit headroom
 // (see InflightTokenBudget) to absorb the error.
 //
-// The error is not one-directional. CJK sent as UTF-8 packs near three bytes
-// per token, so this runs about a quarter low; the same text sent by a client
-// with ensure_ascii on arrives as six-byte \uXXXX escapes and it runs half
-// high. Neither is worth a second knob — lower the budget if the traffic is
-// consistently one of them.
+// The error is one-directional for the common case, and downward. CJK packs
+// near three bytes per token, so this runs about a quarter low — and escapes do
+// not offset it: string content is measured after JSON decoding, so \u4f60 and
+// a literal CJK character count the same. (Only an unrecognised content block,
+// measured as compacted JSON, counts escapes at their encoded width.) Lower the
+// budget for CJK-heavy traffic rather than adding a second knob.
 const bytesPerTokenEstimate = 4
 
-// outputReserveTokens is the per-request output allowance added to the prompt
-// estimate. It mirrors what sglang itself reserves when deciding whether a
-// request fits (PrefillAdder clips the reservation at CLIP_MAX_NEW_TOKENS =
-// 4096 regardless of max_new_tokens), so the broker's arithmetic and the
-// engine's agree instead of the broker being pessimistic by an order of
-// magnitude for models advertising a 32k output cap.
+// outputReserveTokens is the per-request output allowance used when the caller
+// declares none of its own.
+//
+// It matches the reservation sglang makes while deciding whether a request fits
+// (PrefillAdder clips at CLIP_MAX_NEW_TOKENS = 4096 regardless of
+// max_new_tokens). Note what that number is: the engine's OPTIMISTIC admission
+// estimate, not steady-state occupancy — and its optimism is why the engine
+// ends up evicting and recomputing, which is the outcome this budget exists to
+// avoid. So it is only the fallback. When the caller states a ceiling, that is
+// used instead; see requestedOutputTokens.
 const outputReserveTokens = 4096
 
 // minTypicalRequestTokens is the weight of a request small enough that the
@@ -428,12 +433,32 @@ func (p *Proxy) tokenBudgetWeight(svcType, modelName string, ctx *gin.Context, r
 		return 0, false
 	}
 
+	// Before parsing: a body whose raw length alone exceeds what the context
+	// window could hold is going to be clamped to that window no matter what the
+	// parse says, so skip the parse. It is the expensive step — several nested
+	// decodes over the whole body — and this is the request shape that makes it
+	// most expensive. Charging the full window is an over-estimate for a padded
+	// body, which costs the sender concurrency rather than anyone else.
+	if int64(len(reqBody)) > int64(mi.ContextLength)*bytesPerTokenEstimate {
+		return int64(mi.ContextLength), true
+	}
+
+	est := estimateRequest(reqBody)
+
+	// The reserve covers decode, which grows with every token generated. Prefer
+	// what the caller actually asked for over the flat default: a reasoning
+	// request declaring 30k tokens really does hold that much KV by the end, and
+	// charging it 4096 under-counts by nearly an order of magnitude — exactly the
+	// traffic this budget exists to bound.
 	reserve := int64(outputReserveTokens)
+	if est.OutputTokens > 0 {
+		reserve = est.OutputTokens
+	}
 	if mi.MaxCompletionTokens > 0 && int64(mi.MaxCompletionTokens) < reserve {
-		// A model that cannot generate 4096 tokens should not be charged for them.
+		// The model cannot generate more than it advertises, whatever was asked.
 		reserve = int64(mi.MaxCompletionTokens)
 	}
-	weight := promptBytes(reqBody)/bytesPerTokenEstimate + reserve
+	weight := est.PromptBytes/bytesPerTokenEstimate + reserve
 
 	// Bound the estimate by physics. One request cannot hold more KV than the
 	// context window, so a body whose byte count says otherwise is the estimate
