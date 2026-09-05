@@ -649,6 +649,12 @@ type Service struct {
 	// derived from that estimate would be far too small on a long prompt, and on
 	// a reasoning model a small cap is consumed by thinking tokens before any
 	// answer starts.
+	//
+	// The reading is deliberately conservative (three bytes per token, against a
+	// measured 3.07 for rare CJK and 3.50 for source code). Forwarding without a
+	// cap is bounded by the window itself — to reach that band the prompt must
+	// already fill most of the context — whereas an injected cap that overflows
+	// the window is a hard 400 on a request that worked before the flag was set.
 	EnforceMaxCompletionTokens bool `yaml:"enforceMaxCompletionTokens"`
 }
 

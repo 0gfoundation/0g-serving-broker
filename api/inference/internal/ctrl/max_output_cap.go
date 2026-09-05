@@ -31,27 +31,37 @@ import (
 // the context window? It is never used to compute a smaller cap — see
 // injectableOutputCap for why.
 //
-// Four is the English/JSON ratio. An earlier version used three, reasoning that
-// over-estimating was the safe direction because an injected cap that does not
-// fit means an upstream 400. That got the trade backwards. Over-estimating by a
-// third moves the "does not fit" verdict a third of the window too early, and
-// the verdict is fail-OPEN: nothing is injected and the request generates
-// unbounded. On a 262144-token model advertising 32768, the three-byte reading
-// gave up at roughly 66% of context, while 90k tokens of room — nearly three
-// times the advertised cap — actually remained.
+// Three, measured, and deliberately conservative. Real ratios for this
+// network's tokenizer (Qwen BPE, measured against the 0GM checkpoint):
 //
-// At four the verdict lands within a few percent of the real boundary. The
-// residual risk is a prompt whose bytes-per-token runs lower than four: CJK sent
-// as UTF-8 is near three, so a prompt close to the window can be under-read and
-// the injected cap can overflow it, which the upstream answers with a 400. That
-// only reaches requests already within a cap's width of the window, and a loud
-// 400 there is a better failure than silently unbounded generation.
+//	Chinese prose      5.44        English JSON body   4.45
+//	Chinese in a chat body 3.97     Japanese           3.91
+//	Go source code     3.50        rare CJK            3.07
 //
-// One case this cannot read at all: base64 attachments. An image is thousands
-// of bytes per token, so a request carrying one looks far larger than it is and
-// takes the fail-open path early. Models that accept images are outside this
-// pass's remit anyway, but a text model handed a data URL will not get a cap.
-const bytesPerToken = 4
+// Note what is low and what is not. Chinese prose is well above four; the ratios
+// that fall below it are source code, Japanese, and rare characters — and source
+// code is the bulk of the long-context traffic here. An earlier revision used
+// four on the argument that over-reading surrenders window, and would have
+// injected caps that overflow the window for all of those.
+//
+// The two errors are not symmetric, which is what settles the constant.
+// Over-reading makes the test say "does not fit" too early, and the request is
+// then forwarded with no cap — but the band where that happens is bounded by
+// the window itself: to reach it the prompt must already fill most of the
+// context, so generation is capped at what little remains. Under-reading makes
+// the test say "fits" when it does not, and the injected cap overflows the
+// window: the upstream answers 400, turning a request that worked before this
+// flag was enabled into a hard failure. On 29-qwavity-35b-sia (32768 window,
+// 8192 cap) four would have 400'd every prompt between 24.5k and 28k tokens.
+//
+// A loud 400 is NOT the better failure here, which an earlier comment claimed.
+// Overflow needs prompt > context - cap, i.e. the remaining window is already
+// tighter than the cap — so in that entire band injecting buys nothing at all,
+// and the only thing the 400 achieves is breaking the request.
+//
+// Base64 attachments sit at the far end (7.87 and up) and take the fail-open
+// path early; no byte ratio can read them.
+const bytesPerToken = 3
 
 // CapMaxOutputTokens lowers the request's output-token cap to the resolved
 // model's maxCompletionTokens. resolvedModel is the public/canonical id

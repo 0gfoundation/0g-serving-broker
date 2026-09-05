@@ -1,9 +1,15 @@
 package ctrl
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/gin-gonic/gin"
 
 	"github.com/0glabs/0g-serving-broker/inference/config"
 )
@@ -285,6 +291,7 @@ func TestCapMaxOutputTokens_InjectsTheAdvertisedCapOrNothing(t *testing.T) {
 	// Walk the body size across the point where the cap stops fitting; every
 	// injected value must be exactly the advertised cap.
 	for _, bodyLen := range []int{1000, 100000, 400000, 600000, 688000, 690000, 700000} {
+
 		body := []byte(`{"p":"` + strings.Repeat("x", bodyLen) + `"}`)
 		out, err := c.CapMaxOutputTokens(body, "glm-5.3", "")
 		if err != nil {
@@ -442,5 +449,82 @@ func TestCapMaxOutputTokens_NegativeIsTreatedAsNoCap(t *testing.T) {
 		if got := capOf(t, out, "max_tokens"); got != 32768 {
 			t.Fatalf("%s: max_tokens = %v, want a real cap injected", literal, got)
 		}
+	}
+}
+
+// The byte ratio decides whether an injected cap overflows the context window,
+// and the two errors are not symmetric: reading too high forwards without a cap
+// (bounded by the window itself), reading too low injects a cap the upstream
+// rejects with a 400. Nothing pinned the constant, so 3, 4 and 8 were
+// interchangeable — this fixes the boundary in place.
+func TestCapMaxOutputTokens_FitBoundaryIsPinnedToTheRatio(t *testing.T) {
+	// 29-qwavity-35b-sia's real shape: a 32768 window advertising 8192.
+	const contextLength, maxCompletion = 32768, 8192
+	c := newTestCtrlForOutputCapCtx(t, true, maxCompletion, contextLength)
+
+	inject := func(bodyLen int) (float64, bool) {
+		t.Helper()
+		body := []byte(`{"p":"` + strings.Repeat("x", bodyLen) + `"}`)
+		out, err := c.CapMaxOutputTokens(body, "glm-5.3", "")
+		if err != nil {
+			t.Fatalf("bodyLen %d: %v", bodyLen, err)
+		}
+		m := decodeBodyMap(t, out)
+		v, ok := m["max_tokens"]
+		if !ok {
+			return 0, false
+		}
+		return v.(float64), true
+	}
+
+	// A prompt of ~26k real tokens on a 32768 window leaves ~6.5k — less than
+	// the 8192 cap, so injecting it would overflow and the upstream would 400.
+	// At 3.5 bytes/token that prompt is about 91000 bytes.
+	if v, injected := inject(91000); injected {
+		t.Fatalf("injected %v for a prompt that leaves less room than the cap; the upstream would 400", v)
+	}
+
+	// A short prompt leaves plenty; the advertised cap goes in whole.
+	if v, injected := inject(1000); !injected || v != maxCompletion {
+		t.Fatalf("short prompt: injected %v (present=%v), want the advertised %d", v, injected, maxCompletion)
+	}
+}
+
+// The clamp is only worth anything if it is actually wired into the forward
+// path. Nothing asserted that: deleting the CapMaxOutputTokens call from
+// PrepareHTTPRequest left every test in this package and the config package
+// green, so the whole feature could be dropped in a bad rebase and CI would
+// have nothing to say. The load-time checks would still pass, the flag would
+// still be accepted, and no cap would ever be injected.
+func TestPrepareHTTPRequest_AppliesTheOutputCap(t *testing.T) {
+	svc := config.Service{
+		Type:                       "chatbot",
+		ModelType:                  "glm-5.3",
+		ProviderType:               "centralized",
+		ProviderIdentity:           "zhipu",
+		EnforceMaxCompletionTokens: true,
+		ModelInfo: &config.ModelInfo{
+			ContextLength:       262144,
+			MaxCompletionTokens: 32768,
+			SupportedParameters: []string{maxTokensKey},
+		},
+	}
+	c := newChatbotTestCtrl(t, svc)
+	c.Service.Type = "chatbot"
+
+	body := []byte(`{"model":"glm-5.3","messages":[{"role":"user","content":"hi"}]}`)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+
+	req, err := c.PrepareHTTPRequest(ctx, "http://upstream.invalid/v1/chat/completions", body, "chatbot")
+	if err != nil {
+		t.Fatalf("PrepareHTTPRequest: %v", err)
+	}
+	forwarded, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatalf("read forwarded body: %v", err)
+	}
+	if got := capOf(t, forwarded, maxTokensKey); got != 32768 {
+		t.Fatalf("forwarded max_tokens = %v, want the advertised 32768 — the clamp is not wired into the forward path", got)
 	}
 }
