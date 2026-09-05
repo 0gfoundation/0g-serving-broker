@@ -612,6 +612,59 @@ type Service struct {
 	// forwarded unchanged. Only applied for the chatbot service type; rejected for
 	// others at load.
 	StripBodyFields []string `yaml:"stripBodyFields"`
+
+	// EnforceMaxCompletionTokens makes the advertised modelInfo.maxCompletionTokens
+	// binding instead of decorative.
+	//
+	// Today that number is published in /v1/models and enforced by nobody: the
+	// broker does not read it, and an OpenAI-compatible engine given no
+	// max_tokens generates until it hits the context window. On a self-hosted
+	// engine that is not a billing curiosity but a capacity problem — one
+	// unbounded reasoning request holds its KV slot for as long as it keeps
+	// producing, and KV is what the box actually runs out of.
+	//
+	// With this on, a chatbot request's output cap is clamped to the resolved
+	// model's maxCompletionTokens: absent (or null) it is set, higher it is
+	// lowered, lower it is left alone. Take-the-minimum, never raise — a client
+	// asking for 512 tokens still gets 512.
+	//
+	// injectBodyFields cannot express this. It is server-config-wins by
+	// definition, so it would rewrite that client's 512 to the cap and charge
+	// them for output they did not ask for.
+	//
+	// No-op unless the resolved model declares a positive maxCompletionTokens.
+	// Off by default: turning it on changes what reaches the upstream, and a
+	// provider whose advertised value is stale would start truncating.
+	//
+	// Turning it on also requires every servable model to declare max_tokens or
+	// max_completion_tokens in supportedParameters, so the cap this injects uses
+	// a spelling the upstream accepts, and forbids stripBodyFields or
+	// injectBodyFields on either key at BOTH levels — strip would delete the cap
+	// this pass sets, and inject would overwrite it, which can raise it above the
+	// advertised maximum. Config load refuses all of these.
+	//
+	// The cap is injected whole or not at all: when a conservative reading of the
+	// prompt says the advertised maximum no longer fits in the context window,
+	// nothing is injected and the engine decides from the real token count. A cap
+	// derived from that estimate would be far too small on a long prompt, and on
+	// a reasoning model a small cap is consumed by thinking tokens before any
+	// answer starts.
+	//
+	// The reading is deliberately conservative (three bytes per token, against a
+	// measured 3.07 for rare CJK and 3.50 for source code), because an injected
+	// cap that overflows the window is a hard 400 on a request that worked before
+	// the flag was set, while reading high only forwards without a cap.
+	//
+	// Be clear about what that costs, though, since it is not nothing. The
+	// fail-open band starts once the estimated prompt passes contextLength minus
+	// maxCompletionTokens: about 2.9 MB of prompt text on a 1M-token window
+	// advertising 32k, 672 KB on a 256k window, 72 KB on a 32k one. Inside it the
+	// request generates up to whatever the window still allows, which on the
+	// widest configuration is roughly ten times the advertised cap. The narrower
+	// the window relative to the cap, the closer that bound gets to the cap
+	// itself. Only prompt-bearing text is measured, so an image or other non-text
+	// attachment no longer pushes a request into that band by its byte length.
+	EnforceMaxCompletionTokens bool `yaml:"enforceMaxCompletionTokens"`
 }
 
 // IsCentralized returns true if this service routes to a centralized API provider.
@@ -2290,6 +2343,48 @@ func loadConfig(cfg *Config) error {
 			return err
 		}
 		cfg.Service.StripBodyFields = normalized
+	}
+
+	// The output-token clamp runs on the chatbot forward path only (see
+	// ctrl.CapMaxOutputTokens), so setting it on another modality would silently
+	// do nothing. Reject it at load for the same reason the two above are
+	// rejected.
+	if cfg.Service.EnforceMaxCompletionTokens {
+		if cfg.Service.Type != constant.ServiceTypeChatbot {
+			return fmt.Errorf("invalid config: service.enforceMaxCompletionTokens is only supported for service type '%s', got '%s'", constant.ServiceTypeChatbot, cfg.Service.Type)
+		}
+		// The clamp writes an output cap into requests that carry none, and the
+		// spelling it must use is upstream-specific: OpenAI's reasoning models
+		// answer max_tokens with a 400 telling you to send max_completion_tokens.
+		// ctrl.injectionKey reads supportedParameters to choose, so without that
+		// declaration the choice is a guess — and a wrong guess fails EVERY
+		// capless request on the service, which is exactly the population this
+		// flag acts on. Refuse at load rather than at runtime.
+		// Two later passes can undo this clamp, and both are configured at two
+		// levels (service and per pricing entry, unioned at request time). Check
+		// all four, not just the one: a per-entry setting is exactly how an
+		// operator works around a single upstream, so it is the likelier half.
+		//
+		// stripBodyFields removes the cap this pass just set — the flag becomes a
+		// silent no-op. injectBodyFields is worse: it is server-config-wins, so it
+		// overwrites the clamped value and can RAISE the cap above the advertised
+		// maximum, breaking the one promise this pass makes.
+		if err := cfg.Service.checkNoCapOverrides(); err != nil {
+			return err
+		}
+		for _, mi := range cfg.Service.allModelInfos() {
+			// The clamp is a no-op without a positive advertised maximum — there is
+			// nothing to clamp to. Silently doing nothing is the failure mode every
+			// other check here exists to prevent, so it fails at load too.
+			if mi.MaxCompletionTokens <= 0 {
+				return fmt.Errorf("invalid config: service.enforceMaxCompletionTokens requires every servable model to declare a positive modelInfo.maxCompletionTokens; without one the clamp has nothing to enforce and silently does nothing")
+			}
+			if containsString(mi.SupportedParameters, maxTokensParam) ||
+				containsString(mi.SupportedParameters, maxCompletionTokensParam) {
+				continue
+			}
+			return fmt.Errorf("invalid config: service.enforceMaxCompletionTokens requires modelInfo.supportedParameters to declare %q or %q so the injected output cap uses a spelling the upstream accepts", maxTokensParam, maxCompletionTokensParam)
+		}
 	}
 
 	// Provider display metadata (applies to any provider type). Both are optional.
