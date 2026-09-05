@@ -572,7 +572,13 @@ func nameVerdict(where, header, name string) (SealedVerdict, string, string) {
 	case resolvesToMarker(name):
 		return MultipartNamesMarker, "", fmt.Sprintf("%s names a part %q as a conformant parser reads it, trimming linear white space and resolving RFC 2045 quoted pairs where mime.ParseMediaType does neither, so the name it declares cannot be ruled out", where, e2eeBodyMarker)
 	case isEncodedWord(name):
-		return MultipartNamesMarker, "", fmt.Sprintf("%s names a part with an RFC 2047 encoded word, which mime.ParseMediaType returns undecoded but other parsers resolve, so the name it declares cannot be ruled out", where)
+		if verdict, reason, why := encodedWordVerdict(where, name); verdict != NotSealed {
+			return verdict, reason, why
+		}
+		// The word decoded, to a name that is not the marker. That is a FACT
+		// about this part, not a gap, so it neither refuses nor falls through
+		// to a "cannot be ruled out" branch on the strength of the same name.
+		return NotSealed, "", ""
 	case declaresEncodedName(header) && (name == "" || declaresUndecodableName(header)):
 		// STRUCTURAL, not exact, and the distinction is the whole point: the name
 		// here was never read. The parser dropped the charset, so this is "cannot
@@ -588,6 +594,48 @@ func nameVerdict(where, header, name string) (SealedVerdict, string, string) {
 		return MultipartUnreadable, monitor.E2EERefuseUndecodableName, fmt.Sprintf("%s RFC 2231-encodes a part's name in a charset mime.ParseMediaType cannot decode, so the name it declares cannot be ruled out", where)
 	}
 	return NotSealed, "", ""
+}
+
+// encodedWordVerdict decides a name mime.ParseMediaType handed back as an
+// undecoded RFC 2047 encoded word — by decoding it, which is what every parser
+// that resolves the word does.
+//
+// Refusing on the raw form instead made a part legitimately named `café`
+// (`name="=?utf-8?Q?caf=C3=A9?="`) a hard 400 whose message asserted the part
+// was named `_e2ee`. The decoder for that case was in the standard library the
+// whole time; this is the one spelling in the file where "what does it decode
+// to" has an answer rather than a guess.
+//
+// mime.WordDecoder.DecodeHeader splits four ways, measured:
+//
+//	=?utf-8?B?X2UyZWU=?=      -> `_e2ee`, nil            the marker, exactly
+//	=?utf-8?Q?caf=C3=A9?=     -> `café`, nil             some other name
+//	=?utf-8?X?X2UyZWU=?=      -> unchanged, nil          not a word after all
+//	=?shift_jis?B?X2UyZWU=?=  -> ``, unhandled charset   nothing was read
+//
+// Only the last is "cannot be ruled out", so only the last is STRUCTURAL —
+// gated and counted like every other name that was never read. The first three
+// are facts, and the third is a fact too: a malformed word is the literal name
+// every parser sees, so comparing the unchanged text is the exact answer.
+//
+// Decoding also gets right a trap a substring test cannot: RFC 2047 spells
+// space as `_` in a Q-encoded word, so `=?us-ascii?Q?_e2ee?=` names a part
+// " e2ee" and is not the marker at all.
+//
+// The decoded value goes through resolvesToMarker, not `==`, because the word
+// can encode the very white space and quoted pairs that helper exists for —
+// `=?utf-8?Q?=20=5Fe2ee?=` decodes to " _e2ee". The name is NOT trimmed before
+// decoding: resolvesToMarker trims after, which covers the same ground and
+// leaves that trim under test rather than masked by a second one.
+func encodedWordVerdict(where, name string) (SealedVerdict, string, string) {
+	decoded, err := new(mime.WordDecoder).DecodeHeader(name)
+	if err != nil {
+		return MultipartUnreadable, monitor.E2EERefuseUndecodableName, fmt.Sprintf("%s names a part with an RFC 2047 encoded word in a charset Go cannot decode, so the name it declares cannot be ruled out", where)
+	}
+	if !resolvesToMarker(decoded) {
+		return NotSealed, "", ""
+	}
+	return MultipartNamesMarker, "", fmt.Sprintf("%s names a part %q, RFC 2047-encoded", where, e2eeBodyMarker)
 }
 
 // recoverBoundary extracts the boundary from a Content-Type that
@@ -973,7 +1021,7 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (SealedVerdict
 // multipartCarriesE2EEPart.
 func (c *Ctrl) RefuseAsync(contentType string, reqBody []byte) (SealedVerdict, string) {
 	verdict, reason, why := IsSealedRequest(contentType, reqBody)
-	return resolveMultipartPolicy(verdict, reason, why, c.e2eeStrictMultipart, c.logger), why
+	return resolveMultipartPolicy(verdict, reason, c.e2eeStrictMultipart), why
 }
 
 // sealedVerdict is what a request's BYTES are, independent of which entry point
@@ -1085,18 +1133,28 @@ func IsSealedRequest(contentType string, reqBody []byte) (SealedVerdict, string,
 // With the flag off the request is forwarded and counted, which is what makes
 // flipping it an evidence-based decision rather than an assertion in the release
 // notes. See config.Config.E2EEStrictMultipart.
-func resolveMultipartPolicy(verdict SealedVerdict, reason, why string, strictMultipart bool, logger log.Logger) SealedVerdict {
-	if verdict != MultipartUnreadable || strictMultipart {
+func resolveMultipartPolicy(verdict SealedVerdict, reason string, strictMultipart bool) SealedVerdict {
+	if verdict != MultipartUnreadable {
 		return verdict
 	}
-	// COUNTER ONLY, no log line. MaybeUnsealRequest runs before ValidateSession
-	// on the sync proxy, so a per-request line here is written for unauthenticated
-	// traffic at a rate the caller chooses, with content the caller's body
-	// decides — the unbounded, disk-filling log-amplification vector that
-	// proxy/rejection.go exists to have removed. That file's conclusion applies
-	// unchanged: the real-time signal is the Prometheus counter, whose `reason`
-	// label names the branch, which is what the rollout decision needs.
+	// Counted on BOTH sides of the flag. Counting only while off made the metric
+	// vanish at the moment it starts to matter: the flip is when these branches
+	// begin rejecting traffic, so an operator watching for a spike would have
+	// been watching a series that went to zero by construction, unable to tell a
+	// clean rollout from a broken one. What the flag changes is the verdict
+	// below, not the observation.
+	//
+	// COUNTER ONLY, no log line, at either setting. MaybeUnsealRequest runs
+	// before ValidateSession on the sync proxy, so a per-request line here is
+	// written for unauthenticated traffic at a rate the caller chooses, with
+	// content the caller's body decides — the unbounded, disk-filling
+	// log-amplification vector that proxy/rejection.go exists to have removed.
+	// That file's conclusion applies unchanged: the real-time signal is this
+	// counter, whose `reason` label names the branch.
 	monitor.RecordE2EEMultipartWouldRefuse(reason)
+	if strictMultipart {
+		return verdict
+	}
 	return NotSealed
 }
 
@@ -1106,7 +1164,7 @@ func resolveMultipartPolicy(verdict SealedVerdict, reason, why string, strictMul
 // reason, as IsSealedRequest below.
 func RefuseAsync(strictMultipart bool, contentType string, reqBody []byte) (SealedVerdict, string) {
 	verdict, reason, why := IsSealedRequest(contentType, reqBody)
-	return resolveMultipartPolicy(verdict, reason, why, strictMultipart, nil), why
+	return resolveMultipartPolicy(verdict, reason, strictMultipart), why
 }
 
 // MaybeUnsealRequest unseals a sealed E2EE request in-enclave and returns the
@@ -1123,7 +1181,7 @@ func RefuseAsync(strictMultipart bool, contentType string, reqBody []byte) (Seal
 // signer_addr is not this enclave, or whose key_id is unknown is rejected.
 func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, reqBody []byte) ([]byte, error) {
 	verdict, env, reason, why := classifyRequest(ctx.Request.Header.Get("Content-Type"), reqBody)
-	switch resolveMultipartPolicy(verdict, reason, why, c.e2eeStrictMultipart, c.logger) {
+	switch resolveMultipartPolicy(verdict, reason, c.e2eeStrictMultipart) {
 	case NotSealed:
 		return reqBody, nil
 	case MultipartNamesMarker:

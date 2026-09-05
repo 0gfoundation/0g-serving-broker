@@ -76,7 +76,8 @@ func strictFixture(t *testing.T) *Ctrl {
 
 // refuseAsyncBool is the old bool-shaped answer, kept for the tests that only
 // care whether the async routes refuse at all. The verdict itself is what
-// async.go switches on, and TestAsyncMessagesDifferPerVerdict covers that.
+// async.go switches on, and handler.TestSubmitAsync_MessagesDifferPerVerdict
+// covers that.
 func (c *Ctrl) refuseAsyncBool(contentType string, reqBody []byte) (bool, string) {
 	verdict, why := c.RefuseAsync(contentType, reqBody)
 	return verdict != NotSealed, why
@@ -1960,24 +1961,55 @@ func TestEnumerationIsBoundedByPartCount(t *testing.T) {
 // An RFC 2047 encoded word: Go hands the name back verbatim with no error, and
 // the raw bytes spell neither the marker nor `name*`, so the gate is false too —
 // the same shape as the RFC 2231 charset gap and the quoted pair, one encoding
-// over. Refused without decoding the word.
-func TestMultipartWithAnEncodedWordNameIsRefused(t *testing.T) {
-	c := strictCtrl()
+// over. Unlike those two, this one is DECIDABLE: mime.WordDecoder resolves the
+// word, so the verdict is the decoded name and not the spelling.
+//
+// Each row therefore pins which of the three buckets the word lands in. Rows
+// that decode to some other name are the point of the test — refusing those was
+// a hard 400 on a legitimately named part, at both flag settings, with a message
+// asserting the part was named `_e2ee`.
+func TestAnEncodedWordNameIsDecidedByWhatItDecodesTo(t *testing.T) {
 	tests := []struct {
 		name        string
 		disposition string
-		parsedName  string // what Go yields, measured
+		parsedName  string        // what Go yields, measured
+		want        SealedVerdict // what the decoded name makes it
+		spelt       bool          // the raw bytes contain the marker or `name*`
 	}{
-		{"base64 encoded word", `form-data; name="=?utf-8?B?X2UyZWU=?="`, `=?utf-8?B?X2UyZWU=?=`},
-		{"quoted-printable, latin-1", `form-data; name="=?iso-8859-1?Q?=5Fe2ee?="`, `=?iso-8859-1?Q?=5Fe2ee?=`},
-		// Refused too: what the word decodes to is the question this guard
-		// declines to answer for itself, here as for RFC 2231.
-		{"an encoded word that is not the marker", `form-data; name="=?utf-8?Q?ordinary?="`, `=?utf-8?Q?ordinary?=`},
+		{"base64 encoded word", `form-data; name="=?utf-8?B?X2UyZWU=?="`, `=?utf-8?B?X2UyZWU=?=`, MultipartNamesMarker, false},
+		{"quoted-printable, latin-1", `form-data; name="=?iso-8859-1?Q?=5Fe2ee?="`, `=?iso-8859-1?Q?=5Fe2ee?=`, MultipartNamesMarker, false},
 		// RFC 2047 §2 permits linear white space around an encoded word, and a
 		// prefix/suffix test does not. Before the trim these two were forwarded
-		// while the row above was refused — the same word, one space over.
-		{"leading space", `form-data; name=" =?utf-8?B?X2UyZWU=?="`, ` =?utf-8?B?X2UyZWU=?=`},
-		{"trailing space", `form-data; name="=?utf-8?B?X2UyZWU=?= "`, `=?utf-8?B?X2UyZWU=?= `},
+		// while the marker rows were refused — the same word, one space over.
+		{"leading space", `form-data; name=" =?utf-8?B?X2UyZWU=?="`, ` =?utf-8?B?X2UyZWU=?=`, MultipartNamesMarker, false},
+		{"trailing space", `form-data; name="=?utf-8?B?X2UyZWU=?= "`, `=?utf-8?B?X2UyZWU=?= `, MultipartNamesMarker, false},
+
+		// The word can encode the very white space resolvesToMarker exists to
+		// trim, so the decoded value goes through that helper and not `==`.
+		{"encoded leading space", `form-data; name="=?utf-8?Q?=20=5Fe2ee?="`, `=?utf-8?Q?=20=5Fe2ee?=`, MultipartNamesMarker, false},
+
+		// Decodes to a name that is not the marker. Forwarded — a fact about the
+		// part, not a gap, so no flag governs it and no counter records it.
+		{"an encoded word that is not the marker", `form-data; name="=?utf-8?Q?ordinary?="`, `=?utf-8?Q?ordinary?=`, NotSealed, false},
+		{"a name that needs the encoding", `form-data; name="=?utf-8?Q?caf=C3=A9?="`, `=?utf-8?Q?caf=C3=A9?=`, NotSealed, false},
+		// Contains the marker without being it: the comparison is on the whole
+		// decoded name, not a substring of it.
+		{"decodes to a name containing the marker", `form-data; name="=?utf-8?Q?my=5Fe2eefield?="`, `=?utf-8?Q?my=5Fe2eefield?=`, NotSealed, false},
+		// RFC 2047 spells space as `_` in a Q-encoded word, so this names a part
+		// " e2ee". A substring test on the raw bytes reads it the other way.
+		// `spelt`: this one DOES contain the literal marker in its raw bytes. The
+		// gate is still not what answers it — the gate governs only the branches
+		// for a body Go cannot parse, and this body parses cleanly — but the
+		// blanket assertion below does not hold for it.
+		{"underscore is a space, not the marker", `form-data; name="=?us-ascii?Q?_e2ee?="`, `=?us-ascii?Q?_e2ee?=`, NotSealed, true},
+		// Malformed: every parser leaves it verbatim, so the literal text IS the
+		// name, and comparing it is exact rather than a guess.
+		{"not a well-formed word after all", `form-data; name="=?utf-8?X?X2UyZWU=?="`, `=?utf-8?X?X2UyZWU=?=`, NotSealed, false},
+
+		// Nothing was read: the charset is one Go has no decoder for, so this is
+		// the only bucket that is "cannot be ruled out" — and so the only one the
+		// operator's flag governs.
+		{"a charset Go cannot decode", `form-data; name="=?shift_jis?B?X2UyZWU=?="`, `=?shift_jis?B?X2UyZWU=?=`, MultipartUnreadable, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1993,15 +2025,22 @@ func TestMultipartWithAnEncodedWordNameIsRefused(t *testing.T) {
 			body, contentType := buildMultipart(t, func(w *multipart.Writer) {
 				rawPart(t, w, tt.disposition, sealedEnvelopeJSON)
 			})
-			if couldNameE2EEPart(body) {
-				t.Fatal("fixture must not trip the gate, or the branch under test is not what refuses it")
+			if got := couldNameE2EEPart(body); got != tt.spelt {
+				t.Fatalf("fixture spells the marker = %v, want %v: the row's premise about its own bytes is wrong", got, tt.spelt)
 			}
 
-			if sealed, _ := c.refuseAsyncBool(contentType, body); !sealed {
-				t.Error("a name other parsers decode cannot be ruled out")
+			// Under the flag every non-NotSealed verdict refuses, so this reads
+			// the classification itself rather than the policy applied to it.
+			if got, _, _ := IsSealedRequest(contentType, body); got != tt.want {
+				t.Errorf("verdict = %v, want %v", got, tt.want)
 			}
-			if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err == nil {
-				t.Fatal("must refuse rather than forward")
+
+			// And with the flag OFF the structural row is the only one whose
+			// answer moves — which is what makes it structural.
+			wantRefusedWhenOff := tt.want == MultipartNamesMarker
+			_, err = (&Ctrl{}).MaybeUnsealRequest(ginCtxWithContentType(contentType), body)
+			if refused := err != nil; refused != wantRefusedWhenOff {
+				t.Errorf("flag off: refused = %v, want %v (err %v)", refused, wantRefusedWhenOff, err)
 			}
 		})
 	}
@@ -2211,6 +2250,18 @@ func TestForwardedStructuralRefusalIsCounted(t *testing.T) {
 
 	if after := testutil.ToFloat64(counter); after != before+1 {
 		t.Errorf("counter = %v, want %v: a forwarded structural refusal must be counted", after, before+1)
+	}
+
+	// And again with the flag ON. The counter is what an operator watches to
+	// decide the flip and to confirm it afterwards; counting only while off made
+	// the series drop to zero at the flip by construction, which is
+	// indistinguishable from the rollout having gone perfectly.
+	before = testutil.ToFloat64(counter)
+	if _, err := strictCtrl().MaybeUnsealRequest(ginCtxWithContentType(`multipart/form-data; boundary=B`), body); err == nil {
+		t.Fatal("with the flag on it must be refused")
+	}
+	if after := testutil.ToFloat64(counter); after != before+1 {
+		t.Errorf("counter = %v, want %v: the metric must survive the flip, not go silent at it", after, before+1)
 	}
 }
 
