@@ -42,10 +42,15 @@ func requireBuildPricing(t *testing.T, svc *config.Service) {
 	}
 }
 
+// defaultTestContextLength keeps fixtures inside the gate: a model with no
+// contextLength is skipped entirely, which is its own (separately tested)
+// behaviour and would make every weight assertion vacuous.
+const defaultTestContextLength = 1 << 20
+
 func newBudgetProxy(budget int64, maxCompletion int) *Proxy {
-	var mi *config.ModelInfo
-	if maxCompletion > 0 {
-		mi = &config.ModelInfo{MaxCompletionTokens: maxCompletion}
+	mi := &config.ModelInfo{
+		MaxCompletionTokens: maxCompletion,
+		ContextLength:       defaultTestContextLength,
 	}
 	return &Proxy{
 		ctrl:               &ctrl.Ctrl{Service: config.Service{Type: "chatbot", ModelInfo: mi}},
@@ -82,17 +87,27 @@ func TestTokenBudgetWeight_ReserveClampedToAdvertisedCap(t *testing.T) {
 	}
 }
 
-// Without modelInfo there is no basis for either guard: textOnlyInput would wave
-// a vision model through on a byte count that is orders of magnitude wrong, and
-// there is no context length to bound the weight by. Charging on an estimate
-// nothing bounds is worse than not charging.
-func TestTokenBudgetWeight_NoModelInfoSkipsTheGate(t *testing.T) {
-	p := newBudgetProxy(1_000_000, 0)
-	p.ctrl.Service.ModelInfo = nil
-
-	if _, ok := p.tokenBudgetWeight("chatbot", "glm-5.3", newBudgetCtx(), promptBody(4000)); ok {
-		t.Fatal("a model with no metadata must skip the gate, not be charged unbounded")
-	}
+// Without usable modelInfo there is no basis for either guard: textOnlyInput
+// would wave a vision model through on a byte count that is orders of magnitude
+// wrong, and with no context length the weight has no ceiling. Charging on an
+// estimate nothing bounds is worse than not charging.
+func TestTokenBudgetWeight_NoUsableModelInfoSkipsTheGate(t *testing.T) {
+	t.Run("nil", func(t *testing.T) {
+		p := newBudgetProxy(1_000_000, 0)
+		p.ctrl.Service.ModelInfo = nil
+		if _, ok := p.tokenBudgetWeight("chatbot", "glm-5.3", newBudgetCtx(), promptBody(4000)); ok {
+			t.Fatal("a model with no metadata must skip the gate")
+		}
+	})
+	// The condition must match unmanagedBudgetModels' bounded(), or the startup
+	// warning would name a different set of models than the gate actually skips.
+	t.Run("no context length", func(t *testing.T) {
+		p := newBudgetProxy(1_000_000, 32768)
+		p.ctrl.Service.ModelInfo.ContextLength = 0
+		if _, ok := p.tokenBudgetWeight("chatbot", "glm-5.3", newBudgetCtx(), promptBody(4000)); ok {
+			t.Fatal("a model with no contextLength has no ceiling, so it must skip the gate too")
+		}
+	})
 }
 
 // Skipping is not free — such a model is served while escaping the budget — so

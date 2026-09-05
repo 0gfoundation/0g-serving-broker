@@ -410,12 +410,14 @@ func (p *Proxy) tokenBudgetWeight(svcType, modelName string, ctx *gin.Context, r
 	// guards below at once, treating a vision model as text and leaving the
 	// weight unbounded. That is the worst combination available.
 	mi := p.ctrl.Service.EffectiveModelInfoFor(modelName, ctrl.UpstreamIdentity(ctx))
-	if mi == nil {
-		// No metadata means no basis for either guard below: textOnlyInput would
-		// wave a vision model through on a byte count that is three orders of
-		// magnitude wrong, and there would be no context length to bound the
-		// weight by — one 32 MB body would then park the whole surface. Charging
-		// on an estimate nothing bounds is worse than not charging, so skip.
+	if mi == nil || mi.ContextLength <= 0 {
+		// No metadata, or none that bounds anything, means no basis for either
+		// guard below: textOnlyInput would wave a vision model through on a byte
+		// count that is three orders of magnitude wrong, and with no context
+		// length the weight has no ceiling — one 32 MB body would then park the
+		// whole surface. Charging on an estimate nothing bounds is worse than not
+		// charging, so skip. The condition matches unmanagedBudgetModels' bounded()
+		// exactly, so the startup warning names precisely the models that skip.
 		//
 		// Skipping is not free either: such a model is served while escaping the
 		// budget entirely. That is why New() enumerates these at startup instead
@@ -427,7 +429,7 @@ func (p *Proxy) tokenBudgetWeight(svcType, modelName string, ctx *gin.Context, r
 	}
 
 	reserve := int64(outputReserveTokens)
-	if mi != nil && mi.MaxCompletionTokens > 0 && int64(mi.MaxCompletionTokens) < reserve {
+	if mi.MaxCompletionTokens > 0 && int64(mi.MaxCompletionTokens) < reserve {
 		// A model that cannot generate 4096 tokens should not be charged for them.
 		reserve = int64(mi.MaxCompletionTokens)
 	}
@@ -439,7 +441,7 @@ func (p *Proxy) tokenBudgetWeight(svcType, modelName string, ctx *gin.Context, r
 	// a single 32 MB body (the request size limit) weighs 8.4M tokens, exceeds
 	// any budget, and — since an over-budget request is admitted alone rather
 	// than rejected — parks the entire chatbot surface behind one request.
-	if mi != nil && mi.ContextLength > 0 && weight > int64(mi.ContextLength) {
+	if weight > int64(mi.ContextLength) {
 		weight = int64(mi.ContextLength)
 	}
 	return weight, true
