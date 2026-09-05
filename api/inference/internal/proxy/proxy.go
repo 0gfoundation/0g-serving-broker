@@ -280,13 +280,17 @@ func (p *Proxy) globalConcurrencyMiddleware() gin.HandlerFunc {
 	})
 }
 
-// bytesPerTokenEstimate converts request-body bytes to an approximate prompt
-// token count. Four is the usual English/JSON ratio. It is an estimate on
-// purpose: tokenizing every request to gate it would cost more than the gate
-// saves, and the budget carries explicit headroom (see InflightTokenBudget) to
-// absorb the error. CJK text packs closer to three bytes per token, so the
-// estimate runs low there — the documented answer is to lower the budget, which
-// keeps one number to reason about instead of two.
+// bytesPerTokenEstimate converts prompt bytes (see promptBytes — the envelope
+// does not count) to an approximate token count. Four is the usual English/JSON
+// ratio. It is an estimate on purpose: tokenizing every request to gate it
+// would cost more than the gate saves, and the budget carries explicit headroom
+// (see InflightTokenBudget) to absorb the error.
+//
+// The error is not one-directional. CJK sent as UTF-8 packs near three bytes
+// per token, so this runs about a quarter low; the same text sent by a client
+// with ensure_ascii on arrives as six-byte \uXXXX escapes and it runs half
+// high. Neither is worth a second knob — lower the budget if the traffic is
+// consistently one of them.
 const bytesPerTokenEstimate = 4
 
 // outputReserveTokens is the per-request output allowance added to the prompt
@@ -427,7 +431,7 @@ func (p *Proxy) tokenBudgetWeight(svcType, modelName string, ctx *gin.Context, r
 		// A model that cannot generate 4096 tokens should not be charged for them.
 		reserve = int64(mi.MaxCompletionTokens)
 	}
-	weight := int64(len(reqBody))/bytesPerTokenEstimate + reserve
+	weight := promptBytes(reqBody)/bytesPerTokenEstimate + reserve
 
 	// Bound the estimate by physics. One request cannot hold more KV than the
 	// context window, so a body whose byte count says otherwise is the estimate

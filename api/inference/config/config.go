@@ -1088,12 +1088,19 @@ type ConcurrencyLimitConfig struct {
 	// Set it to about 80% of the engine's KV pool (sglang reports
 	// sglang_max_total_num_tokens). The headroom absorbs the estimate below.
 	//
-	// A request weighs len(body)/4 + min(maxCompletionTokens, 4096): a byte-based
-	// prompt estimate plus an output reserve mirroring the engine's own
-	// (sglang's PrefillAdder reserves min(max_new_tokens, 4096) per request).
-	// The /4 divisor is English/JSON-shaped; CJK-heavy traffic packs closer to 3
-	// bytes per token, so lower the budget rather than raising the divisor if
-	// that is the workload.
+	// A request weighs promptBytes/4 + min(maxCompletionTokens, 4096): an
+	// estimate over the fields that actually become prompt (system, message
+	// content, tool definitions) plus an output reserve mirroring the engine's
+	// own (sglang's PrefillAdder reserves min(max_new_tokens, 4096) per request).
+	// The envelope is deliberately not counted — JSON whitespace and ignored
+	// fields cost the engine nothing, and charging for them would let one padded
+	// body claim the whole budget.
+	//
+	// The /4 divisor is English/JSON-shaped and errs in both directions: CJK sent
+	// as UTF-8 packs near 3 bytes per token so it runs about a quarter low, while
+	// the same text from a client with ensure_ascii on arrives as 6-byte escapes
+	// and runs half high. Lower the budget if the traffic is consistently one of
+	// them rather than adding a second knob.
 	//
 	// Chatbot only, and only for text-input models: images arrive as base64 in
 	// the body, where a 3 MB picture reads as ~786k tokens against the thousand
