@@ -157,7 +157,7 @@ func (c *PhalaTappdClient) TdxQuote(ctx context.Context, reportData []byte, nvQu
 
 	if nvQuote {
 		if err := util.CheckPythonEnv(util.NvTrustPackages, nil); err != nil {
-			panic(err)
+			return "", errors.Wrap(err, "failed to check Python environment for NVIDIA trust packages")
 		}
 
 		nvidiaPayload, err := GpuPayload(hex.EncodeToString(crypto.Keccak256(reportData)), nil)
