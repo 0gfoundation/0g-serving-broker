@@ -74,17 +74,53 @@ func TestTokenBudgetWeight_ReserveClampedToAdvertisedCap(t *testing.T) {
 	}
 }
 
-// No advertised cap means no information, not zero: the engine's own reserve is
-// the honest default.
-func TestTokenBudgetWeight_NoModelInfoUsesFullReserve(t *testing.T) {
+// Without modelInfo there is no basis for either guard: textOnlyInput would wave
+// a vision model through on a byte count that is orders of magnitude wrong, and
+// there is no context length to bound the weight by. Charging on an estimate
+// nothing bounds is worse than not charging.
+func TestTokenBudgetWeight_NoModelInfoSkipsTheGate(t *testing.T) {
 	p := newBudgetProxy(1_000_000, 0)
+	p.ctrl.Service.ModelInfo = nil
 
-	weight, ok := p.tokenBudgetWeight("chatbot", "glm-5.3", newBudgetCtx(), []byte(strings.Repeat("x", 4000)))
-	if !ok {
-		t.Fatal("chatbot traffic must be charged")
+	if _, ok := p.tokenBudgetWeight("chatbot", "glm-5.3", newBudgetCtx(), []byte(strings.Repeat("x", 4000))); ok {
+		t.Fatal("a model with no metadata must skip the gate, not be charged unbounded")
 	}
-	if want := int64(1000 + outputReserveTokens); weight != want {
-		t.Fatalf("weight = %d, want %d", weight, want)
+}
+
+// Skipping is not free — such a model is served while escaping the budget — so
+// it has to be visible at startup rather than only as a rejection counter that
+// never moves.
+func TestUnmanagedBudgetModels(t *testing.T) {
+	single := config.Service{Type: "chatbot", ModelType: "glm-5.3"}
+	if got := unmanagedBudgetModels(&single); len(got) != 1 {
+		t.Fatalf("a single-model chatbot with no modelInfo must be reported, got %v", got)
+	}
+
+	single.ModelInfo = &config.ModelInfo{ContextLength: 262144}
+	if got := unmanagedBudgetModels(&single); len(got) != 0 {
+		t.Fatalf("a bounded single model must not be reported, got %v", got)
+	}
+
+	multi := config.Service{Type: "chatbot", ModelPricing: []config.ModelPricingEntry{
+		{Model: "bounded", InputPrice: "1", OutputPrice: "1", ModelInfo: &config.ModelInfo{ContextLength: 1000}},
+		{Model: "no-info", InputPrice: "1", OutputPrice: "1"},
+		{Model: config.ModelWildcard, InputPrice: "1", OutputPrice: "1"},
+	}}
+	requireBuildPricing(t, &multi)
+	got := unmanagedBudgetModels(&multi)
+	if len(got) != 2 {
+		t.Fatalf("both the metadata-less entry and the wildcard must be reported, got %v", got)
+	}
+
+	// A service-level block covers entries that carry none of their own.
+	multi.ModelInfo = &config.ModelInfo{ContextLength: 1000}
+	if got := unmanagedBudgetModels(&multi); len(got) != 0 {
+		t.Fatalf("a service-level modelInfo must cover entries without one, got %v", got)
+	}
+
+	nonChatbot := config.Service{Type: "text-to-image"}
+	if got := unmanagedBudgetModels(&nonChatbot); got != nil {
+		t.Fatalf("a non-chatbot service is not budgeted at all, got %v", got)
 	}
 }
 

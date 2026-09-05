@@ -170,6 +170,17 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 
 	if p.tokenBudgetLimiter != nil {
 		logger.Infof("In-flight token budget: %d tokens", concurrencyConfig.InflightTokenBudget)
+		// A model with no resolvable modelInfo is served but never charged against
+		// the budget, and nothing about that is visible at request time — the
+		// rejection counter simply stays at zero and the gate looks healthy. Say
+		// it once, loudly, at startup. The usual causes are a chatbot service with
+		// no modelInfo block at all, a wildcard "*" pricing entry (which by
+		// definition carries none), and a single entry that forgot one.
+		if unmanaged := unmanagedBudgetModels(&ctrl.Service); len(unmanaged) > 0 {
+			logger.Warnf(
+				"inflightTokenBudget is set but these models have no modelInfo.contextLength and are therefore NOT bounded by it: %s. Add modelInfo (with contextLength) for each, or expect them to consume the engine unmetered.",
+				strings.Join(unmanaged, ", "))
+		}
 		// maxGlobalConcurrent has no "off" setting and runs as middleware, i.e.
 		// ahead of this gate. If it is low enough to bind first, the token budget
 		// never gets to decide anything — and worse, the request sheds as a 503,
@@ -293,6 +304,60 @@ const outputReserveTokens = 4096
 // sized for.
 const minTypicalRequestTokens = 8192
 
+// unmanagedBudgetModels lists the chatbot models this service can serve that
+// the in-flight token budget will NOT bound, because no modelInfo with a
+// positive contextLength resolves for them.
+//
+// The gate skips such a model rather than charge it on an estimate nothing
+// bounds (see tokenBudgetWeight), which is the right call per request and the
+// wrong thing to be silent about across a deployment: the model is still served
+// and still fills KV, while the rejection counter reads zero and the gate looks
+// like it is working.
+//
+// Resolution mirrors EffectiveModelInfoFor: a pricing entry's own modelInfo,
+// falling back to the service-level block.
+func unmanagedBudgetModels(svc *config.Service) []string {
+	if svc.Type != constant.ServiceTypeChatbot {
+		return nil
+	}
+	effective := func(entry *config.ModelInfo) *config.ModelInfo {
+		if entry != nil {
+			return entry
+		}
+		return svc.ModelInfo
+	}
+	bounded := func(mi *config.ModelInfo) bool {
+		return mi != nil && mi.ContextLength > 0
+	}
+
+	if !svc.HasMultiModelPricing() {
+		if bounded(svc.ModelInfo) {
+			return nil
+		}
+		name := svc.ModelType
+		if name == "" {
+			name = "(service model)"
+		}
+		return []string{name}
+	}
+
+	var unmanaged []string
+	for i := range svc.ModelPricing {
+		entry := &svc.ModelPricing[i]
+		if bounded(effective(entry.ModelInfo)) {
+			continue
+		}
+		name := entry.Model
+		if name == config.ModelWildcard {
+			// The wildcard serves every unlisted model, so it is the widest hole
+			// of the lot; name it as such rather than printing a bare "*".
+			name = `"*" (every unlisted model)`
+		}
+		unmanaged = append(unmanaged, name)
+	}
+	return unmanaged
+}
+
 // reserveTokenBudget takes this request's share of the in-flight KV budget.
 //
 // Returns the release to defer and whether the request may proceed; on refusal
@@ -341,10 +406,16 @@ func (p *Proxy) tokenBudgetWeight(svcType, modelName string, ctx *gin.Context, r
 	// guards below at once, treating a vision model as text and leaving the
 	// weight unbounded. That is the worst combination available.
 	mi := p.ctrl.Service.EffectiveModelInfoFor(modelName, ctrl.UpstreamIdentity(ctx))
-	if mi == nil && p.ctrl.Service.HasMultiModelPricing() {
-		// Multi-model and unresolvable means the metadata this gate needs is
-		// missing, or the model is not ours. Skipping is the honest answer;
-		// charging on an estimate we cannot bound is not.
+	if mi == nil {
+		// No metadata means no basis for either guard below: textOnlyInput would
+		// wave a vision model through on a byte count that is three orders of
+		// magnitude wrong, and there would be no context length to bound the
+		// weight by — one 32 MB body would then park the whole surface. Charging
+		// on an estimate nothing bounds is worse than not charging, so skip.
+		//
+		// Skipping is not free either: such a model is served while escaping the
+		// budget entirely. That is why New() enumerates these at startup instead
+		// of letting the gate look like it is working. See unmanagedBudgetModels.
 		return 0, false
 	}
 	if !textOnlyInput(mi) {
