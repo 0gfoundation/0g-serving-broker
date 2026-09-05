@@ -433,30 +433,36 @@ func (p *Proxy) tokenBudgetWeight(svcType, modelName string, ctx *gin.Context, r
 		return 0, false
 	}
 
-	// Before parsing: a body whose raw length alone exceeds what the context
-	// window could hold is going to be clamped to that window no matter what the
-	// parse says, so skip the parse. It is the expensive step — several nested
-	// decodes over the whole body — and this is the request shape that makes it
-	// most expensive. Charging the full window is an over-estimate for a padded
-	// body, which costs the sender concurrency rather than anyone else.
-	if int64(len(reqBody)) > int64(mi.ContextLength)*bytesPerTokenEstimate {
-		return int64(mi.ContextLength), true
-	}
+	// The estimate walks only prompt-bearing fields, and that is load-bearing
+	// rather than fastidious: a length-based shortcut would charge padding, and
+	// padding is exactly what an attacker pads with. A body whose bulk sits in a
+	// field the upstream ignores costs the engine nothing, runs for minutes, and
+	// under a length-based weight would hold the whole budget while doing so.
+	//
+	// The ceiling bounds the walk. Past the point where the weight is clamped to
+	// the context window anyway, more counting cannot change the answer, so a
+	// body made of a million tiny blocks stops being a way to burn broker CPU.
+	est := estimateRequest(reqBody, int64(mi.ContextLength)*bytesPerTokenEstimate)
 
-	est := estimateRequest(reqBody)
-
-	// The reserve covers decode, which grows with every token generated. Prefer
-	// what the caller actually asked for over the flat default: a reasoning
-	// request declaring 30k tokens really does hold that much KV by the end, and
-	// charging it 4096 under-counts by nearly an order of magnitude — exactly the
-	// traffic this budget exists to bound.
-	reserve := int64(outputReserveTokens)
-	if est.OutputTokens > 0 {
-		reserve = est.OutputTokens
+	// The reserve covers decode, which grows with every token generated.
+	//
+	// Default to what the model advertises, not to a small constant. A constant
+	// would mean a request that declares nothing is charged less than one that
+	// declares 32k — while an undeclared cap is precisely the unbounded case, so
+	// deleting one field would buy eight times the admission for identical real
+	// cost. Declaring must never be more expensive than not declaring.
+	reserve := int64(mi.MaxCompletionTokens)
+	if reserve <= 0 {
+		reserve = outputReserveTokens
 	}
-	if mi.MaxCompletionTokens > 0 && int64(mi.MaxCompletionTokens) < reserve {
-		// The model cannot generate more than it advertises, whatever was asked.
-		reserve = int64(mi.MaxCompletionTokens)
+	if want := est.OutputTokensPerSequence; want > 0 && want < reserve {
+		// The caller asked for less than the model's maximum: charge the lesser.
+		reserve = want
+	}
+	// Clamp per sequence, THEN multiply: maxCompletionTokens is a per-sequence
+	// figure, so applying it to the total would silently discard n.
+	if est.Sequences > 1 {
+		reserve *= est.Sequences
 	}
 	weight := est.PromptBytes/bytesPerTokenEstimate + reserve
 

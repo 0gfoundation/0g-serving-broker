@@ -8,7 +8,7 @@ import (
 
 // promptBytes is the prompt half of estimateRequest, which is what most of
 // these cases are about.
-func promptBytes(reqBody []byte) int64 { return estimateRequest(reqBody).PromptBytes }
+func promptBytes(reqBody []byte) int64 { return estimateRequest(reqBody, 0).PromptBytes }
 
 // The attack this exists to stop: legal JSON whitespace inflates the envelope
 // without reaching the model. Charged on raw bytes, four megabytes of
@@ -172,23 +172,30 @@ func TestPromptBytes_PaddingStaysFreeAcrossShapes(t *testing.T) {
 // which routinely generates that much, is exactly what this budget is for.
 func TestRequestedOutputTokens_ReadsTheDeclaredCeiling(t *testing.T) {
 	cases := map[string]struct {
-		body string
-		want int64
+		body        string
+		perSequence int64
+		sequences   int64
 	}{
-		"max_tokens":            {`{"max_tokens":30000}`, 30000},
-		"max_completion_tokens": {`{"max_completion_tokens":25000}`, 25000},
-		"largest of several":    {`{"max_tokens":100,"max_completion_tokens":25000}`, 25000},
-		"anthropic thinking":    {`{"max_tokens":4000,"thinking":{"type":"enabled","budget_tokens":20000}}`, 24000},
-		"n multiplies":          {`{"max_tokens":1000,"n":4}`, 4000},
-		"n is bounded":          {`{"max_tokens":1000,"n":1000}`, 8000},
-		"none declared":         {`{"messages":[]}`, 0},
-		"null":                  {`{"max_tokens":null}`, 0},
-		"string":                {`{"max_tokens":"30000"}`, 0},
-		"negative":              {`{"max_tokens":-1}`, 0},
+		"max_tokens":            {`{"max_tokens":30000}`, 30000, 1},
+		"max_completion_tokens": {`{"max_completion_tokens":25000}`, 25000, 1},
+		"largest of several":    {`{"max_tokens":100,"max_completion_tokens":25000}`, 25000, 1},
+		// Anthropic requires budget_tokens < max_tokens and counts thinking
+		// tokens INSIDE max_tokens, so the ceiling is the maximum, not the sum.
+		// Adding them would over-charge a legal reasoning request by ~2x.
+		"anthropic thinking":     {`{"max_tokens":24000,"thinking":{"type":"enabled","budget_tokens":20000}}`, 24000, 1},
+		"thinking above the cap": {`{"max_tokens":100,"thinking":{"budget_tokens":20000}}`, 20000, 1},
+		"n is reported apart":    {`{"max_tokens":1000,"n":4}`, 1000, 4},
+		"n is bounded":           {`{"max_tokens":1000,"n":1000}`, 1000, 8},
+		"none declared":          {`{"messages":[]}`, 0, 1},
+		"null":                   {`{"max_tokens":null}`, 0, 1},
+		"string":                 {`{"max_tokens":"30000"}`, 0, 1},
+		"negative":               {`{"max_tokens":-1}`, 0, 1},
 	}
 	for name, tc := range cases {
-		if got := estimateRequest([]byte(tc.body)).OutputTokens; got != tc.want {
-			t.Fatalf("%s: OutputTokens = %d, want %d", name, got, tc.want)
+		est := estimateRequest([]byte(tc.body), 0)
+		if est.OutputTokensPerSequence != tc.perSequence || est.Sequences != tc.sequences {
+			t.Fatalf("%s: got per-sequence %d x %d, want %d x %d",
+				name, est.OutputTokensPerSequence, est.Sequences, tc.perSequence, tc.sequences)
 		}
 	}
 }
@@ -198,10 +205,17 @@ func TestRequestedOutputTokens_ReadsTheDeclaredCeiling(t *testing.T) {
 // opposite, and an operator sizing a budget on that claim would have
 // under-provisioned.
 func TestPromptBytes_EscapesCountTheSameAsRawText(t *testing.T) {
-	raw := promptBytes([]byte(`{"messages":[{"role":"user","content":"` + strings.Repeat("你", 100) + `"}]}`))
-	escaped := promptBytes([]byte(`{"messages":[{"role":"user","content":"` + strings.Repeat(`你`, 100) + `"}]}`))
+	// Two byte-different JSON documents that decode to the same string: one with
+	// literal UTF-8, one with \uXXXX escapes. An earlier version of this case put
+	// literal characters on both sides and so would have passed against any
+	// implementation.
+	literalBody := `{"messages":[{"role":"user","content":"` + strings.Repeat("\u4f60", 100) + `"}]}`
+	escapedBody := `{"messages":[{"role":"user","content":"` + strings.Repeat(`\u4f60`, 100) + `"}]}`
+	if literalBody == escapedBody {
+		t.Fatal("fixture bug: both sides are the same bytes")
+	}
 
-	if raw != escaped {
-		t.Fatalf("escaped text charged %d, raw charged %d — they decode to the same string", escaped, raw)
+	if literal, escaped := promptBytes([]byte(literalBody)), promptBytes([]byte(escapedBody)); literal != escaped {
+		t.Fatalf("literal charged %d, escaped charged %d — they decode to the same string, so the estimate must not depend on the encoding", literal, escaped)
 	}
 }

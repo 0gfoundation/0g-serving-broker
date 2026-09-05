@@ -68,8 +68,10 @@ func TestTokenBudgetWeight_PromptEstimatePlusOutputReserve(t *testing.T) {
 		t.Fatal("chatbot traffic must be charged")
 	}
 	// The role string and the per-message scaffolding are prompt as well, hence
-	// the extra 20 bytes over the content itself.
-	if want := int64((40000+20)/bytesPerTokenEstimate + outputReserveTokens); weight != want {
+	// the extra 20 bytes over the content itself. The reserve defaults to what
+	// the model advertises, not to a constant — see the reverse-incentive note on
+	// tokenBudgetWeight.
+	if want := int64((40000+20)/bytesPerTokenEstimate + 32768); weight != want {
 		t.Fatalf("weight = %d, want %d", weight, want)
 	}
 }
@@ -248,7 +250,7 @@ func TestTokenBudgetWeight_ContextBoundDoesNotRaiseSmallWeights(t *testing.T) {
 	p.ctrl.Service.ModelInfo.ContextLength = 262144
 
 	weight, _ := p.tokenBudgetWeight("chatbot", "glm-5.3", newBudgetCtx(), promptBody(4000))
-	if want := int64((4000+20)/bytesPerTokenEstimate + outputReserveTokens); weight != want {
+	if want := int64((4000+20)/bytesPerTokenEstimate + 32768); weight != want {
 		t.Fatalf("weight = %d, want %d", weight, want)
 	}
 }
@@ -351,27 +353,57 @@ func TestReserveTokenBudget_NoOpReleaseWhenGateSkipped(t *testing.T) {
 	release() // must not panic
 }
 
-// A body larger than the window could ever hold is clamped to the window
-// whatever the parse says, so the parse — several nested decodes over the whole
-// body — is skipped. At the 32 MB request limit that parse took seconds, which
-// is a free denial of service on the broker's own CPU.
-func TestTokenBudgetWeight_OversizedBodySkipsTheParse(t *testing.T) {
+// A length-based shortcut for large bodies would reopen the hole the estimator
+// exists to close: padding costs the engine nothing, but charged by length it
+// takes the whole shared budget while the request runs — and the sender pays
+// nothing, since the upstream never sees the padding. So there is no shortcut,
+// and a padded body weighs what its prompt weighs.
+func TestTokenBudgetWeight_PaddingIsNotChargedHowverLargeTheBody(t *testing.T) {
 	p := newBudgetProxy(1_440_000, 32768)
 	p.ctrl.Service.ModelInfo.ContextLength = 262144
 
-	body := make([]byte, 32<<20)
+	small := []byte(`{"messages":[{"role":"user","content":"hi"}]}`)
+	padded := []byte(`{"pad":"` + strings.Repeat("a", 8<<20) + `","messages":[{"role":"user","content":"hi"}]}`)
+
+	base, _ := p.tokenBudgetWeight("chatbot", "glm-5.3", newBudgetCtx(), small)
+	got, ok := p.tokenBudgetWeight("chatbot", "glm-5.3", newBudgetCtx(), padded)
+	if !ok {
+		t.Fatal("chatbot traffic must be charged")
+	}
+	if got != base {
+		t.Fatalf("8 MB of padding changed the weight from %d to %d", base, got)
+	}
+}
+
+// Past the point where the weight is clamped to the window, more counting
+// cannot change the answer — so a body made of a million tiny blocks must not
+// be walked in full just to arrive at the same number.
+func TestTokenBudgetWeight_WalkStopsAtTheClampCeiling(t *testing.T) {
+	p := newBudgetProxy(1_440_000, 32768)
+	p.ctrl.Service.ModelInfo.ContextLength = 8192 // small window: ceiling reached early
+
+	var b strings.Builder
+	b.WriteString(`{"messages":[`)
+	for i := 0; i < 200000; i++ {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		b.WriteString(`{"role":"user","content":"xxxxxxxxxxxxxxxx"}`)
+	}
+	b.WriteString(`]}`)
+
 	start := time.Now()
-	weight, ok := p.tokenBudgetWeight("chatbot", "glm-5.3", newBudgetCtx(), body)
+	weight, ok := p.tokenBudgetWeight("chatbot", "glm-5.3", newBudgetCtx(), []byte(b.String()))
 	elapsed := time.Since(start)
 
 	if !ok {
 		t.Fatal("chatbot traffic must be charged")
 	}
-	if weight != 262144 {
-		t.Fatalf("weight = %d, want the context window %d", weight, 262144)
+	if weight != 8192 {
+		t.Fatalf("weight = %d, want the context window 8192", weight)
 	}
-	if elapsed > 100*time.Millisecond {
-		t.Fatalf("took %v — the oversized short-circuit is not firing", elapsed)
+	if elapsed > 300*time.Millisecond {
+		t.Fatalf("took %v — the walk is not stopping at the ceiling", elapsed)
 	}
 }
 
@@ -396,5 +428,23 @@ func TestTokenBudgetWeight_ReserveFollowsTheDeclaredOutput(t *testing.T) {
 	capped, _ := p.tokenBudgetWeight("chatbot", "glm-5.3", newBudgetCtx(), body)
 	if capped > 4096+100 {
 		t.Fatalf("weight = %d, want it clamped to the advertised 4096", capped)
+	}
+
+	// Declaring must never cost more than not declaring: an undeclared cap is
+	// the unbounded case, so it defaults to the advertised maximum.
+	p.ctrl.Service.ModelInfo.MaxCompletionTokens = 32768
+	declared, _ := p.tokenBudgetWeight("chatbot", "glm-5.3", newBudgetCtx(), []byte(`{"max_tokens":30000,"messages":[]}`))
+	silent, _ := p.tokenBudgetWeight("chatbot", "glm-5.3", newBudgetCtx(), []byte(`{"messages":[]}`))
+	if declared > silent {
+		t.Fatalf("declaring 30000 cost %d while declaring nothing cost %d — that rewards omitting the field", declared, silent)
+	}
+
+	// n multiplies the per-sequence reserve, and the advertised maximum is
+	// applied per sequence rather than to the total.
+	p.ctrl.Service.ModelInfo.ContextLength = 1 << 20
+	one, _ := p.tokenBudgetWeight("chatbot", "glm-5.3", newBudgetCtx(), []byte(`{"max_tokens":32768,"messages":[]}`))
+	four, _ := p.tokenBudgetWeight("chatbot", "glm-5.3", newBudgetCtx(), []byte(`{"max_tokens":32768,"n":4,"messages":[]}`))
+	if four < one*3 {
+		t.Fatalf("n=4 weighed %d against %d for n=1 — the multiplier is being swallowed by the per-sequence clamp", four, one)
 	}
 }

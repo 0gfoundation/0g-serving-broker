@@ -9,6 +9,10 @@ import (
 // the KV budget needs: how many of its bytes actually become prompt, and how
 // many output tokens the caller declared it wants.
 //
+// ceiling bounds the work. Once the running prompt total reaches it the walk
+// stops, because the caller clamps the final weight to the context window and
+// anything past that point cannot change the answer. Pass 0 for no bound.
+//
 // The raw body length is not that number, and the difference is exploitable.
 // JSON whitespace, fields the upstream ignores, and escape expansion all
 // inflate the envelope without reaching the model, so four megabytes of legal
@@ -31,13 +35,14 @@ import (
 // Returns a zero estimate only for a body that is not a JSON object at all.
 // Such a body is rejected by the engine before it holds any KV, so charging it
 // for context would be charging for work that never happens.
-func estimateRequest(reqBody []byte) requestEstimate {
+func estimateRequest(reqBody []byte, ceiling int64) requestEstimate {
 	var body map[string]json.RawMessage
 	if err := json.Unmarshal(reqBody, &body); err != nil || body == nil {
 		return requestEstimate{}
 	}
 
-	est := requestEstimate{OutputTokens: requestedOutputTokens(body)}
+	est := requestEstimate{}
+	est.OutputTokensPerSequence, est.Sequences = requestedOutputTokens(body)
 	var total int64
 	total += textBytes(body["system"]) // Anthropic, and OpenAI's newer top-level form
 	total += textBytes(body["prompt"]) // legacy completions
@@ -63,6 +68,13 @@ func estimateRequest(reqBody []byte) requestEstimate {
 		return est
 	}
 	for _, m := range messages {
+		if ceiling > 0 && total >= ceiling {
+			// Past this point the weight is clamped to the context window whatever
+			// the rest adds up to, so walking it only burns CPU — and a body made
+			// of a million tiny blocks burns a lot of it. Stop counting; the
+			// caller's clamp finishes the job.
+			break
+		}
 		var fields map[string]json.RawMessage
 		if err := json.Unmarshal(m, &fields); err != nil {
 			total += compactLen(m)
@@ -86,45 +98,56 @@ func estimateRequest(reqBody []byte) requestEstimate {
 // prompt, and how many output tokens the request has asked to generate.
 type requestEstimate struct {
 	PromptBytes int64
-	// OutputTokens is the caller's own declared ceiling on generation, 0 when it
-	// declared none. Decode KV grows with every token produced, so a request that
-	// says it wants 30k of them costs far more than the flat reserve assumes.
-	OutputTokens int64
+	// OutputTokensPerSequence is the caller's own declared ceiling on generation,
+	// 0 when it declared none. Decode KV grows with every token produced, so a
+	// request that says it wants 30k of them costs far more than a flat reserve
+	// assumes. Per SEQUENCE: the model's advertised maximum has to be applied to
+	// this before Sequences multiplies it.
+	OutputTokensPerSequence int64
+	// Sequences is n / best_of, at least 1. Each sequence decodes independently
+	// and holds its own KV.
+	Sequences int64
 }
 
-// requestedOutputTokens reads the caller's declared generation ceiling.
+// requestedOutputTokens reads the caller's declared per-sequence generation
+// ceiling, and how many sequences it asked for.
 //
-// It takes the LARGEST of the spellings present, because they are alternatives
-// and the engine will honour whichever it recognises: OpenAI's max_tokens and
-// max_completion_tokens, and Anthropic's thinking.budget_tokens, which declares
-// the thinking allowance on top of the answer. Multiplied by n / best_of, since
-// those generate that many independent sequences and each holds its own KV.
-func requestedOutputTokens(body map[string]json.RawMessage) int64 {
-	var want int64
+// The ceiling is the LARGEST of the spellings present, since they are
+// alternatives and the engine honours whichever it recognises. Anthropic's
+// thinking.budget_tokens joins that maximum rather than adding to it: the API
+// requires budget_tokens < max_tokens and counts thinking tokens INSIDE
+// max_tokens, so adding them would over-charge a legal reasoning request by
+// nearly a factor of two — and reasoning traffic is what this budget mostly
+// carries.
+//
+// Sequences are returned separately, not folded in, because the caller has to
+// clamp the per-sequence ceiling to what the model advertises BEFORE
+// multiplying. maxCompletionTokens is a per-sequence figure; applying it to a
+// total would silently discard the multiplier.
+func requestedOutputTokens(body map[string]json.RawMessage) (perSequence, sequences int64) {
 	for _, key := range []string{"max_tokens", "max_completion_tokens", "max_output_tokens"} {
-		if v := numberField(body[key]); v > want {
-			want = v
+		if v := numberField(body[key]); v > perSequence {
+			perSequence = v
 		}
 	}
 	if thinking := objectField(body["thinking"]); thinking != nil {
-		want += numberField(thinking["budget_tokens"])
-	}
-	if want <= 0 {
-		return 0
+		if b := numberField(thinking["budget_tokens"]); b > perSequence {
+			perSequence = b
+		}
 	}
 
-	sequences := int64(1)
+	sequences = 1
 	for _, key := range []string{"n", "best_of"} {
 		if v := numberField(body[key]); v > sequences {
 			sequences = v
 		}
 	}
-	// Bounded so a silly n cannot overflow or swamp the budget on its own; the
-	// weight is clamped to the context window afterwards regardless.
+	// Bounded so a silly n cannot overflow the arithmetic. The weight is clamped
+	// to the context window afterwards, so this only guards the multiplication.
 	if sequences > 8 {
 		sequences = 8
 	}
-	return want * sequences
+	return perSequence, sequences
 }
 
 // numberField reads a JSON number, returning 0 for anything else — a missing
