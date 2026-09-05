@@ -41,6 +41,12 @@ func newTestCtrlForOutputCapCtx(t *testing.T, enforce bool, maxCompletion, conte
 	}
 }
 
+// promptJSON builds a chat body whose PROMPT is n bytes, so fit-test cases
+// track the prompt rather than the envelope.
+func promptJSON(n int) string {
+	return `{"messages":[{"role":"user","content":"` + strings.Repeat("x", n) + `"}]}`
+}
+
 // capOf reads a numeric cap field, failing if it is missing or not a number.
 func capOf(t *testing.T, body []byte, key string) float64 {
 	t.Helper()
@@ -271,7 +277,7 @@ func TestCapMaxOutputTokens_NoRoomForTheFullCapInjectsNothing(t *testing.T) {
 	c := newTestCtrlForOutputCapCtx(t, true, maxCompletion, contextLength)
 
 	// ~150k estimated prompt tokens: the advertised 131072 cannot also fit.
-	body := []byte(`{"p":"` + strings.Repeat("x", 600000) + `"}`)
+	body := []byte(promptJSON(600000))
 	out, err := c.CapMaxOutputTokens(body, "glm-5.3", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -292,7 +298,7 @@ func TestCapMaxOutputTokens_InjectsTheAdvertisedCapOrNothing(t *testing.T) {
 	// injected value must be exactly the advertised cap.
 	for _, bodyLen := range []int{1000, 100000, 400000, 600000, 688000, 690000, 700000} {
 
-		body := []byte(`{"p":"` + strings.Repeat("x", bodyLen) + `"}`)
+		body := []byte(promptJSON(bodyLen))
 		out, err := c.CapMaxOutputTokens(body, "glm-5.3", "")
 		if err != nil {
 			t.Fatalf("bodyLen %d: unexpected error: %v", bodyLen, err)
@@ -462,12 +468,12 @@ func TestCapMaxOutputTokens_FitBoundaryIsPinnedToTheRatio(t *testing.T) {
 	const contextLength, maxCompletion = 32768, 8192
 	c := newTestCtrlForOutputCapCtx(t, true, maxCompletion, contextLength)
 
-	inject := func(bodyLen int) (float64, bool) {
+	inject := func(promptLen int) (float64, bool) {
 		t.Helper()
-		body := []byte(`{"p":"` + strings.Repeat("x", bodyLen) + `"}`)
+		body := []byte(promptJSON(promptLen))
 		out, err := c.CapMaxOutputTokens(body, "glm-5.3", "")
 		if err != nil {
-			t.Fatalf("bodyLen %d: %v", bodyLen, err)
+			t.Fatalf("promptLen %d: %v", promptLen, err)
 		}
 		m := decodeBodyMap(t, out)
 		v, ok := m["max_tokens"]
@@ -477,11 +483,17 @@ func TestCapMaxOutputTokens_FitBoundaryIsPinnedToTheRatio(t *testing.T) {
 		return v.(float64), true
 	}
 
-	// A prompt of ~26k real tokens on a 32768 window leaves ~6.5k — less than
-	// the 8192 cap, so injecting it would overflow and the upstream would 400.
-	// At 3.5 bytes/token that prompt is about 91000 bytes.
-	if v, injected := inject(91000); injected {
-		t.Fatalf("injected %v for a prompt that leaves less room than the cap; the upstream would 400", v)
+	// The threshold must sit at exactly 3 bytes per token: reading lower widens
+	// the fail-open band for nothing, reading higher injects caps that overflow
+	// the window and come back as 400s. Both sides are pinned, so 1, 2, 4 and 8
+	// all fail.
+	const gap = contextLength - maxCompletion // room the prompt may occupy
+
+	if v, injected := inject(3*gap - 1024); !injected || v != maxCompletion {
+		t.Fatalf("just under the threshold: injected %v (present=%v), want the advertised %d — the ratio is reading too low", v, injected, maxCompletion)
+	}
+	if v, injected := inject(3*gap + 1024); injected {
+		t.Fatalf("just over the threshold: injected %v, want none — the ratio is reading too high and this cap would overflow the window", v)
 	}
 
 	// A short prompt leaves plenty; the advertised cap goes in whole.
@@ -526,5 +538,40 @@ func TestPrepareHTTPRequest_AppliesTheOutputCap(t *testing.T) {
 	}
 	if got := capOf(t, forwarded, maxTokensKey); got != 32768 {
 		t.Fatalf("forwarded max_tokens = %v, want the advertised 32768 — the clamp is not wired into the forward path", got)
+	}
+}
+
+// An image is half a megabyte of base64 standing for on the order of a thousand
+// tokens, because vision models charge by patch. Measured by length it reads as
+// a nearly full context window, and the cap is skipped on precisely the request
+// with the most room left to generate into.
+func TestCapMaxOutputTokens_ImagePartDoesNotConsumeTheWindow(t *testing.T) {
+	// 20-qwavity-35b's shape, which advertises image input.
+	c := newTestCtrlForOutputCapCtx(t, true, 32768, 262144)
+
+	image := `{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,` + strings.Repeat("A", 700000) + `"}}`
+	body := []byte(`{"messages":[{"role":"user","content":[` + image + `,{"type":"text","text":"what is this"}]}]}`)
+
+	out, err := c.CapMaxOutputTokens(body, "glm-5.3", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := capOf(t, out, "max_tokens"); got != 32768 {
+		t.Fatalf("max_tokens = %v, want the advertised 32768 — a 700 KB image must not read as a full context window", got)
+	}
+}
+
+// The flat allowance still has to be charged, or a message full of images would
+// weigh nothing at all.
+func TestPromptTextBytes_ChargesNonTextPartsAnAllowance(t *testing.T) {
+	one := promptTextBytes([]byte(`{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:x"}}]}]}`))
+	many := promptTextBytes([]byte(`{"messages":[{"role":"user","content":[` +
+		strings.TrimSuffix(strings.Repeat(`{"type":"image_url","image_url":{"url":"data:x"}},`, 20), ",") + `]}]}`))
+
+	if one < nonTextPartBytes {
+		t.Fatalf("one image charged %d, want at least the %d allowance", one, nonTextPartBytes)
+	}
+	if many < one*15 {
+		t.Fatalf("20 images charged %d against %d for one — each must be charged", many, one)
 	}
 }

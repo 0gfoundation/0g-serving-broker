@@ -59,8 +59,10 @@ import (
 // tighter than the cap — so in that entire band injecting buys nothing at all,
 // and the only thing the 400 achieves is breaking the request.
 //
-// Base64 attachments sit at the far end (7.87 and up) and take the fail-open
-// path early; no byte ratio can read them.
+// Base64 attachments sit at the far end (7.87 and up) and no byte ratio can
+// read them at all — a vision model charges an image by patch, so half a
+// megabyte of data URL is worth about a thousand tokens. They are therefore not
+// measured by length; see promptTextBytes.
 const bytesPerToken = 3
 
 // CapMaxOutputTokens lowers the request's output-token cap to the resolved
@@ -176,7 +178,7 @@ func (c *Ctrl) CapMaxOutputTokens(body []byte, resolvedModel, identity string) (
 		// the context window rather than the advertised maximum, which for a model
 		// whose maxCompletionTokens is a large fraction of its context length would
 		// turn a long prompt that used to work into an upstream 400.
-		if injected := c.injectableOutputCap(mi, limit, len(body)); injected > 0 {
+		if injected := c.injectableOutputCap(mi, limit, promptTextBytes(body)); injected > 0 {
 			bodyMap[injectionKey(mi)] = injected
 			changed = true
 		}
@@ -218,15 +220,15 @@ func (c *Ctrl) CapMaxOutputTokens(body []byte, resolvedModel, identity string) (
 //
 // With no advertised contextLength there is nothing to reason about, so the
 // advertised maximum is used as-is.
-func (c *Ctrl) injectableOutputCap(mi *config.ModelInfo, limit int64, bodyLen int) int64 {
+func (c *Ctrl) injectableOutputCap(mi *config.ModelInfo, limit, promptBytes int64) int64 {
 	if mi.ContextLength <= 0 {
 		return limit
 	}
-	if int64(mi.ContextLength)-int64(bodyLen)/bytesPerToken < limit {
+	if int64(mi.ContextLength)-promptBytes/bytesPerToken < limit {
 		// Fail open, and say so. "Configured but never applied" is otherwise
 		// indistinguishable from "applied and the client asked for less", and this
 		// is the branch where the flag stops protecting anything.
-		c.logger.Infof("capMaxOutputTokens: no room for the advertised %d-token cap alongside an estimated %d-token prompt; forwarding without one", limit, int64(bodyLen)/bytesPerToken)
+		c.logger.Infof("capMaxOutputTokens: no room for the advertised %d-token cap alongside an estimated %d-token prompt; forwarding without one", limit, promptBytes/bytesPerToken)
 		return 0
 	}
 	return limit

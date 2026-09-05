@@ -651,10 +651,19 @@ type Service struct {
 	// answer starts.
 	//
 	// The reading is deliberately conservative (three bytes per token, against a
-	// measured 3.07 for rare CJK and 3.50 for source code). Forwarding without a
-	// cap is bounded by the window itself — to reach that band the prompt must
-	// already fill most of the context — whereas an injected cap that overflows
-	// the window is a hard 400 on a request that worked before the flag was set.
+	// measured 3.07 for rare CJK and 3.50 for source code), because an injected
+	// cap that overflows the window is a hard 400 on a request that worked before
+	// the flag was set, while reading high only forwards without a cap.
+	//
+	// Be clear about what that costs, though, since it is not nothing. The
+	// fail-open band starts once the estimated prompt passes contextLength minus
+	// maxCompletionTokens: about 2.9 MB of prompt text on a 1M-token window
+	// advertising 32k, 672 KB on a 256k window, 72 KB on a 32k one. Inside it the
+	// request generates up to whatever the window still allows, which on the
+	// widest configuration is roughly ten times the advertised cap. The narrower
+	// the window relative to the cap, the closer that bound gets to the cap
+	// itself. Only prompt-bearing text is measured, so an image or other non-text
+	// attachment no longer pushes a request into that band by its byte length.
 	EnforceMaxCompletionTokens bool `yaml:"enforceMaxCompletionTokens"`
 }
 
@@ -2364,6 +2373,12 @@ func loadConfig(cfg *Config) error {
 			return err
 		}
 		for _, mi := range cfg.Service.allModelInfos() {
+			// The clamp is a no-op without a positive advertised maximum — there is
+			// nothing to clamp to. Silently doing nothing is the failure mode every
+			// other check here exists to prevent, so it fails at load too.
+			if mi.MaxCompletionTokens <= 0 {
+				return fmt.Errorf("invalid config: service.enforceMaxCompletionTokens requires every servable model to declare a positive modelInfo.maxCompletionTokens; without one the clamp has nothing to enforce and silently does nothing")
+			}
 			if containsString(mi.SupportedParameters, maxTokensParam) ||
 				containsString(mi.SupportedParameters, maxCompletionTokensParam) {
 				continue

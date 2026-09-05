@@ -4082,3 +4082,36 @@ service:
 		t.Fatalf("expected an inject-conflict rejection, got: %v", err)
 	}
 }
+
+// Without a positive advertised maximum the clamp has nothing to enforce and
+// silently does nothing — the failure mode every other check on this flag
+// exists to prevent.
+func TestLoadConfig_EnforceMaxCompletionTokens_RequiresAPositiveCap(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "chatbot"
+  model: "glm-5.3"
+  providerType: "centralized"
+  providerIdentity: "zhipu"
+  verifiability: "TeeML"
+  inputPrice: "10"
+  outputPrice: "30"
+  enforceMaxCompletionTokens: true
+  modelInfo:
+    name: "GLM-5.3"
+    description: "test model"
+    contextLength: 262144
+    architecture:
+      modality: "text->text"
+      inputModalities: ["text"]
+      outputModalities: ["text"]
+    supportedParameters:
+      - max_tokens
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "positive modelInfo.maxCompletionTokens") {
+		t.Fatalf("expected a missing-cap rejection, got: %v", err)
+	}
+}
