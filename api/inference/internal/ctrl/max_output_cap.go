@@ -35,25 +35,13 @@ import (
 // that is too LARGE means an upstream 400 (input + max_tokens > context
 // length), turning a request that would have worked into an error.
 //
-// It is not safe without a floor, though, and the error is not "slightly" too
-// small. Over-estimating by a third compounds as the prompt approaches the
-// window: at a real prompt of 70% of context the estimate leaves a twentieth of
-// the room that actually remains. See minInjectableOutputTokens.
+// It is used only as a yes/no test — does the advertised cap still fit — never
+// to compute a smaller cap from. Deriving one would compound the error as the
+// prompt approaches the window (at a real prompt of 70% of context the estimate
+// leaves a twentieth of the room that actually remains) and produce caps small
+// enough to be swallowed whole by a reasoning model's thinking tokens. See
+// injectableOutputCap.
 const conservativeBytesPerToken = 3
-
-// minInjectableOutputTokens is the floor below which no cap is injected at all.
-//
-// A tiny cap is worse than none. On a reasoning model max_tokens covers the
-// thinking tokens, so a few hundred of them are consumed before any answer
-// begins: the client gets an empty content with finish_reason "length", and
-// pays for the reasoning. Because the estimate above runs high, that outcome
-// sits right next to a working one — a body a few kilobytes larger crosses into
-// "no room" and is forwarded untouched, which succeeds.
-//
-// Below this floor the estimate is simply too coarse to be acted on, so the
-// request takes the same exit as the no-room case: the engine decides, from the
-// tokenized prompt it alone can see.
-const minInjectableOutputTokens = 1024
 
 // CapMaxOutputTokens lowers the request's output-token cap to the resolved
 // model's maxCompletionTokens. resolvedModel is the public/canonical id
@@ -184,14 +172,29 @@ func (c *Ctrl) CapMaxOutputTokens(body []byte, resolvedModel, identity string) (
 	return modified, nil
 }
 
-// injectableOutputCap is the cap to write into a request that carried none: the
-// advertised maximum, reduced to whatever the context window still has room for
-// after a conservative estimate of the prompt.
+// injectableOutputCap is the cap to write into a request that carried none.
+// It is all or nothing: the advertised maximum when a conservative reading of
+// the prompt says it still fits in the context window, and zero — inject
+// nothing — when it does not.
 //
-// Returns 0 when the room left is absent or too small to be worth acting on, in
-// which case nothing is injected and the engine decides — it computes the true
-// remaining context from the tokenized prompt, which is strictly better than a
-// guess made from byte counts.
+// The tempting alternative, injecting whatever room the estimate says is left,
+// is worse than either. The estimate deliberately runs a third high so it never
+// overshoots the window, and that error compounds as the prompt grows: at a
+// real prompt of 70% of context it reports about a twentieth of the room that
+// actually remains. On a reasoning model, where max_tokens covers the thinking
+// tokens, a cap that small is consumed before any answer starts — the client
+// gets empty content with finish_reason "length" and pays for the reasoning.
+// And it would sit immediately beside a working outcome, since a body a few
+// kilobytes larger crosses into "no room", is forwarded untouched, and
+// succeeds. Two adjacent inputs, opposite results, with the out-of-range one
+// better.
+//
+// Injecting nothing hands the decision to the engine, which computes the true
+// remaining context from the tokenized prompt — strictly better than a guess
+// made from byte counts. What is given up is bounding these particular
+// requests, and they are the ones least in need of it: a prompt that nearly
+// fills the window has little room left to generate into, so the window itself
+// is already the bound.
 //
 // With no advertised contextLength there is nothing to reason about, so the
 // advertised maximum is used as-is.
@@ -199,13 +202,8 @@ func (c *Ctrl) injectableOutputCap(mi *config.ModelInfo, limit int64, bodyLen in
 	if mi.ContextLength <= 0 {
 		return limit
 	}
-	promptEstimate := int64(bodyLen) / conservativeBytesPerToken
-	room := int64(mi.ContextLength) - promptEstimate
-	if room < minInjectableOutputTokens {
+	if int64(mi.ContextLength)-int64(bodyLen)/conservativeBytesPerToken < limit {
 		return 0
-	}
-	if room < limit {
-		return room
 	}
 	return limit
 }

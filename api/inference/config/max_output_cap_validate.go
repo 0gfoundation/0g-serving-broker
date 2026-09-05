@@ -1,5 +1,10 @@
 package config
 
+import (
+	"fmt"
+	"strings"
+)
+
 // Field names of the two interchangeable OpenAI output-token caps. Kept here,
 // not imported from the ctrl package, because config must not depend on it.
 const (
@@ -41,4 +46,53 @@ func containsString(list []string, name string) bool {
 		}
 	}
 	return false
+}
+
+// checkNoCapOverrides refuses a configuration in which a later body-rewriting
+// pass would undo the output clamp.
+//
+// Both stripBodyFields and injectBodyFields run after it, and both are the
+// UNION of the service-level setting and the pricing entry's own, so all four
+// places have to be checked. Strip would delete the cap the clamp just set,
+// leaving the flag silently inert. Inject is worse — it is server-config-wins,
+// so it overwrites the clamped value and can raise the cap above the advertised
+// maximum, which is the one thing the clamp promises never to happen.
+func (s *Service) checkNoCapOverrides() error {
+	capKeys := []string{maxTokensParam, maxCompletionTokensParam}
+
+	checkStrip := func(where string, keys []string) error {
+		for _, k := range keys {
+			for _, capKey := range capKeys {
+				if strings.TrimSpace(k) == capKey {
+					return fmt.Errorf("invalid config: service.enforceMaxCompletionTokens cannot be combined with %s containing %q — strip runs after the clamp and would remove the cap it sets", where, capKey)
+				}
+			}
+		}
+		return nil
+	}
+	checkInject := func(where string, fields map[string]interface{}) error {
+		for _, capKey := range capKeys {
+			if _, ok := fields[capKey]; ok {
+				return fmt.Errorf("invalid config: service.enforceMaxCompletionTokens cannot be combined with %s setting %q — inject runs after the clamp and would overwrite the cap, which can raise it above the advertised maximum", where, capKey)
+			}
+		}
+		return nil
+	}
+
+	if err := checkStrip("service.stripBodyFields", s.StripBodyFields); err != nil {
+		return err
+	}
+	if err := checkInject("service.injectBodyFields", s.InjectBodyFields); err != nil {
+		return err
+	}
+	for i := range s.ModelPricing {
+		entry := &s.ModelPricing[i]
+		if err := checkStrip(fmt.Sprintf("service.modelPricing[%d].stripBodyFields", i), entry.StripBodyFields); err != nil {
+			return err
+		}
+		if err := checkInject(fmt.Sprintf("service.modelPricing[%d].injectBodyFields", i), entry.InjectBodyFields); err != nil {
+			return err
+		}
+	}
+	return nil
 }

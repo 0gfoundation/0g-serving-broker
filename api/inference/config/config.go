@@ -638,9 +638,17 @@ type Service struct {
 	//
 	// Turning it on also requires every servable model to declare max_tokens or
 	// max_completion_tokens in supportedParameters, so the cap this injects uses
-	// a spelling the upstream accepts, and forbids stripBodyFields on either key
-	// (strip runs after this pass and would delete the cap it just set). Config
-	// load refuses both.
+	// a spelling the upstream accepts, and forbids stripBodyFields or
+	// injectBodyFields on either key at BOTH levels — strip would delete the cap
+	// this pass sets, and inject would overwrite it, which can raise it above the
+	// advertised maximum. Config load refuses all of these.
+	//
+	// The cap is injected whole or not at all: when a conservative reading of the
+	// prompt says the advertised maximum no longer fits in the context window,
+	// nothing is injected and the engine decides from the real token count. A cap
+	// derived from that estimate would be far too small on a long prompt, and on
+	// a reasoning model a small cap is consumed by thinking tokens before any
+	// answer starts.
 	EnforceMaxCompletionTokens bool `yaml:"enforceMaxCompletionTokens"`
 }
 
@@ -2337,14 +2345,17 @@ func loadConfig(cfg *Config) error {
 		// declaration the choice is a guess — and a wrong guess fails EVERY
 		// capless request on the service, which is exactly the population this
 		// flag acts on. Refuse at load rather than at runtime.
-		// stripBodyFields runs AFTER this clamp, so stripping either cap key would
-		// delete the bound it just set and turn the flag into a silent no-op. Every
-		// other constraint this flag carries fails at load; this one should not be
-		// the exception that only lives in a comment.
-		for _, key := range cfg.Service.StripBodyFields {
-			if key == maxTokensParam || key == maxCompletionTokensParam {
-				return fmt.Errorf("invalid config: service.enforceMaxCompletionTokens cannot be combined with service.stripBodyFields containing %q — strip runs after the clamp and would remove the cap it sets", key)
-			}
+		// Two later passes can undo this clamp, and both are configured at two
+		// levels (service and per pricing entry, unioned at request time). Check
+		// all four, not just the one: a per-entry setting is exactly how an
+		// operator works around a single upstream, so it is the likelier half.
+		//
+		// stripBodyFields removes the cap this pass just set — the flag becomes a
+		// silent no-op. injectBodyFields is worse: it is server-config-wins, so it
+		// overwrites the clamped value and can RAISE the cap above the advertised
+		// maximum, breaking the one promise this pass makes.
+		if err := cfg.Service.checkNoCapOverrides(); err != nil {
+			return err
 		}
 		for _, mi := range cfg.Service.allModelInfos() {
 			if containsString(mi.SupportedParameters, maxTokensParam) ||

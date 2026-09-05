@@ -254,43 +254,50 @@ func TestCapMaxOutputTokens_NullBesideRealSiblingDoesNotRaise(t *testing.T) {
 	}
 }
 
-// Injecting the advertised maximum can push input + max_tokens past the context
-// window, turning a request that used to work into an upstream 400. The
-// injected value must be what still fits.
-func TestCapMaxOutputTokens_InjectionRespectsContextWindow(t *testing.T) {
-	// A model whose advertised output cap is a large fraction of its context.
+// Injecting a cap derived from the estimate would compound its deliberate
+// over-reading: at a long prompt it reports a fraction of the room that
+// actually remains, and on a reasoning model a cap that small is swallowed by
+// thinking tokens — empty content, billed. So the decision is all or nothing:
+// when the advertised cap no longer fits, nothing is injected and the engine
+// decides from the real token count.
+func TestCapMaxOutputTokens_NoRoomForTheFullCapInjectsNothing(t *testing.T) {
 	const contextLength, maxCompletion = 200000, 131072
 	c := newTestCtrlForOutputCapCtx(t, true, maxCompletion, contextLength)
 
-	// ~150k tokens of prompt at the conservative 3 bytes/token estimate.
+	// ~150k estimated prompt tokens: the advertised 131072 cannot also fit.
 	body := []byte(`{"p":"` + strings.Repeat("x", 450000) + `"}`)
 	out, err := c.CapMaxOutputTokens(body, "glm-5.3", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	injected := capOf(t, out, "max_tokens")
-	if injected >= maxCompletion {
-		t.Fatalf("injected %v, want less than the advertised %d for a long prompt", injected, maxCompletion)
-	}
-	// The estimate deliberately runs high, so prompt + injected output must sit
-	// inside the window even before the real tokenizer shortens the prompt.
-	if promptEstimate := float64(len(body) / conservativeBytesPerToken); promptEstimate+injected > contextLength {
-		t.Fatalf("injected %v on top of an estimated %v prompt exceeds the %d context window", injected, promptEstimate, contextLength)
+	if string(out) != string(body) {
+		m := decodeBodyMap(t, out)
+		t.Fatalf("no room for the full cap must inject nothing, got max_tokens=%v", m["max_tokens"])
 	}
 }
 
-// When the prompt already fills the context, injecting anything is guesswork —
-// the engine computes the real remaining room from the tokenized prompt.
-func TestCapMaxOutputTokens_NoRoomInjectsNothing(t *testing.T) {
-	c := newTestCtrlForOutputCapCtx(t, true, 32768, 10000)
-	body := []byte(`{"p":"` + strings.Repeat("x", 60000) + `"}`)
+// Whenever it does inject, the value is the operator's advertised number —
+// never a smaller one derived from the byte estimate.
+func TestCapMaxOutputTokens_InjectsTheAdvertisedCapOrNothing(t *testing.T) {
+	const contextLength, maxCompletion = 262144, 32768
+	c := newTestCtrlForOutputCapCtx(t, true, maxCompletion, contextLength)
 
-	out, err := c.CapMaxOutputTokens(body, "glm-5.3", "")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if string(out) != string(body) {
-		t.Fatalf("with no context room left, the body must be forwarded unchanged")
+	// Walk the body size across the point where the cap stops fitting; every
+	// injected value must be exactly the advertised cap.
+	for _, bodyLen := range []int{1000, 100000, 400000, 600000, 688000, 690000, 700000} {
+		body := []byte(`{"p":"` + strings.Repeat("x", bodyLen) + `"}`)
+		out, err := c.CapMaxOutputTokens(body, "glm-5.3", "")
+		if err != nil {
+			t.Fatalf("bodyLen %d: unexpected error: %v", bodyLen, err)
+		}
+		m := decodeBodyMap(t, out)
+		v, injected := m["max_tokens"]
+		if !injected {
+			continue
+		}
+		if v.(float64) != maxCompletion {
+			t.Fatalf("bodyLen %d: injected %v, want the advertised %d or nothing", bodyLen, v, maxCompletion)
+		}
 	}
 }
 
@@ -435,49 +442,5 @@ func TestCapMaxOutputTokens_NegativeIsTreatedAsNoCap(t *testing.T) {
 		if got := capOf(t, out, "max_tokens"); got != 32768 {
 			t.Fatalf("%s: max_tokens = %v, want a real cap injected", literal, got)
 		}
-	}
-}
-
-// The byte estimate runs high by a third, and that error compounds as the
-// prompt approaches the window: a cap computed from it can be a twentieth of
-// the room that actually remains. On a reasoning model a cap that small is
-// consumed entirely by thinking tokens, so the client gets an empty answer with
-// finish_reason "length" and pays for it — strictly worse than injecting
-// nothing, which is what the no-room case already does.
-func TestCapMaxOutputTokens_TinyRemainingRoomInjectsNothing(t *testing.T) {
-	const contextLength, maxCompletion = 262144, 32768
-	c := newTestCtrlForOutputCapCtx(t, true, maxCompletion, contextLength)
-
-	// Sized so the estimate leaves a positive but useless remainder.
-	bodyLen := (contextLength - 500) * conservativeBytesPerToken
-	body := []byte(`{"p":"` + strings.Repeat("x", bodyLen) + `"}`)
-
-	out, err := c.CapMaxOutputTokens(body, "glm-5.3", "")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if string(out) != string(body) {
-		m := decodeBodyMap(t, out)
-		t.Fatalf("a sub-floor remainder must inject nothing, got max_tokens=%v", m["max_tokens"])
-	}
-}
-
-// Just above the floor it still injects, so the floor is a floor and not a
-// silent disable of the whole feature.
-func TestCapMaxOutputTokens_RoomAtTheFloorStillInjects(t *testing.T) {
-	const contextLength, maxCompletion = 262144, 32768
-	c := newTestCtrlForOutputCapCtx(t, true, maxCompletion, contextLength)
-
-	bodyLen := (contextLength - 4096) * conservativeBytesPerToken
-	out, err := c.CapMaxOutputTokens([]byte(`{"p":"`+strings.Repeat("x", bodyLen)+`"}`), "glm-5.3", "")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	injected := capOf(t, out, "max_tokens")
-	if injected < minInjectableOutputTokens {
-		t.Fatalf("injected %v, want at least the floor %d", injected, minInjectableOutputTokens)
-	}
-	if injected >= maxCompletion {
-		t.Fatalf("injected %v, want the context-reduced value", injected)
 	}
 }
