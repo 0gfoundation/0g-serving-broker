@@ -124,6 +124,52 @@ routing/billing:
 The reconstructed plaintext (pre-upstream-rewrite) is stashed on the context for
 the §8 signature.
 
+### A sealed envelope smuggled into a multipart body (SPEC §5.3.1)
+
+Step 1 above detects an envelope in a JSON body. A client can also put one in a
+`multipart/form-data` part — the speech-to-text shape — where step 1 never looks,
+because the body is not JSON. SPEC §5.3.1's rule is that *a body that cannot be
+parsed as an envelope is not thereby an unsealed body*; its mirror is that a body
+that **is** an envelope is one whatever `Content-Type` the client put on it. So
+`multipartCarriesE2EEPart` enumerates the parts and refuses a request that
+carries one named `_e2ee`, rather than forwarding the envelope as cleartext.
+
+Refusals come in two kinds, and only the second is configurable:
+
+| kind | what it means | examples | governed by the flag? |
+|---|---|---|---|
+| **exact** | a part name **was read**, and it is the marker | `name="_e2ee"`; a quoted pair or an RFC 2047 word that resolves to it | no — always refuses |
+| **structural** | **no name was read**; the body could not be enumerated | unusable boundary, nested `multipart/*`, over budget, unparseable part header, a name in a charset Go cannot decode | yes |
+
+Structural refusals are not facts about the request, they are facts about what
+this code could not determine — on shapes that are legal or merely sloppy far
+more often than hostile. Both entry points run before billing and the sync one
+runs before `ValidateSession`, so refusing them trades real availability against
+a leak whose damage is bounded (the payload stays ciphertext; what breaks is that
+the client believes it sealed). They therefore default to **forward-and-count**:
+
+```yaml
+# config.yaml — default false
+e2eeStrictMultipart: false   # true = refuse structural cases as well as exact ones
+```
+
+With the flag off a structural case is forwarded and counted; with it on the same
+case is refused. `e2ee_multipart_would_refuse_total{reason}` increments **either
+way** — the `reason` label names the branch (`unusable_boundary`,
+`unenumerated_remainder`, `over_budget`, `nested_multipart`,
+`unreadable_part_header`, `undecodable_name`), so the flip is an evidence-based
+decision and the same series confirms it afterwards. There is deliberately no log
+line: this path is pre-authentication, so a per-request line is a
+log-amplification vector (see `rejection-observability.md`).
+
+**Known gap, by construction.** With the flag off, a part actually named `_e2ee`
+but spelled `name*=iso-8859-1''%5Fe2ee` is **forwarded**. Go's
+`mime.ParseMediaType` decodes only `utf-8` and `us-ascii` for RFC 2231 (measured;
+everything else yields an empty name), so the name is never read — which makes
+this structural, and structural defaults to forwarding. It is the spelling most
+likely to appear in real traffic among the structural cases. Turning the flag on
+closes it; until then the counter is what shows whether it occurs at all.
+
 ### Stale enc key self-heal (409)
 
 The enc key is measurement-tied, so a provider upgrade can rotate it while the

@@ -85,3 +85,13 @@ service:
 # providerHttp:
 #   totalTimeout: "15m"          # Overall HTTP request timeout (default: 15m)
 #   responseHeaderTimeout: "15m" # Max time to wait for provider to start responding (default: 15m)
+# Optional: refuse multipart requests that could not be checked for a smuggled
+# sealed envelope (SPEC §5.3.1), instead of forwarding and counting them.
+# Requests whose part name WAS read and is "_e2ee" are always refused; this flag
+# governs only the cases where no name could be read at all (unusable boundary,
+# nested multipart, over budget, unparseable part header, a name in a charset Go
+# cannot decode) — legal or sloppy far more often than hostile, and checked
+# before authentication. Watch e2ee_multipart_would_refuse_total{reason}, which
+# counts at either setting, and flip this once it has stayed at zero.
+# See docs/design/e2ee.md.
+# e2eeStrictMultipart: false

@@ -58,6 +58,19 @@ var (
 	// identical in logs and obvious here.
 	RoutingProofSkippedTotal *prometheus.CounterVec
 
+	// E2EEMultipartWouldRefuseTotal counts multipart requests that the STRUCTURAL
+	// SPEC §5.3.1 branches would refuse, by reason, while cfg.e2eeStrictMultipart
+	// is false. It is the evidence for flipping that flag: these branches refuse
+	// shapes that are legal or merely sloppy far more often than hostile, and
+	// they have never seen production traffic, so this counter answers "is the
+	// false-positive set actually empty" with data rather than assertion.
+	//
+	// A sustained non-zero rate means real clients send one of these shapes and
+	// the flag must NOT be flipped until that is understood. Zero across a
+	// release is the go-ahead. The exact refusals (a name resolving to `_e2ee`)
+	// are not counted here — they always refuse and are not in question.
+	E2EEMultipartWouldRefuseTotal *prometheus.CounterVec
+
 	// VideoBillingSkippedTotal counts video-generation requests that returned
 	// 200 but for which no positive duration could be resolved from either the
 	// upstream response or the client request — i.e. the video was served
@@ -450,6 +463,15 @@ func PrometheusInit(serverName, providerAddress string) {
 		},
 	)
 
+	E2EEMultipartWouldRefuseTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name:        "broker_e2ee_multipart_would_refuse_total",
+			Help:        "Multipart requests the structural SPEC 5.3.1 branches would refuse if e2eeStrictMultipart were true, labeled by reason (unusable_boundary, unenumerated_remainder, over_budget, nested_multipart, unreadable_part_header, undecodable_name). Non-zero means real traffic hits a fail-closed branch, so the flag is not yet safe to flip.",
+			ConstLabels: constLabels,
+		},
+		[]string{"reason"},
+	)
+
 	RoutingProofSkippedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_routing_proof_skipped_total",
@@ -486,6 +508,7 @@ func PrometheusInit(serverName, providerAddress string) {
 	prometheus.MustRegister(VideoGenerationFailedTotal)
 	prometheus.MustRegister(VideoTableMissTotal)
 	prometheus.MustRegister(VideoReserveSkippedTotal)
+	prometheus.MustRegister(E2EEMultipartWouldRefuseTotal)
 	prometheus.MustRegister(RoutingProofSkippedTotal)
 	prometheus.MustRegister(RequestRejectedTotal)
 	prometheus.MustRegister(FailureCount)
@@ -863,6 +886,44 @@ const (
 	// config or the shim's create response, not the TEE signer.
 	RoutingProofSkipNoPollJob = "no_poll_job"
 )
+
+// Reasons for RecordE2EEMultipartWouldRefuse. Each names one structural branch
+// of multipartCarriesE2EEPart, so a non-zero series says WHICH shape real
+// traffic sends rather than only that something fired.
+const (
+	// E2EERefuseUnusableBoundary: the request's multipart boundary could be
+	// neither parsed nor recovered, and the body still contains part-shaped
+	// lines. Nothing was enumerated.
+	E2EERefuseUnusableBoundary = "unusable_boundary"
+	// E2EERefuseUnenumeratedRemainder: the multipart parse failed mid-stream
+	// with part-shaped content still ahead of the reader.
+	E2EERefuseUnenumeratedRemainder = "unenumerated_remainder"
+	// E2EERefuseOverBudget: the body declares more parts and part headers
+	// combined than maxHeadersExamined, so they cannot all be read.
+	E2EERefuseOverBudget = "over_budget"
+	// E2EERefuseNestedMultipart: a part is itself multipart, and mime/multipart
+	// does not descend, so the inner part names were never read. The RFC 1867
+	// multi-file field is the legal shape here.
+	E2EERefuseNestedMultipart = "nested_multipart"
+	// E2EERefuseUnreadablePartHeader: a part header could not be parsed, no name
+	// could be recovered from it, and the body could be naming the marker.
+	E2EERefuseUnreadablePartHeader = "unreadable_part_header"
+	// E2EERefuseUndecodableName: a part header RFC 2231-encodes its name in a
+	// charset mime.ParseMediaType cannot decode, so the name it resolved is
+	// absent or a partial concatenation. Expected to be the most likely of these
+	// to fire on real traffic, since RFC 2231 names appear in the wild.
+	E2EERefuseUndecodableName = "undecodable_name"
+)
+
+// RecordE2EEMultipartWouldRefuse increments the counter of multipart requests a
+// structural SPEC 5.3.1 branch would have refused with e2eeStrictMultipart on.
+// Called only when the flag is OFF and the request was therefore forwarded.
+func RecordE2EEMultipartWouldRefuse(reason string) {
+	if E2EEMultipartWouldRefuseTotal == nil {
+		return
+	}
+	E2EEMultipartWouldRefuseTotal.WithLabelValues(reason).Inc()
+}
 
 // RecordRoutingProofSkipped increments the counter of centralized-provider
 // responses served without a TEE routing proof. Every call site is a place where

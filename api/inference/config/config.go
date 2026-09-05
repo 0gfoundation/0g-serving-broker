@@ -1058,6 +1058,30 @@ type Config struct {
 	// the registered service's billing_unit instead of asking operators to
 	// flip a global flag.
 	AllowTokenBilledSpeechToText bool `yaml:"allowTokenBilledSpeechToText"`
+
+	// E2EEStrictMultipart makes the STRUCTURAL multipart refusals (SPEC §5.3.1)
+	// return a 400 instead of counting what they would have refused.
+	//
+	// The exact refusals — a part whose name resolves to the reserved `_e2ee`
+	// marker under some reading a conformant parser gives it — are NOT governed
+	// by this and always refuse. They are a fact about the request and have no
+	// false-positive story to learn.
+	//
+	// The structural ones are different: a nested multipart part, a form past the
+	// header budget, a boundary that can be neither parsed nor recovered, an
+	// enumeration that stopped with part-shaped content ahead of it. Each is a
+	// shape that is legal or merely sloppy far more often than it is hostile, and
+	// none has seen production traffic. They run pre-authentication on the sync
+	// proxy (MaybeUnsealRequest precedes ValidateSession), so refusing trades
+	// real availability against a leak the SPEC's own damage assessment calls
+	// small — the payload stays ciphertext; what breaks is that the client
+	// believes it sealed.
+	//
+	// So: false by default. e2ee_multipart_would_refuse_total then says whether
+	// the false-positive set is empty in practice, instead of the release notes
+	// asking operators to take it on faith. Flip it once the counter has stayed
+	// at zero across a release.
+	E2EEStrictMultipart bool `yaml:"e2eeStrictMultipart"`
 }
 
 // ConcurrencyLimitConfig defines concurrency limiting for backend protection.

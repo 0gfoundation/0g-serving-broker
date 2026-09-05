@@ -116,6 +116,14 @@ type Ctrl struct {
 	// updateSpeechToTextWithUsage docstring and #530 for the trade-off.
 	allowTokenBilledSTT bool
 
+	// e2eeStrictMultipart makes the STRUCTURAL SPEC §5.3.1 refusals return a 400
+	// instead of counting what they would have refused. The EXACT ones (a part
+	// name resolving to `_e2ee`) always refuse and are not governed by it.
+	// Defaults to false: those branches have never seen production traffic and
+	// run pre-authentication on the sync path. See config.E2EEStrictMultipart and
+	// resolveMultipartPolicy.
+	e2eeStrictMultipart bool
+
 	// priceCache holds the latest wei prices derived from the live 0G/USD
 	// rate.  Non-nil only when Service.PriceDenomination == "USD".  Written
 	// by the PriceUpdateProcessor, read by GetCachedService to overlay
@@ -317,6 +325,7 @@ func New(
 		concurrencyLimit:     cfg.ConcurrencyLimit,
 		userUsageStats:       cfg.UserUsageStats,
 		allowTokenBilledSTT:  cfg.AllowTokenBilledSpeechToText,
+		e2eeStrictMultipart:  cfg.E2EEStrictMultipart,
 		priceCache:           priceCache,
 		svcCache:             svcCache,
 		teeService:           teeService,
