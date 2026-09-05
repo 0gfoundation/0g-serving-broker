@@ -887,6 +887,86 @@ func TestEncodedFilenameDoesNotArmTheFailClosedBranches(t *testing.T) {
 	}
 }
 
+// Breaking the marker-bearing header must not clear what it declares. The gate
+// on this branch was justified by "evading it needs the marker-bearing header to
+// itself be unparseable, so the name is a guess either way" — the antecedent is
+// right and the consequent does not follow: the header still visibly names the
+// part, in the one spelling couldNameE2EEPart provably cannot see.
+//
+// Each row carries a byte-identical, well-formed part named with finding 17's
+// RFC 2047 encoded word, behind a header broken in the three ways this file
+// already enumerates for the request's Content-Type. The fixtures must NOT trip
+// the gate, or they cannot tell the recovery from the heuristic.
+func TestBreakingTheHeaderDoesNotClearTheNameItDeclares(t *testing.T) {
+	c := &Ctrl{}
+	const word = `=?utf-8?B?X2UyZWU=?=` // RFC 2047 for `_e2ee`
+
+	for _, tt := range []struct {
+		name   string
+		header string
+	}{
+		{"duplicate name", `Content-Disposition: form-data; name=x; name="` + word + `"`},
+		{"unclosed quote", `Content-Disposition: form-data; name="` + word},
+		{"junk parameter", `Content-Disposition: form-data; name="` + word + `"; =junk`},
+		{"duplicate name on Content-Type", `Content-Type: text/plain; name=x; name="` + word + `"`},
+		{"unclosed quote on Content-Type", `Content-Type: text/plain; name="` + word},
+		// Only the encoded word can appear here. A padded literal and a
+		// `name*=` spelling behind the same broken header ARE also refused, but
+		// both trip the gate — the literal through hasE2EEMarker, `name*` through
+		// mentionsEncodedName — so a fixture using them cannot tell the recovery
+		// from the heuristic. That the recovered value is judged by every reading
+		// is TestRecoverParamValues plus nameVerdict's own tests.
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			body := []byte("--B\r\n" + tt.header + "\r\n\r\n" + sealedEnvelopeJSON + "\r\n--B--\r\n")
+			const contentType = `multipart/form-data; boundary=B`
+			if couldNameE2EEPart(body) {
+				t.Fatal("fixture trips the gate, so it cannot distinguish recovery from the heuristic")
+			}
+			if sealed, _ := c.IsSealedRequest(contentType, body); !sealed {
+				t.Error("a broken header still declares the name it declares")
+			}
+			if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err == nil {
+				t.Fatal("must refuse rather than forward")
+			}
+		})
+	}
+}
+
+func TestRecoverParamValues(t *testing.T) {
+	for _, tt := range []struct {
+		header string
+		want   []string
+	}{
+		{`form-data; name=x; name="a b"`, []string{"x", "a b"}},
+		{`form-data; name="unclosed`, []string{"unclosed"}},
+		{`form-data; name="v"; =junk`, []string{"v"}},
+		{`form-data; NAME=upper`, []string{"upper"}},
+		{`form-data;name=nospace`, []string{"nospace"}},
+		{`form-data; name=  padded  ; x=1`, []string{"padded"}},
+		{`form-data; name="quoted \" inside"`, []string{`quoted \" inside`}},
+		// A `name=` inside a quoted VALUE is content, not a parameter — the
+		// finding-11 shape, and the reason this walks parameters rather than
+		// scanning for the needle.
+		{`form-data; filename="a; name=_e2ee"`, nil},
+		{`form-data; filename="name=x"`, nil},
+		{`form-data`, nil},
+		{``, nil},
+	} {
+		t.Run(tt.header, func(t *testing.T) {
+			got := recoverParamValues(tt.header, "name")
+			if len(got) != len(tt.want) {
+				t.Fatalf("got %q, want %q", got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("[%d] got %q, want %q", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
 // And the same shape WITH the marker, so gating the branch did not disarm it.
 func TestUnparseablePartDispositionMentioningTheMarkerIsRefused(t *testing.T) {
 	c := &Ctrl{}

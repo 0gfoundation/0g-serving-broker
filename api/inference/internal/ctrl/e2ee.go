@@ -137,16 +137,20 @@ var e2eeResponseUnboundFields = []string{"model", "x_0g_trace"}
 // Three orders of magnitude above any real transcription or image-edit form,
 // and ~1000x below the 3.7 million minimum-size parts that fit in 32 MiB.
 //
-// About that "32 MiB": it is RequestSizeLimitMiddleware, and it is registered on
-// the sync proxy's serviceGroup ONLY (proxy.go). The async submit routes hang
-// off r.Group("/v1") with cors and the rate limiter and no size limit, so on
-// /v1/async/images/edits neither the part count nor the body length is bounded
-// by anything but what the client sends. This budget is what bounds the
-// AMPLIFICATION on both paths — the cost of this check against the cost of
-// reading the body at all — and on the sync path the size limit also bounds the
-// absolute cost. The unbounded read on the async route predates this check and
-// is not widened by it; adding a size limit there would reject bodies that work
-// today, which is a decision for its own change rather than a comment.
+// About that "32 MiB": it is RequestSizeLimitMiddleware, registered on the sync
+// proxy's serviceGroup ONLY (proxy.go). The async submit routes hang off
+// r.Group("/v1") with cors and the rate limiter and no size limit, so on
+// /v1/async/images/edits the body length is bounded only by what the client
+// sends. This budget is what bounds the AMPLIFICATION on both paths — the cost
+// of this check against the cost of reading the body at all — while on the sync
+// path the size limit also bounds the absolute cost.
+//
+// The two paths differ in who can reach them, which is why the unbounded async
+// read is the smaller concern: the sync proxy runs this BEFORE ValidateSession,
+// so it is reachable with no session, while the async routes validate the
+// session first (async.go) and only then read the body. That read predates this
+// check and is not widened by it; adding a size limit there would reject bodies
+// that work today, which is a decision for its own change.
 const maxHeadersExamined = 4096
 
 // hasE2EEMarker is a cheap substring pre-check to skip the JSON parse on the vast
@@ -408,11 +412,78 @@ func looksMultipart(contentType string) bool {
 	return strings.HasPrefix(strings.ToLower(strings.TrimLeft(contentType, " \t")), "multipart/")
 }
 
+// recoverParamValues returns every value the raw header gives to a parameter,
+// for a header mime.ParseMediaType refused to parse. It walks parameters
+// directly, skipping quoted values, so a `name=` inside someone's filename is
+// not mistaken for one.
+//
+// It is the same move recoverBoundary makes, one level down, and for the same
+// reason: a parse failure is not an answer about what the header DECLARES. A
+// part header can be made unparseable in the three ways this file already
+// enumerates for the request's Content-Type — a duplicate parameter, an unclosed
+// quote, a junk parameter — while still visibly naming a part. Measured, each
+// row carrying a well-formed part named `=?utf-8?B?X2UyZWU=?=`:
+//
+//	name="=?utf-8?B?X2UyZWU=?="             parses    -> refused
+//	name=x; name="=?utf-8?B?X2UyZWU=?="     parse err -> recovered [x, the word]
+//	name="=?utf-8?B?X2UyZWU=?=              parse err -> recovered [the word]
+//	name="=?utf-8?B?X2UyZWU=?="; =junk      parse err -> recovered [the word]
+//
+// EVERY value is returned, not the first or the last, because parsers disagree
+// about which of a duplicate wins — javax.mail takes the last — and a name that
+// any of them resolves to the marker cannot be ruled out.
+//
+// An unclosed quote runs to the end of the header, which is what a parser
+// recovering from one does.
+func recoverParamValues(header, attr string) []string {
+	var out []string
+	for i := 0; i < len(header); {
+		for i < len(header) && isParamBoundary(header[i]) {
+			i++
+		}
+		start := i
+		for i < len(header) && header[i] != '=' && header[i] != ';' {
+			i++
+		}
+		name := strings.TrimSpace(header[start:i])
+		if i < len(header) && header[i] == '=' {
+			i++
+			var value string
+			if i < len(header) && header[i] == '"' {
+				i++
+				valueStart := i
+				for i < len(header) && header[i] != '"' {
+					if header[i] == '\\' && i+1 < len(header) {
+						i++
+					}
+					i++
+				}
+				value = header[valueStart:i]
+				if i < len(header) {
+					i++
+				}
+			} else {
+				valueStart := i
+				for i < len(header) && header[i] != ';' {
+					i++
+				}
+				value = strings.TrimSpace(header[valueStart:i])
+			}
+			if strings.EqualFold(name, attr) {
+				out = append(out, value)
+			}
+		}
+		for i < len(header) && header[i] != ';' {
+			i++
+		}
+	}
+	return out
+}
+
 // nameVerdict applies the readings that decide a declared part name to ONE
 // header, so that both headers which can carry a name get exactly the same
-// treatment. Written once for that reason: finding 28 was the Content-Type
-// missing checks the Content-Disposition had, and two copies is how that
-// happens.
+// treatment. Written once for that reason: two copies is how one header ends up
+// with a check the other lacks, which is a bug this guard has already had.
 //
 // `where` names the header for the message; `header` is its raw value, needed by
 // declaresEncodedName because the parser drops what it cannot decode; `name` is
@@ -611,7 +682,8 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 	examined := 0
 	partsRead := 0
 	// One budget, three per-part loops. Written once so a fourth loop cannot be
-	// added without it — the shape of finding 19 and finding 26 both.
+	// added without one — an unbounded per-part loop is the amplification this
+	// budget exists for, and it has been reintroduced by a new loop before.
 	overBudget := func() bool {
 		examined++
 		return examined > maxHeadersExamined
@@ -704,6 +776,18 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 			}
 			_, dparams, derr := mime.ParseMediaType(disposition)
 			if derr != nil {
+				// The parse failed, so ask the raw header what it declares rather
+				// than asking a body-wide spelling heuristic whether the body
+				// might mention something. The gate cannot see an RFC 2047 encoded
+				// word — that is why isEncodedWord exists — so a header made
+				// unparseable while naming the marker as one reached here and was
+				// forwarded. Recovering the names closes that for every spelling
+				// nameVerdict knows, not just the one that was measured.
+				for _, name := range recoverParamValues(disposition, "name") {
+					if refuse, why := nameVerdict("a part's Content-Disposition", disposition, name); refuse {
+						return true, why
+					}
+				}
 				// Gated, unlike the budget and nested branches. Evading THIS gate
 				// needs the marker-bearing disposition to itself be unparseable,
 				// so the name is a guess either way and the heuristic gives up
@@ -758,6 +842,14 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 			// against the prefix test alone above; the budget already covers it.
 			_, tparams, terr := mime.ParseMediaType(partType)
 			if terr != nil {
+				// The same recovery as the disposition above, for the same reason:
+				// this header carries a name too (RFC 2045 §5), and breaking it
+				// must not clear what it declares.
+				for _, name := range recoverParamValues(partType, "name") {
+					if refuse, why := nameVerdict("a part's Content-Type (RFC 2045 §5)", partType, name); refuse {
+						return true, why
+					}
+				}
 				if couldName() {
 					return true, "the body could be naming the reserved marker and a part's Content-Type could not be parsed, so the name it declares cannot be ruled out"
 				}
