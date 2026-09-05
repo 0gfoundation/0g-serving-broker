@@ -1095,10 +1095,25 @@ type ConcurrencyLimitConfig struct {
 	// bytes per token, so lower the budget rather than raising the divisor if
 	// that is the workload.
 	//
-	// Chatbot only. Image, video and audio requests do not hold KV.
-	// Whitelisted callers are NOT exempt — the whole point is to bound the GPU,
-	// and on a router-fronted deployment the whitelisted router is all the
+	// Chatbot only, and only for text-input models: images arrive as base64 in
+	// the body, where a 3 MB picture reads as ~786k tokens against the thousand
+	// or so of KV it really costs, and no headroom absorbs three orders of
+	// magnitude. Whitelisted callers are NOT exempt — the point is to bound the
+	// GPU, and on a router-fronted deployment the whitelisted router is all the
 	// traffic there is.
+	//
+	// Two things to check before enabling:
+	//
+	//   - maxGlobalConcurrent must be well above the number of requests this
+	//     budget admits. It runs as middleware, ahead of this gate, has no "off"
+	//     setting, and sheds as 503 — so if it binds first, this budget never
+	//     decides anything. The broker warns at startup when the two are set
+	//     inconsistently.
+	//   - a router in front reads the resulting 429s. 0g-router today counts a
+	//     429 toward its circuit breaker exactly like a 5xx, and with its
+	//     error-classification feature off it does not fail 429s over at all.
+	//     Neither is worse than the 503 this replaces, but neither is the "full,
+	//     not broken" reading the code is aiming for until the router side lands.
 	InflightTokenBudget int64 `yaml:"inflightTokenBudget"`
 
 	// PerUserOverrides grants specific addresses different per-user limits than

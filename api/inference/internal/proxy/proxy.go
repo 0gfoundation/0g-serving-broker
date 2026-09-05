@@ -168,6 +168,22 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 	logger.Infof("Concurrency limits: global=%d, per-user=%d",
 		concurrencyConfig.MaxGlobalConcurrent, concurrencyConfig.MaxPerUserConcurrent)
 
+	if p.tokenBudgetLimiter != nil {
+		logger.Infof("In-flight token budget: %d tokens", concurrencyConfig.InflightTokenBudget)
+		// maxGlobalConcurrent has no "off" setting and runs as middleware, i.e.
+		// ahead of this gate. If it is low enough to bind first, the token budget
+		// never gets to decide anything — and worse, the request sheds as a 503,
+		// which a router reads as a broken endpoint rather than a full one. Warn
+		// with a concrete threshold rather than guessing a value on the operator's
+		// behalf: how many requests the budget holds depends on their context
+		// sizes, and only the operator knows the traffic.
+		if smallRequests := concurrencyConfig.InflightTokenBudget / minTypicalRequestTokens; int64(concurrencyConfig.MaxGlobalConcurrent) < smallRequests {
+			logger.Warnf(
+				"inflightTokenBudget=%d would admit ~%d small requests, but maxGlobalConcurrent=%d sheds first (as 503, not 429). Raise maxGlobalConcurrent above %d for the token budget to be the binding gate.",
+				concurrencyConfig.InflightTokenBudget, smallRequests, concurrencyConfig.MaxGlobalConcurrent, smallRequests)
+		}
+	}
+
 	// Configure CORS middleware
 	// IMPORTANT: This must handle OPTIONS preflight requests before they reach the proxy handler
 	corsConfig := cors.Config{
@@ -270,23 +286,69 @@ const bytesPerTokenEstimate = 4
 // magnitude for models advertising a 32k output cap.
 const outputReserveTokens = 4096
 
+// minTypicalRequestTokens is the weight of a request small enough that the
+// count gate, not the token budget, would be the first to shed it. Used only to
+// decide whether the startup warning below applies. 8k is a short chat turn
+// plus the output reserve — anything smaller is not the traffic either gate is
+// sized for.
+const minTypicalRequestTokens = 8192
+
 // tokenBudgetWeight returns the KV weight to charge this request and whether
 // the gate applies at all.
 //
-// Only chatbot traffic is charged: image, video and audio requests do not hold
-// KV cache on the engine, so counting them would shrink the budget for the
-// requests that do. A disabled limiter reports false so the caller skips the
-// acquire/release pair entirely.
+// It reports false — skip the acquire/release pair entirely — when the limiter
+// is disabled, when the service is not chatbot (image, video and audio requests
+// do not hold KV cache, so charging them would shrink the budget for the
+// requests that do), or when the model accepts non-text input.
+//
+// The multimodal exclusion is not fastidiousness. Images arrive as base64 data
+// URLs inside the JSON body, and a 3 MB image is roughly 786k bytes-over-four
+// while occupying on the order of a thousand tokens of KV. That is a
+// three-order-of-magnitude error in the one number this gate is built on, so
+// for such a model the byte estimate is not a usable proxy and the gate stays
+// out of the way rather than shedding traffic on a fiction.
 func (p *Proxy) tokenBudgetWeight(svcType string, reqBody []byte) (int64, bool) {
-	if p.tokenBudgetLimiter == nil || svcType != "chatbot" {
+	if p.tokenBudgetLimiter == nil || svcType != constant.ServiceTypeChatbot {
 		return 0, false
 	}
+	mi := p.ctrl.Service.ModelInfo
+	if !textOnlyInput(mi) {
+		return 0, false
+	}
+
 	reserve := int64(outputReserveTokens)
-	if mi := p.ctrl.Service.ModelInfo; mi != nil && mi.MaxCompletionTokens > 0 && int64(mi.MaxCompletionTokens) < reserve {
+	if mi != nil && mi.MaxCompletionTokens > 0 && int64(mi.MaxCompletionTokens) < reserve {
 		// A model that cannot generate 4096 tokens should not be charged for them.
 		reserve = int64(mi.MaxCompletionTokens)
 	}
-	return int64(len(reqBody))/bytesPerTokenEstimate + reserve, true
+	weight := int64(len(reqBody))/bytesPerTokenEstimate + reserve
+
+	// Bound the estimate by physics. One request cannot hold more KV than the
+	// context window, so a body whose byte count says otherwise is the estimate
+	// being wrong, not the engine being asked for the impossible. Without this,
+	// a single 32 MB body (the request size limit) weighs 8.4M tokens, exceeds
+	// any budget, and — since an over-budget request is admitted alone rather
+	// than rejected — parks the entire chatbot surface behind one request.
+	if mi != nil && mi.ContextLength > 0 && weight > int64(mi.ContextLength) {
+		weight = int64(mi.ContextLength)
+	}
+	return weight, true
+}
+
+// textOnlyInput reports whether the model's advertised input is text and
+// nothing else. An unset architecture is treated as text-only: every model this
+// broker fronts today is, and the alternative would silently disable the gate
+// on a provider whose metadata is merely incomplete.
+func textOnlyInput(mi *config.ModelInfo) bool {
+	if mi == nil || mi.Architecture == nil || len(mi.Architecture.InputModalities) == 0 {
+		return true
+	}
+	for _, m := range mi.Architecture.InputModalities {
+		if !strings.EqualFold(strings.TrimSpace(m), "text") {
+			return false
+		}
+	}
+	return true
 }
 
 // buildPerUserOverrides converts the operator-supplied per-address override
@@ -726,23 +788,6 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		}
 	}
 
-	// In-flight KV budget. Deliberately OUTSIDE the !isWhitelisted block above:
-	// the per-user gates exempt whitelisted callers because they are trusted, but
-	// trust does not create GPU memory, and on a router-fronted deployment the
-	// whitelisted router is all the traffic there is. Exempting it would leave
-	// the gate guarding nothing.
-	//
-	// Placed after session validation so an unauthenticated request cannot
-	// reserve capacity, and it charges the real body length rather than
-	// Content-Length, which a client controls independently of what it sent.
-	if weight, ok := p.tokenBudgetWeight(svcType, reqBody); ok {
-		if !middleware.CheckTokenBudget(p.tokenBudgetLimiter, ctx, weight) {
-			p.rejections.record(ctx, monitor.RejectionTokenBudget, userAddress)
-			return
-		}
-		defer p.tokenBudgetLimiter.Release(weight)
-	}
-
 	// Set rate limit response headers BEFORE forwarding to backend.
 	// Headers must be set before the response body is written, so we use
 	// current remaining values (pre-request). The actual consumption from
@@ -1026,6 +1071,26 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	if err := p.ctrl.CreateRequest(req); err != nil {
 		p.handleBrokerError(ctx, err, "create request")
 		return
+	}
+
+	// In-flight KV budget, taken here rather than earlier for two reasons.
+	//
+	// It is AFTER the billing gate so a caller with no balance, or one that is
+	// not acknowledged, cannot reserve GPU capacity it will never pay for. Taken
+	// before validation, a single authenticated but unfunded address could hold
+	// the whole budget with one oversized body and shed every paying request at
+	// zero cost.
+	//
+	// It is OUTSIDE the !isWhitelisted block above, because the per-user gates
+	// exempt whitelisted callers as trusted and trust does not create GPU memory.
+	// On a router-fronted deployment the whitelisted router is all the traffic
+	// there is, so exempting it would leave the gate guarding nothing.
+	if weight, ok := p.tokenBudgetWeight(svcType, reqBody); ok {
+		if !middleware.CheckTokenBudget(p.tokenBudgetLimiter, ctx, weight) {
+			p.rejections.record(ctx, monitor.RejectionTokenBudget, userAddress)
+			return
+		}
+		defer p.tokenBudgetLimiter.Release(weight)
 	}
 
 	httpReq, err := p.ctrl.PrepareHTTPRequest(ctx, targetURL, reqBody, svcType)

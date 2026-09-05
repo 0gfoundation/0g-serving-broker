@@ -112,3 +112,59 @@ func TestTokenBudgetWeight_SeparatesTheTwoTrafficShapes(t *testing.T) {
 		t.Fatalf("250k-token requests admitted %d, expected the budget to stop well before 20", got)
 	}
 }
+
+// Images arrive as base64 inside the JSON body: a 3 MB picture reads as ~786k
+// tokens against the ~1k of KV it really costs. Three orders of magnitude is
+// not headroom, so a multimodal model must be left out of the gate entirely
+// rather than shed traffic on a fiction.
+func TestTokenBudgetWeight_MultimodalModelIsExcluded(t *testing.T) {
+	p := newBudgetProxy(1_000_000, 32768)
+	p.ctrl.Service.ModelInfo.Architecture = &config.ModelArchitecture{
+		InputModalities:  []string{"text", "image"},
+		OutputModalities: []string{"text"},
+	}
+
+	if _, ok := p.tokenBudgetWeight("chatbot", []byte(strings.Repeat("x", 40000))); ok {
+		t.Fatal("a model accepting images must not be charged on body bytes")
+	}
+}
+
+func TestTokenBudgetWeight_TextOnlyArchitectureIsCharged(t *testing.T) {
+	p := newBudgetProxy(1_000_000, 32768)
+	p.ctrl.Service.ModelInfo.Architecture = &config.ModelArchitecture{
+		InputModalities:  []string{"Text"},
+		OutputModalities: []string{"text"},
+	}
+
+	if _, ok := p.tokenBudgetWeight("chatbot", []byte("body")); !ok {
+		t.Fatal("a text-only model must still be charged (match is case-insensitive)")
+	}
+}
+
+// One request cannot hold more KV than the context window. Without this bound a
+// single 32 MB body (the request size limit) weighs 8.4M tokens, exceeds any
+// budget, and — since an over-budget request is admitted alone — parks the
+// whole chatbot surface behind it.
+func TestTokenBudgetWeight_BoundedByContextLength(t *testing.T) {
+	p := newBudgetProxy(1_440_000, 32768)
+	p.ctrl.Service.ModelInfo.ContextLength = 262144
+
+	weight, ok := p.tokenBudgetWeight("chatbot", make([]byte, 32<<20))
+	if !ok {
+		t.Fatal("chatbot traffic must be charged")
+	}
+	if weight != 262144 {
+		t.Fatalf("weight = %d, want it bounded by the %d context window", weight, 262144)
+	}
+}
+
+// The bound must not inflate an ordinary request.
+func TestTokenBudgetWeight_ContextBoundDoesNotRaiseSmallWeights(t *testing.T) {
+	p := newBudgetProxy(1_440_000, 32768)
+	p.ctrl.Service.ModelInfo.ContextLength = 262144
+
+	weight, _ := p.tokenBudgetWeight("chatbot", []byte(strings.Repeat("x", 4000)))
+	if want := int64(1000 + outputReserveTokens); weight != want {
+		t.Fatalf("weight = %d, want %d", weight, want)
+	}
+}

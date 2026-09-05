@@ -108,11 +108,20 @@ func (l *TokenBudgetLimiter) Stats() (used, budget int64) {
 // aborting when it does not fit. Returns true when the caller may proceed, in
 // which case the caller owns a matching Release.
 //
-// The status code is deliberately 429 and not the 503 that the global
-// concurrency cap returns. Downstream routers read a 5xx as "this endpoint is
-// broken" and open a circuit breaker on it, while 429 is "full right now" —
-// which is exactly what this is, and lets a caller overflow one request
-// elsewhere instead of writing the whole endpoint off.
+// The status code is deliberately 429 and not the 503 the global concurrency
+// cap returns, because 429 is what this is: full right now, not broken.
+//
+// Be precise about what that buys today, though. 0g-router currently treats 429
+// exactly like a 5xx — pkg/inference/executor.go excludes it from transportOK
+// and calls MarkProviderFailed, so N consecutive rejections still open its
+// circuit breaker. A router-side change is what makes 429 mean "capacity"
+// there; until it ships and is enabled, the honest description of this choice
+// is "semantically correct and no worse than 503", not "avoids the breaker".
+//
+// One caveat worth knowing before enabling this on a router-fronted deployment:
+// with the router's error-classification feature OFF, its retry predicate
+// matches 5xx and transport errors only, so a 429 is NOT failed over while a
+// 503 would have been. Check that flag before turning the budget on.
 //
 // ignoreError marks the rejection as expected so it is attributed to the client
 // rather than counted as a broker fault, matching every other admission gate.
