@@ -26,22 +26,32 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/config"
 )
 
-// conservativeBytesPerToken converts request-body bytes to a deliberately HIGH
-// prompt-token estimate, used only to decide how much output can still fit in
-// the context window.
+// bytesPerToken converts request-body bytes to an approximate prompt-token
+// count, used only to answer one question: does the advertised cap still fit in
+// the context window? It is never used to compute a smaller cap — see
+// injectableOutputCap for why.
 //
-// Three bytes per token is roughly CJK-shaped; English/JSON runs nearer four.
-// Over-estimating is the safe direction for the upper bound: an injected cap
-// that is too LARGE means an upstream 400 (input + max_tokens > context
-// length), turning a request that would have worked into an error.
+// Four is the English/JSON ratio. An earlier version used three, reasoning that
+// over-estimating was the safe direction because an injected cap that does not
+// fit means an upstream 400. That got the trade backwards. Over-estimating by a
+// third moves the "does not fit" verdict a third of the window too early, and
+// the verdict is fail-OPEN: nothing is injected and the request generates
+// unbounded. On a 262144-token model advertising 32768, the three-byte reading
+// gave up at roughly 66% of context, while 90k tokens of room — nearly three
+// times the advertised cap — actually remained.
 //
-// It is used only as a yes/no test — does the advertised cap still fit — never
-// to compute a smaller cap from. Deriving one would compound the error as the
-// prompt approaches the window (at a real prompt of 70% of context the estimate
-// leaves a twentieth of the room that actually remains) and produce caps small
-// enough to be swallowed whole by a reasoning model's thinking tokens. See
-// injectableOutputCap.
-const conservativeBytesPerToken = 3
+// At four the verdict lands within a few percent of the real boundary. The
+// residual risk is a prompt whose bytes-per-token runs lower than four: CJK sent
+// as UTF-8 is near three, so a prompt close to the window can be under-read and
+// the injected cap can overflow it, which the upstream answers with a 400. That
+// only reaches requests already within a cap's width of the window, and a loud
+// 400 there is a better failure than silently unbounded generation.
+//
+// One case this cannot read at all: base64 attachments. An image is thousands
+// of bytes per token, so a request carrying one looks far larger than it is and
+// takes the fail-open path early. Models that accept images are outside this
+// pass's remit anyway, but a text model handed a data URL will not get a cap.
+const bytesPerToken = 4
 
 // CapMaxOutputTokens lowers the request's output-token cap to the resolved
 // model's maxCompletionTokens. resolvedModel is the public/canonical id
@@ -202,7 +212,11 @@ func (c *Ctrl) injectableOutputCap(mi *config.ModelInfo, limit int64, bodyLen in
 	if mi.ContextLength <= 0 {
 		return limit
 	}
-	if int64(mi.ContextLength)-int64(bodyLen)/conservativeBytesPerToken < limit {
+	if int64(mi.ContextLength)-int64(bodyLen)/bytesPerToken < limit {
+		// Fail open, and say so. "Configured but never applied" is otherwise
+		// indistinguishable from "applied and the client asked for less", and this
+		// is the branch where the flag stops protecting anything.
+		c.logger.Infof("capMaxOutputTokens: no room for the advertised %d-token cap alongside an estimated %d-token prompt; forwarding without one", limit, int64(bodyLen)/bytesPerToken)
 		return 0
 	}
 	return limit

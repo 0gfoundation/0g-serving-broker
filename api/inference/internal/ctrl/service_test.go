@@ -32,9 +32,9 @@ func newUSDOverlayCtrl(t *testing.T, priceCache *pricefeed.Cache, staleness time
 		serviceCache: svcCache,
 		priceCache:   priceCache,
 		Service: config.Service{
-			PriceDenomination: constant.PriceDenominationUSD,
-			InputPriceUSDPerMillionTokens:     "0.50",
-			OutputPriceUSDPerMillionTokens:    "1.50",
+			PriceDenomination:              constant.PriceDenominationUSD,
+			InputPriceUSDPerMillionTokens:  "0.50",
+			OutputPriceUSDPerMillionTokens: "1.50",
 		},
 		priceFeed: config.PriceFeedConfig{
 			StalenessThreshold: staleness,

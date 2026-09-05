@@ -3955,3 +3955,130 @@ func TestValidatePricingTiers_FractionalMultipliers(t *testing.T) {
 		}
 	}
 }
+
+// The three enforceMaxCompletionTokens load checks are wired into loadConfig,
+// not just implemented. Without a case at this level, deleting the call site
+// leaves every unit test green.
+
+func TestLoadConfig_EnforceMaxCompletionTokens_RejectsNonChatbot(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "text-to-image"
+  model: "dall-e-3"
+  providerType: "centralized"
+  providerIdentity: "openai"
+  verifiability: "TeeML"
+  inputPrice: "10"
+  outputPrice: "30"
+  enforceMaxCompletionTokens: true
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "enforceMaxCompletionTokens is only supported") {
+		t.Fatalf("expected non-chatbot rejection, got: %v", err)
+	}
+}
+
+// The clamp injects a cap under whichever spelling the model advertises, so
+// without that declaration the spelling would be a guess — and a wrong guess
+// fails every capless request on the service.
+func TestLoadConfig_EnforceMaxCompletionTokens_RequiresSupportedParameters(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "chatbot"
+  model: "glm-5.3"
+  providerType: "centralized"
+  providerIdentity: "zhipu"
+  verifiability: "TeeML"
+  inputPrice: "10"
+  outputPrice: "30"
+  enforceMaxCompletionTokens: true
+  modelInfo:
+    name: "GLM-5.3"
+    description: "test model"
+    contextLength: 262144
+    maxCompletionTokens: 32768
+    architecture:
+      modality: "text->text"
+      inputModalities: ["text"]
+      outputModalities: ["text"]
+    supportedParameters:
+      - temperature
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "supportedParameters") {
+		t.Fatalf("expected a supportedParameters rejection, got: %v", err)
+	}
+}
+
+// strip runs after the clamp and would delete the cap it just set.
+func TestLoadConfig_EnforceMaxCompletionTokens_RejectsStrippingTheCap(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "chatbot"
+  model: "glm-5.3"
+  providerType: "centralized"
+  providerIdentity: "zhipu"
+  verifiability: "TeeML"
+  inputPrice: "10"
+  outputPrice: "30"
+  enforceMaxCompletionTokens: true
+  stripBodyFields:
+    - max_tokens
+  modelInfo:
+    name: "GLM-5.3"
+    description: "test model"
+    contextLength: 262144
+    maxCompletionTokens: 32768
+    architecture:
+      modality: "text->text"
+      inputModalities: ["text"]
+      outputModalities: ["text"]
+    supportedParameters:
+      - max_tokens
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "strip runs after the clamp") {
+		t.Fatalf("expected a strip-conflict rejection, got: %v", err)
+	}
+}
+
+// inject is server-config-wins, so it overwrites the clamped value and can
+// raise the cap above the advertised maximum.
+func TestLoadConfig_EnforceMaxCompletionTokens_RejectsInjectingTheCap(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "chatbot"
+  model: "glm-5.3"
+  providerType: "centralized"
+  providerIdentity: "zhipu"
+  verifiability: "TeeML"
+  inputPrice: "10"
+  outputPrice: "30"
+  enforceMaxCompletionTokens: true
+  injectBodyFields:
+    max_tokens: 200000
+  modelInfo:
+    name: "GLM-5.3"
+    description: "test model"
+    contextLength: 262144
+    maxCompletionTokens: 32768
+    architecture:
+      modality: "text->text"
+      inputModalities: ["text"]
+      outputModalities: ["text"]
+    supportedParameters:
+      - max_tokens
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "inject runs after the clamp") {
+		t.Fatalf("expected an inject-conflict rejection, got: %v", err)
+	}
+}

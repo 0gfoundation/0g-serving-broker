@@ -265,7 +265,7 @@ func TestCapMaxOutputTokens_NoRoomForTheFullCapInjectsNothing(t *testing.T) {
 	c := newTestCtrlForOutputCapCtx(t, true, maxCompletion, contextLength)
 
 	// ~150k estimated prompt tokens: the advertised 131072 cannot also fit.
-	body := []byte(`{"p":"` + strings.Repeat("x", 450000) + `"}`)
+	body := []byte(`{"p":"` + strings.Repeat("x", 600000) + `"}`)
 	out, err := c.CapMaxOutputTokens(body, "glm-5.3", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

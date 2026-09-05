@@ -13,6 +13,12 @@ const (
 )
 
 // allModelInfos returns every ModelInfo this service can serve a request with:
+//
+// Reads the raw ModelPricing slice, NOT HasMultiModelPricing(). The derived
+// lookup map that predicate consults is built at the END of validateModelPricing,
+// which runs after this — so "unifying" the two would make the whole check
+// silently degrade to the service-level block on every multi-model provider.
+//
 // the per-entry blocks of a multi-model service (falling back to the
 // service-level one where an entry carries none), or just the service-level
 // block otherwise. Nil blocks are skipped — a model with no metadata at all is
