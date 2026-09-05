@@ -1073,6 +1073,73 @@ type ConcurrencyLimitConfig struct {
 	PerUserIPM           int `yaml:"perUserIPM"`           // Max images per minute per user (default: 0 = disabled, text-to-image/image-editing)
 	PerUserIPMBurst      int `yaml:"perUserIPMBurst"`      // Max burst size for per-user IPM limit (default: 0)
 
+	// InflightTokenBudget caps the total context of concurrent chatbot requests,
+	// in tokens. 0 (default) disables it and nothing changes.
+	//
+	// Every other gate here counts requests, which only works while requests are
+	// interchangeable. On a self-hosted engine they are not: KV cache is charged
+	// per token, so twenty 40k-token conversations and four 250k-token ones
+	// occupy the same GPU memory. A request-count cap tuned for one shape
+	// over-admits the other, and when KV fills the engine evicts running requests
+	// and recomputes them — throughput collapses while the request count still
+	// looks healthy. Measured on 19-glm5.3 (2026-09-03): 28 in-flight was correct
+	// for 40k contexts and catastrophic once the same 28 carried more.
+	//
+	// Set it to about 80% of the engine's KV pool (sglang reports
+	// sglang_max_total_num_tokens). The headroom absorbs the estimate below.
+	//
+	// A request weighs promptBytes/4 (capped at the model's context length) plus
+	// an output reserve. The reserve is NOT capped by the window: n sequences
+	// decode independently and each holds its own output KV. The prompt half counts only the fields that actually become
+	// prompt (system, message content, tool definitions); the envelope is
+	// deliberately excluded, since JSON whitespace and ignored fields cost the
+	// engine nothing and charging for them would let one padded body claim the
+	// whole budget. The reserve is what the request itself declared — max_tokens,
+	// max_completion_tokens, thinking.budget_tokens, times n — because decode KV
+	// grows with every token produced; a flat constant under-counts reasoning
+	// traffic by an order of magnitude. It falls back to 4096 when the caller
+	// declared nothing.
+	//
+	// The /4 divisor is English/JSON-shaped and errs downward: CJK packs near 3
+	// bytes per token (about a quarter low) and adversarial input — random
+	// characters, emoji, dense CJK — can reach 3-4x low. Escapes do not offset
+	// that, since string content is measured after JSON decoding, so \u4f60 and
+	// a literal CJK character count the same. The context-length cap on the
+	// prompt half is what keeps the worst case bounded; lower the budget for
+	// consistently CJK-heavy traffic rather than adding a second knob.
+	//
+	// Intended for a self-hosted engine, where KV is a resource this broker
+	// shares with itself. In front of a centralized upstream there is no local KV
+	// pool to bound and the gate only sheds traffic the vendor would have
+	// accepted.
+	//
+	// Chatbot only, and only for models declaring all three of contextLength,
+	// maxCompletionTokens and text-only architecture.inputModalities. Each bounds
+	// something the byte estimate cannot: the prompt half, the output half per
+	// sequence, and whether bytes stand for tokens at all (a 3 MB image reads as
+	// ~786k tokens against the thousand or so of KV it really costs). A model
+	// missing any of them is skipped rather than charged an unbounded estimate,
+	// and named in a startup warning so the gap is visible. On a multi-model
+	// provider the per-entry modelInfo decides this per model.
+	//
+	// Whitelisted callers are NOT exempt — the point is to bound the GPU, and on
+	// a router-fronted deployment the whitelisted router is all the traffic there
+	// is.
+	//
+	// Two things to check before enabling:
+	//
+	//   - maxGlobalConcurrent must be well above the number of requests this
+	//     budget admits. It runs as middleware, ahead of this gate, has no "off"
+	//     setting, and sheds as 503 — so if it binds first, this budget never
+	//     decides anything. The broker warns at startup when the two are set
+	//     inconsistently.
+	//   - a router in front reads the resulting 429s. 0g-router today counts a
+	//     429 toward its circuit breaker exactly like a 5xx, and with its
+	//     error-classification feature off it does not fail 429s over at all.
+	//     Neither is worse than the 503 this replaces, but neither is the "full,
+	//     not broken" reading the code is aiming for until the router side lands.
+	InflightTokenBudget int64 `yaml:"inflightTokenBudget"`
+
 	// PerUserOverrides grants specific addresses different per-user limits than
 	// the shared defaults above, without changing the limit for everyone else.
 	// Intended for heavy partners who legitimately need more headroom. Overrides

@@ -39,9 +39,12 @@ type Proxy struct {
 	rateLimiter               *middleware.RateLimiter
 	concurrencyLimiter        *middleware.ConcurrencyLimiter
 	perUserConcurrencyLimiter *middleware.PerUserConcurrencyLimiter
-	perUserRateLimiter        *middleware.PerUserRateLimiter
-	perUserTPMLimiter         *middleware.PerUserTPMLimiter
-	perUserIPMLimiter         *middleware.PerUserTPMLimiter
+	// tokenBudgetLimiter bounds concurrent chatbot work by context size instead
+	// of request count. nil = disabled. See ConcurrencyLimitConfig.InflightTokenBudget.
+	tokenBudgetLimiter *middleware.TokenBudgetLimiter
+	perUserRateLimiter *middleware.PerUserRateLimiter
+	perUserTPMLimiter  *middleware.PerUserTPMLimiter
+	perUserIPMLimiter  *middleware.PerUserTPMLimiter
 	// imageServeLimiter throttles the unauthenticated /v1/proxy/images/{key}/{i}
 	// endpoint per-client-IP. The endpoint bypasses session auth (UUID-as-token
 	// model), so a bandwidth-amplification bound is the only defence against a
@@ -90,6 +93,9 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 		// Configure concurrency limiter to match backend GPU capacity
 		concurrencyLimiter:        middleware.NewConcurrencyLimiter(concurrencyConfig.MaxGlobalConcurrent),
 		perUserConcurrencyLimiter: middleware.NewPerUserConcurrencyLimiter(concurrencyConfig.MaxPerUserConcurrent, concOverrides),
+		// nil when inflightTokenBudget is unset, and every call on it is then a
+		// no-op. See ConcurrencyLimitConfig.InflightTokenBudget.
+		tokenBudgetLimiter: middleware.NewTokenBudgetLimiter(concurrencyConfig.InflightTokenBudget),
 	}
 
 	// Initialize per-user rate limiter if configured
@@ -161,6 +167,33 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 
 	logger.Infof("Concurrency limits: global=%d, per-user=%d",
 		concurrencyConfig.MaxGlobalConcurrent, concurrencyConfig.MaxPerUserConcurrent)
+
+	if p.tokenBudgetLimiter != nil {
+		logger.Infof("In-flight token budget: %d tokens", concurrencyConfig.InflightTokenBudget)
+		// A model with no resolvable modelInfo is served but never charged against
+		// the budget, and nothing about that is visible at request time — the
+		// rejection counter simply stays at zero and the gate looks healthy. Say
+		// it once, loudly, at startup. The usual causes are a chatbot service with
+		// no modelInfo block at all, a wildcard "*" pricing entry (which by
+		// definition carries none), and a single entry that forgot one.
+		if unmanaged := unmanagedBudgetModels(&ctrl.Service); len(unmanaged) > 0 {
+			logger.Warnf(
+				"inflightTokenBudget is set but these models are NOT bounded by it: %s. Each needs modelInfo with contextLength, maxCompletionTokens, and text-only architecture.inputModalities; a model accepting images cannot be weighed by byte count at all. Until then they consume the engine unmetered.",
+				strings.Join(unmanaged, ", "))
+		}
+		// maxGlobalConcurrent has no "off" setting and runs as middleware, i.e.
+		// ahead of this gate. If it is low enough to bind first, the token budget
+		// never gets to decide anything — and worse, the request sheds as a 503,
+		// which a router reads as a broken endpoint rather than a full one. Warn
+		// with a concrete threshold rather than guessing a value on the operator's
+		// behalf: how many requests the budget holds depends on their context
+		// sizes, and only the operator knows the traffic.
+		if smallRequests := concurrencyConfig.InflightTokenBudget / minTypicalRequestTokens; int64(concurrencyConfig.MaxGlobalConcurrent) < smallRequests {
+			logger.Warnf(
+				"inflightTokenBudget=%d would admit ~%d small requests, but maxGlobalConcurrent=%d sheds first (as 503, not 429). Raise maxGlobalConcurrent above %d for the token budget to be the binding gate.",
+				concurrencyConfig.InflightTokenBudget, smallRequests, concurrencyConfig.MaxGlobalConcurrent, smallRequests)
+		}
+	}
 
 	// Configure CORS middleware
 	// IMPORTANT: This must handle OPTIONS preflight requests before they reach the proxy handler
@@ -245,6 +278,249 @@ func (p *Proxy) globalConcurrencyMiddleware() gin.HandlerFunc {
 	return middleware.ConcurrencyLimitMiddleware(p.concurrencyLimiter, func(c *gin.Context) {
 		p.rejections.record(c, monitor.RejectionGlobalConcurrency, "")
 	})
+}
+
+// bytesPerTokenEstimate converts prompt bytes (see promptBytes — the envelope
+// does not count) to an approximate token count. Four is the usual English/JSON
+// ratio. It is an estimate on purpose: tokenizing every request to gate it
+// would cost more than the gate saves, and the budget carries explicit headroom
+// (see InflightTokenBudget) to absorb the error.
+//
+// The error is one-directional for the common case, and downward. CJK packs
+// near three bytes per token, so this runs about a quarter low — and escapes do
+// not offset it: string content is measured after JSON decoding, so \u4f60 and
+// a literal CJK character count the same. (Only an unrecognised content block,
+// measured as compacted JSON, counts escapes at their encoded width.) Lower the
+// budget for CJK-heavy traffic rather than adding a second knob.
+const bytesPerTokenEstimate = 4
+
+// outputReserveTokens is the per-request output allowance used when the caller
+// declares none of its own.
+//
+// It matches the reservation sglang makes while deciding whether a request fits
+// (PrefillAdder clips at CLIP_MAX_NEW_TOKENS = 4096 regardless of
+// max_new_tokens). Note what that number is: the engine's OPTIMISTIC admission
+// estimate, not steady-state occupancy — and its optimism is why the engine
+// ends up evicting and recomputing, which is the outcome this budget exists to
+// avoid. So it is only the fallback. When the caller states a ceiling, that is
+// used instead; see requestedOutputTokens.
+const outputReserveTokens = 4096
+
+// minTypicalRequestTokens is the weight of a request small enough that the
+// count gate, not the token budget, would be the first to shed it. Used only to
+// decide whether the startup warning below applies. 8k is a short chat turn
+// plus the output reserve — anything smaller is not the traffic either gate is
+// sized for.
+const minTypicalRequestTokens = 8192
+
+// unmanagedBudgetModels lists the chatbot models this service can serve that
+// the in-flight token budget will NOT bound, because no modelInfo with a
+// positive contextLength resolves for them.
+//
+// The gate skips such a model rather than charge it on an estimate nothing
+// bounds (see tokenBudgetWeight), which is the right call per request and the
+// wrong thing to be silent about across a deployment: the model is still served
+// and still fills KV, while the rejection counter reads zero and the gate looks
+// like it is working.
+//
+// Resolution mirrors EffectiveModelInfoFor: a pricing entry's own modelInfo,
+// falling back to the service-level block.
+func unmanagedBudgetModels(svc *config.Service) []string {
+	if svc.Type != constant.ServiceTypeChatbot {
+		return nil
+	}
+	effective := func(entry *config.ModelInfo) *config.ModelInfo {
+		if entry != nil {
+			return entry
+		}
+		return svc.ModelInfo
+	}
+	bounded := budgetableModel
+
+	if !svc.HasMultiModelPricing() {
+		if bounded(svc.ModelInfo) {
+			return nil
+		}
+		name := svc.ModelType
+		if name == "" {
+			name = "(service model)"
+		}
+		return []string{name}
+	}
+
+	var unmanaged []string
+	for i := range svc.ModelPricing {
+		entry := &svc.ModelPricing[i]
+		if bounded(effective(entry.ModelInfo)) {
+			continue
+		}
+		name := entry.Model
+		if name == config.ModelWildcard {
+			// The wildcard serves every unlisted model, so it is the widest hole
+			// of the lot; name it as such rather than printing a bare "*".
+			name = `"*" (every unlisted model)`
+		}
+		unmanaged = append(unmanaged, name)
+	}
+	return unmanaged
+}
+
+// reserveTokenBudget takes this request's share of the in-flight KV budget.
+//
+// Returns the release to defer and whether the request may proceed; on refusal
+// the 429 is already written and the rejection recorded. When the gate does not
+// apply the release is a no-op, so both call sites read the same way.
+//
+// There are two call sites on purpose — the whitelisted branch returns before
+// the billed one — and both must keep it. Whitelisting exempts a caller from
+// billing and per-user limits because it is trusted, but trust does not create
+// GPU memory, and on a router-fronted deployment the whitelisted router is all
+// the traffic there is.
+func (p *Proxy) reserveTokenBudget(ctx *gin.Context, svcType, modelName, userAddress string, reqBody []byte) (func(), bool) {
+	weight, ok := p.tokenBudgetWeight(svcType, modelName, ctx, reqBody)
+	if !ok {
+		return func() {}, true
+	}
+	if !middleware.CheckTokenBudget(p.tokenBudgetLimiter, ctx, weight) {
+		p.rejections.record(ctx, monitor.RejectionTokenBudget, userAddress)
+		return func() {}, false
+	}
+	return func() { p.tokenBudgetLimiter.Release(weight) }, true
+}
+
+// tokenBudgetWeight returns the KV weight to charge this request and whether
+// the gate applies at all.
+//
+// It reports false — skip the acquire/release pair entirely — when the limiter
+// is disabled, when the service is not chatbot (image, video and audio requests
+// do not hold KV cache, so charging them would shrink the budget for the
+// requests that do), or when the model accepts non-text input.
+//
+// The multimodal exclusion is not fastidiousness. Images arrive as base64 data
+// URLs inside the JSON body, and a 3 MB image is roughly 786k bytes-over-four
+// while occupying on the order of a thousand tokens of KV. That is a
+// three-order-of-magnitude error in the one number this gate is built on, so
+// for such a model the byte estimate is not a usable proxy and the gate stays
+// out of the way rather than shedding traffic on a fiction.
+func (p *Proxy) tokenBudgetWeight(svcType, modelName string, ctx *gin.Context, reqBody []byte) (int64, bool) {
+	if p.tokenBudgetLimiter == nil || svcType != constant.ServiceTypeChatbot {
+		return 0, false
+	}
+	// Resolve the metadata for the model this request actually names, not the
+	// service-level block. A multi-model provider carries its modelInfo per
+	// pricing entry and usually has no service-level one at all, so reading
+	// Service.ModelInfo there returns nil — which would quietly disable both
+	// guards below at once, treating a vision model as text and leaving the
+	// weight unbounded. That is the worst combination available.
+	mi := p.ctrl.Service.EffectiveModelInfoFor(modelName, ctrl.UpstreamIdentity(ctx))
+	if !budgetableModel(mi) {
+		// Every one of the three facts budgetableModel requires bounds something
+		// the estimate cannot bound on its own, and a model missing any of them
+		// gets charged a number with no ceiling. Skipping is the honest answer;
+		// the startup warning names exactly this set, so an operator sees which
+		// models are unmetered rather than watching a rejection counter sit at
+		// zero and concluding the gate works.
+		//
+		// Skipping is not free either: such a model is served while escaping the
+		// budget entirely. That is why New() enumerates these at startup instead
+		// of letting the gate look like it is working. See unmanagedBudgetModels.
+		return 0, false
+	}
+
+	// The estimate walks only prompt-bearing fields, and that is load-bearing
+	// rather than fastidious: a length-based shortcut would charge padding, and
+	// padding is exactly what an attacker pads with. A body whose bulk sits in a
+	// field the upstream ignores costs the engine nothing, runs for minutes, and
+	// under a length-based weight would hold the whole budget while doing so.
+	//
+	// The ceiling bounds the walk. Past the point where the weight is clamped to
+	// the context window anyway, more counting cannot change the answer, so a
+	// body made of a million tiny blocks stops being a way to burn broker CPU.
+	est := estimateRequest(reqBody, int64(mi.ContextLength)*bytesPerTokenEstimate)
+
+	// The reserve covers decode, which grows with every token generated.
+	//
+	// Default to what the model advertises, not to a small constant. A constant
+	// would mean a request that declares nothing is charged less than one that
+	// declares 32k — while an undeclared cap is precisely the unbounded case, so
+	// deleting one field would buy eight times the admission for identical real
+	// cost. Declaring must never be more expensive than not declaring.
+	// Three separate numbers, and conflating any two of them has been a bug
+	// already:
+	//
+	//   maxPerSequence — what the model can produce at all. The advertised cap
+	//     when there is one; otherwise the context window, since nothing
+	//     generates past that.
+	//   declared       — what this request asked for, per sequence.
+	//   fallback       — what to charge when it asked for nothing, which is the
+	//     unbounded case and must never be the cheapest option.
+	//
+	// The fallback is NOT a ceiling. Treating it as one meant that a model with
+	// no advertised maximum charged a request declaring 128k output the same as
+	// one declaring 1 — the whole declaration discarded, a sixteen-fold
+	// under-count on exactly the traffic this budget exists to bound. It is also
+	// why the advertised maximum is now REQUIRED rather than defaulted: standing
+	// the context window in for it let a 72-byte body declaring n=8 and a
+	// nine-million-token cap weigh eight windows, clamp to the whole budget, and
+	// shut out every other request while it ran.
+	maxPerSequence := int64(mi.MaxCompletionTokens)
+	reserve := est.OutputTokensPerSequence
+	if reserve <= 0 {
+		// Undeclared: charge the advertised maximum, so declaring a number can
+		// only ever cost less than staying silent.
+		reserve = maxPerSequence
+	}
+	if reserve > maxPerSequence {
+		reserve = maxPerSequence
+	}
+	// Clamp per sequence, THEN multiply: maxCompletionTokens is a per-sequence
+	// figure, so applying it to the total would silently discard n.
+	if est.Sequences > 1 {
+		reserve *= est.Sequences
+	}
+
+	// Bound the PROMPT by physics — no request holds more context than the
+	// window — but not the total. n sequences decode independently and each
+	// holds its own output KV, so their sum legitimately exceeds one window;
+	// clamping the total would discard the multiplier a second time.
+	promptTokens := est.PromptBytes / bytesPerTokenEstimate
+	if promptTokens > int64(mi.ContextLength) {
+		promptTokens = int64(mi.ContextLength)
+	}
+	return promptTokens + reserve, true
+}
+
+// budgetableModel reports whether a model declares everything the weight needs
+// in order to be bounded.
+//
+// Three facts, each bounding something the byte estimate cannot bound alone:
+//
+//	contextLength       — the ceiling on the prompt half. Without it a 32 MB
+//	                      body weighs millions of tokens and parks the surface.
+//	maxCompletionTokens — the ceiling on the output half, per sequence. Without
+//	                      it, n multiplies against the context window instead.
+//	inputModalities     — whether bytes stand for tokens at all. An image is
+//	                      thousands of bytes per token, so charging one by
+//	                      length is wrong by three orders of magnitude.
+//
+// An unset architecture used to be read as text-only, on the reasoning that
+// every model here is. That turns a metadata omission into a silent
+// mischarge, and the omission is the likelier state for a newly added model.
+// Requiring the declaration makes the gate's coverage a property an operator
+// can see, via the startup warning, rather than one they have to infer.
+func budgetableModel(mi *config.ModelInfo) bool {
+	if mi == nil || mi.ContextLength <= 0 || mi.MaxCompletionTokens <= 0 {
+		return false
+	}
+	if mi.Architecture == nil || len(mi.Architecture.InputModalities) == 0 {
+		return false
+	}
+	for _, m := range mi.Architecture.InputModalities {
+		if !strings.EqualFold(strings.TrimSpace(m), "text") {
+			return false
+		}
+	}
+	return true
 }
 
 // buildPerUserOverrides converts the operator-supplied per-address override
@@ -833,6 +1109,19 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		whitelistReq.RequestHash = whitelistReq.Nonce
 		whitelistReq.ModelName = modelName
 
+		// The KV budget applies here too. Whitelisting exempts a caller from
+		// billing and from the per-user limits, because it is trusted — but trust
+		// does not create GPU memory, and on a router-fronted deployment the
+		// whitelisted router is all the traffic there is, so skipping it would
+		// leave the gate guarding nothing at all. There is no billing gate on this
+		// branch to sequence against, so the reservation is simply taken before
+		// the request is forwarded.
+		release, admitted := p.reserveTokenBudget(ctx, svcType, modelName, userAddress, reqBody)
+		if !admitted {
+			return
+		}
+		defer release()
+
 		httpReq, err := p.ctrl.PrepareHTTPRequest(ctx, targetURL, reqBody, svcType)
 		if err != nil {
 			p.handleBrokerError(ctx, err, "prepare HTTP request")
@@ -968,6 +1257,20 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		p.handleBrokerError(ctx, err, "create request")
 		return
 	}
+
+	// In-flight KV budget for the billed path. Taken AFTER the billing gate so a
+	// caller with no balance, or one that is not acknowledged, cannot reserve GPU
+	// capacity it will never pay for: taken before validation, a single
+	// authenticated but unfunded address could hold the whole budget with one
+	// oversized body and shed every paying request at zero cost.
+	//
+	// The whitelisted path takes its own reservation above — it returns before
+	// reaching here, and it is exactly the traffic this gate exists to bound.
+	release, admitted := p.reserveTokenBudget(ctx, svcType, req.ModelName, userAddress, reqBody)
+	if !admitted {
+		return
+	}
+	defer release()
 
 	httpReq, err := p.ctrl.PrepareHTTPRequest(ctx, targetURL, reqBody, svcType)
 	if err != nil {
