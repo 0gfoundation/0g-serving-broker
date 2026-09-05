@@ -437,3 +437,47 @@ func TestCapMaxOutputTokens_NegativeIsTreatedAsNoCap(t *testing.T) {
 		}
 	}
 }
+
+// The byte estimate runs high by a third, and that error compounds as the
+// prompt approaches the window: a cap computed from it can be a twentieth of
+// the room that actually remains. On a reasoning model a cap that small is
+// consumed entirely by thinking tokens, so the client gets an empty answer with
+// finish_reason "length" and pays for it — strictly worse than injecting
+// nothing, which is what the no-room case already does.
+func TestCapMaxOutputTokens_TinyRemainingRoomInjectsNothing(t *testing.T) {
+	const contextLength, maxCompletion = 262144, 32768
+	c := newTestCtrlForOutputCapCtx(t, true, maxCompletion, contextLength)
+
+	// Sized so the estimate leaves a positive but useless remainder.
+	bodyLen := (contextLength - 500) * conservativeBytesPerToken
+	body := []byte(`{"p":"` + strings.Repeat("x", bodyLen) + `"}`)
+
+	out, err := c.CapMaxOutputTokens(body, "glm-5.3", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if string(out) != string(body) {
+		m := decodeBodyMap(t, out)
+		t.Fatalf("a sub-floor remainder must inject nothing, got max_tokens=%v", m["max_tokens"])
+	}
+}
+
+// Just above the floor it still injects, so the floor is a floor and not a
+// silent disable of the whole feature.
+func TestCapMaxOutputTokens_RoomAtTheFloorStillInjects(t *testing.T) {
+	const contextLength, maxCompletion = 262144, 32768
+	c := newTestCtrlForOutputCapCtx(t, true, maxCompletion, contextLength)
+
+	bodyLen := (contextLength - 4096) * conservativeBytesPerToken
+	out, err := c.CapMaxOutputTokens([]byte(`{"p":"`+strings.Repeat("x", bodyLen)+`"}`), "glm-5.3", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	injected := capOf(t, out, "max_tokens")
+	if injected < minInjectableOutputTokens {
+		t.Fatalf("injected %v, want at least the floor %d", injected, minInjectableOutputTokens)
+	}
+	if injected >= maxCompletion {
+		t.Fatalf("injected %v, want the context-reduced value", injected)
+	}
+}

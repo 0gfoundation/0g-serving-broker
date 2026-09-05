@@ -638,9 +638,9 @@ type Service struct {
 	//
 	// Turning it on also requires every servable model to declare max_tokens or
 	// max_completion_tokens in supportedParameters, so the cap this injects uses
-	// a spelling the upstream accepts; config load refuses otherwise. And do not
-	// pair it with stripBodyFields on either of those keys — strip runs after
-	// this pass and would delete the cap it just set.
+	// a spelling the upstream accepts, and forbids stripBodyFields on either key
+	// (strip runs after this pass and would delete the cap it just set). Config
+	// load refuses both.
 	EnforceMaxCompletionTokens bool `yaml:"enforceMaxCompletionTokens"`
 }
 
@@ -2337,6 +2337,15 @@ func loadConfig(cfg *Config) error {
 		// declaration the choice is a guess — and a wrong guess fails EVERY
 		// capless request on the service, which is exactly the population this
 		// flag acts on. Refuse at load rather than at runtime.
+		// stripBodyFields runs AFTER this clamp, so stripping either cap key would
+		// delete the bound it just set and turn the flag into a silent no-op. Every
+		// other constraint this flag carries fails at load; this one should not be
+		// the exception that only lives in a comment.
+		for _, key := range cfg.Service.StripBodyFields {
+			if key == maxTokensParam || key == maxCompletionTokensParam {
+				return fmt.Errorf("invalid config: service.enforceMaxCompletionTokens cannot be combined with service.stripBodyFields containing %q — strip runs after the clamp and would remove the cap it sets", key)
+			}
+		}
 		for _, mi := range cfg.Service.allModelInfos() {
 			if containsString(mi.SupportedParameters, maxTokensParam) ||
 				containsString(mi.SupportedParameters, maxCompletionTokensParam) {

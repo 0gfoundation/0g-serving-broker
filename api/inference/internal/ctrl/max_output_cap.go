@@ -31,12 +31,29 @@ import (
 // the context window.
 //
 // Three bytes per token is roughly CJK-shaped; English/JSON runs nearer four.
-// Over-estimating is the safe direction here: it shrinks the injected cap, and
-// the failure mode of an injected cap that is too LARGE is an upstream 400
-// (input + max_tokens > context length), which turns a request that would have
-// worked into an error. A cap that is slightly too small only shortens a reply
-// the client did not ask to bound in the first place.
+// Over-estimating is the safe direction for the upper bound: an injected cap
+// that is too LARGE means an upstream 400 (input + max_tokens > context
+// length), turning a request that would have worked into an error.
+//
+// It is not safe without a floor, though, and the error is not "slightly" too
+// small. Over-estimating by a third compounds as the prompt approaches the
+// window: at a real prompt of 70% of context the estimate leaves a twentieth of
+// the room that actually remains. See minInjectableOutputTokens.
 const conservativeBytesPerToken = 3
+
+// minInjectableOutputTokens is the floor below which no cap is injected at all.
+//
+// A tiny cap is worse than none. On a reasoning model max_tokens covers the
+// thinking tokens, so a few hundred of them are consumed before any answer
+// begins: the client gets an empty content with finish_reason "length", and
+// pays for the reasoning. Because the estimate above runs high, that outcome
+// sits right next to a working one — a body a few kilobytes larger crosses into
+// "no room" and is forwarded untouched, which succeeds.
+//
+// Below this floor the estimate is simply too coarse to be acted on, so the
+// request takes the same exit as the no-room case: the engine decides, from the
+// tokenized prompt it alone can see.
+const minInjectableOutputTokens = 1024
 
 // CapMaxOutputTokens lowers the request's output-token cap to the resolved
 // model's maxCompletionTokens. resolvedModel is the public/canonical id
@@ -171,9 +188,10 @@ func (c *Ctrl) CapMaxOutputTokens(body []byte, resolvedModel, identity string) (
 // advertised maximum, reduced to whatever the context window still has room for
 // after a conservative estimate of the prompt.
 //
-// Returns 0 when there is no room, in which case nothing is injected and the
-// engine decides — it computes the true remaining context from the tokenized
-// prompt, which is strictly better than a guess made from byte counts.
+// Returns 0 when the room left is absent or too small to be worth acting on, in
+// which case nothing is injected and the engine decides — it computes the true
+// remaining context from the tokenized prompt, which is strictly better than a
+// guess made from byte counts.
 //
 // With no advertised contextLength there is nothing to reason about, so the
 // advertised maximum is used as-is.
@@ -183,7 +201,7 @@ func (c *Ctrl) injectableOutputCap(mi *config.ModelInfo, limit int64, bodyLen in
 	}
 	promptEstimate := int64(bodyLen) / conservativeBytesPerToken
 	room := int64(mi.ContextLength) - promptEstimate
-	if room <= 0 {
+	if room < minInjectableOutputTokens {
 		return 0
 	}
 	if room < limit {
