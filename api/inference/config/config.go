@@ -1113,12 +1113,14 @@ type ConcurrencyLimitConfig struct {
 	// pool to bound and the gate only sheds traffic the vendor would have
 	// accepted.
 	//
-	// Chatbot only, and only for text-input models: images arrive as base64 in
-	// the body, where a 3 MB picture reads as ~786k tokens against the thousand
-	// or so of KV it really costs, and no headroom absorbs three orders of
-	// magnitude. On a multi-model provider the per-entry modelInfo is what
-	// decides both of those, so a model whose metadata cannot be resolved is
-	// skipped rather than charged on an estimate nothing bounds.
+	// Chatbot only, and only for models declaring all three of contextLength,
+	// maxCompletionTokens and text-only architecture.inputModalities. Each bounds
+	// something the byte estimate cannot: the prompt half, the output half per
+	// sequence, and whether bytes stand for tokens at all (a 3 MB image reads as
+	// ~786k tokens against the thousand or so of KV it really costs). A model
+	// missing any of them is skipped rather than charged an unbounded estimate,
+	// and named in a startup warning so the gap is visible. On a multi-model
+	// provider the per-entry modelInfo decides this per model.
 	//
 	// Whitelisted callers are NOT exempt — the point is to bound the GPU, and on
 	// a router-fronted deployment the whitelisted router is all the traffic there

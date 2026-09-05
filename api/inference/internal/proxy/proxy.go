@@ -178,7 +178,7 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 		// definition carries none), and a single entry that forgot one.
 		if unmanaged := unmanagedBudgetModels(&ctrl.Service); len(unmanaged) > 0 {
 			logger.Warnf(
-				"inflightTokenBudget is set but these models have no modelInfo.contextLength and are therefore NOT bounded by it: %s. Add modelInfo (with contextLength) for each, or expect them to consume the engine unmetered.",
+				"inflightTokenBudget is set but these models are NOT bounded by it: %s. Each needs modelInfo with contextLength, maxCompletionTokens, and text-only architecture.inputModalities; a model accepting images cannot be weighed by byte count at all. Until then they consume the engine unmetered.",
 				strings.Join(unmanaged, ", "))
 		}
 		// maxGlobalConcurrent has no "off" setting and runs as middleware, i.e.
@@ -335,9 +335,7 @@ func unmanagedBudgetModels(svc *config.Service) []string {
 		}
 		return svc.ModelInfo
 	}
-	bounded := func(mi *config.ModelInfo) bool {
-		return mi != nil && mi.ContextLength > 0
-	}
+	bounded := budgetableModel
 
 	if !svc.HasMultiModelPricing() {
 		if bounded(svc.ModelInfo) {
@@ -415,21 +413,17 @@ func (p *Proxy) tokenBudgetWeight(svcType, modelName string, ctx *gin.Context, r
 	// guards below at once, treating a vision model as text and leaving the
 	// weight unbounded. That is the worst combination available.
 	mi := p.ctrl.Service.EffectiveModelInfoFor(modelName, ctrl.UpstreamIdentity(ctx))
-	if mi == nil || mi.ContextLength <= 0 {
-		// No metadata, or none that bounds anything, means no basis for either
-		// guard below: textOnlyInput would wave a vision model through on a byte
-		// count that is three orders of magnitude wrong, and with no context
-		// length the weight has no ceiling — one 32 MB body would then park the
-		// whole surface. Charging on an estimate nothing bounds is worse than not
-		// charging, so skip. The condition matches unmanagedBudgetModels' bounded()
-		// exactly, so the startup warning names precisely the models that skip.
+	if !budgetableModel(mi) {
+		// Every one of the three facts budgetableModel requires bounds something
+		// the estimate cannot bound on its own, and a model missing any of them
+		// gets charged a number with no ceiling. Skipping is the honest answer;
+		// the startup warning names exactly this set, so an operator sees which
+		// models are unmetered rather than watching a rejection counter sit at
+		// zero and concluding the gate works.
 		//
 		// Skipping is not free either: such a model is served while escaping the
 		// budget entirely. That is why New() enumerates these at startup instead
 		// of letting the gate look like it is working. See unmanagedBudgetModels.
-		return 0, false
-	}
-	if !textOnlyInput(mi) {
 		return 0, false
 	}
 
@@ -464,19 +458,17 @@ func (p *Proxy) tokenBudgetWeight(svcType, modelName string, ctx *gin.Context, r
 	// The fallback is NOT a ceiling. Treating it as one meant that a model with
 	// no advertised maximum charged a request declaring 128k output the same as
 	// one declaring 1 — the whole declaration discarded, a sixteen-fold
-	// under-count on exactly the traffic this budget exists to bound.
+	// under-count on exactly the traffic this budget exists to bound. It is also
+	// why the advertised maximum is now REQUIRED rather than defaulted: standing
+	// the context window in for it let a 72-byte body declaring n=8 and a
+	// nine-million-token cap weigh eight windows, clamp to the whole budget, and
+	// shut out every other request while it ran.
 	maxPerSequence := int64(mi.MaxCompletionTokens)
-	if maxPerSequence <= 0 {
-		maxPerSequence = int64(mi.ContextLength)
-	}
 	reserve := est.OutputTokensPerSequence
 	if reserve <= 0 {
 		// Undeclared: charge the advertised maximum, so declaring a number can
-		// only ever cost less than staying silent. With nothing advertised there
-		// is no honest figure and the engine's own admission reserve stands in.
-		if reserve = int64(mi.MaxCompletionTokens); reserve <= 0 {
-			reserve = outputReserveTokens
-		}
+		// only ever cost less than staying silent.
+		reserve = maxPerSequence
 	}
 	if reserve > maxPerSequence {
 		reserve = maxPerSequence
@@ -498,13 +490,30 @@ func (p *Proxy) tokenBudgetWeight(svcType, modelName string, ctx *gin.Context, r
 	return promptTokens + reserve, true
 }
 
-// textOnlyInput reports whether the model's advertised input is text and
-// nothing else. An unset architecture is treated as text-only: every model this
-// broker fronts today is, and the alternative would silently disable the gate
-// on a provider whose metadata is merely incomplete.
-func textOnlyInput(mi *config.ModelInfo) bool {
-	if mi == nil || mi.Architecture == nil || len(mi.Architecture.InputModalities) == 0 {
-		return true
+// budgetableModel reports whether a model declares everything the weight needs
+// in order to be bounded.
+//
+// Three facts, each bounding something the byte estimate cannot bound alone:
+//
+//	contextLength       — the ceiling on the prompt half. Without it a 32 MB
+//	                      body weighs millions of tokens and parks the surface.
+//	maxCompletionTokens — the ceiling on the output half, per sequence. Without
+//	                      it, n multiplies against the context window instead.
+//	inputModalities     — whether bytes stand for tokens at all. An image is
+//	                      thousands of bytes per token, so charging one by
+//	                      length is wrong by three orders of magnitude.
+//
+// An unset architecture used to be read as text-only, on the reasoning that
+// every model here is. That turns a metadata omission into a silent
+// mischarge, and the omission is the likelier state for a newly added model.
+// Requiring the declaration makes the gate's coverage a property an operator
+// can see, via the startup warning, rather than one they have to infer.
+func budgetableModel(mi *config.ModelInfo) bool {
+	if mi == nil || mi.ContextLength <= 0 || mi.MaxCompletionTokens <= 0 {
+		return false
+	}
+	if mi.Architecture == nil || len(mi.Architecture.InputModalities) == 0 {
+		return false
 	}
 	for _, m := range mi.Architecture.InputModalities {
 		if !strings.EqualFold(strings.TrimSpace(m), "text") {

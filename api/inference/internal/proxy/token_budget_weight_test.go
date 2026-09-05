@@ -51,6 +51,7 @@ func newBudgetProxy(budget int64, maxCompletion int) *Proxy {
 	mi := &config.ModelInfo{
 		MaxCompletionTokens: maxCompletion,
 		ContextLength:       defaultTestContextLength,
+		Architecture:        &config.ModelArchitecture{InputModalities: []string{"text"}, OutputModalities: []string{"text"}},
 	}
 	return &Proxy{
 		ctrl:               &ctrl.Ctrl{Service: config.Service{Type: "chatbot", ModelInfo: mi}},
@@ -93,41 +94,74 @@ func TestTokenBudgetWeight_ReserveClampedToAdvertisedCap(t *testing.T) {
 // would wave a vision model through on a byte count that is orders of magnitude
 // wrong, and with no context length the weight has no ceiling. Charging on an
 // estimate nothing bounds is worse than not charging.
+// Each of the three declared facts bounds something the byte estimate cannot,
+// so a model missing any of them is skipped rather than charged a number with
+// no ceiling. The set must match unmanagedBudgetModels exactly, or the startup
+// warning would name different models than the gate actually skips.
 func TestTokenBudgetWeight_NoUsableModelInfoSkipsTheGate(t *testing.T) {
-	t.Run("nil", func(t *testing.T) {
-		p := newBudgetProxy(1_000_000, 0)
-		p.ctrl.Service.ModelInfo = nil
-		if _, ok := p.tokenBudgetWeight("chatbot", "glm-5.3", newBudgetCtx(), promptBody(4000)); ok {
-			t.Fatal("a model with no metadata must skip the gate")
-		}
-	})
-	// The condition must match unmanagedBudgetModels' bounded(), or the startup
-	// warning would name a different set of models than the gate actually skips.
-	t.Run("no context length", func(t *testing.T) {
+	cases := map[string]func(*config.ModelInfo){
+		"no metadata":       nil,
+		"no context length": func(mi *config.ModelInfo) { mi.ContextLength = 0 },
+		"no output maximum": func(mi *config.ModelInfo) { mi.MaxCompletionTokens = 0 },
+		"no modalities":     func(mi *config.ModelInfo) { mi.Architecture = nil },
+		"empty modalities":  func(mi *config.ModelInfo) { mi.Architecture.InputModalities = nil },
+		"accepts images":    func(mi *config.ModelInfo) { mi.Architecture.InputModalities = []string{"text", "image"} },
+	}
+	for name, mutate := range cases {
 		p := newBudgetProxy(1_000_000, 32768)
-		p.ctrl.Service.ModelInfo.ContextLength = 0
-		if _, ok := p.tokenBudgetWeight("chatbot", "glm-5.3", newBudgetCtx(), promptBody(4000)); ok {
-			t.Fatal("a model with no contextLength has no ceiling, so it must skip the gate too")
+		if mutate == nil {
+			p.ctrl.Service.ModelInfo = nil
+		} else {
+			mutate(p.ctrl.Service.ModelInfo)
 		}
-	})
+		if _, ok := p.tokenBudgetWeight("chatbot", "glm-5.3", newBudgetCtx(), promptBody(4000)); ok {
+			t.Fatalf("%s: must skip the gate rather than charge an unbounded estimate", name)
+		}
+	}
+}
+
+// A 72-byte body must not be able to claim eight context windows. It could,
+// while an absent maxCompletionTokens let the context window stand in for the
+// per-sequence ceiling and n multiplied against it — the resulting weight
+// clamped to the whole budget and shut out every other request.
+func TestTokenBudgetWeight_SequencesCannotAmplifyATinyBody(t *testing.T) {
+	p := newBudgetProxy(1_120_000, 32768)
+
+	weight, ok := p.tokenBudgetWeight("chatbot", "glm-5.3", newBudgetCtx(),
+		[]byte(`{"max_tokens":9999999,"n":8,"messages":[{"role":"user","content":"hi"}]}`))
+	if !ok {
+		t.Fatal("chatbot traffic must be charged")
+	}
+	if want := int64(8 * 32768); weight > want+100 {
+		t.Fatalf("a 72-byte body weighed %d; the declared cap must be clamped to the advertised %d per sequence first", weight, 32768)
+	}
 }
 
 // Skipping is not free — such a model is served while escaping the budget — so
 // it has to be visible at startup rather than only as a rejection counter that
 // never moves.
+// budgetableModelInfo is metadata declaring everything the gate requires.
+func budgetableModelInfo() *config.ModelInfo {
+	return &config.ModelInfo{
+		ContextLength:       262144,
+		MaxCompletionTokens: 32768,
+		Architecture:        &config.ModelArchitecture{InputModalities: []string{"text"}, OutputModalities: []string{"text"}},
+	}
+}
+
 func TestUnmanagedBudgetModels(t *testing.T) {
 	single := config.Service{Type: "chatbot", ModelType: "glm-5.3"}
 	if got := unmanagedBudgetModels(&single); len(got) != 1 {
 		t.Fatalf("a single-model chatbot with no modelInfo must be reported, got %v", got)
 	}
 
-	single.ModelInfo = &config.ModelInfo{ContextLength: 262144}
+	single.ModelInfo = budgetableModelInfo()
 	if got := unmanagedBudgetModels(&single); len(got) != 0 {
 		t.Fatalf("a bounded single model must not be reported, got %v", got)
 	}
 
 	multi := config.Service{Type: "chatbot", ModelPricing: []config.ModelPricingEntry{
-		{Model: "bounded", InputPrice: "1", OutputPrice: "1", ModelInfo: &config.ModelInfo{ContextLength: 1000}},
+		{Model: "bounded", InputPrice: "1", OutputPrice: "1", ModelInfo: budgetableModelInfo()},
 		{Model: "no-info", InputPrice: "1", OutputPrice: "1"},
 		{Model: config.ModelWildcard, InputPrice: "1", OutputPrice: "1"},
 	}}
@@ -138,7 +172,7 @@ func TestUnmanagedBudgetModels(t *testing.T) {
 	}
 
 	// A service-level block covers entries that carry none of their own.
-	multi.ModelInfo = &config.ModelInfo{ContextLength: 1000}
+	multi.ModelInfo = budgetableModelInfo()
 	if got := unmanagedBudgetModels(&multi); len(got) != 0 {
 		t.Fatalf("a service-level modelInfo must cover entries without one, got %v", got)
 	}
@@ -470,7 +504,7 @@ func TestTokenBudgetWeight_ReserveFollowsTheDeclaredOutput(t *testing.T) {
 // same as one asking for 1 — a sixteen-fold under-count on exactly the traffic
 // this budget exists to bound.
 func TestTokenBudgetWeight_FallbackDoesNotCapADeclaredOutput(t *testing.T) {
-	p := newBudgetProxy(1_440_000, 0) // nothing advertised
+	p := newBudgetProxy(1_440_000, 131072) // advertises a large maximum
 	p.ctrl.Service.ModelInfo.ContextLength = 262144
 
 	declared, ok := p.tokenBudgetWeight("chatbot", "glm-5.3", newBudgetCtx(),
@@ -482,11 +516,11 @@ func TestTokenBudgetWeight_FallbackDoesNotCapADeclaredOutput(t *testing.T) {
 		t.Fatalf("weight = %d, want at least the 128000 the caller declared", declared)
 	}
 
-	// And with nothing declared either, the fallback still applies.
+	// And declaring must never cost more than staying silent.
 	silent, _ := p.tokenBudgetWeight("chatbot", "glm-5.3", newBudgetCtx(),
 		[]byte(`{"messages":[{"role":"user","content":"hi"}]}`))
-	if silent > outputReserveTokens+100 {
-		t.Fatalf("undeclared weight = %d, want about the %d fallback", silent, outputReserveTokens)
+	if declared > silent {
+		t.Fatalf("declaring cost %d while silence cost %d — that rewards omitting the field", declared, silent)
 	}
 }
 
