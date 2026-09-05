@@ -107,6 +107,18 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 		// max_completion_tokens an OpenAI-compatible client sends. No-op unless the
 		// model advertises exactly one of the two and the client sent the other. The
 		// two fields are semantically identical, so billing is unaffected.
+		// Clamp the output-token cap to the model's advertised
+		// maxCompletionTokens before the rename below, so a request that carried no
+		// cap gets one under max_tokens and the rename then puts it under whichever
+		// name this upstream accepts. Take-the-minimum: a client asking for less
+		// than the cap keeps its own value. No-op unless the service sets
+		// enforceMaxCompletionTokens.
+		modifiedBody, err = c.CapMaxOutputTokens(reqBody, resolvedModelStr, resolvedIdentity(ctx))
+		if err != nil {
+			return nil, errors.Wrap(err, "cap max output tokens")
+		}
+		reqBody = modifiedBody
+
 		modifiedBody, err = c.TranslateMaxTokensFor(reqBody, resolvedModelStr, resolvedIdentity(ctx))
 		if err != nil {
 			return nil, errors.Wrap(err, "translate max tokens")

@@ -611,6 +611,30 @@ type Service struct {
 	// value and then inject the server's own. Empty or unset means the body is
 	// forwarded unchanged. Only applied for the chatbot service type; rejected for
 	// others at load.
+	// EnforceMaxCompletionTokens makes the advertised modelInfo.maxCompletionTokens
+	// binding instead of decorative.
+	//
+	// Today that number is published in /v1/models and enforced by nobody: the
+	// broker does not read it, and an OpenAI-compatible engine given no
+	// max_tokens generates until it hits the context window. On a self-hosted
+	// engine that is not a billing curiosity but a capacity problem — one
+	// unbounded reasoning request holds its KV slot for as long as it keeps
+	// producing, and KV is what the box actually runs out of.
+	//
+	// With this on, a chatbot request's output cap is clamped to the resolved
+	// model's maxCompletionTokens: absent (or null) it is set, higher it is
+	// lowered, lower it is left alone. Take-the-minimum, never raise — a client
+	// asking for 512 tokens still gets 512.
+	//
+	// injectBodyFields cannot express this. It is server-config-wins by
+	// definition, so it would rewrite that client's 512 to the cap and charge
+	// them for output they did not ask for.
+	//
+	// No-op unless the resolved model declares a positive maxCompletionTokens.
+	// Off by default: turning it on changes what reaches the upstream, and a
+	// provider whose advertised value is stale would start truncating.
+	EnforceMaxCompletionTokens bool `yaml:"enforceMaxCompletionTokens"`
+
 	StripBodyFields []string `yaml:"stripBodyFields"`
 }
 
