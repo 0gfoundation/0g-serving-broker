@@ -14,6 +14,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
+	"mime"
+	"mime/multipart"
 	"slices"
 	"strings"
 
@@ -126,6 +129,30 @@ const (
 //   - "x_0g_trace": observability metadata the router injects downstream.
 var e2eeResponseUnboundFields = []string{"model", "x_0g_trace"}
 
+// maxHeadersExamined bounds how many multipart parts AND Content-Disposition
+// headers multipartCarriesE2EEPart will read before it stops and refuses. One
+// shared budget, because both loops are separately unbounded: the outer over
+// parts, the inner over the dispositions a single part declares.
+//
+// Three orders of magnitude above any real transcription or image-edit form,
+// and ~1000x below the 3.7 million minimum-size parts that fit in 32 MiB.
+//
+// About that "32 MiB": it is RequestSizeLimitMiddleware, registered on the sync
+// proxy's serviceGroup ONLY (proxy.go). The async submit routes hang off
+// r.Group("/v1") with cors and the rate limiter and no size limit, so on
+// /v1/async/images/edits the body length is bounded only by what the client
+// sends. This budget is what bounds the AMPLIFICATION on both paths — the cost
+// of this check against the cost of reading the body at all — while on the sync
+// path the size limit also bounds the absolute cost.
+//
+// The two paths differ in who can reach them, which is why the unbounded async
+// read is the smaller concern: the sync proxy runs this BEFORE ValidateSession,
+// so it is reachable with no session, while the async routes validate the
+// session first (async.go) and only then read the body. That read predates this
+// check and is not widened by it; adding a size limit there would reject bodies
+// that work today, which is a decision for its own change.
+const maxHeadersExamined = 4096
+
 // hasE2EEMarker is a cheap substring pre-check to skip the JSON parse on the vast
 // majority of (non-sealed) requests. A match is not proof of a sealed request —
 // the substring could appear inside message content — so MaybeUnsealRequest
@@ -134,30 +161,801 @@ func hasE2EEMarker(reqBody []byte) bool {
 	return bytes.Contains(reqBody, []byte(e2eeBodyMarker))
 }
 
+// couldNameE2EEPart reports whether a body SPELLS something that a part named
+// "_e2ee" would have to spell — the literal marker, or an RFC 2231 `name*`
+// attribute in any case.
+//
+// It does NOT report whether the body might be hiding such a part, and the
+// difference is the whole reason it gates nothing but the fail-closed branches.
+// It cannot see an encoded word, or a quoted pair, or any other spelling that
+// resolves to the marker without containing it; three separate rounds of review
+// found one of those. A summary of "might be hiding it" would be a claim this
+// function is structurally unable to make.
+//
+// It gates the FAIL-CLOSED branches only, never detection. This is a heuristic
+// over SPELLINGS, and spellings do not enumerate: it cannot see a name the
+// parser resolves from an encoding, so anything that gates detection on it leaks
+// whatever it failed to anticipate. Detection asks the parser instead
+// (multipartCarriesE2EEPart), which is exact for every body Go can parse; this
+// covers the bodies it cannot, where the failure direction is forwarding a
+// MALFORMED request rather than an envelope.
+//
+// Case is folded for "name*" because the parser folds parameter names; the
+// literal marker is matched exactly because parameter VALUES are not folded, so
+// a part named `_E2EE` is a different field no parser resolves to the marker.
+func couldNameE2EEPart(reqBody []byte) bool {
+	return hasE2EEMarker(reqBody) || mentionsEncodedName(reqBody)
+}
+
+// mentionsEncodedName reports whether the body contains the RFC 2231 parameter
+// prefix "name*" AT A PARAMETER POSITION, in any case. One pass, one byte at a
+// time, no allocation — the body may be tens of megabytes of audio.
+//
+// The parameter position is what makes this selective. `filename*` also contains
+// "name*" and is what browsers emit for a non-ASCII upload name (RFC 8187), so
+// matching it anywhere makes the gate true for essentially every
+// internationalised form — and the gate decides the fail-closed branches:
+//
+//	filename*=UTF-8''caf%C3%A9.png  -> gate=true,  REFUSED
+//	filename="cafe.png"             -> gate=false, forwarded
+//
+// Selectivity therefore has to be measured against real form bodies, not random
+// ones: `name*` does not occur in 32 MiB of random bytes, but `filename*` occurs
+// in most internationalised uploads. declaresEncodedName excludes it on a token
+// boundary for the same reason.
+//
+// Cost is FLAT by design, ~51 ms per 32 MiB whatever the body contains. An
+// anchored bytes.IndexByte scan is 9x faster on typical input and 8x slower on a
+// '*'-dense one — the wrong trade for a check that runs before inference on
+// requests it exists to reject, since a cliff an attacker picks the body for is
+// worse than a higher floor. It is also not where this check spends its time:
+// enumerating the parts costs ~750 ms for 32 MiB of tiny ones against ~22 ms for
+// one large part, so optimise multipartCarriesE2EEPart instead.
+//
+// The fold is letters-only rather than the usual `b|0x20`, which is not
+// stylistic: 0x20 maps '\n' (0x0A) onto '*' (0x2A), reporting "name\n" as a
+// mention. TestMentionsEncodedName sweeps all 256 bytes through each of the five
+// positions to hold that. Restarting needs no backtracking beyond index 1,
+// because 'n' occurs only at index 0 of the needle.
+func mentionsEncodedName(reqBody []byte) bool {
+	const needle = "name*"
+	matched := 0
+	atBoundary := false
+	for i := 0; i < len(reqBody); i++ {
+		b := reqBody[i]
+		if b >= 'A' && b <= 'Z' {
+			b += 'a' - 'A'
+		}
+		if b == needle[matched] {
+			if matched == 0 {
+				atBoundary = i == 0 || isParamBoundary(reqBody[i-1])
+			}
+			matched++
+			if matched == len(needle) {
+				if atBoundary {
+					return true
+				}
+				matched = 0 // the tail of a longer attribute, e.g. filename*
+			}
+			continue
+		}
+		if b == needle[0] {
+			matched = 1
+			atBoundary = i == 0 || isParamBoundary(reqBody[i-1])
+		} else {
+			matched = 0
+		}
+	}
+	return false
+}
+
+// isParamBoundary reports whether b can precede the start of a header
+// parameter: a semicolon, linear whitespace, or a header fold.
+func isParamBoundary(b byte) bool {
+	switch b {
+	case ';', ' ', '\t', '\r', '\n':
+		return true
+	}
+	return false
+}
+
+// declaresEncodedName reports whether a Content-Disposition RFC 2231-encodes its
+// `name` parameter, in any of the forms that notation has: `name*=`, and the
+// `name*0=` / `name*0*=` continuation segments, case-insensitively because
+// parameter names are.
+//
+// The match must sit at a PARAMETER POSITION, and neither neighbour of the match
+// establishes that. `filename*=` and `filename="name*.wav"` both contain "name*"
+// and both are ordinary, and so does `filename="name*=x.wav"`, which satisfies
+// any check on what FOLLOWS as well. So this walks the disposition tracking
+// quoted strings and tests only after a `;` outside quotes. Desyncing requires a
+// disposition that does not parse, which the caller's gated fail-closed branch
+// covers.
+//
+// This is a tokeniser, not a decoder, and that is why writing one here is not
+// the mistake refused in multipartCarriesE2EEPart: what an encoded name MEANS is
+// the parser's job, but where a parameter STARTS is unambiguous grammar with no
+// charset in it.
+func declaresEncodedName(disposition string) bool {
+	inQuotes := false
+	atParamStart := false
+	for i := 0; i < len(disposition); i++ {
+		switch c := disposition[i]; {
+		case inQuotes:
+			switch c {
+			case '\\':
+				i++ // a quoted pair: whatever follows is not a closing quote
+			case '"':
+				inQuotes = false
+			}
+		case c == '"':
+			inQuotes = true
+		case c == ';':
+			atParamStart = true
+		case c == ' ' || c == '\t':
+			// Leading whitespace does not end the parameter position.
+		default:
+			if atParamStart {
+				if isEncodedNameAttr(disposition[i:]) {
+					return true
+				}
+				atParamStart = false
+			}
+		}
+	}
+	return false
+}
+
+// isEncodedNameAttr reports whether s BEGINS with an RFC 2231-encoded `name`
+// attribute followed by its `=`. The three shapes are `name*=`, `name*<n>=` and
+// `name*<n>*=`; anything else that merely starts with "name*" — `name*foo=`, or
+// a bare `name*` at the end of the header — is not one, and neither is
+// `namespace=`.
+func isEncodedNameAttr(s string) bool {
+	const attr = "name*"
+	if len(s) < len(attr) || !strings.EqualFold(s[:len(attr)], attr) {
+		return false
+	}
+	rest := s[len(attr):]
+	for len(rest) > 0 && rest[0] >= '0' && rest[0] <= '9' {
+		rest = rest[1:] // the continuation index of name*<n>
+	}
+	if strings.HasPrefix(rest, "*") {
+		rest = rest[1:] // the encoding marker of name*<n>*
+	}
+	return strings.HasPrefix(rest, "=")
+}
+
+// isEncodedWord reports whether a parameter value is an RFC 2047 encoded word —
+// `=?charset?encoding?text?=`. Only the delimiters are checked, deliberately:
+// what the word decodes to is the question this guard refuses to answer for
+// itself, here as in declaresEncodedName.
+//
+// Surrounding whitespace is trimmed first, because RFC 2047 §2 permits linear
+// white space around an encoded word and a prefix/suffix test does not:
+//
+//	name="=?utf-8?B?X2UyZWU=?="    -> refused
+//	name=" =?utf-8?B?X2UyZWU=?="   -> FORWARDED, before the trim
+//	name="=?utf-8?B?X2UyZWU=?= "   -> FORWARDED, before the trim
+//
+// Weaker than the charset gap: exploiting it needs an upstream that both decodes
+// encoded words in parameter values AND trims the result (javax.mail keeps the
+// leading space, yielding " _e2ee"). But the branch's contract is to refuse
+// without deciding what the word meant, and the spellings it covers should not
+// turn on a space.
+func isEncodedWord(value string) bool {
+	value = strings.TrimSpace(value)
+	return len(value) > 4 && strings.HasPrefix(value, "=?") && strings.HasSuffix(value, "?=")
+}
+
+// unquotePairs removes RFC 2045 quoted-pair backslashes the way a conformant
+// parser does: inside a quoted string every `\` escapes the character after it.
+//
+// Go does not. mime.ParseMediaType unescapes a backslash only where it precedes
+// a tspecial, so `name="\_e2ee"` comes back as `\_e2ee` — while javax.mail and
+// Ruby's mail read `_e2ee`. Same one-encoding-over shape as the RFC 2231 charset
+// gap, and it gets the same treatment in resolvesToMarker.
+//
+// Dropping every backslash is not a faithful decode of the ORIGINAL header — Go
+// has already consumed some of them — so a name that legitimately contains a
+// backslash is compared as though it did not. That errs toward refusing, on a
+// spelling no form client produces.
+func unquotePairs(name string) string {
+	return strings.ReplaceAll(name, `\`, "")
+}
+
+// resolvesToMarker reports whether a parsed parameter value is the reserved
+// marker under any reading a conformant parser might give it: as written, with
+// linear white space trimmed (RFC 2047 §2, and RFC 2045 folding around a
+// parameter value), with quoted pairs resolved, or both.
+//
+// Both, in that order, is the case a single pass misses: a quoted pair can
+// protect the very space that has to be trimmed, so `\ _e2ee` needs the pair
+// resolved BEFORE the trim, where ` \_e2ee` does not care. Trimming after
+// unquoting subsumes the other order — if the value is the marker once outer
+// white space and backslashes are gone, it is also the marker with the
+// backslashes removed first — so these four readings are the whole closure
+// rather than a sample of it, and a test asserts that against a fixpoint.
+//
+// Whitespace and backslashes in a form-field name are not something any client
+// emits, so refusing them costs nothing real.
+func resolvesToMarker(name string) bool {
+	for _, s := range []string{name, unquotePairs(name)} {
+		if s == e2eeBodyMarker || strings.TrimSpace(s) == e2eeBodyMarker {
+			return true
+		}
+	}
+	return false
+}
+
+// looksMultipart reports whether a Content-Type CLAIMS to be multipart, by a
+// case-insensitive prefix test on the raw string — deliberately without parsing
+// it.
+//
+// Parsing here fails OPEN. mime.ParseMediaType rejects a duplicate parameter, a
+// trailing junk parameter and an unclosed quote, so deciding on the parse lets
+// all three skip the guard entirely — envelope intact — and leaves the
+// fail-closed branch written for exactly that case unreachable. Measured:
+//
+//	multipart/form-data; boundary=x; boundary=y  -> duplicate parameter
+//	multipart/form-data; boundary=x; =junk       -> invalid media parameter
+//	multipart/form-data; boundary="x             -> invalid media parameter
+//
+// A lenient upstream reads parts out of all three. So whether this is OUR
+// business is decided on the raw header, and the parse — which can fail — only
+// decides which branch inside handles it.
+//
+// Any subtype, not just form-data, because the question is "can this body carry
+// parts" and every multipart/* can. Matching only form-data left the hole
+// reachable by changing one word of the Content-Type.
+func looksMultipart(contentType string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimLeft(contentType, " \t")), "multipart/")
+}
+
+// recoverParamValues returns every value the raw header gives to a parameter,
+// for a header mime.ParseMediaType refused to parse. It walks parameters
+// directly, skipping quoted values, so a `name=` inside someone's filename is
+// not mistaken for one.
+//
+// It is the same move recoverBoundary makes, one level down, and for the same
+// reason: a parse failure is not an answer about what the header DECLARES. A
+// part header can be made unparseable in the three ways this file already
+// enumerates for the request's Content-Type — a duplicate parameter, an unclosed
+// quote, a junk parameter — while still visibly naming a part. Measured, each
+// row carrying a well-formed part named `=?utf-8?B?X2UyZWU=?=`:
+//
+//	name="=?utf-8?B?X2UyZWU=?="             parses    -> refused
+//	name=x; name="=?utf-8?B?X2UyZWU=?="     parse err -> recovered [x, the word]
+//	name="=?utf-8?B?X2UyZWU=?=              parse err -> recovered [the word]
+//	name="=?utf-8?B?X2UyZWU=?="; =junk      parse err -> recovered [the word]
+//
+// EVERY value is returned, not the first or the last, because parsers disagree
+// about which of a duplicate wins — javax.mail takes the last — and a name that
+// any of them resolves to the marker cannot be ruled out.
+//
+// An unclosed quote runs to the end of the header, which is what a parser
+// recovering from one does.
+func recoverParamValues(header, attr string) []string {
+	var out []string
+	for i := 0; i < len(header); {
+		for i < len(header) && isParamBoundary(header[i]) {
+			i++
+		}
+		start := i
+		for i < len(header) && header[i] != '=' && header[i] != ';' {
+			i++
+		}
+		name := strings.TrimSpace(header[start:i])
+		if i < len(header) && header[i] == '=' {
+			i++
+			var value string
+			if i < len(header) && header[i] == '"' {
+				i++
+				valueStart := i
+				for i < len(header) && header[i] != '"' {
+					if header[i] == '\\' && i+1 < len(header) {
+						i++
+					}
+					i++
+				}
+				value = header[valueStart:i]
+				if i < len(header) {
+					i++
+				}
+			} else {
+				valueStart := i
+				for i < len(header) && header[i] != ';' {
+					i++
+				}
+				value = strings.TrimSpace(header[valueStart:i])
+			}
+			if strings.EqualFold(name, attr) {
+				out = append(out, value)
+			}
+		}
+		for i < len(header) && header[i] != ';' {
+			i++
+		}
+	}
+	return out
+}
+
+// nameVerdict applies the readings that decide a declared part name to ONE
+// header, so that both headers which can carry a name get exactly the same
+// treatment. Written once for that reason: two copies is how one header ends up
+// with a check the other lacks, which is a bug this guard has already had.
+//
+// `where` names the header for the message; `header` is its raw value, needed by
+// declaresEncodedName because the parser drops what it cannot decode; `name` is
+// the value the parser resolved.
+func nameVerdict(where, header, name string) (bool, string) {
+	switch {
+	case name == e2eeBodyMarker:
+		return true, fmt.Sprintf("a multipart part is named %q", e2eeBodyMarker)
+	case resolvesToMarker(name):
+		return true, fmt.Sprintf("%s names a part %q as a conformant parser reads it, trimming linear white space and resolving RFC 2045 quoted pairs where mime.ParseMediaType does neither, so the name it declares cannot be ruled out", where, e2eeBodyMarker)
+	case isEncodedWord(name):
+		return true, fmt.Sprintf("%s names a part with an RFC 2047 encoded word, which mime.ParseMediaType returns undecoded but other parsers resolve, so the name it declares cannot be ruled out", where)
+	case declaresEncodedName(header):
+		return true, fmt.Sprintf("%s RFC 2231-encodes a part's name, which mime.ParseMediaType resolves only for us-ascii and utf-8 (dropping the rest silently), so the name it declares cannot be ruled out", where)
+	}
+	return false, ""
+}
+
+// recoverBoundary extracts the boundary from a Content-Type that
+// mime.ParseMediaType rejected: everything from `boundary=` to the next `;`,
+// trimmed of surrounding white space and one layer of quotes.
+//
+// It exists because RFC 2046 §5.1.1 admits boundary characters RFC 2045 calls
+// tspecials — `: = ? / ' ( ) + , - . _` and, in bchars, space — so an UNQUOTED
+// but entirely legal boundary makes ParseMediaType fail. Measured:
+//
+//	boundary=----WebKitFormBoundaryABC123  parse ok
+//	boundary=abc:def                       parse err, recovered `abc:def`
+//	boundary=a?b/c                         parse err, recovered `a?b/c`
+//	boundary=a+b,c-d.e_f                   parse err, recovered `a+b,c-d.e_f`
+//	boundary=boundary with space           parse err, recovered `boundary with space`
+//
+// Without recovery each of those hit the structural refusal — a 400 on a legal
+// request, pre-authentication on the sync path. With it they are enumerated and
+// judged on their part names like any other body, which is both fewer false
+// positives AND real detection where there was only a blanket verdict.
+//
+// The parameter name is matched at a parameter position and case-insensitively,
+// so `xboundary=` and a `boundary=` inside another parameter's value do not
+// count. Recovery is deliberately permissive about the VALUE — a body's real
+// delimiter is whatever it is, and enumerating with a wrong guess finds no
+// parts, which lands on the same structural refusal as recovering nothing.
+func recoverBoundary(contentType string) string {
+	const attr = "boundary="
+	for i := 0; i+len(attr) <= len(contentType); i++ {
+		if !strings.EqualFold(contentType[i:i+len(attr)], attr) {
+			continue
+		}
+		if i > 0 && !isParamBoundary(contentType[i-1]) {
+			continue
+		}
+		value := contentType[i+len(attr):]
+		if end := strings.IndexByte(value, ';'); end >= 0 {
+			value = value[:end]
+		}
+		value = strings.TrimSpace(value)
+		if len(value) > 1 && strings.HasPrefix(value, `"`) && strings.HasSuffix(value, `"`) {
+			value = value[1 : len(value)-1]
+		}
+		return value
+	}
+	return ""
+}
+
+// countLineStartsWith counts the lines of the body that begin with prefix. Both
+// callers use it to ask a structural question about a body that failed to parse:
+// does it still declare part-shaped content that this enumeration never reached?
+//
+// A line start is taken as "at the body start, or after LF" rather than after
+// CRLF, deliberately: a body using bare LF line endings is malformed but lenient
+// parsers read it, and anchoring on CRLF would UNDERCOUNT such a body and
+// forward it. Overcounting only happens when part content contains the prefix at
+// a line start, and where it does, a parser splits there too.
+//
+// bytes.Index rather than the byte-at-a-time scan mentionsEncodedName needs: the
+// needle is a fixed multi-byte string, so the platform's optimised search
+// applies. It runs at most once per request, on an error path that returns
+// immediately.
+func countLineStartsWith(reqBody []byte, prefix string) int {
+	needle := []byte(prefix)
+	n := 0
+	for i := 0; i+len(needle) <= len(reqBody); {
+		j := bytes.Index(reqBody[i:], needle)
+		if j < 0 {
+			break
+		}
+		at := i + j
+		if at == 0 || reqBody[at-1] == '\n' {
+			n++
+		}
+		i = at + len(needle)
+	}
+	return n
+}
+
+// declaresUnreadableParts reports whether a body that could not be enumerated
+// with the declared boundary nonetheless contains something part-shaped: a line
+// opening with `--`, which is where a part begins under SOME boundary. A parser
+// that cannot use the declared boundary may resolve a different one — several
+// take it from the first such line — so those bytes are part headers this
+// enumeration never read.
+//
+// The distinction this draws is the reason it exists rather than an
+// unconditional refusal: a JSON body sent with a multipart Content-Type has no
+// such line, so no parser reads a part from it under any boundary, and it is
+// forwarded on a structural fact rather than on a spelling heuristic.
+func declaresUnreadableParts(reqBody []byte) bool {
+	return countLineStartsWith(reqBody, "--") > 0
+}
+
+// multipartCarriesE2EEPart reports whether a multipart body declares a part named
+// "_e2ee" — a sealed envelope smuggled into the one request shape the JSON checks
+// cannot see (SPEC §5.3.1). The string is the reason, for the rejection message.
+//
+// It exists because every other sealed-request check parses the body as JSON, and
+// a multipart body is not JSON: "detect _e2ee, else pass through" reads the parse
+// failure as NOT SEALED and forwards the envelope in the clear. §5.3.1 names the
+// rule that breaks — a body that cannot be parsed as an envelope is not thereby
+// an unsealed body.
+//
+// The check is on PART NAMES, never the raw bytes, and that cuts both ways: a
+// substring rule would refuse a transcription whose `prompt` legitimately
+// mentions the marker, and would miss the name whenever it is encoded.
+//
+// "Declares a name" means both headers that can carry one (Content-Disposition,
+// and Content-Type per RFC 2045 §5), read directly rather than via
+// Part.FormName() — which answers "" for any disposition that is not exactly
+// `form-data`, while lenient parsers read `name` regardless of the type — and
+// read across every value the part declares, since Header.Get answers with the
+// first of several.
+//
+// Comparison is CASE-SENSITIVE, because form field names are: `_E2EE` is a
+// different field. It is not literal, though — resolvesToMarker compares every
+// reading a conformant parser might give the value.
+//
+// Two kinds of branch below, and the distinction carries the design. EXACT ones
+// (a resolved name, a header that demonstrably encodes one, names that were
+// never read at all) refuse outright. HEURISTIC ones — where a header cannot be
+// parsed, so nothing can be asked — refuse only when couldNameE2EEPart also
+// holds, making the set "malformed AND could be naming the marker" rather than
+// "malformed". That gated set is deliberately not closed; see the branches.
+//
+// Parts whose header never completes are not covered and need no cover: Go drops
+// one with a plain io.EOF, and a header that never terminates has no body after
+// it to hold an envelope. Its neighbour — a header that terminates with a
+// malformed name — makes ParseMediaType error and is refused.
+func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string) {
+	if !looksMultipart(contentType) {
+		return false, ""
+	}
+	_, params, err := mime.ParseMediaType(contentType)
+	boundary := params["boundary"]
+	if err != nil {
+		// A parse failure is not the end of the question: the boundary may be
+		// perfectly legal and merely unquoted (see recoverBoundary). Recovering it
+		// turns a blanket refusal into an actual enumeration.
+		boundary = recoverBoundary(contentType)
+	}
+	if boundary == "" {
+		// UNGATED, like the budget and nested branches and unlike the per-header
+		// ones. With no readable boundary NOTHING is enumerated, so this is the
+		// strongest form of "the names were never read" — and the gating argument
+		// that holds one branch down does not reach here: what is broken is the
+		// REQUEST's Content-Type, while the marker-bearing part header inside the
+		// body is intact and readable by any parser that resolves the boundary
+		// differently. The name is not a guess; it is simply never looked at.
+		//
+		// A gate here is evadable by the one spelling it cannot see: a duplicate
+		// boundary parameter in front of an otherwise perfect part named
+		// `=?utf-8?B?X2UyZWU=?=`, which is neither the literal marker nor `name*`.
+		//
+		// STRUCTURAL, not unconditional: refuse when the body still contains a
+		// part-shaped line, forward when it contains none. A JSON body sent with a
+		// multipart Content-Type is the second case and stays forwarded.
+		//
+		// Two causes, two wordings: a Content-Type that does not parse, and one
+		// that parses with no boundary at all. Formatting err in both renders the
+		// second as "could not be read (<nil>)".
+		if declaresUnreadableParts(reqBody) {
+			why := "its multipart boundary is missing from the Content-Type"
+			if err != nil {
+				why = fmt.Sprintf("its multipart boundary could not be read or recovered (%v)", err)
+			}
+			return true, "the body declares parts that cannot be enumerated because " + why + ", so a smuggled envelope cannot be ruled out"
+		}
+		return false, ""
+	}
+
+	// The gate scans the whole body and depends on nothing but reqBody, so it is
+	// computed at most once — and lazily, so a well-formed body never pays for it
+	// at all. The disposition branch `continue`s rather than returning, so a
+	// per-part call costs parts x len(body) for an identical answer: 97 ms / 4.1 s
+	// / 16.4 s at 1 / 50 / 200 malformed parts in 32 MiB, pre-authentication (the
+	// sync proxy reaches here ~90 lines before ValidateSession). See
+	// maxHeadersExamined for what bounds the rest.
+	examined := 0
+	partsRead := 0
+	// One budget, three per-part loops. Written once so a fourth loop cannot be
+	// added without one — an unbounded per-part loop is the amplification this
+	// budget exists for, and it has been reintroduced by a new loop before.
+	overBudget := func() bool {
+		examined++
+		return examined > maxHeadersExamined
+	}
+	gateKnown, gate := false, false
+	couldName := func() bool {
+		if !gateKnown {
+			gate, gateKnown = couldNameE2EEPart(reqBody), true
+		}
+		return gate
+	}
+
+	reader := multipart.NewReader(bytes.NewReader(reqBody), boundary)
+	for {
+		part, err := reader.NextPart()
+		// `== io.EOF`, NOT errors.Is, is load-bearing. mime/multipart reports "no
+		// more parts" as a bare io.EOF but WRAPS the failure to ever find the
+		// declared boundary:
+		//
+		//	clean end of parts            -> "EOF"                     == io.EOF
+		//	boundary never found in body  -> "multipart: NextPart: EOF" != io.EOF
+		//
+		// The second is a body nobody enumerated, which must reach the fail-closed
+		// branch below. errors.Is matches both and would forward it — so this is
+		// the rare place where the change a linter proposes reopens a hole, and
+		// TestMismatchedBoundaryMentioningTheMarkerIsRefused fails when it does.
+		if err == io.EOF { //nolint:errorlint // see above: errors.Is would match the wrapped boundary failure too
+			return false, ""
+		}
+		if err != nil {
+			// UNGATED too, and for the same reason: the header that broke is not
+			// the one that would carry the marker. A part header without a colon
+			// stops the enumeration, and every part after it — perfect,
+			// readable, marker-bearing — is never seen, and a gate here is evadable
+			// by the same spelling as the one above.
+			//
+			// But the decision is STRUCTURAL rather than unconditional, because
+			// this error class is wider than "a part header is malformed": a body
+			// with no closing delimiter, one truncated mid-part, and one whose
+			// declared boundary never appears all arrive here too, and a client
+			// that aborts an upload should not get an e2ee-flavoured 400.
+			//
+			// So: refuse when part-shaped content remains that this enumeration
+			// never reached — a delimiter beyond the parts read plus the closing
+			// one — or when the declared boundary appears nowhere, where nothing
+			// was enumerated at all and a lenient parser may resolve a different
+			// boundary. Measured across the whole error class:
+			//
+			//	bad part header, then more parts   -> delims 3, read 0  refuse
+			//	bad part header, then the close    -> delims 2, read 0  refuse
+			//	declared boundary never appears,
+			//	  body has `--other` lines         -> delims 0, read 0  refuse
+			//	  body is JSON, no `--` line       -> delims 0, read 0  forward
+			//	no closing delimiter               -> delims 1, read 1  forward
+			//	truncated mid part body            -> delims 2, read 2  forward
+			//	truncated mid part header          -> delims 2, read 1  forward
+			//
+			// The last row agrees with the io.EOF case above for the same reason:
+			// a header that never terminates has no body after it to hold an
+			// envelope.
+			delims := countLineStartsWith(reqBody, "--"+boundary)
+			if delims > partsRead+1 || (delims == 0 && declaresUnreadableParts(reqBody)) {
+				return true, fmt.Sprintf("the body could not be parsed as multipart (%v) and declares part-shaped content this enumeration never reached, so a smuggled envelope cannot be ruled out", err)
+			}
+			return false, ""
+		}
+		partsRead++
+		if overBudget() {
+			// UNGATED: the premise is that a name past the budget is never read,
+			// so the one spelling the gate cannot see is the one that would evade
+			// it — an RFC 2047 encoded word was forwarded from here while the
+			// isEncodedWord branch refused the same name inside the budget.
+			// Widening the gate instead is worse: `=?` occurs ~516 times by chance
+			// in 32 MiB of random bytes, which makes it always-true.
+			//
+			// Costs nothing real — no client on these endpoints sends thousands of
+			// parts — and it counts HEADERS, not just parts, because the inner
+			// loops pay a ParseMediaType and a declaresEncodedName walk per
+			// declared header: 35x at 32 MiB against one legitimate part.
+			return true, fmt.Sprintf("the body declares more than %d parts or part headers, so they cannot all be enumerated from here", maxHeadersExamined)
+		}
+		// EVERY value, not Header.Get's first: a part may declare the header twice,
+		// innocuous first and marker second, and parsers disagree about which wins
+		// (Go and Python's email take the first, others the last). The contract
+		// does not depend on the answer — the body demonstrably declares the name.
+		// Values returns empty for a part with no disposition, so no separate skip.
+		for _, disposition := range part.Header.Values("Content-Disposition") {
+			if overBudget() {
+				return true, fmt.Sprintf("the body declares more than %d parts or part headers, so they cannot all be enumerated from here", maxHeadersExamined)
+			}
+			_, dparams, derr := mime.ParseMediaType(disposition)
+			if derr != nil {
+				// The parse failed, so ask the raw header what it declares rather
+				// than asking a body-wide spelling heuristic whether the body
+				// might mention something. The gate cannot see an RFC 2047 encoded
+				// word — that is why isEncodedWord exists — so a header made
+				// unparseable while naming the marker as one reached here and was
+				// forwarded. Recovering the names closes that for every spelling
+				// nameVerdict knows, not just the one that was measured.
+				for _, name := range recoverParamValues(disposition, "name") {
+					if refuse, why := nameVerdict("a part's Content-Disposition", disposition, name); refuse {
+						return true, why
+					}
+				}
+				// Gated, unlike the budget and nested branches. Evading THIS gate
+				// needs the marker-bearing disposition to itself be unparseable,
+				// so the name is a guess either way and the heuristic gives up
+				// nothing; on those branches it gives up the whole refusal.
+				//
+				// Ungated, this refuses any part whose disposition merely fails to
+				// parse — `filename="my"file.txt"`, an unescaped quote, sloppy but
+				// real and forwarded by every other path here.
+				if couldName() {
+					return true, "the body could be naming the reserved marker and a part's Content-Disposition could not be parsed, so the name it declares cannot be ruled out"
+				}
+				continue
+			}
+			if refuse, why := nameVerdict("a part's Content-Disposition", disposition, dparams["name"]); refuse {
+				return true, why
+			}
+		}
+		for _, partType := range part.Header.Values("Content-Type") {
+			if overBudget() {
+				return true, fmt.Sprintf("the body declares more than %d parts or part headers, so they cannot all be enumerated from here", maxHeadersExamined)
+			}
+			// A part that is ITSELF multipart hides its own parts: mime/multipart
+			// does not descend, so an inner part named `_e2ee` parses cleanly and
+			// is forwarded. Closed without recursion, because "the parts were not
+			// enumerated" is already the condition this function fails closed on —
+			// and descending would multiply the enumeration cost by the nesting
+			// depth, wanting its own bound. UNGATED for the reason at the budget
+			// branch above.
+			//
+			// Not quite free: `multipart/mixed` in a form part is the RFC 1867
+			// multi-file field, dropped by HTML5 and emitted by no
+			// OpenAI-compatible client, but this is a hard 400 on a shape every
+			// other path forwards. Release notes, not just here.
+			//
+			// The other unenumerated content is NOT closed. mime/multipart is
+			// symmetric about the delimiters — it skips everything before the
+			// first and stops at the close — so a part-shaped block in the
+			// preamble or the epilogue is never read here. Both are left open
+			// deliberately: RFC 2046 §5.1.1 says both MUST be ignored, so reaching
+			// either needs an upstream honouring neither delimiter, where
+			// descending into a nested part is what a lenient parser does anyway.
+			if looksMultipart(partType) {
+				return true, "a part declares a nested multipart body, whose own parts cannot be enumerated from here"
+			}
+			// RFC 2045 §5 puts a `name` on Content-Type too, javax.mail's
+			// getFileName() reads it as a fallback, and a part may declare it with
+			// NO Content-Disposition — in which case the loop above never runs and
+			// every check in it is skipped. So the same three readings apply here,
+			// and not only when a disposition is absent: which header a lenient
+			// parser prefers is not ours to assume. The parse failure is gated as
+			// the disposition's is. One ParseMediaType per part Content-Type,
+			// against the prefix test alone above; the budget already covers it.
+			_, tparams, terr := mime.ParseMediaType(partType)
+			if terr != nil {
+				// The same recovery as the disposition above, for the same reason:
+				// this header carries a name too (RFC 2045 §5), and breaking it
+				// must not clear what it declares.
+				for _, name := range recoverParamValues(partType, "name") {
+					if refuse, why := nameVerdict("a part's Content-Type (RFC 2045 §5)", partType, name); refuse {
+						return true, why
+					}
+				}
+				if couldName() {
+					return true, "the body could be naming the reserved marker and a part's Content-Type could not be parsed, so the name it declares cannot be ruled out"
+				}
+				continue
+			}
+			if refuse, why := nameVerdict("a part's Content-Type (RFC 2045 §5)", partType, tparams["name"]); refuse {
+				return true, why
+			}
+		}
+	}
+}
+
 // IsSealedRequest reports whether reqBody is a sealed envelope (SPEC §5): a JSON
 // object with a top-level "_e2ee" key. It is the same test MaybeUnsealRequest
 // makes before committing to fail-closed, exposed for entry points that cannot
 // SERVE a sealed request and so must refuse it rather than forward it.
 //
 // The async submit routes are those entry points. They do not go through the
-// proxy, so they never reach MaybeUnsealRequest; without this, a sealed envelope
-// POSTed to /v1/async/images/generations was enqueued verbatim, had its
-// cleartext rewritten by forceB64ResponseFormat (which also invalidates the
-// AAD), was forwarded upstream still sealed, and had its result served in
-// plaintext — while the user was billed for the garbage job. The prompt stayed
-// sealed throughout, so little was disclosed; what broke is that "a sealed
-// request is fail-closed" stopped being a property of the enclave and became a
-// property of which route the client picked.
-func (c *Ctrl) IsSealedRequest(reqBody []byte) bool {
+// proxy, so they never reach MaybeUnsealRequest. Without this refusal a sealed
+// envelope POSTed to /v1/async/images/generations is enqueued verbatim, has its
+// cleartext rewritten by forceB64ResponseFormat (which invalidates the AAD), is
+// forwarded upstream still sealed, and has its result served in plaintext —
+// while the user is billed for the garbage job. Little is disclosed, since the
+// prompt stays sealed throughout; what breaks is that "a sealed request is
+// fail-closed" becomes a property of which route the client picked rather than
+// of the enclave.
+//
+// It takes the request's Content-Type because a sealed envelope has two ways in
+// and only one of them is JSON. The async image-editing route accepts
+// multipart/form-data (it preserves the boundary Content-Type for the upstream),
+// and a JSON-only test says "not sealed" to a body carrying the envelope in a
+// multipart part — the same hole, one request shape over. See
+// multipartCarriesE2EEPart.
+func (c *Ctrl) IsSealedRequest(contentType string, reqBody []byte) (bool, string) {
+	return IsSealedRequest(contentType, reqBody)
+}
+
+// sealedVerdict is what a request's BYTES are, independent of which entry point
+// is asking. Both of them classify identically and then differ only in what they
+// do about it, which is the point: the sealed decision written twice is how the
+// two disagreed about the same bytes (a multipart body reached the sync proxy's
+// forward path while the async routes called it sealed), and how a
+// `looksMultipart` short-circuit on one of them forwarded a genuine envelope in
+// the clear while the other refused it.
+type sealedVerdict int
+
+const (
+	// notSealed: forward it. Includes an ordinary multipart body, whose JSON
+	// unmarshal simply fails.
+	notSealed sealedVerdict = iota
+	// smuggledIntoMultipart: a multipart request declares a part named `_e2ee`,
+	// or is malformed in a way that leaves that impossible to rule out
+	// (SPEC §5.3.1). Refuse — no multipart endpoint has a sealed request profile,
+	// so there is nothing to open even when the envelope is genuine.
+	smuggledIntoMultipart
+	// jsonEnvelope: the body IS a sealed envelope, whatever Content-Type the
+	// client put on it. Unseal it, fail-closed.
+	jsonEnvelope
+)
+
+// classifyRequest is the one place the sealed decision is made. The returned
+// wire.Request is populated only for jsonEnvelope; the string is the reason, for
+// a rejection message.
+//
+// The multipart question comes FIRST, and that ordering is load-bearing rather
+// than stylistic: a part name can be RFC 2231-encoded, so the body carries no
+// literal "_e2ee", hasE2EEMarker returns false, and an early return on it would
+// send the encoded case straight out for forwarding.
+func classifyRequest(contentType string, reqBody []byte) (sealedVerdict, wire.Request, string) {
+	if carries, why := multipartCarriesE2EEPart(contentType, reqBody); carries {
+		return smuggledIntoMultipart, nil, why
+	}
+	// No short-circuit on looksMultipart. A body is an envelope or not by its
+	// bytes; the Content-Type is the client's claim about them, and §5.3.1 read in
+	// the other direction says a body that IS an envelope is one whatever label it
+	// arrives under. An ordinary multipart body is handled correctly below anyway:
+	// its unmarshal fails and it comes back notSealed, for one bytes.Contains
+	// pass.
 	if !hasE2EEMarker(reqBody) {
-		return false
+		return notSealed, nil, ""
 	}
 	var env wire.Request
 	if err := json.Unmarshal(reqBody, &env); err != nil {
-		return false // not a JSON object → cannot be an envelope
+		return notSealed, nil, "" // not a JSON object → cannot be an envelope
 	}
-	_, ok := env[e2eeBodyMarker]
-	return ok
+	if _, ok := env[e2eeBodyMarker]; !ok {
+		return notSealed, nil, "" // the substring matched inside content
+	}
+	return jsonEnvelope, env, fmt.Sprintf("the body carries a top-level %q object", e2eeBodyMarker)
+}
+
+// IsSealedRequest is the receiver-free form, exported so a caller that has no
+// Ctrl — the handler tests, which mock the rest of the interface — can ask the
+// real question instead of reimplementing it.
+//
+// The method above forwards to it, which makes "this predicate reads no enclave
+// state" structural rather than a comment. It was a comment, and the test held
+// it up with `(&ctrl.Ctrl{})`: correct, but it encodes the assumption at the
+// call site, where the day the predicate starts reading a field it fails as a
+// nil-map panic inside an unrelated handler test rather than as a compile error
+// here. The split is also what the predicate's meaning already implies — it
+// answers a question about the BYTES, and the enclave's keys have no bearing on
+// whether the client sent an envelope.
+func IsSealedRequest(contentType string, reqBody []byte) (bool, string) {
+	verdict, _, why := classifyRequest(contentType, reqBody)
+	return verdict != notSealed, why
 }
 
 // MaybeUnsealRequest unseals a sealed E2EE request in-enclave and returns the
@@ -173,18 +971,12 @@ func (c *Ctrl) IsSealedRequest(reqBody []byte) bool {
 // plaintext fallback, SPEC §6) — a sealed request that cannot be opened, whose
 // signer_addr is not this enclave, or whose key_id is unknown is rejected.
 func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, reqBody []byte) ([]byte, error) {
-	if !hasE2EEMarker(reqBody) {
+	verdict, env, why := classifyRequest(ctx.Request.Header.Get("Content-Type"), reqBody)
+	switch verdict {
+	case notSealed:
 		return reqBody, nil
-	}
-
-	var env wire.Request
-	if err := json.Unmarshal(reqBody, &env); err != nil {
-		// Not a JSON object → cannot be a sealed envelope; forward unchanged.
-		return reqBody, nil
-	}
-	if _, ok := env[e2eeBodyMarker]; !ok {
-		// The substring matched inside content, not a real envelope; not sealed.
-		return reqBody, nil
+	case smuggledIntoMultipart:
+		return nil, fmt.Errorf("multipart request must not carry a sealed envelope: %s. A sealed request is sent as JSON, and a body that cannot be parsed as an envelope is not thereby an unsealed body", why)
 	}
 
 	// Confirmed sealed from here on: fail-closed on any error.

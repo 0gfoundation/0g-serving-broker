@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -35,22 +36,25 @@ func (h *Handler) submitAsyncJob(ctx *gin.Context, svcType string) {
 		handleBrokerError(ctx, err, "read request body")
 		return
 	}
-	// E2EE (0g-pc SPEC §1/§5): the async routes cannot serve a sealed request —
-	// they enqueue the body, a worker forwards it later, and the result is served
+	// E2EE (0g-pc SPEC §1/§5): the async routes cannot serve a sealed request.
+	// They enqueue the body, a worker forwards it later, and the result is served
 	// from a store in plaintext, so there is no point at which the response could
 	// be sealed to the client's ephemeral key or signed under §8. Forwarding one
-	// anyway is worse than useless: forceB64ResponseFormat rewrites the envelope's
-	// cleartext (invalidating the AAD), the provider receives a request it cannot
-	// read, and the user is billed for the result.
+	// is worse than useless: forceB64ResponseFormat rewrites the envelope's
+	// cleartext (invalidating the AAD), the provider gets a request it cannot
+	// read, and the user is billed for the result. Refusing keeps "a sealed
+	// request is fail-closed" a property of the enclave rather than of which route
+	// the client picked; the sync proxy reaches the same conclusion via
+	// MaybeUnsealRequest, which these routes never touch.
 	//
-	// Refuse, so "a sealed request is fail-closed" is a property of the enclave
-	// rather than of which route the client happened to pick. The synchronous
-	// proxy reaches the same conclusion via MaybeUnsealRequest; these routes never
-	// touch it, which is exactly how they came to be a hole.
-	if h.asyncCtrl.IsSealedRequest(reqBody) {
+	// The REASON is reported, not just the verdict: "use the synchronous endpoint"
+	// is right for a part genuinely named `_e2ee` and wrong for the fail-closed
+	// branches, which refuse a body that is merely malformed and could be naming
+	// the marker.
+	if sealed, why := h.asyncCtrl.IsSealedRequest(ctx.GetHeader("Content-Type"), reqBody); sealed {
 		ctx.Set("ignoreError", true)
 		ctx.JSON(http.StatusBadRequest, gin.H{
-			"error": "e2ee: sealed requests are not supported on the async endpoints; use the synchronous endpoint",
+			"error": fmt.Sprintf("e2ee: this request cannot be served on the async endpoints because %s. A genuinely sealed request goes to the synchronous endpoint; a malformed multipart body has to be corrected", why),
 		})
 		return
 	}

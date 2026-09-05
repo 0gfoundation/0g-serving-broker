@@ -1,8 +1,10 @@
 package handler
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 )
 
@@ -42,16 +45,22 @@ func (m *mockAsyncCtrl) IsAsyncEnabled() bool {
 	return m.asyncEnabled
 }
 
-// IsSealedRequest mirrors the real Ctrl's test: a JSON object with a top-level
-// "_e2ee" key. Reimplemented here rather than stubbed to false, so a test that
-// posts a real envelope exercises the gate rather than the mock's opinion of it.
-func (m *mockAsyncCtrl) IsSealedRequest(reqBody []byte) bool {
-	var env map[string]json.RawMessage
-	if err := json.Unmarshal(reqBody, &env); err != nil {
-		return false
-	}
-	_, ok := env["_e2ee"]
-	return ok
+// IsSealedRequest DELEGATES to the real implementation rather than mirroring it.
+// The previous version reimplemented "a JSON object with a top-level _e2ee key"
+// here, with the stated intent that a test posting a real envelope exercise the
+// gate rather than the mock's opinion of it — but a reimplementation IS the
+// mock's opinion, and it stops tracking the real rule the moment that rule
+// grows. It just did: the gate now also has to see an envelope smuggled into a
+// multipart part, which these async routes accept, and a mirrored JSON-only
+// mock would have kept this test green while the route leaked.
+//
+// It calls the receiver-free ctrl.IsSealedRequest rather than constructing a
+// zero Ctrl. The zero value worked — the predicate reads no enclave state — but
+// it encoded that assumption HERE, so the day the predicate starts reading a
+// field this fails as a nil-map panic inside a handler test instead of as a
+// compile error where the change was made.
+func (m *mockAsyncCtrl) IsSealedRequest(contentType string, reqBody []byte) (bool, string) {
+	return ctrl.IsSealedRequest(contentType, reqBody)
 }
 
 func (m *mockAsyncCtrl) ValidateSession(ctx *gin.Context) (string, error) {
@@ -744,6 +753,105 @@ func TestSubmitAsync_RejectsSealedRequest(t *testing.T) {
 				t.Errorf("a sealed request must not be submitted, got body: %s", mock.capturedReqBody)
 			}
 		})
+	}
+}
+
+// The same gate, on the request shape /v1/async/images/edits actually accepts.
+// It takes multipart/form-data (it stores the boundary Content-Type for the
+// upstream), and every JSON-shaped check reads a multipart body as "not sealed"
+// — so before the gate learned about part names, an envelope smuggled into a
+// part was enqueued exactly as the JSON one above used to be.
+//
+// This is at the ROUTE rather than only on the predicate because the route is
+// what leaks: a mutation removing the multipart half of IsSealedRequest turned
+// the ctrl tests red and left this package entirely green, which is precisely
+// the coverage shape that lets a hole ship.
+func TestSubmitAsync_RejectsSealedEnvelopeSmuggledIntoMultipart(t *testing.T) {
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	if err := w.WriteField("model", "qwen-image-edit"); err != nil {
+		t.Fatalf("WriteField: %v", err)
+	}
+	if err := w.WriteField("_e2ee", `{"v":1,"kem_id":"0x0020","ciphertext":"c"}`); err != nil {
+		t.Fatalf("WriteField: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	mock := &mockAsyncCtrl{asyncEnabled: true, sessionUser: "0xUser1", submitJobID: "job-1"}
+	h := newTestHandler(mock)
+	rec := performRequest(h.SubmitAsyncImageEdit, "POST", "/v1/async/images/edits", buf.String(),
+		map[string]string{"Content-Type": w.FormDataContentType()})
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if mock.capturedReqBody != nil {
+		t.Errorf("a smuggled envelope must not be submitted, got body: %s", mock.capturedReqBody)
+	}
+	// And the message says WHICH case it is. A genuinely named part is the one
+	// case for which "use the synchronous endpoint" is the right advice, so the
+	// reason has to reach the response rather than be discarded for a single
+	// fixed sentence.
+	if !strings.Contains(rec.Body.String(), `named \"_e2ee\"`) {
+		t.Errorf("the refusal must name the reason it found, got: %s", rec.Body.String())
+	}
+}
+
+// The same route, refusing for a DIFFERENT reason: a malformed multipart body
+// that could be naming the marker. This is not a sealed request, so the old
+// fixed message — "use the synchronous endpoint" — sent the caller to a route
+// that refuses it too, with different wording. The reason must distinguish them.
+func TestSubmitAsync_MalformedMultipartRefusalSaysWhy(t *testing.T) {
+	// A body that mentions the marker, with a Content-Type carrying no boundary,
+	// so the parts cannot be enumerated at all.
+	body := "--x\r\nContent-Disposition: form-data; name=\"_e2ee\"\r\n\r\n{}\r\n--x--\r\n"
+
+	mock := &mockAsyncCtrl{asyncEnabled: true, sessionUser: "0xUser1", submitJobID: "job-1"}
+	h := newTestHandler(mock)
+	rec := performRequest(h.SubmitAsyncImageEdit, "POST", "/v1/async/images/edits", body,
+		map[string]string{"Content-Type": "multipart/form-data"})
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if mock.capturedReqBody != nil {
+		t.Errorf("must not be submitted, got body: %s", mock.capturedReqBody)
+	}
+	got := rec.Body.String()
+	if !strings.Contains(got, "boundary is missing") {
+		t.Errorf("the refusal must say the boundary was missing, got: %s", got)
+	}
+	// The two causes that share this branch need distinct wording: formatting a
+	// nil error rendered a parseable-but-boundaryless Content-Type as "(<nil>)".
+	if strings.Contains(got, "<nil>") {
+		t.Errorf("a nil parse error must not be rendered, got: %s", got)
+	}
+}
+
+// And its complement, so the route is not simply refusing all multipart: an
+// ordinary edit whose `prompt` mentions the marker must still be accepted.
+func TestSubmitAsync_MultipartMentioningTheMarkerIsAccepted(t *testing.T) {
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	if err := w.WriteField("model", "qwen-image-edit"); err != nil {
+		t.Fatalf("WriteField: %v", err)
+	}
+	if err := w.WriteField("prompt", "annotate the diagram labelled _e2ee"); err != nil {
+		t.Fatalf("WriteField: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	mock := &mockAsyncCtrl{asyncEnabled: true, sessionUser: "0xUser1", submitJobID: "job-1"}
+	h := newTestHandler(mock)
+	rec := performRequest(h.SubmitAsyncImageEdit, "POST", "/v1/async/images/edits", buf.String(),
+		map[string]string{"Content-Type": w.FormDataContentType()})
+
+	if rec.Code == http.StatusBadRequest && strings.Contains(rec.Body.String(), "e2ee") {
+		t.Fatalf("an ordinary edit must not be refused over its prompt text: %s", rec.Body.String())
 	}
 }
 
