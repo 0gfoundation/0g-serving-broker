@@ -451,31 +451,51 @@ func (p *Proxy) tokenBudgetWeight(svcType, modelName string, ctx *gin.Context, r
 	// declares 32k — while an undeclared cap is precisely the unbounded case, so
 	// deleting one field would buy eight times the admission for identical real
 	// cost. Declaring must never be more expensive than not declaring.
-	reserve := int64(mi.MaxCompletionTokens)
-	if reserve <= 0 {
-		reserve = outputReserveTokens
+	// Three separate numbers, and conflating any two of them has been a bug
+	// already:
+	//
+	//   maxPerSequence — what the model can produce at all. The advertised cap
+	//     when there is one; otherwise the context window, since nothing
+	//     generates past that.
+	//   declared       — what this request asked for, per sequence.
+	//   fallback       — what to charge when it asked for nothing, which is the
+	//     unbounded case and must never be the cheapest option.
+	//
+	// The fallback is NOT a ceiling. Treating it as one meant that a model with
+	// no advertised maximum charged a request declaring 128k output the same as
+	// one declaring 1 — the whole declaration discarded, a sixteen-fold
+	// under-count on exactly the traffic this budget exists to bound.
+	maxPerSequence := int64(mi.MaxCompletionTokens)
+	if maxPerSequence <= 0 {
+		maxPerSequence = int64(mi.ContextLength)
 	}
-	if want := est.OutputTokensPerSequence; want > 0 && want < reserve {
-		// The caller asked for less than the model's maximum: charge the lesser.
-		reserve = want
+	reserve := est.OutputTokensPerSequence
+	if reserve <= 0 {
+		// Undeclared: charge the advertised maximum, so declaring a number can
+		// only ever cost less than staying silent. With nothing advertised there
+		// is no honest figure and the engine's own admission reserve stands in.
+		if reserve = int64(mi.MaxCompletionTokens); reserve <= 0 {
+			reserve = outputReserveTokens
+		}
+	}
+	if reserve > maxPerSequence {
+		reserve = maxPerSequence
 	}
 	// Clamp per sequence, THEN multiply: maxCompletionTokens is a per-sequence
 	// figure, so applying it to the total would silently discard n.
 	if est.Sequences > 1 {
 		reserve *= est.Sequences
 	}
-	weight := est.PromptBytes/bytesPerTokenEstimate + reserve
 
-	// Bound the estimate by physics. One request cannot hold more KV than the
-	// context window, so a body whose byte count says otherwise is the estimate
-	// being wrong, not the engine being asked for the impossible. Without this,
-	// a single 32 MB body (the request size limit) weighs 8.4M tokens, exceeds
-	// any budget, and — since an over-budget request is admitted alone rather
-	// than rejected — parks the entire chatbot surface behind one request.
-	if weight > int64(mi.ContextLength) {
-		weight = int64(mi.ContextLength)
+	// Bound the PROMPT by physics — no request holds more context than the
+	// window — but not the total. n sequences decode independently and each
+	// holds its own output KV, so their sum legitimately exceeds one window;
+	// clamping the total would discard the multiplier a second time.
+	promptTokens := est.PromptBytes / bytesPerTokenEstimate
+	if promptTokens > int64(mi.ContextLength) {
+		promptTokens = int64(mi.ContextLength)
 	}
-	return weight, true
+	return promptTokens + reserve, true
 }
 
 // textOnlyInput reports whether the model's advertised input is text and

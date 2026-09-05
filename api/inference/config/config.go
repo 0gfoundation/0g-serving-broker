@@ -1088,8 +1088,9 @@ type ConcurrencyLimitConfig struct {
 	// Set it to about 80% of the engine's KV pool (sglang reports
 	// sglang_max_total_num_tokens). The headroom absorbs the estimate below.
 	//
-	// A request weighs promptBytes/4 + an output reserve, capped at the model's
-	// context length. The prompt half counts only the fields that actually become
+	// A request weighs promptBytes/4 (capped at the model's context length) plus
+	// an output reserve. The reserve is NOT capped by the window: n sequences
+	// decode independently and each holds its own output KV. The prompt half counts only the fields that actually become
 	// prompt (system, message content, tool definitions); the envelope is
 	// deliberately excluded, since JSON whitespace and ignored fields cost the
 	// engine nothing and charging for them would let one padded body claim the
@@ -1099,11 +1100,13 @@ type ConcurrencyLimitConfig struct {
 	// traffic by an order of magnitude. It falls back to 4096 when the caller
 	// declared nothing.
 	//
-	// The /4 divisor is English/JSON-shaped and errs downward for CJK, which
-	// packs near 3 bytes per token — about a quarter low. Escapes do not offset
-	// that: string content is measured after JSON decoding, so \u4f60 and a
-	// literal CJK character count the same. Lower the budget for CJK-heavy
-	// traffic rather than adding a second knob.
+	// The /4 divisor is English/JSON-shaped and errs downward: CJK packs near 3
+	// bytes per token (about a quarter low) and adversarial input — random
+	// characters, emoji, dense CJK — can reach 3-4x low. Escapes do not offset
+	// that, since string content is measured after JSON decoding, so \u4f60 and
+	// a literal CJK character count the same. The context-length cap on the
+	// prompt half is what keeps the worst case bounded; lower the budget for
+	// consistently CJK-heavy traffic rather than adding a second knob.
 	//
 	// Intended for a self-hosted engine, where KV is a resource this broker
 	// shares with itself. In front of a centralized upstream there is no local KV

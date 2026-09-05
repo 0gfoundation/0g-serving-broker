@@ -239,8 +239,11 @@ func TestTokenBudgetWeight_BoundedByContextLength(t *testing.T) {
 	if !ok {
 		t.Fatal("chatbot traffic must be charged")
 	}
-	if weight != 262144 {
-		t.Fatalf("weight = %d, want it bounded by the %d context window", weight, 262144)
+	// The PROMPT is bounded by the window; the output reserve sits on top of it,
+	// since the two occupy KV at different times and the reserve is what n
+	// multiplies.
+	if want := int64(262144 + 32768); weight != want {
+		t.Fatalf("weight = %d, want the window-bounded prompt plus the reserve (%d)", weight, want)
 	}
 }
 
@@ -291,8 +294,8 @@ func TestTokenBudgetWeight_MultiModelUsesPerEntryModelInfo(t *testing.T) {
 	if !ok {
 		t.Fatal("a resolvable multi-model entry must be charged")
 	}
-	if weight != 262144 {
-		t.Fatalf("weight = %d, want the per-entry context length %d", weight, 262144)
+	if want := int64(262144 + 32768); weight != want {
+		t.Fatalf("weight = %d, want the per-entry context length plus its reserve (%d)", weight, want)
 	}
 }
 
@@ -378,33 +381,45 @@ func TestTokenBudgetWeight_PaddingIsNotChargedHowverLargeTheBody(t *testing.T) {
 // Past the point where the weight is clamped to the window, more counting
 // cannot change the answer — so a body made of a million tiny blocks must not
 // be walked in full just to arrive at the same number.
-func TestTokenBudgetWeight_WalkStopsAtTheClampCeiling(t *testing.T) {
-	p := newBudgetProxy(1_440_000, 32768)
-	p.ctrl.Service.ModelInfo.ContextLength = 8192 // small window: ceiling reached early
+//
+// Asserted on the count, not on elapsed time: a wall-clock threshold sat in the
+// middle of the two distributions and let the regression through most runs.
+func TestEstimateRequest_WalkStopsAtTheCeiling(t *testing.T) {
+	const ceiling = 32768
 
-	var b strings.Builder
-	b.WriteString(`{"messages":[`)
-	for i := 0; i < 200000; i++ {
-		if i > 0 {
-			b.WriteString(",")
+	// The bound has to reach every loop. A million blocks inside ONE message is
+	// the same attack as a million messages, and so is a million in system.
+	shapes := map[string]string{
+		"many messages": `{"messages":[` + repeatJoin(`{"role":"user","content":"xxxxxxxxxxxxxxxx"}`, 20000) + `]}`,
+		"one message, many blocks": `{"messages":[{"role":"user","content":[` +
+			repeatJoin(`{"type":"text","text":"xxxxxxxxxxxxxxxx"}`, 20000) + `]}]}`,
+		"system, many blocks": `{"system":[` +
+			repeatJoin(`{"type":"text","text":"xxxxxxxxxxxxxxxx"}`, 20000) + `]}`,
+	}
+	for name, body := range shapes {
+		unbounded := estimateRequest([]byte(body), 0).PromptBytes
+		bounded := estimateRequest([]byte(body), ceiling).PromptBytes
+
+		if unbounded < ceiling*4 {
+			t.Fatalf("%s: fixture is too small to test the bound (%d)", name, unbounded)
 		}
-		b.WriteString(`{"role":"user","content":"xxxxxxxxxxxxxxxx"}`)
+		// It stops just past the ceiling, not at the end: one more block may land
+		// before the check, so allow a single block's worth of overshoot.
+		if bounded >= unbounded {
+			t.Fatalf("%s: walked the whole body (%d) despite the %d ceiling", name, bounded, ceiling)
+		}
+		if bounded < ceiling {
+			t.Fatalf("%s: stopped at %d, before the %d ceiling", name, bounded, ceiling)
+		}
 	}
-	b.WriteString(`]}`)
+}
 
-	start := time.Now()
-	weight, ok := p.tokenBudgetWeight("chatbot", "glm-5.3", newBudgetCtx(), []byte(b.String()))
-	elapsed := time.Since(start)
-
-	if !ok {
-		t.Fatal("chatbot traffic must be charged")
+func repeatJoin(item string, n int) string {
+	parts := make([]string, n)
+	for i := range parts {
+		parts[i] = item
 	}
-	if weight != 8192 {
-		t.Fatalf("weight = %d, want the context window 8192", weight)
-	}
-	if elapsed > 300*time.Millisecond {
-		t.Fatalf("took %v — the walk is not stopping at the ceiling", elapsed)
-	}
+	return strings.Join(parts, ",")
 }
 
 // The reserve must follow what the caller actually asked to generate, not a
@@ -446,5 +461,48 @@ func TestTokenBudgetWeight_ReserveFollowsTheDeclaredOutput(t *testing.T) {
 	four, _ := p.tokenBudgetWeight("chatbot", "glm-5.3", newBudgetCtx(), []byte(`{"max_tokens":32768,"n":4,"messages":[]}`))
 	if four < one*3 {
 		t.Fatalf("n=4 weighed %d against %d for n=1 — the multiplier is being swallowed by the per-sequence clamp", four, one)
+	}
+}
+
+// The fallback constant must never become a ceiling. With no advertised
+// maxCompletionTokens the reserve fell back to 4096 and then discarded any
+// larger declared value, so a request asking for 128k output was charged the
+// same as one asking for 1 — a sixteen-fold under-count on exactly the traffic
+// this budget exists to bound.
+func TestTokenBudgetWeight_FallbackDoesNotCapADeclaredOutput(t *testing.T) {
+	p := newBudgetProxy(1_440_000, 0) // nothing advertised
+	p.ctrl.Service.ModelInfo.ContextLength = 262144
+
+	declared, ok := p.tokenBudgetWeight("chatbot", "glm-5.3", newBudgetCtx(),
+		[]byte(`{"max_tokens":128000,"messages":[{"role":"user","content":"hi"}]}`))
+	if !ok {
+		t.Fatal("chatbot traffic must be charged")
+	}
+	if declared < 128000 {
+		t.Fatalf("weight = %d, want at least the 128000 the caller declared", declared)
+	}
+
+	// And with nothing declared either, the fallback still applies.
+	silent, _ := p.tokenBudgetWeight("chatbot", "glm-5.3", newBudgetCtx(),
+		[]byte(`{"messages":[{"role":"user","content":"hi"}]}`))
+	if silent > outputReserveTokens+100 {
+		t.Fatalf("undeclared weight = %d, want about the %d fallback", silent, outputReserveTokens)
+	}
+}
+
+// n sequences decode independently and each holds its own output KV, so the sum
+// legitimately exceeds one context window. Clamping the total to the window
+// would discard the multiplier a second time.
+func TestTokenBudgetWeight_SequencesAreNotClampedAwayByTheWindow(t *testing.T) {
+	p := newBudgetProxy(4_000_000, 32768)
+	p.ctrl.Service.ModelInfo.ContextLength = 65536 // deliberately smaller than 8 x 32768
+
+	weight, ok := p.tokenBudgetWeight("chatbot", "glm-5.3", newBudgetCtx(),
+		[]byte(`{"max_tokens":32768,"n":8,"messages":[{"role":"user","content":"hi"}]}`))
+	if !ok {
+		t.Fatal("chatbot traffic must be charged")
+	}
+	if weight < 8*32768 {
+		t.Fatalf("weight = %d, want the eight sequences' worth of output KV (%d)", weight, 8*32768)
 	}
 }

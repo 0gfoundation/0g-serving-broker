@@ -43,20 +43,21 @@ func estimateRequest(reqBody []byte, ceiling int64) requestEstimate {
 
 	est := requestEstimate{}
 	est.OutputTokensPerSequence, est.Sequences = requestedOutputTokens(body)
-	var total int64
-	total += textBytes(body["system"]) // Anthropic, and OpenAI's newer top-level form
-	total += textBytes(body["prompt"]) // legacy completions
+
+	c := &byteCounter{ceiling: ceiling}
+	c.add(textBytes(body["system"], c)) // Anthropic, and OpenAI's newer top-level form
+	c.add(textBytes(body["prompt"], c)) // legacy completions
 
 	// Tool definitions and a response schema are handed to the model verbatim,
 	// so their whole JSON is prompt — compacted, since the engine re-serializes
 	// them and the whitespace never arrives.
-	total += compactLen(body["tools"])
-	total += compactLen(body["functions"]) // pre-tools spelling, still accepted
-	total += compactLen(body["response_format"])
+	c.add(compactLen(body["tools"]))
+	c.add(compactLen(body["functions"])) // pre-tools spelling, still accepted
+	c.add(compactLen(body["response_format"]))
 
 	raw, ok := body["messages"]
 	if !ok {
-		est.PromptBytes = total
+		est.PromptBytes = c.total
 		return est
 	}
 	var messages []json.RawMessage
@@ -64,35 +65,49 @@ func estimateRequest(reqBody []byte, ceiling int64) requestEstimate {
 		// Unreadable shape. Charge the whole thing rather than nothing: the
 		// upstream may well accept what this parser did not, and a body that is
 		// free to send is the one an attacker sends.
-		est.PromptBytes = total + compactLen(raw)
+		c.add(compactLen(raw))
+		est.PromptBytes = c.total
 		return est
 	}
 	for _, m := range messages {
-		if ceiling > 0 && total >= ceiling {
-			// Past this point the weight is clamped to the context window whatever
-			// the rest adds up to, so walking it only burns CPU — and a body made
-			// of a million tiny blocks burns a lot of it. Stop counting; the
-			// caller's clamp finishes the job.
+		if c.done() {
 			break
 		}
 		var fields map[string]json.RawMessage
 		if err := json.Unmarshal(m, &fields); err != nil {
-			total += compactLen(m)
+			c.add(compactLen(m))
 			continue
 		}
-		total += textBytes(fields["content"])
-		total += textBytes(fields["role"])
-		total += textBytes(fields["name"])
-		total += compactLen(fields["tool_calls"])
-		total += compactLen(fields["function_call"])
+		c.add(textBytes(fields["content"], c))
+		c.add(textBytes(fields["role"], c))
+		c.add(textBytes(fields["name"], c))
+		c.add(compactLen(fields["tool_calls"]))
+		c.add(compactLen(fields["function_call"]))
 		// Every message costs a few tokens of chat-template scaffolding
 		// regardless of content; without this a thousand empty messages would
 		// weigh nothing.
-		total += perMessageOverheadBytes
+		c.add(perMessageOverheadBytes)
 	}
-	est.PromptBytes = total
+	est.PromptBytes = c.total
 	return est
 }
+
+// byteCounter accumulates the estimate and knows when to stop.
+//
+// The stopping point matters as much as the counting. Past the total at which
+// the caller clamps the weight to the context window, nothing further can
+// change the answer — but a body can carry a million tiny content blocks, and
+// walking all of them costs real CPU on a request that will be rejected
+// upstream anyway. The bound has to reach every loop, not just the outer one:
+// a million blocks inside ONE message is the same attack as a million messages.
+type byteCounter struct {
+	total   int64
+	ceiling int64 // 0 disables the bound
+}
+
+func (c *byteCounter) add(n int64) { c.total += n }
+
+func (c *byteCounter) done() bool { return c.ceiling > 0 && c.total >= c.ceiling }
 
 // requestEstimate is what one parse of the body yields: the bytes that become
 // prompt, and how many output tokens the request has asked to generate.
@@ -191,7 +206,7 @@ const perMessageOverheadBytes = 16
 // gate exists for, and made "hide the prompt in a tool_result" a one-line
 // bypass. Over-counting an unfamiliar block by its JSON overhead is the safe
 // direction.
-func textBytes(raw json.RawMessage) int64 {
+func textBytes(raw json.RawMessage, c *byteCounter) int64 {
 	if len(raw) == 0 {
 		return 0
 	}
@@ -208,6 +223,9 @@ func textBytes(raw json.RawMessage) int64 {
 
 	var total int64
 	for _, p := range parts {
+		if c != nil && c.ceiling > 0 && c.total+total >= c.ceiling {
+			break
+		}
 		var fields map[string]json.RawMessage
 		if err := json.Unmarshal(p, &fields); err != nil {
 			total += compactLen(p)
