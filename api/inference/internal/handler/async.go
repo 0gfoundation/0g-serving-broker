@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
@@ -51,10 +52,27 @@ func (h *Handler) submitAsyncJob(ctx *gin.Context, svcType string) {
 	// is right for a part genuinely named `_e2ee` and wrong for the fail-closed
 	// branches, which refuse a body that is merely malformed and could be naming
 	// the marker.
-	if sealed, why := h.asyncCtrl.IsSealedRequest(ctx.GetHeader("Content-Type"), reqBody); sealed {
+	// The three refusals are three different problems and get three different
+	// messages. One bool could not tell them apart, so a single sentence had to
+	// cover all of them at once — and told a client with a sloppy-but-legitimate
+	// multipart body to go use an endpoint that would refuse it too.
+	switch verdict, why := h.asyncCtrl.RefuseAsync(ctx.GetHeader("Content-Type"), reqBody); verdict {
+	case ctrl.JSONEnvelope:
 		ctx.Set("ignoreError", true)
 		ctx.JSON(http.StatusBadRequest, gin.H{
-			"error": fmt.Sprintf("e2ee: this request cannot be served on the async endpoints because %s. A genuinely sealed request goes to the synchronous endpoint; a malformed multipart body has to be corrected", why),
+			"error": "e2ee: a sealed request cannot be served on the async endpoints, which enqueue the body and serve the result from a store in plaintext. Send it to the synchronous endpoint instead",
+		})
+		return
+	case ctrl.MultipartNamesMarker:
+		ctx.Set("ignoreError", true)
+		ctx.JSON(http.StatusBadRequest, gin.H{
+			"error": fmt.Sprintf("e2ee: this multipart request declares a part named %q — %s. A sealed request is sent as JSON to the synchronous endpoint", "_e2ee", why),
+		})
+		return
+	case ctrl.MultipartUnreadable:
+		ctx.Set("ignoreError", true)
+		ctx.JSON(http.StatusBadRequest, gin.H{
+			"error": fmt.Sprintf("this multipart body cannot be checked for a sealed envelope: %s. Correct the body and retry — this is not a sealed request and the synchronous endpoint would refuse it too", why),
 		})
 		return
 	}

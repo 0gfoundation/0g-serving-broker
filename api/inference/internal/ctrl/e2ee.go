@@ -29,6 +29,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
+	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
 
 // ErrE2EEKeyMismatch marks a sealed request whose key_id is not the enclave's
@@ -129,13 +130,28 @@ const (
 //   - "x_0g_trace": observability metadata the router injects downstream.
 var e2eeResponseUnboundFields = []string{"model", "x_0g_trace"}
 
-// maxHeadersExamined bounds how many multipart parts AND Content-Disposition
-// headers multipartCarriesE2EEPart will read before it stops and refuses. One
-// shared budget, because both loops are separately unbounded: the outer over
-// parts, the inner over the dispositions a single part declares.
+// maxHeadersExamined bounds how many multipart parts and part HEADERS
+// multipartCarriesE2EEPart will read before it stops and refuses. One shared
+// budget, because all three loops are separately unbounded: the outer over
+// parts, and the inner ones over the Content-Disposition and Content-Type values
+// a single part declares.
 //
-// Three orders of magnitude above any real transcription or image-edit form,
-// and ~1000x below the 3.7 million minimum-size parts that fit in 32 MiB.
+// Shared means the constant is NOT the part limit, and the difference is ~3x. A
+// part costs one unit, plus one for each of those headers it declares, so the
+// effective ceiling depends on the form's shape. Measured:
+//
+//	2045 plain fields (part + disposition)          -> forwarded
+//	2050 plain fields                               -> refused
+//	1365 file parts (part + disposition + type)     -> forwarded
+//	1366 file parts                                 -> refused
+//
+// So the figure to reason about is ~1365 for a form of file uploads, not 4096.
+// That is still three orders of magnitude above any real transcription or
+// image-edit form — those have single-digit part counts — and ~2700x below the
+// 3.7 million minimum-size parts that fit in 32 MiB, so the bound holds. The
+// refusal message says "parts and part headers combined" rather than naming the
+// constant, because a caller cut off at 1365 parts is not helped by being told
+// the limit is 4096.
 //
 // About that "32 MiB": it is RequestSizeLimitMiddleware, registered on the sync
 // proxy's serviceGroup ONLY (proxy.go). The async submit routes hang off
@@ -168,9 +184,8 @@ func hasE2EEMarker(reqBody []byte) bool {
 // It does NOT report whether the body might be hiding such a part, and the
 // difference is the whole reason it gates nothing but the fail-closed branches.
 // It cannot see an encoded word, or a quoted pair, or any other spelling that
-// resolves to the marker without containing it; three separate rounds of review
-// found one of those. A summary of "might be hiding it" would be a claim this
-// function is structurally unable to make.
+// resolves to the marker without containing it. A summary of "might be hiding
+// it" would be a claim this function is structurally unable to make.
 //
 // It gates the FAIL-CLOSED branches only, never detection. This is a heuristic
 // over SPELLINGS, and spellings do not enumerate: it cannot see a name the
@@ -483,7 +498,7 @@ func recoverParamValues(header, attr string) []string {
 // nameVerdict applies the readings that decide a declared part name to ONE
 // header, so that both headers which can carry a name get exactly the same
 // treatment. Written once for that reason: two copies is how one header ends up
-// with a check the other lacks, which is a bug this guard has already had.
+// with a check the other lacks.
 //
 // `where` names the header for the message; `header` is its raw value, needed by
 // declaresEncodedName because the parser drops what it cannot decode; `name` is
@@ -630,9 +645,9 @@ func declaresUnreadableParts(reqBody []byte) bool {
 // one with a plain io.EOF, and a header that never terminates has no body after
 // it to hold an envelope. Its neighbour — a header that terminates with a
 // malformed name — makes ParseMediaType error and is refused.
-func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string) {
+func multipartCarriesE2EEPart(contentType string, reqBody []byte) (SealedVerdict, string, string) {
 	if !looksMultipart(contentType) {
-		return false, ""
+		return NotSealed, "", ""
 	}
 	_, params, err := mime.ParseMediaType(contentType)
 	boundary := params["boundary"]
@@ -667,9 +682,9 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 			if err != nil {
 				why = fmt.Sprintf("its multipart boundary could not be read or recovered (%v)", err)
 			}
-			return true, "the body declares parts that cannot be enumerated because " + why + ", so a smuggled envelope cannot be ruled out"
+			return MultipartUnreadable, monitor.E2EERefuseUnusableBoundary, "the body declares parts that cannot be enumerated because " + why + ", so a smuggled envelope cannot be ruled out"
 		}
-		return false, ""
+		return NotSealed, "", ""
 	}
 
 	// The gate scans the whole body and depends on nothing but reqBody, so it is
@@ -682,8 +697,8 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 	examined := 0
 	partsRead := 0
 	// One budget, three per-part loops. Written once so a fourth loop cannot be
-	// added without one — an unbounded per-part loop is the amplification this
-	// budget exists for, and it has been reintroduced by a new loop before.
+	// added without one: an unbounded per-part loop is the amplification this
+	// budget exists for.
 	overBudget := func() bool {
 		examined++
 		return examined > maxHeadersExamined
@@ -711,7 +726,7 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 		// the rare place where the change a linter proposes reopens a hole, and
 		// TestMismatchedBoundaryMentioningTheMarkerIsRefused fails when it does.
 		if err == io.EOF { //nolint:errorlint // see above: errors.Is would match the wrapped boundary failure too
-			return false, ""
+			return NotSealed, "", ""
 		}
 		if err != nil {
 			// UNGATED too, and for the same reason: the header that broke is not
@@ -746,9 +761,9 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 			// envelope.
 			delims := countLineStartsWith(reqBody, "--"+boundary)
 			if delims > partsRead+1 || (delims == 0 && declaresUnreadableParts(reqBody)) {
-				return true, fmt.Sprintf("the body could not be parsed as multipart (%v) and declares part-shaped content this enumeration never reached, so a smuggled envelope cannot be ruled out", err)
+				return MultipartUnreadable, monitor.E2EERefuseUnenumeratedRemainder, fmt.Sprintf("the body could not be parsed as multipart (%v) and declares part-shaped content this enumeration never reached, so a smuggled envelope cannot be ruled out", err)
 			}
-			return false, ""
+			return NotSealed, "", ""
 		}
 		partsRead++
 		if overBudget() {
@@ -763,7 +778,7 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 			// parts — and it counts HEADERS, not just parts, because the inner
 			// loops pay a ParseMediaType and a declaresEncodedName walk per
 			// declared header: 35x at 32 MiB against one legitimate part.
-			return true, fmt.Sprintf("the body declares more than %d parts or part headers, so they cannot all be enumerated from here", maxHeadersExamined)
+			return MultipartUnreadable, monitor.E2EERefuseOverBudget, fmt.Sprintf("the body declares more than %d parts and part headers combined, so they cannot all be enumerated from here", maxHeadersExamined)
 		}
 		// EVERY value, not Header.Get's first: a part may declare the header twice,
 		// innocuous first and marker second, and parsers disagree about which wins
@@ -772,7 +787,7 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 		// Values returns empty for a part with no disposition, so no separate skip.
 		for _, disposition := range part.Header.Values("Content-Disposition") {
 			if overBudget() {
-				return true, fmt.Sprintf("the body declares more than %d parts or part headers, so they cannot all be enumerated from here", maxHeadersExamined)
+				return MultipartUnreadable, monitor.E2EERefuseOverBudget, fmt.Sprintf("the body declares more than %d parts and part headers combined, so they cannot all be enumerated from here", maxHeadersExamined)
 			}
 			_, dparams, derr := mime.ParseMediaType(disposition)
 			if derr != nil {
@@ -785,7 +800,7 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 				// nameVerdict knows, not just the one that was measured.
 				for _, name := range recoverParamValues(disposition, "name") {
 					if refuse, why := nameVerdict("a part's Content-Disposition", disposition, name); refuse {
-						return true, why
+						return MultipartNamesMarker, "", why
 					}
 				}
 				// Gated, unlike the budget and nested branches. Evading THIS gate
@@ -797,17 +812,17 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 				// parse — `filename="my"file.txt"`, an unescaped quote, sloppy but
 				// real and forwarded by every other path here.
 				if couldName() {
-					return true, "the body could be naming the reserved marker and a part's Content-Disposition could not be parsed, so the name it declares cannot be ruled out"
+					return MultipartUnreadable, monitor.E2EERefuseUnreadablePartHeader, "the body could be naming the reserved marker and a part's Content-Disposition could not be parsed, so the name it declares cannot be ruled out"
 				}
 				continue
 			}
 			if refuse, why := nameVerdict("a part's Content-Disposition", disposition, dparams["name"]); refuse {
-				return true, why
+				return MultipartNamesMarker, "", why
 			}
 		}
 		for _, partType := range part.Header.Values("Content-Type") {
 			if overBudget() {
-				return true, fmt.Sprintf("the body declares more than %d parts or part headers, so they cannot all be enumerated from here", maxHeadersExamined)
+				return MultipartUnreadable, monitor.E2EERefuseOverBudget, fmt.Sprintf("the body declares more than %d parts and part headers combined, so they cannot all be enumerated from here", maxHeadersExamined)
 			}
 			// A part that is ITSELF multipart hides its own parts: mime/multipart
 			// does not descend, so an inner part named `_e2ee` parses cleanly and
@@ -830,7 +845,7 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 			// either needs an upstream honouring neither delimiter, where
 			// descending into a nested part is what a lenient parser does anyway.
 			if looksMultipart(partType) {
-				return true, "a part declares a nested multipart body, whose own parts cannot be enumerated from here"
+				return MultipartUnreadable, monitor.E2EERefuseNestedMultipart, "a part declares a nested multipart body, whose own parts cannot be enumerated from here"
 			}
 			// RFC 2045 §5 puts a `name` on Content-Type too, javax.mail's
 			// getFileName() reads it as a fallback, and a part may declare it with
@@ -847,16 +862,16 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 				// must not clear what it declares.
 				for _, name := range recoverParamValues(partType, "name") {
 					if refuse, why := nameVerdict("a part's Content-Type (RFC 2045 §5)", partType, name); refuse {
-						return true, why
+						return MultipartNamesMarker, "", why
 					}
 				}
 				if couldName() {
-					return true, "the body could be naming the reserved marker and a part's Content-Type could not be parsed, so the name it declares cannot be ruled out"
+					return MultipartUnreadable, monitor.E2EERefuseUnreadablePartHeader, "the body could be naming the reserved marker and a part's Content-Type could not be parsed, so the name it declares cannot be ruled out"
 				}
 				continue
 			}
 			if refuse, why := nameVerdict("a part's Content-Type (RFC 2045 §5)", partType, tparams["name"]); refuse {
-				return true, why
+				return MultipartNamesMarker, "", why
 			}
 		}
 	}
@@ -883,8 +898,9 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 // and a JSON-only test says "not sealed" to a body carrying the envelope in a
 // multipart part — the same hole, one request shape over. See
 // multipartCarriesE2EEPart.
-func (c *Ctrl) IsSealedRequest(contentType string, reqBody []byte) (bool, string) {
-	return IsSealedRequest(contentType, reqBody)
+func (c *Ctrl) RefuseAsync(contentType string, reqBody []byte) (SealedVerdict, string) {
+	verdict, reason, why := IsSealedRequest(contentType, reqBody)
+	return resolveMultipartPolicy(verdict, reason, why, c.e2eeStrictMultipart, c.logger), why
 }
 
 // sealedVerdict is what a request's BYTES are, independent of which entry point
@@ -894,20 +910,36 @@ func (c *Ctrl) IsSealedRequest(contentType string, reqBody []byte) (bool, string
 // forward path while the async routes called it sealed), and how a
 // `looksMultipart` short-circuit on one of them forwarded a genuine envelope in
 // the clear while the other refused it.
-type sealedVerdict int
+// SealedVerdict is what a request's BYTES are, independent of which entry point
+// is asking. Both classify identically and then differ only in what they do
+// about it: the sealed decision written twice is how they came to disagree about
+// the same bytes.
+//
+// The two multipart verdicts are kept apart because they carry different
+// evidence and earn different treatment. MultipartNamesMarker is a fact about
+// the request; MultipartUnreadable is a fact about what this code could not
+// determine, on shapes that are legal or merely sloppy far more often than they
+// are hostile.
+type SealedVerdict int
 
 const (
-	// notSealed: forward it. Includes an ordinary multipart body, whose JSON
+	// NotSealed: forward it. Includes an ordinary multipart body, whose JSON
 	// unmarshal simply fails.
-	notSealed sealedVerdict = iota
-	// smuggledIntoMultipart: a multipart request declares a part named `_e2ee`,
-	// or is malformed in a way that leaves that impossible to rule out
-	// (SPEC §5.3.1). Refuse — no multipart endpoint has a sealed request profile,
-	// so there is nothing to open even when the envelope is genuine.
-	smuggledIntoMultipart
-	// jsonEnvelope: the body IS a sealed envelope, whatever Content-Type the
+	NotSealed SealedVerdict = iota
+	// MultipartNamesMarker: a multipart request declares a part named `_e2ee`,
+	// under some reading a conformant parser gives it. EXACT — the name was
+	// read. Refuse: no multipart endpoint has a sealed request profile, so there
+	// is nothing to open even when the envelope is genuine.
+	MultipartNamesMarker
+	// MultipartUnreadable: the parts could not be enumerated, or a part header
+	// could not be parsed and could have been naming the marker. STRUCTURAL —
+	// nothing was read, so this is "cannot be ruled out" rather than "is". Every
+	// shape here is one a legal-but-exotic client can send, which is why it is
+	// the verdict the strict flag governs.
+	MultipartUnreadable
+	// JSONEnvelope: the body IS a sealed envelope, whatever Content-Type the
 	// client put on it. Unseal it, fail-closed.
-	jsonEnvelope
+	JSONEnvelope
 )
 
 // classifyRequest is the one place the sealed decision is made. The returned
@@ -918,9 +950,9 @@ const (
 // than stylistic: a part name can be RFC 2231-encoded, so the body carries no
 // literal "_e2ee", hasE2EEMarker returns false, and an early return on it would
 // send the encoded case straight out for forwarding.
-func classifyRequest(contentType string, reqBody []byte) (sealedVerdict, wire.Request, string) {
-	if carries, why := multipartCarriesE2EEPart(contentType, reqBody); carries {
-		return smuggledIntoMultipart, nil, why
+func classifyRequest(contentType string, reqBody []byte) (SealedVerdict, wire.Request, string, string) {
+	if verdict, reason, why := multipartCarriesE2EEPart(contentType, reqBody); verdict != NotSealed {
+		return verdict, nil, reason, why
 	}
 	// No short-circuit on looksMultipart. A body is an envelope or not by its
 	// bytes; the Content-Type is the client's claim about them, and §5.3.1 read in
@@ -929,16 +961,16 @@ func classifyRequest(contentType string, reqBody []byte) (sealedVerdict, wire.Re
 	// its unmarshal fails and it comes back notSealed, for one bytes.Contains
 	// pass.
 	if !hasE2EEMarker(reqBody) {
-		return notSealed, nil, ""
+		return NotSealed, nil, "", ""
 	}
 	var env wire.Request
 	if err := json.Unmarshal(reqBody, &env); err != nil {
-		return notSealed, nil, "" // not a JSON object → cannot be an envelope
+		return NotSealed, nil, "", "" // not a JSON object → cannot be an envelope
 	}
 	if _, ok := env[e2eeBodyMarker]; !ok {
-		return notSealed, nil, "" // the substring matched inside content
+		return NotSealed, nil, "", "" // the substring matched inside content
 	}
-	return jsonEnvelope, env, fmt.Sprintf("the body carries a top-level %q object", e2eeBodyMarker)
+	return JSONEnvelope, env, "", fmt.Sprintf("the body carries a top-level %q object", e2eeBodyMarker)
 }
 
 // IsSealedRequest is the receiver-free form, exported so a caller that has no
@@ -946,16 +978,58 @@ func classifyRequest(contentType string, reqBody []byte) (sealedVerdict, wire.Re
 // real question instead of reimplementing it.
 //
 // The method above forwards to it, which makes "this predicate reads no enclave
-// state" structural rather than a comment. It was a comment, and the test held
-// it up with `(&ctrl.Ctrl{})`: correct, but it encodes the assumption at the
-// call site, where the day the predicate starts reading a field it fails as a
-// nil-map panic inside an unrelated handler test rather than as a compile error
-// here. The split is also what the predicate's meaning already implies — it
-// answers a question about the BYTES, and the enclave's keys have no bearing on
-// whether the client sent an envelope.
-func IsSealedRequest(contentType string, reqBody []byte) (bool, string) {
-	verdict, _, why := classifyRequest(contentType, reqBody)
-	return verdict != notSealed, why
+// state" structural rather than a comment. A mock holding the assumption up with
+// a zero Ctrl would be correct but would encode it at the call site, where the
+// day the predicate starts reading a field it fails as a nil-map panic inside an
+// unrelated handler test rather than as a compile error here. The split is also
+// what the predicate's meaning implies — it answers a question about the BYTES,
+// and the enclave's keys have no bearing on whether the client sent an
+// envelope.
+func IsSealedRequest(contentType string, reqBody []byte) (SealedVerdict, string, string) {
+	verdict, _, reason, why := classifyRequest(contentType, reqBody)
+	return verdict, reason, why
+}
+
+// resolveMultipartPolicy applies the operator's choice to a STRUCTURAL verdict,
+// and is the one place that choice is made so the two entry points cannot
+// diverge about it — the same reason classifyRequest exists for the verdict
+// itself.
+//
+// MultipartNamesMarker and JSONEnvelope pass through untouched: they are facts
+// about the request, and no flag should be able to forward a request whose part
+// name resolves to the reserved marker.
+//
+// MultipartUnreadable is the one the flag governs, because it is not a fact
+// about the request — it is a fact about what this code could not determine, on
+// shapes (a nested part, a form past the budget, an unrecoverable boundary, an
+// enumeration that stopped early) that are legal or merely sloppy far more often
+// than hostile, and that have never seen production traffic. Both entry points
+// run before any billing, and the sync one runs before ValidateSession, so
+// refusing them trades real availability against a leak whose own damage
+// assessment is "the payload stays ciphertext; what breaks is that the client
+// believes it sealed".
+//
+// With the flag off the request is forwarded and counted, which is what makes
+// flipping it an evidence-based decision rather than an assertion in the release
+// notes. See config.Config.E2EEStrictMultipart.
+func resolveMultipartPolicy(verdict SealedVerdict, reason, why string, strictMultipart bool, logger log.Logger) SealedVerdict {
+	if verdict != MultipartUnreadable || strictMultipart {
+		return verdict
+	}
+	monitor.RecordE2EEMultipartWouldRefuse(reason)
+	if logger != nil {
+		logger.Warnf("e2ee: forwarding a multipart request a structural check would refuse (reason=%s): %s. Set e2eeStrictMultipart to refuse it", reason, why)
+	}
+	return NotSealed
+}
+
+// RefuseAsync is the receiver-free form, taking the policy explicitly so a
+// caller with no enclave — the handler tests — gets the real decision at either
+// flag setting rather than a reimplementation of it. Same split, and the same
+// reason, as IsSealedRequest below.
+func RefuseAsync(strictMultipart bool, contentType string, reqBody []byte) (SealedVerdict, string) {
+	verdict, reason, why := IsSealedRequest(contentType, reqBody)
+	return resolveMultipartPolicy(verdict, reason, why, strictMultipart, nil), why
 }
 
 // MaybeUnsealRequest unseals a sealed E2EE request in-enclave and returns the
@@ -971,12 +1045,14 @@ func IsSealedRequest(contentType string, reqBody []byte) (bool, string) {
 // plaintext fallback, SPEC §6) — a sealed request that cannot be opened, whose
 // signer_addr is not this enclave, or whose key_id is unknown is rejected.
 func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, reqBody []byte) ([]byte, error) {
-	verdict, env, why := classifyRequest(ctx.Request.Header.Get("Content-Type"), reqBody)
-	switch verdict {
-	case notSealed:
+	verdict, env, reason, why := classifyRequest(ctx.Request.Header.Get("Content-Type"), reqBody)
+	switch resolveMultipartPolicy(verdict, reason, why, c.e2eeStrictMultipart, c.logger) {
+	case NotSealed:
 		return reqBody, nil
-	case smuggledIntoMultipart:
+	case MultipartNamesMarker:
 		return nil, fmt.Errorf("multipart request must not carry a sealed envelope: %s. A sealed request is sent as JSON, and a body that cannot be parsed as an envelope is not thereby an unsealed body", why)
+	case MultipartUnreadable:
+		return nil, fmt.Errorf("multipart request cannot be checked for a sealed envelope: %s. Correct the multipart body; a sealed request is sent as JSON", why)
 	}
 
 	// Confirmed sealed from here on: fail-closed on any error.

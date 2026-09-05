@@ -1,7 +1,10 @@
 package ctrl
 
 import (
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"bytes"
+	"github.com/0glabs/0g-serving-broker/inference/monitor"
 	"mime"
 	"mime/multipart"
 	"net/http/httptest"
@@ -35,6 +38,49 @@ const sealedEnvelopeJSON = `{"v":1,"kem_id":"0x0020","ciphertext":"AAAA"}`
 
 // buildMultipart writes a transcription-shaped body: the audio first (as a real
 // client sends it), then the named parts the case is about.
+// carriesE2EEPart and isSealedRequestBool are the bool-shaped answers the tests
+// below were written against. The production signatures return a SealedVerdict
+// because the exact and structural refusals earn different treatment; these
+// collapse it again for the many assertions that only ask "refused or not".
+// TestStructuralRefusalsAreGated is where the distinction is asserted.
+func carriesE2EEPart(contentType string, reqBody []byte) (bool, string) {
+	verdict, _, why := multipartCarriesE2EEPart(contentType, reqBody)
+	return verdict != NotSealed, why
+}
+
+func isSealedRequestBool(contentType string, reqBody []byte) (bool, string) {
+	verdict, _, why := IsSealedRequest(contentType, reqBody)
+	return verdict != NotSealed, why
+}
+
+// strictCtrl is a Ctrl with the structural SPEC §5.3.1 refusals ON.
+//
+// Every test below that asserts a refusal for a body whose part names could not
+// be READ — a nested part, a form past the budget, an unrecoverable boundary, an
+// enumeration that stopped early, an unparseable part header — is asserting the
+// strict behaviour, because those verdicts are governed by
+// cfg.e2eeStrictMultipart and default to forwarding-and-counting. The EXACT
+// refusals (a name resolving to the marker) need none of this and hold either
+// way; TestStructuralRefusalsAreGated pins the difference.
+func strictCtrl() *Ctrl { return &Ctrl{e2eeStrictMultipart: true} }
+
+// strictFixture is newE2EEFixture's Ctrl with the same flag set, for the tests
+// that need a real enclave key as well.
+func strictFixture(t *testing.T) *Ctrl {
+	t.Helper()
+	c := newE2EEFixture(t).c
+	c.e2eeStrictMultipart = true
+	return c
+}
+
+// refuseAsyncBool is the old bool-shaped answer, kept for the tests that only
+// care whether the async routes refuse at all. The verdict itself is what
+// async.go switches on, and TestAsyncMessagesDifferPerVerdict covers that.
+func (c *Ctrl) refuseAsyncBool(contentType string, reqBody []byte) (bool, string) {
+	verdict, why := c.RefuseAsync(contentType, reqBody)
+	return verdict != NotSealed, why
+}
+
 func buildMultipart(t *testing.T, parts func(*multipart.Writer)) (body []byte, contentType string) {
 	t.Helper()
 	var buf bytes.Buffer
@@ -115,12 +161,12 @@ func TestMultipartCarryingASealedEnvelopeIsRefused(t *testing.T) {
 		},
 	}
 
-	c := &Ctrl{}
+	c := strictCtrl()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			body, contentType := buildMultipart(t, tt.parts)
 
-			if sealed, _ := c.IsSealedRequest(contentType, body); !sealed {
+			if sealed, _ := c.refuseAsyncBool(contentType, body); !sealed {
 				t.Error("IsSealedRequest must see it: the async routes refuse on this, and a miss there enqueues the envelope")
 			}
 
@@ -148,7 +194,7 @@ func TestMultipartWithAnEncodedE2EEPartNameIsRefused(t *testing.T) {
 		{"RFC 2231 continuation", `form-data; name*0="_e2"; name*1="ee"`},
 	}
 
-	c := &Ctrl{}
+	c := strictCtrl()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			body, contentType := buildMultipart(t, func(w *multipart.Writer) {
@@ -158,7 +204,7 @@ func TestMultipartWithAnEncodedE2EEPartNameIsRefused(t *testing.T) {
 				t.Fatal("fixture no longer tests the encoded case: the literal marker is present")
 			}
 
-			if sealed, _ := c.IsSealedRequest(contentType, body); !sealed {
+			if sealed, _ := c.refuseAsyncBool(contentType, body); !sealed {
 				t.Error("an encoded part name must be seen: the parser resolves it, so a downstream parser does too")
 			}
 			if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err == nil {
@@ -181,7 +227,7 @@ func TestMultipartWithAnUppercaseEncodedPartNameIsRefused(t *testing.T) {
 		{"mixed-case continuation", `form-data; Name*0="_e2"; Name*1="ee"`},
 	}
 
-	c := &Ctrl{}
+	c := strictCtrl()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			body, contentType := buildMultipart(t, func(w *multipart.Writer) {
@@ -191,7 +237,7 @@ func TestMultipartWithAnUppercaseEncodedPartNameIsRefused(t *testing.T) {
 				t.Fatal("fixture no longer tests the case-folded path")
 			}
 
-			if sealed, _ := c.IsSealedRequest(contentType, body); !sealed {
+			if sealed, _ := c.refuseAsyncBool(contentType, body); !sealed {
 				t.Error("the parser resolves this name, so a downstream parser does too")
 			}
 			if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err == nil {
@@ -207,7 +253,7 @@ func TestMultipartWithAnUppercaseEncodedPartNameIsRefused(t *testing.T) {
 // intact and the fail-closed branch written for them was unreachable. Lenient
 // upstream parsers read parts out of all three.
 func TestUnparseableMultipartContentTypeStillReachesTheGuard(t *testing.T) {
-	c := &Ctrl{}
+	c := strictCtrl()
 	body, _ := buildMultipart(t, func(w *multipart.Writer) {
 		if err := w.WriteField("_e2ee", sealedEnvelopeJSON); err != nil {
 			t.Fatalf("WriteField: %v", err)
@@ -221,7 +267,7 @@ func TestUnparseableMultipartContentTypeStillReachesTheGuard(t *testing.T) {
 		`MULTIPART/FORM-DATA; boundary=x; boundary=y`,
 	} {
 		t.Run(contentType, func(t *testing.T) {
-			if sealed, _ := c.IsSealedRequest(contentType, body); !sealed {
+			if sealed, _ := c.refuseAsyncBool(contentType, body); !sealed {
 				t.Error("a Content-Type that claims multipart must not skip the guard by failing to parse")
 			}
 			if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err == nil {
@@ -238,14 +284,14 @@ func TestUnparseableMultipartContentTypeStillReachesTheGuard(t *testing.T) {
 // honours is not the question: the body declares the name, so the guard cannot
 // show it carries no envelope.
 func TestMultipartWithADuplicateDispositionIsRefused(t *testing.T) {
-	c := &Ctrl{}
+	c := strictCtrl()
 	body := []byte("--x\r\n" +
 		"Content-Disposition: form-data; name=\"file\"\r\n" +
 		"Content-Disposition: form-data; name=\"_e2ee\"\r\n\r\n" +
 		sealedEnvelopeJSON + "\r\n--x--\r\n")
 	const contentType = `multipart/form-data; boundary=x`
 
-	if sealed, _ := c.IsSealedRequest(contentType, body); !sealed {
+	if sealed, _ := c.refuseAsyncBool(contentType, body); !sealed {
 		t.Error("a part declaring the marker in any of its dispositions must be seen")
 	}
 	if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err == nil {
@@ -262,12 +308,12 @@ func TestMultipartWithADuplicateDispositionIsRefused(t *testing.T) {
 //	clean end                    -> "EOF"                     == io.EOF
 //	boundary never found in body -> "multipart: NextPart: EOF" != io.EOF
 func TestMismatchedBoundaryMentioningTheMarkerIsRefused(t *testing.T) {
-	c := &Ctrl{}
+	c := strictCtrl()
 	body := []byte("--x\r\nContent-Disposition: form-data; name=\"_e2ee\"\r\n\r\n" +
 		sealedEnvelopeJSON + "\r\n--x--\r\n")
 	const contentType = `multipart/form-data; boundary=WRONGBOUND`
 
-	if sealed, _ := c.IsSealedRequest(contentType, body); !sealed {
+	if sealed, _ := c.refuseAsyncBool(contentType, body); !sealed {
 		t.Error("a body whose parts were never enumerated must be treated as carrying an envelope")
 	}
 	if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err == nil {
@@ -283,7 +329,7 @@ func TestMismatchedBoundaryMentioningTheMarkerIsRefused(t *testing.T) {
 // sees anything here. Written after a mutation of containsFold back to
 // bytes.Contains left the whole suite green.
 func TestUnparseableBoundaryWithAnUppercaseEncodedNameIsRefused(t *testing.T) {
-	c := &Ctrl{}
+	c := strictCtrl()
 	body := []byte("--x\r\nContent-Disposition: form-data; NAME*=utf-8''%5Fe2ee\r\n\r\n" +
 		sealedEnvelopeJSON + "\r\n--x--\r\n")
 	const contentType = `multipart/form-data; boundary=x; boundary=y`
@@ -292,7 +338,7 @@ func TestUnparseableBoundaryWithAnUppercaseEncodedNameIsRefused(t *testing.T) {
 		t.Fatal("fixture no longer tests the case-folded path")
 	}
 
-	if sealed, _ := c.IsSealedRequest(contentType, body); !sealed {
+	if sealed, _ := c.refuseAsyncBool(contentType, body); !sealed {
 		t.Error("a body that cannot be shown NOT to carry an envelope must be treated as one")
 	}
 	if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err == nil {
@@ -315,7 +361,7 @@ func TestUnparseableBoundaryWithAnUppercaseEncodedNameIsRefused(t *testing.T) {
 // body with no part-shaped line at all is still forwarded, on the structural
 // fact that no parser reads a part from it under any boundary.
 func TestUnparseableContentTypeWithARealBodyIsRefused(t *testing.T) {
-	c := &Ctrl{}
+	c := strictCtrl()
 	body, _ := buildMultipart(t, func(w *multipart.Writer) {
 		if err := w.WriteField("prompt", "an ordinary transcription"); err != nil {
 			t.Fatalf("WriteField: %v", err)
@@ -331,7 +377,7 @@ func TestUnparseableContentTypeWithARealBodyIsRefused(t *testing.T) {
 	// duplicate parameter and the enumeration runs — and finds nothing, since
 	// the body's real delimiter is the writer's. Either way the parts exist and
 	// were never read, which is what must be asserted.
-	if sealed, why := c.IsSealedRequest(contentType, body); !sealed {
+	if sealed, why := c.refuseAsyncBool(contentType, body); !sealed {
 		t.Error("parts that exist and were never enumerated cannot be cleared")
 	} else if !strings.Contains(why, "never reached") && !strings.Contains(why, "cannot be enumerated") {
 		t.Errorf("the refusal should cite the unread parts, got %q", why)
@@ -351,7 +397,7 @@ func TestUnparseableContentTypeWithARealBodyIsRefused(t *testing.T) {
 // gated and ungated behave identically, so the test would pass against the bug.
 // The gate assertion below is what holds that.
 func TestABrokenHeaderDoesNotHideTheRestOfTheBody(t *testing.T) {
-	c := &Ctrl{}
+	c := strictCtrl()
 	const wordName = `=?utf-8?B?X2UyZWU=?=` // RFC 2047 for `_e2ee`
 	const goodPart = "--B\r\nContent-Disposition: form-data; name=\"file\"\r\n\r\naudio\r\n"
 	const wordPart = "--B\r\nContent-Disposition: form-data; name=\"" + wordName + "\"\r\n\r\n" + sealedEnvelopeJSON + "\r\n"
@@ -376,7 +422,7 @@ func TestABrokenHeaderDoesNotHideTheRestOfTheBody(t *testing.T) {
 			if couldNameE2EEPart(body) {
 				t.Fatal("fixture spells something the gate can see, so it cannot distinguish gated from ungated")
 			}
-			if sealed, _ := c.IsSealedRequest(tt.contentType, body); !sealed {
+			if sealed, _ := c.refuseAsyncBool(tt.contentType, body); !sealed {
 				t.Error("a broken unrelated header does not clear the parts behind it")
 			}
 			if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(tt.contentType), body); err == nil {
@@ -395,7 +441,7 @@ func TestABrokenHeaderDoesNotHideTheRestOfTheBody(t *testing.T) {
 		{"nested part alone", nestedPart + "--B--\r\n"},
 	} {
 		t.Run("control: "+tt.name, func(t *testing.T) {
-			if sealed, _ := c.IsSealedRequest(`multipart/form-data; boundary=B`, []byte(tt.body)); !sealed {
+			if sealed, _ := c.refuseAsyncBool(`multipart/form-data; boundary=B`, []byte(tt.body)); !sealed {
 				t.Error("the control must be refused, or the rows above prove nothing")
 			}
 		})
@@ -443,7 +489,7 @@ func TestTheDelimiterAnchorDecidesTwoRealBodies(t *testing.T) {
 	if couldNameE2EEPart(bareLF) {
 		t.Fatal("fixture must not trip the gate")
 	}
-	if carries, _ := multipartCarriesE2EEPart(contentType, bareLF); !carries {
+	if carries, _ := carriesE2EEPart(contentType, bareLF); !carries {
 		t.Error("a bare-LF body with unenumerated parts must fail closed")
 	}
 
@@ -455,7 +501,7 @@ func TestTheDelimiterAnchorDecidesTwoRealBodies(t *testing.T) {
 	if couldNameE2EEPart(contentMentions) {
 		t.Fatal("fixture must not trip the gate")
 	}
-	if carries, why := multipartCarriesE2EEPart(contentType, contentMentions); carries {
+	if carries, why := carriesE2EEPart(contentType, contentMentions); carries {
 		t.Errorf("content mentioning the delimiter is not an unenumerated part: %s", why)
 	}
 }
@@ -489,7 +535,7 @@ func TestUnparseableBodyIsJudgedByWhatRemainsUnenumerated(t *testing.T) {
 			if couldNameE2EEPart(body) {
 				t.Fatal("fixture must not trip the gate: these branches are ungated and the gate would mask that")
 			}
-			carries, why := multipartCarriesE2EEPart(contentType, body)
+			carries, why := carriesE2EEPart(contentType, body)
 			if carries != tt.refuse {
 				t.Fatalf("carries = %v, want %v (%s)", carries, tt.refuse, why)
 			}
@@ -501,7 +547,7 @@ func TestUnparseableBodyIsJudgedByWhatRemainsUnenumerated(t *testing.T) {
 // form-data: matching only that left the hole reachable by changing one word of
 // the Content-Type.
 func TestNonFormDataMultipartSubtypeIsStillChecked(t *testing.T) {
-	c := &Ctrl{}
+	c := strictCtrl()
 	body, contentType := buildMultipart(t, func(w *multipart.Writer) {
 		if err := w.WriteField("_e2ee", sealedEnvelopeJSON); err != nil {
 			t.Fatalf("WriteField: %v", err)
@@ -512,7 +558,7 @@ func TestNonFormDataMultipartSubtypeIsStillChecked(t *testing.T) {
 		t.Fatal("fixture did not change the subtype")
 	}
 
-	if sealed, _ := c.IsSealedRequest(mixed, body); !sealed {
+	if sealed, _ := c.refuseAsyncBool(mixed, body); !sealed {
 		t.Error("a multipart/mixed body carrying the envelope must be seen too")
 	}
 	if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(mixed), body); err == nil {
@@ -526,11 +572,11 @@ func TestNonFormDataMultipartSubtypeIsStillChecked(t *testing.T) {
 // such requests before this change and must keep doing so — refusing them would
 // be a behaviour change for requests that have nothing to do with sealing.
 func TestMalformedMultipartWithoutTheMarkerIsStillForwarded(t *testing.T) {
-	c := &Ctrl{}
+	c := strictCtrl()
 	body := []byte(`{"prompt":"a json body sent with a multipart content type"}`)
 	const contentType = "multipart/form-data; boundary=abc123"
 
-	if sealed, _ := c.IsSealedRequest(contentType, body); sealed {
+	if sealed, _ := c.refuseAsyncBool(contentType, body); sealed {
 		t.Error("a malformed body that cannot be naming the marker is not a sealed request")
 	}
 	got, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body)
@@ -546,7 +592,7 @@ func TestMalformedMultipartWithoutTheMarkerIsStillForwarded(t *testing.T) {
 // forces the distinction: `prompt` carries arbitrary caller text, so a substring
 // rule would refuse a legitimate transcription for mentioning the marker.
 func TestMultipartMentioningTheMarkerInContentIsForwarded(t *testing.T) {
-	c := &Ctrl{}
+	c := strictCtrl()
 	for _, where := range []string{"prompt", "language"} {
 		t.Run(where, func(t *testing.T) {
 			body, contentType := buildMultipart(t, func(w *multipart.Writer) {
@@ -555,7 +601,7 @@ func TestMultipartMentioningTheMarkerInContentIsForwarded(t *testing.T) {
 				}
 			})
 
-			if sealed, _ := c.IsSealedRequest(contentType, body); sealed {
+			if sealed, _ := c.refuseAsyncBool(contentType, body); sealed {
 				t.Error("a field whose VALUE mentions the marker is not a sealed request")
 			}
 
@@ -573,10 +619,10 @@ func TestMultipartMentioningTheMarkerInContentIsForwarded(t *testing.T) {
 // An ordinary multipart request with no mention of the marker must not pay for
 // any of this: the substring pre-check has to short-circuit before the parse.
 func TestOrdinaryMultipartIsUntouched(t *testing.T) {
-	c := &Ctrl{}
+	c := strictCtrl()
 	body, contentType := buildMultipart(t, func(*multipart.Writer) {})
 
-	if sealed, _ := c.IsSealedRequest(contentType, body); sealed {
+	if sealed, _ := c.refuseAsyncBool(contentType, body); sealed {
 		t.Error("an ordinary transcription is not a sealed request")
 	}
 	got, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body)
@@ -592,7 +638,7 @@ func TestOrdinaryMultipartIsUntouched(t *testing.T) {
 // measured in multipartCarriesE2EEPart's doc comment, and the two cases here are
 // the ones that reach the fail-closed branches.
 func TestUnparseableMultipartMentioningTheMarkerIsRefused(t *testing.T) {
-	c := &Ctrl{}
+	c := strictCtrl()
 	tests := []struct {
 		name        string
 		body        string
@@ -614,7 +660,7 @@ func TestUnparseableMultipartMentioningTheMarkerIsRefused(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if sealed, _ := c.IsSealedRequest(tt.contentType, []byte(tt.body)); !sealed {
+			if sealed, _ := c.refuseAsyncBool(tt.contentType, []byte(tt.body)); !sealed {
 				t.Error("a body that cannot be shown NOT to carry an envelope must be treated as one")
 			}
 			if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(tt.contentType), []byte(tt.body)); err == nil {
@@ -630,12 +676,12 @@ func TestUnparseableMultipartMentioningTheMarkerIsRefused(t *testing.T) {
 // lucky: a header that never terminates has no body after it, so it holds no
 // envelope, and no downstream parser sees a part there either.
 func TestMultipartWithATruncatedHeaderIsForwarded(t *testing.T) {
-	c := &Ctrl{}
+	c := strictCtrl()
 	const body = "--x\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nwhisper\r\n" +
 		"--x\r\nContent-Disposition: form-data; name=\"_e2ee"
 	const contentType = `multipart/form-data; boundary=x`
 
-	if sealed, _ := c.IsSealedRequest(contentType, []byte(body)); sealed {
+	if sealed, _ := c.refuseAsyncBool(contentType, []byte(body)); sealed {
 		t.Error("a header that never terminates carries no envelope")
 	}
 	if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), []byte(body)); err != nil {
@@ -648,13 +694,13 @@ func TestMultipartWithATruncatedHeaderIsForwarded(t *testing.T) {
 // directly, because MaybeUnsealRequest's JSON path reads enclave key material
 // that a zero Ctrl does not have.
 func TestJSONRequestsAreNotJudgedByTheMultipartRule(t *testing.T) {
-	c := &Ctrl{}
+	c := strictCtrl()
 	body := []byte(`{"model":"whisper-large-v3","_e2ee":` + sealedEnvelopeJSON + `}`)
 
-	if carries, _ := multipartCarriesE2EEPart("application/json", body); carries {
+	if carries, _ := carriesE2EEPart("application/json", body); carries {
 		t.Error("the multipart rule must not claim a JSON body")
 	}
-	if sealed, _ := c.IsSealedRequest("application/json", body); !sealed {
+	if sealed, _ := c.refuseAsyncBool("application/json", body); !sealed {
 		t.Error("a JSON envelope is still a sealed request")
 	}
 }
@@ -758,7 +804,7 @@ func TestMultipartWithAnUndecodableEncodedNameIsRefused(t *testing.T) {
 		{"partially decodable continuation", `form-data; name*0*=iso-8859-1''%5Fe2; name*1*=ee`, "ee"},
 	}
 
-	c := &Ctrl{}
+	c := strictCtrl()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Pin the parser behaviour the case rests on, so this test says why
@@ -779,7 +825,7 @@ func TestMultipartWithAnUndecodableEncodedNameIsRefused(t *testing.T) {
 				t.Fatal("fixture no longer tests the encoded case: the literal marker is present")
 			}
 
-			if sealed, _ := c.IsSealedRequest(contentType, body); !sealed {
+			if sealed, _ := c.refuseAsyncBool(contentType, body); !sealed {
 				t.Error("a name the parser refused to decode cannot be ruled out; the async route would enqueue this")
 			}
 			if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err == nil {
@@ -794,7 +840,7 @@ func TestMultipartWithAnUndecodableEncodedNameIsRefused(t *testing.T) {
 // filename is both legitimate and common. Refusing these would break ordinary
 // uploads.
 func TestMultipartWithAnEncodedFilenameIsForwarded(t *testing.T) {
-	c := &Ctrl{}
+	c := strictCtrl()
 	for _, disposition := range []string{
 		`form-data; name="file"; filename*=iso-8859-1''caf%E9.wav`,
 		`form-data; name="file"; filename*0*=utf-8''caf%C3%A9; filename*1=".wav"`,
@@ -804,7 +850,7 @@ func TestMultipartWithAnEncodedFilenameIsForwarded(t *testing.T) {
 			body, contentType := buildMultipart(t, func(w *multipart.Writer) {
 				rawPart(t, w, disposition, "RIFF....audio....")
 			})
-			if sealed, _ := c.IsSealedRequest(contentType, body); sealed {
+			if sealed, _ := c.refuseAsyncBool(contentType, body); sealed {
 				t.Error("an encoded FILENAME is not an encoded field name")
 			}
 			got, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body)
@@ -824,7 +870,7 @@ func TestMultipartWithAnEncodedFilenameIsForwarded(t *testing.T) {
 // before this check existed — came back as an e2ee error. The branch is gated
 // now; this pins the gate.
 func TestUnparseablePartDispositionWithoutTheMarkerIsForwarded(t *testing.T) {
-	c := &Ctrl{}
+	c := strictCtrl()
 	const disposition = `form-data; name="notes"; filename="my"file.txt"`
 	if _, _, err := mime.ParseMediaType(disposition); err == nil {
 		t.Fatal("fixture assumes this disposition does NOT parse")
@@ -836,7 +882,7 @@ func TestUnparseablePartDispositionWithoutTheMarkerIsForwarded(t *testing.T) {
 		t.Fatal("fixture must not mention the marker in any form")
 	}
 
-	if sealed, _ := c.IsSealedRequest(contentType, body); sealed {
+	if sealed, _ := c.refuseAsyncBool(contentType, body); sealed {
 		t.Error("a malformed disposition that cannot be naming the marker is not a sealed request")
 	}
 	got, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body)
@@ -860,7 +906,7 @@ func TestUnparseablePartDispositionWithoutTheMarkerIsForwarded(t *testing.T) {
 // broker forwarded before this check existed, refused for a reason that had
 // nothing to do with the request.
 func TestEncodedFilenameDoesNotArmTheFailClosedBranches(t *testing.T) {
-	c := &Ctrl{}
+	c := strictCtrl()
 	const sloppy = `form-data; name="notes"; filename="my"file.txt"`
 	if _, _, err := mime.ParseMediaType(sloppy); err == nil {
 		t.Fatal("fixture assumes the second disposition does NOT parse")
@@ -875,7 +921,7 @@ func TestEncodedFilenameDoesNotArmTheFailClosedBranches(t *testing.T) {
 	if couldNameE2EEPart(body) {
 		t.Error("an RFC 8187 filename* is not a mention of the RFC 2231 name*")
 	}
-	if sealed, why := c.IsSealedRequest(contentType, body); sealed {
+	if sealed, why := c.refuseAsyncBool(contentType, body); sealed {
 		t.Errorf("an ordinary internationalised form is not a sealed request: %s", why)
 	}
 	got, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body)
@@ -898,7 +944,7 @@ func TestEncodedFilenameDoesNotArmTheFailClosedBranches(t *testing.T) {
 // already enumerates for the request's Content-Type. The fixtures must NOT trip
 // the gate, or they cannot tell the recovery from the heuristic.
 func TestBreakingTheHeaderDoesNotClearTheNameItDeclares(t *testing.T) {
-	c := &Ctrl{}
+	c := strictCtrl()
 	const word = `=?utf-8?B?X2UyZWU=?=` // RFC 2047 for `_e2ee`
 
 	for _, tt := range []struct {
@@ -923,7 +969,7 @@ func TestBreakingTheHeaderDoesNotClearTheNameItDeclares(t *testing.T) {
 			if couldNameE2EEPart(body) {
 				t.Fatal("fixture trips the gate, so it cannot distinguish recovery from the heuristic")
 			}
-			if sealed, _ := c.IsSealedRequest(contentType, body); !sealed {
+			if sealed, _ := c.refuseAsyncBool(contentType, body); !sealed {
 				t.Error("a broken header still declares the name it declares")
 			}
 			if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err == nil {
@@ -969,11 +1015,11 @@ func TestRecoverParamValues(t *testing.T) {
 
 // And the same shape WITH the marker, so gating the branch did not disarm it.
 func TestUnparseablePartDispositionMentioningTheMarkerIsRefused(t *testing.T) {
-	c := &Ctrl{}
+	c := strictCtrl()
 	body := []byte("--x\r\nContent-Disposition: form-data; name=\"notes\"; filename=\"a\"b.txt\"\r\n\r\n_e2ee\r\n--x--\r\n")
 	const contentType = `multipart/form-data; boundary=x`
 
-	if sealed, _ := c.IsSealedRequest(contentType, body); !sealed {
+	if sealed, _ := c.refuseAsyncBool(contentType, body); !sealed {
 		t.Error("malformed AND mentioning the marker must fail closed")
 	}
 	if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err == nil {
@@ -1031,7 +1077,7 @@ func TestDeclaresEncodedName(t *testing.T) {
 // The last row is why the scan tracks quoting rather than inspecting the match's
 // neighbours: it satisfies any follow-the-match shape check too.
 func TestMultipartWithNameStarInsideAQuotedValueIsForwarded(t *testing.T) {
-	c := &Ctrl{}
+	c := strictCtrl()
 	for _, disposition := range []string{
 		`form-data; name="file"; filename="name*.wav"`,
 		`form-data; name="file"; filename="recording (name*).wav"`,
@@ -1060,7 +1106,7 @@ func TestMultipartWithNameStarInsideAQuotedValueIsForwarded(t *testing.T) {
 			body, contentType := buildMultipart(t, func(w *multipart.Writer) {
 				rawPart(t, w, disposition, "RIFF....audio....")
 			})
-			if sealed, _ := c.IsSealedRequest(contentType, body); sealed {
+			if sealed, _ := c.refuseAsyncBool(contentType, body); sealed {
 				t.Error("a name* inside a quoted value does not declare an encoded field name")
 			}
 			got, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body)
@@ -1081,7 +1127,7 @@ func TestMultipartWithNameStarInsideAQuotedValueIsForwarded(t *testing.T) {
 // than the charset gap; the comparison costs one call and the alternative is
 // trusting every upstream to agree with Go about a backslash.
 func TestMultipartWithAQuotedPairInTheNameIsRefused(t *testing.T) {
-	c := &Ctrl{}
+	c := strictCtrl()
 	tests := []struct {
 		name        string
 		disposition string
@@ -1116,7 +1162,7 @@ func TestMultipartWithAQuotedPairInTheNameIsRefused(t *testing.T) {
 			body, contentType := buildMultipart(t, func(w *multipart.Writer) {
 				rawPart(t, w, tt.disposition, sealedEnvelopeJSON)
 			})
-			if sealed, _ := c.IsSealedRequest(contentType, body); !sealed {
+			if sealed, _ := c.refuseAsyncBool(contentType, body); !sealed {
 				t.Error("a conformant parser reads this as the marker, so it cannot be ruled out")
 			}
 			if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err == nil {
@@ -1213,7 +1259,7 @@ func TestResolvesToMarker(t *testing.T) {
 // would reject an ordinary field. Only comparing the unescaped value to the
 // marker forwards it. Written after that over-broad rule survived as a mutation.
 func TestMultipartWithAnUnrelatedQuotedPairIsForwarded(t *testing.T) {
-	c := &Ctrl{}
+	c := strictCtrl()
 	tests := []struct {
 		name        string
 		disposition string
@@ -1235,7 +1281,7 @@ func TestMultipartWithAnUnrelatedQuotedPairIsForwarded(t *testing.T) {
 			body, contentType := buildMultipart(t, func(w *multipart.Writer) {
 				rawPart(t, w, tt.disposition, "some field value")
 			})
-			if sealed, _ := c.IsSealedRequest(contentType, body); sealed {
+			if sealed, _ := c.refuseAsyncBool(contentType, body); sealed {
 				t.Error("a quoted pair in a name that is not the marker is not a sealed request")
 			}
 			if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err != nil {
@@ -1252,7 +1298,7 @@ func TestMultipartWithAnUnrelatedQuotedPairIsForwarded(t *testing.T) {
 // halves of that are worth pinning: the predicate says false, the guard still
 // refuses.
 func TestBareEncodedNameDispositionIsRefused(t *testing.T) {
-	c := &Ctrl{}
+	c := strictCtrl()
 	const disposition = `name*=utf-8''%5Fe2ee`
 	if _, _, err := mime.ParseMediaType(disposition); err == nil {
 		t.Fatal("fixture assumes this disposition does NOT parse")
@@ -1267,7 +1313,7 @@ func TestBareEncodedNameDispositionIsRefused(t *testing.T) {
 		t.Fatal("fixture no longer tests the encoded case")
 	}
 
-	if sealed, _ := c.IsSealedRequest(contentType, body); !sealed {
+	if sealed, _ := c.refuseAsyncBool(contentType, body); !sealed {
 		t.Error("the marker cannot be ruled out, so this must fail closed via the unparseable-disposition branch")
 	}
 	if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err == nil {
@@ -1324,7 +1370,7 @@ func TestGateIsNotRecomputedPerPart(t *testing.T) {
 		if couldNameE2EEPart(body) {
 			t.Fatal("fixture must not trip the gate, or the branch returns instead of continuing")
 		}
-		if carries, _ := multipartCarriesE2EEPart(contentType, body); carries {
+		if carries, _ := carriesE2EEPart(contentType, body); carries {
 			t.Fatal("fixture must not be refused, or the loop exits early")
 		}
 	}
@@ -1365,7 +1411,7 @@ func TestGateIsNotRecomputedPerPart(t *testing.T) {
 // instead, which removes the false positive AND gives real part-name detection
 // where there was only a blanket verdict.
 func TestLegalUnquotedBoundariesAreEnumeratedRatherThanRefused(t *testing.T) {
-	c := &Ctrl{}
+	c := strictCtrl()
 	for _, boundary := range []string{
 		`abc:def`, `abc=def`, `a?b/c`, `a'b(c)d`, `a+b,c-d.e_f`, `boundary with space`,
 	} {
@@ -1377,14 +1423,14 @@ func TestLegalUnquotedBoundariesAreEnumeratedRatherThanRefused(t *testing.T) {
 
 			// An ordinary body under that boundary is forwarded...
 			ordinary := []byte("--" + boundary + "\r\nContent-Disposition: form-data; name=\"file\"\r\n\r\naudio\r\n--" + boundary + "--\r\n")
-			if carries, why := multipartCarriesE2EEPart(contentType, ordinary); carries {
+			if carries, why := carriesE2EEPart(contentType, ordinary); carries {
 				t.Errorf("a legal unquoted boundary is not a smuggled envelope: %s", why)
 			}
 
 			// ...and the marker under the same boundary is still found BY NAME,
 			// which a blanket refusal could never report.
 			marked := []byte("--" + boundary + "\r\nContent-Disposition: form-data; name=\"" + e2eeBodyMarker + "\"\r\n\r\n" + sealedEnvelopeJSON + "\r\n--" + boundary + "--\r\n")
-			if carries, why := multipartCarriesE2EEPart(contentType, marked); !carries {
+			if carries, why := carriesE2EEPart(contentType, marked); !carries {
 				t.Error("the marker must still be found under a recovered boundary")
 			} else if !strings.Contains(why, "is named") {
 				t.Errorf("it should be found by name, not by a structural fallback: %q", why)
@@ -1444,7 +1490,7 @@ func TestARealEnvelopeIsNotForwardedBecauseItIsLabelledMultipart(t *testing.T) {
 	} {
 		t.Run(contentType, func(t *testing.T) {
 			// The async entry point has always seen this correctly.
-			sealed, _ := IsSealedRequest(contentType, envelope)
+			sealed, _ := isSealedRequestBool(contentType, envelope)
 			if !sealed {
 				t.Fatal("a body carrying a top-level envelope is sealed whatever its label")
 			}
@@ -1453,7 +1499,7 @@ func TestARealEnvelopeIsNotForwardedBecauseItIsLabelledMultipart(t *testing.T) {
 			// one, so the sealed path fails closed on it — what matters is that
 			// it REACHES that path instead of handing the body back to be
 			// forwarded in the clear.
-			c := newE2EEFixture(t).c
+			c := strictFixture(t)
 			got, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), envelope)
 			if err == nil && bytes.Equal(got, envelope) {
 				t.Fatal("the sync path forwarded a sealed envelope unchanged, in cleartext")
@@ -1467,7 +1513,7 @@ func TestARealEnvelopeIsNotForwardedBecauseItIsLabelledMultipart(t *testing.T) {
 	// The complement, and the reason the deleted block looked reasonable: a real
 	// multipart body still forwards. It gets there through the JSON path, whose
 	// unmarshal fails — which is why IsSealedRequest never needed such a return.
-	c := newE2EEFixture(t).c
+	c := strictFixture(t)
 	body, contentType := buildMultipart(t, func(w *multipart.Writer) {
 		if err := w.WriteField("prompt", "mentions _e2ee in content"); err != nil {
 			t.Fatalf("WriteField: %v", err)
@@ -1495,7 +1541,7 @@ func TestARealEnvelopeIsNotForwardedBecauseItIsLabelledMultipart(t *testing.T) {
 // whole point of the branch: with one present these would be caught upstream and
 // the test would pass while testing nothing.
 func TestMultipartNamingTheMarkerOnContentTypeIsRefused(t *testing.T) {
-	c := &Ctrl{}
+	c := strictCtrl()
 	for _, tt := range []struct {
 		name        string
 		contentType string
@@ -1515,7 +1561,7 @@ func TestMultipartNamingTheMarkerOnContentTypeIsRefused(t *testing.T) {
 				t.Fatal("fixture must declare the name on Content-Type only")
 			}
 
-			if sealed, _ := c.IsSealedRequest(contentType, body); !sealed {
+			if sealed, _ := c.refuseAsyncBool(contentType, body); !sealed {
 				t.Error("a name declared on Content-Type cannot be ruled out")
 			}
 			if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err == nil {
@@ -1539,13 +1585,13 @@ func TestMultipartNamingTheMarkerOnContentTypeIsRefused(t *testing.T) {
 // unparseable disposition: gated, so a sloppy header alone is still forwarded,
 // but refused once the body could be naming the marker.
 func TestContentTypeNameIsCheckedRegardlessOfTheDisposition(t *testing.T) {
-	c := &Ctrl{}
+	c := strictCtrl()
 	const contentType = `multipart/form-data; boundary=B`
 
 	t.Run("a benign disposition does not excuse the Content-Type", func(t *testing.T) {
 		body := []byte("--B\r\nContent-Disposition: form-data; name=\"file\"\r\n" +
 			"Content-Type: text/plain; name=\"_e2ee\"\r\n\r\n" + sealedEnvelopeJSON + "\r\n--B--\r\n")
-		if sealed, _ := c.IsSealedRequest(contentType, body); !sealed {
+		if sealed, _ := c.refuseAsyncBool(contentType, body); !sealed {
 			t.Error("the marker on Content-Type cannot be ruled out because another header names something else")
 		}
 	})
@@ -1564,7 +1610,7 @@ func TestContentTypeNameIsCheckedRegardlessOfTheDisposition(t *testing.T) {
 		if !couldNameE2EEPart(body) {
 			t.Fatal("fixture must trip the gate, or it is not testing the gated branch")
 		}
-		if sealed, why := c.IsSealedRequest(contentType, body); !sealed {
+		if sealed, why := c.refuseAsyncBool(contentType, body); !sealed {
 			t.Error("malformed AND could be naming the marker must fail closed")
 		} else if !strings.Contains(why, "Content-Type could not be parsed") {
 			t.Errorf("the refusal should cite the Content-Type parse, got %q", why)
@@ -1577,7 +1623,7 @@ func TestContentTypeNameIsCheckedRegardlessOfTheDisposition(t *testing.T) {
 // emit it), and a part whose type merely fails to parse without mentioning
 // anything reserved was forwarded before this branch existed.
 func TestOrdinaryContentTypeNamesAreForwarded(t *testing.T) {
-	c := &Ctrl{}
+	c := strictCtrl()
 	for _, tt := range []struct {
 		name        string
 		contentType string
@@ -1602,7 +1648,7 @@ func TestOrdinaryContentTypeNamesAreForwarded(t *testing.T) {
 				t.Fatalf("gate = %v, want %v: the fixture is not exercising what this row is for", got, tt.tripsGate)
 			}
 
-			if sealed, why := c.IsSealedRequest(contentType, body); sealed {
+			if sealed, why := c.refuseAsyncBool(contentType, body); sealed {
 				t.Errorf("must be forwarded, refused because %s", why)
 			}
 			got, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body)
@@ -1639,7 +1685,7 @@ func TestUnenumeratedPreambleAndEpilogueAreForwarded(t *testing.T) {
 		{"epilogue, after the close delimiter", file + term + "--B\r\n" + partShaped + term},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			carries, why := multipartCarriesE2EEPart(contentType, []byte(tt.body))
+			carries, why := carriesE2EEPart(contentType, []byte(tt.body))
 			if carries {
 				t.Fatalf("this position is enumerated now (%s) — the residuals list needs updating, not this test", why)
 			}
@@ -1648,13 +1694,13 @@ func TestUnenumeratedPreambleAndEpilogueAreForwarded(t *testing.T) {
 
 	// The control that makes the two rows above meaningful: the same block INSIDE
 	// the delimiters is refused. Without this, a broken fixture would pass both.
-	if carries, _ := multipartCarriesE2EEPart(contentType, []byte(file+"--B\r\n"+partShaped+term)); !carries {
+	if carries, _ := carriesE2EEPart(contentType, []byte(file+"--B\r\n"+partShaped+term)); !carries {
 		t.Fatal("the same block as a real part must be refused, or the fixtures prove nothing")
 	}
 }
 
 func TestNestedMultipartPartIsRefused(t *testing.T) {
-	c := &Ctrl{}
+	c := strictCtrl()
 	nested := func(innerDisposition, innerBody string) []byte {
 		return []byte("--OUTER\r\n" +
 			"Content-Disposition: form-data; name=\"wrapper\"\r\n" +
@@ -1667,7 +1713,7 @@ func TestNestedMultipartPartIsRefused(t *testing.T) {
 
 	t.Run("inner part named the marker", func(t *testing.T) {
 		body := nested(`form-data; name="_e2ee"`, sealedEnvelopeJSON)
-		if sealed, _ := c.IsSealedRequest(contentType, body); !sealed {
+		if sealed, _ := c.refuseAsyncBool(contentType, body); !sealed {
 			t.Error("an envelope one nesting level down cannot be ruled out")
 		}
 		if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err == nil {
@@ -1691,7 +1737,7 @@ func TestNestedMultipartPartIsRefused(t *testing.T) {
 		if couldNameE2EEPart(body) {
 			t.Fatal("fixture must not mention the marker in any form")
 		}
-		if sealed, _ := c.IsSealedRequest(contentType, body); !sealed {
+		if sealed, _ := c.refuseAsyncBool(contentType, body); !sealed {
 			t.Error("nesting hides its own part names, so it cannot be cleared")
 		}
 		if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err == nil {
@@ -1707,7 +1753,7 @@ func TestNestedMultipartPartIsRefused(t *testing.T) {
 		if couldNameE2EEPart(body) {
 			t.Fatal("fixture must not trip the gate, or it is not testing the evasion")
 		}
-		if sealed, _ := c.IsSealedRequest(contentType, body); !sealed {
+		if sealed, _ := c.refuseAsyncBool(contentType, body); !sealed {
 			t.Error("an encoded-word name one level down must not be forwarded")
 		}
 		if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err == nil {
@@ -1762,7 +1808,7 @@ func TestEnumerationIsBoundedByPartCount(t *testing.T) {
 
 	// Within the cap, the marker is found by NAME: the loop reaches it.
 	within := build(withinIndex, e2eeBodyMarker)
-	carries, why := multipartCarriesE2EEPart(contentType, within)
+	carries, why := carriesE2EEPart(contentType, within)
 	if !carries {
 		t.Fatal("a marker within the cap must be found")
 	}
@@ -1775,7 +1821,7 @@ func TestEnumerationIsBoundedByPartCount(t *testing.T) {
 	// refusal comes from the gate. If the cap were raised past this index, the
 	// name would be found instead and this assertion fails.
 	past := build(pastIndex, e2eeBodyMarker)
-	carries, why = multipartCarriesE2EEPart(contentType, past)
+	carries, why = carriesE2EEPart(contentType, past)
 	if !carries {
 		t.Fatal("past the cap, a body that could be naming the marker must fail closed")
 	}
@@ -1797,7 +1843,7 @@ func TestEnumerationIsBoundedByPartCount(t *testing.T) {
 	if couldNameE2EEPart(quiet) {
 		t.Fatal("fixture must not trip the gate, or it is not testing the un-gating")
 	}
-	if carries, why := multipartCarriesE2EEPart(contentType, quiet); !carries {
+	if carries, why := carriesE2EEPart(contentType, quiet); !carries {
 		t.Error("past the budget, a body whose parts were never enumerated cannot be cleared")
 	} else if !strings.Contains(why, "more than") {
 		t.Errorf("the refusal should cite the budget, got %q", why)
@@ -1808,7 +1854,7 @@ func TestEnumerationIsBoundedByPartCount(t *testing.T) {
 	if couldNameE2EEPart(evasive) {
 		t.Fatal("fixture must not trip the gate, or it is not testing the evasion")
 	}
-	if carries, _ := multipartCarriesE2EEPart(contentType, evasive); !carries {
+	if carries, _ := carriesE2EEPart(contentType, evasive); !carries {
 		t.Error("an encoded-word name past the budget must not be forwarded")
 	}
 
@@ -1826,7 +1872,7 @@ func TestEnumerationIsBoundedByPartCount(t *testing.T) {
 	if couldNameE2EEPart(manyDispositions.Bytes()) {
 		t.Fatal("fixture must not trip the gate")
 	}
-	if carries, why := multipartCarriesE2EEPart(contentType, manyDispositions.Bytes()); !carries {
+	if carries, why := carriesE2EEPart(contentType, manyDispositions.Bytes()); !carries {
 		t.Error("one part declaring more dispositions than the budget must hit the same branch")
 	} else if !strings.Contains(why, "more than") {
 		t.Errorf("the refusal should cite the budget, got %q", why)
@@ -1845,7 +1891,7 @@ func TestEnumerationIsBoundedByPartCount(t *testing.T) {
 	if couldNameE2EEPart(manyTypes.Bytes()) {
 		t.Fatal("fixture must not trip the gate")
 	}
-	if carries, why := multipartCarriesE2EEPart(contentType, manyTypes.Bytes()); !carries {
+	if carries, why := carriesE2EEPart(contentType, manyTypes.Bytes()); !carries {
 		t.Error("one part declaring more Content-Types than the budget must hit the same branch")
 	} else if !strings.Contains(why, "more than") {
 		t.Errorf("the refusal should cite the budget, got %q", why)
@@ -1915,7 +1961,7 @@ func TestEnumerationIsBoundedByPartCount(t *testing.T) {
 // the same shape as the RFC 2231 charset gap and the quoted pair, one encoding
 // over. Refused without decoding the word.
 func TestMultipartWithAnEncodedWordNameIsRefused(t *testing.T) {
-	c := &Ctrl{}
+	c := strictCtrl()
 	tests := []struct {
 		name        string
 		disposition string
@@ -1950,7 +1996,7 @@ func TestMultipartWithAnEncodedWordNameIsRefused(t *testing.T) {
 				t.Fatal("fixture must not trip the gate, or the branch under test is not what refuses it")
 			}
 
-			if sealed, _ := c.IsSealedRequest(contentType, body); !sealed {
+			if sealed, _ := c.refuseAsyncBool(contentType, body); !sealed {
 				t.Error("a name other parsers decode cannot be ruled out")
 			}
 			if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err == nil {
@@ -1987,5 +2033,182 @@ func TestIsEncodedWord(t *testing.T) {
 		if got := isEncodedWord(value); got != want {
 			t.Errorf("%q: got %v, want %v", value, got, want)
 		}
+	}
+}
+
+// The flag's whole contract in one place: EXACT refusals hold either way,
+// STRUCTURAL ones only when strict, and with the flag off the request is
+// forwarded rather than silently dropped.
+//
+// The split matters because the structural branches refuse shapes that are legal
+// or merely sloppy far more often than hostile, run before ValidateSession on
+// the sync path, and have never seen production traffic. The exact ones are a
+// fact about the request and no operator setting should forward them.
+func TestStructuralRefusalsAreGated(t *testing.T) {
+	const marker = "--B\r\nContent-Disposition: form-data; name=\"" + e2eeBodyMarker + "\"\r\n\r\n" + sealedEnvelopeJSON + "\r\n--B--\r\n"
+	nested := "--B\r\nContent-Disposition: form-data; name=\"w\"\r\nContent-Type: multipart/mixed; boundary=I\r\n\r\n" +
+		"--I\r\nContent-Disposition: form-data; name=\"x\"\r\n\r\ny\r\n--I--\r\n--B--\r\n"
+
+	// Every structural branch, and an exact one behind each shape that could be
+	// mistaken for structural. Four mutations survived a version of this test
+	// carrying only the first two rows: the over-budget branch reclassified as
+	// exact, and a RECOVERED marker name reclassified as structural, both went
+	// unnoticed.
+	var overBudget bytes.Buffer
+	for i := 0; i <= maxHeadersExamined; i++ {
+		overBudget.WriteString("--B\r\nContent-Disposition: form-data; name=\"f\"\r\n\r\nx\r\n")
+	}
+	overBudget.WriteString("--B--\r\n")
+
+	for _, tt := range []struct {
+		name          string
+		body          string
+		contentType   string
+		strictRefuses bool
+		laxRefuses    bool
+	}{
+		{name: "exact: a part names the marker", body: marker, strictRefuses: true, laxRefuses: true},
+		// The name was RECOVERED from a header that would not parse, but it was
+		// still read — so this is a fact about the request, not about what we
+		// could not determine, and no flag may forward it.
+		{
+			name:          "exact: a marker name recovered from a broken header",
+			body:          "--B\r\nContent-Disposition: form-data; name=x; name=\"=?utf-8?B?X2UyZWU=?=\"\r\n\r\n" + sealedEnvelopeJSON + "\r\n--B--\r\n",
+			strictRefuses: true, laxRefuses: true,
+		},
+		{name: "structural: a nested multipart part", body: nested, strictRefuses: true, laxRefuses: false},
+		{name: "structural: past the header budget", body: overBudget.String(), strictRefuses: true, laxRefuses: false},
+		{
+			name:          "structural: a boundary that cannot be recovered",
+			body:          "--x\r\nContent-Disposition: form-data; name=\"f\"\r\n\r\nx\r\n--x--\r\n",
+			contentType:   "multipart/form-data",
+			strictRefuses: true, laxRefuses: false,
+		},
+		{
+			name:          "structural: the parse stops with content ahead of it",
+			body:          "--B\r\nthis-is-not-a-header\r\n\r\njunk\r\n--B\r\nContent-Disposition: form-data; name=\"f\"\r\n\r\nx\r\n--B--\r\n",
+			strictRefuses: true, laxRefuses: false,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			contentType := tt.contentType
+			if contentType == "" {
+				contentType = `multipart/form-data; boundary=B`
+			}
+			for _, strict := range []bool{false, true} {
+				c := &Ctrl{e2eeStrictMultipart: strict}
+				want := tt.laxRefuses
+				if strict {
+					want = tt.strictRefuses
+				}
+
+				verdict, _ := c.RefuseAsync(contentType, []byte(tt.body))
+				if got := verdict != NotSealed; got != want {
+					t.Errorf("strict=%v: async refused=%v, want %v", strict, got, want)
+				}
+
+				got, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), []byte(tt.body))
+				if (err != nil) != want {
+					t.Errorf("strict=%v: sync refused=%v, want %v (%v)", strict, err != nil, want, err)
+				}
+				// Forwarded means forwarded UNCHANGED, not dropped.
+				if err == nil && !bytes.Equal(got, []byte(tt.body)) {
+					t.Errorf("strict=%v: the body must be forwarded unchanged", strict)
+				}
+			}
+		})
+	}
+}
+
+// The shared budget is not the part limit, and the difference is ~3x: a part
+// costs one unit plus one for each header it declares. The refusal message says
+// "combined" for that reason — naming the constant would tell a caller cut off
+// at 1365 parts that the limit is 4096.
+func TestTheBudgetCountsPartsAndHeadersTogether(t *testing.T) {
+	const contentType = `multipart/form-data; boundary=B`
+	build := func(n int, extraHeader string) []byte {
+		var b bytes.Buffer
+		for i := 0; i < n; i++ {
+			b.WriteString("--B\r\nContent-Disposition: form-data; name=\"f\"\r\n" + extraHeader + "\r\nx\r\n")
+		}
+		b.WriteString("--B--\r\n")
+		return b.Bytes()
+	}
+	for _, tt := range []struct {
+		name  string
+		extra string
+		under int
+		over  int
+	}{
+		// part + disposition = 2 units, so ~2048 fit.
+		{"plain fields", "", 2045, 2050},
+		// part + disposition + type = 3 units, so ~1365 fit.
+		{"file parts", "Content-Type: text/plain\r\n", 1360, 1370},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if carries, _ := carriesE2EEPart(contentType, build(tt.under, tt.extra)); carries {
+				t.Errorf("%d %s should be under the budget", tt.under, tt.name)
+			}
+			carries, why := carriesE2EEPart(contentType, build(tt.over, tt.extra))
+			if !carries {
+				t.Fatalf("%d %s should be over the budget", tt.over, tt.name)
+			}
+			if !strings.Contains(why, "combined") {
+				t.Errorf("the message must say the budget is shared, got %q", why)
+			}
+			if strings.Contains(why, "parts or part headers") {
+				t.Errorf("the message must not read as a part limit, got %q", why)
+			}
+		})
+	}
+}
+
+// The sync path's two refusals are two different problems, exactly as the async
+// path's are: one says a part IS named the marker, the other says the body could
+// not be checked. Collapsing them into one message survived as a mutation.
+func TestSyncMessagesDifferPerVerdict(t *testing.T) {
+	c := strictCtrl()
+	const ct = `multipart/form-data; boundary=B`
+
+	named := []byte("--B\r\nContent-Disposition: form-data; name=\"" + e2eeBodyMarker + "\"\r\n\r\n" + sealedEnvelopeJSON + "\r\n--B--\r\n")
+	_, err := c.MaybeUnsealRequest(ginCtxWithContentType(ct), named)
+	if err == nil {
+		t.Fatal("a part named the marker must be refused")
+	}
+	if !strings.Contains(err.Error(), "must not carry a sealed envelope") {
+		t.Errorf("the exact refusal should say the body carries one, got: %v", err)
+	}
+
+	unreadable := []byte("--B\r\nContent-Disposition: form-data; name=\"w\"\r\nContent-Type: multipart/mixed; boundary=I\r\n\r\n--I\r\nContent-Disposition: form-data; name=\"x\"\r\n\r\ny\r\n--I--\r\n--B--\r\n")
+	_, err = c.MaybeUnsealRequest(ginCtxWithContentType(ct), unreadable)
+	if err == nil {
+		t.Fatal("an unreadable body must be refused when strict")
+	}
+	if !strings.Contains(err.Error(), "cannot be checked") {
+		t.Errorf("the structural refusal should say it could not be checked, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "must not carry a sealed envelope") {
+		t.Errorf("it must not claim the body carries an envelope, got: %v", err)
+	}
+}
+
+// Forwarding a structural refusal is only defensible if it is COUNTED — that
+// counter is the evidence for flipping the flag, so losing the increment would
+// make the rollout plan silently useless. It survived as a mutation without
+// this.
+func TestForwardedStructuralRefusalIsCounted(t *testing.T) {
+	monitor.PrometheusInit("e2ee-multipart-test", "0x0000000000000000000000000000000000000001")
+
+	counter := monitor.E2EEMultipartWouldRefuseTotal.WithLabelValues(monitor.E2EERefuseNestedMultipart)
+	before := testutil.ToFloat64(counter)
+
+	c := &Ctrl{} // flag off: forward and count
+	body := []byte("--B\r\nContent-Disposition: form-data; name=\"w\"\r\nContent-Type: multipart/mixed; boundary=I\r\n\r\n--I\r\nContent-Disposition: form-data; name=\"x\"\r\n\r\ny\r\n--I--\r\n--B--\r\n")
+	if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(`multipart/form-data; boundary=B`), body); err != nil {
+		t.Fatalf("with the flag off it must be forwarded, got %v", err)
+	}
+
+	if after := testutil.ToFloat64(counter); after != before+1 {
+		t.Errorf("counter = %v, want %v: a forwarded structural refusal must be counted", after, before+1)
 	}
 }

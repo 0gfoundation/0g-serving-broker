@@ -20,8 +20,13 @@ import (
 // --- Mock asyncCtrl ---
 
 type mockAsyncCtrl struct {
-	asyncEnabled  bool
-	whitelistUser bool
+	// strictMultipart mirrors cfg.e2eeStrictMultipart. The structural refusals
+	// are governed by it, so a handler test that does not set it is asserting the
+	// DEFAULT behaviour — forward and count — which is the point of having it
+	// here rather than a hardcoded true.
+	strictMultipart bool
+	asyncEnabled    bool
+	whitelistUser   bool
 
 	// ValidateSession
 	sessionUser string
@@ -59,8 +64,8 @@ func (m *mockAsyncCtrl) IsAsyncEnabled() bool {
 // it encoded that assumption HERE, so the day the predicate starts reading a
 // field this fails as a nil-map panic inside a handler test instead of as a
 // compile error where the change was made.
-func (m *mockAsyncCtrl) IsSealedRequest(contentType string, reqBody []byte) (bool, string) {
-	return ctrl.IsSealedRequest(contentType, reqBody)
+func (m *mockAsyncCtrl) RefuseAsync(contentType string, reqBody []byte) (ctrl.SealedVerdict, string) {
+	return ctrl.RefuseAsync(m.strictMultipart, contentType, reqBody)
 }
 
 func (m *mockAsyncCtrl) ValidateSession(ctx *gin.Context) (string, error) {
@@ -808,7 +813,10 @@ func TestSubmitAsync_MalformedMultipartRefusalSaysWhy(t *testing.T) {
 	// so the parts cannot be enumerated at all.
 	body := "--x\r\nContent-Disposition: form-data; name=\"_e2ee\"\r\n\r\n{}\r\n--x--\r\n"
 
-	mock := &mockAsyncCtrl{asyncEnabled: true, sessionUser: "0xUser1", submitJobID: "job-1"}
+	// STRUCTURAL: the parts were never read, so this refusal is the one
+	// cfg.e2eeStrictMultipart governs. TestSubmitAsync_StructuralRefusalIsGated
+	// covers the default, where the same body is forwarded and counted.
+	mock := &mockAsyncCtrl{asyncEnabled: true, sessionUser: "0xUser1", submitJobID: "job-1", strictMultipart: true}
 	h := newTestHandler(mock)
 	rec := performRequest(h.SubmitAsyncImageEdit, "POST", "/v1/async/images/edits", body,
 		map[string]string{"Content-Type": "multipart/form-data"})
@@ -870,5 +878,102 @@ func TestSubmitAsync_E2EESubstringInPromptIsNotSealed(t *testing.T) {
 	}
 	if mock.capturedReqBody == nil {
 		t.Error("an ordinary request must still be enqueued")
+	}
+}
+
+// The default: a structural refusal forwards and is counted, so the operator can
+// see whether the false-positive set is empty before the flag is flipped. These
+// branches run before authentication on the sync path and have never seen
+// production traffic, which is why they do not ship refusing.
+func TestSubmitAsync_StructuralRefusalIsGated(t *testing.T) {
+	body := "--x\r\nContent-Disposition: form-data; name=\"_e2ee\"\r\n\r\n{}\r\n--x--\r\n"
+
+	mock := &mockAsyncCtrl{asyncEnabled: true, sessionUser: "0xUser1", submitJobID: "job-1"}
+	if mock.strictMultipart {
+		t.Fatal("this test is about the DEFAULT, which must be off")
+	}
+	h := newTestHandler(mock)
+	rec := performRequest(h.SubmitAsyncImageEdit, "POST", "/v1/async/images/edits", body,
+		map[string]string{"Content-Type": "multipart/form-data"})
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 with the flag off, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if mock.capturedReqBody == nil {
+		t.Error("the body must be submitted unchanged, not dropped")
+	}
+}
+
+// An EXACT refusal is not governed by the flag: a part whose name resolves to
+// the marker is a fact about the request, and no operator setting should forward
+// it. Same body shape as above but enumerable, so the name is actually read.
+func TestSubmitAsync_ExactRefusalIgnoresTheFlag(t *testing.T) {
+	body := "--x\r\nContent-Disposition: form-data; name=\"_e2ee\"\r\n\r\n{}\r\n--x--\r\n"
+
+	for _, strict := range []bool{false, true} {
+		mock := &mockAsyncCtrl{asyncEnabled: true, sessionUser: "0xUser1", submitJobID: "job-1", strictMultipart: strict}
+		h := newTestHandler(mock)
+		rec := performRequest(h.SubmitAsyncImageEdit, "POST", "/v1/async/images/edits", body,
+			map[string]string{"Content-Type": "multipart/form-data; boundary=x"})
+
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("strict=%v: a part named the marker must be refused either way, got %d: %s", strict, rec.Code, rec.Body.String())
+		}
+		if got := rec.Body.String(); !strings.Contains(got, "declares a part named") {
+			t.Errorf("strict=%v: the message should name the part, got: %s", strict, got)
+		}
+	}
+}
+
+// One bool could not tell the three refusals apart, so a single sentence had to
+// serve all of them — and told a client with a merely-malformed body to retry on
+// an endpoint that would refuse it too. Each verdict gets its own message now.
+func TestSubmitAsync_MessagesDifferPerVerdict(t *testing.T) {
+	cases := []struct {
+		name        string
+		contentType string
+		body        string
+		wants       string
+		notWants    string
+	}{
+		{
+			name:        "a real sealed envelope",
+			contentType: "application/json",
+			body:        `{"_e2ee":{"v":1}}`,
+			wants:       "Send it to the synchronous endpoint",
+		},
+		{
+			name:        "a part named the marker",
+			contentType: "multipart/form-data; boundary=x",
+			body:        "--x\r\nContent-Disposition: form-data; name=\"_e2ee\"\r\n\r\n{}\r\n--x--\r\n",
+			wants:       "declares a part named",
+		},
+		{
+			name:        "merely malformed",
+			contentType: "multipart/form-data",
+			body:        "--x\r\nContent-Disposition: form-data; name=\"_e2ee\"\r\n\r\n{}\r\n--x--\r\n",
+			wants:       "Correct the body and retry",
+			// The old single message sent this caller to an endpoint that would
+			// also refuse them.
+			notWants: "goes to the synchronous endpoint",
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			mock := &mockAsyncCtrl{asyncEnabled: true, sessionUser: "0xUser1", submitJobID: "job-1", strictMultipart: true}
+			h := newTestHandler(mock)
+			rec := performRequest(h.SubmitAsyncImageEdit, "POST", "/v1/async/images/edits", tt.body,
+				map[string]string{"Content-Type": tt.contentType})
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+			}
+			got := rec.Body.String()
+			if !strings.Contains(got, tt.wants) {
+				t.Errorf("message should contain %q, got: %s", tt.wants, got)
+			}
+			if tt.notWants != "" && strings.Contains(got, tt.notWants) {
+				t.Errorf("message should NOT contain %q, got: %s", tt.notWants, got)
+			}
+		})
 	}
 }
