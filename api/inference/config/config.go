@@ -1098,9 +1098,13 @@ type ConcurrencyLimitConfig struct {
 	// Chatbot only, and only for text-input models: images arrive as base64 in
 	// the body, where a 3 MB picture reads as ~786k tokens against the thousand
 	// or so of KV it really costs, and no headroom absorbs three orders of
-	// magnitude. Whitelisted callers are NOT exempt — the point is to bound the
-	// GPU, and on a router-fronted deployment the whitelisted router is all the
-	// traffic there is.
+	// magnitude. On a multi-model provider the per-entry modelInfo is what
+	// decides both of those, so a model whose metadata cannot be resolved is
+	// skipped rather than charged on an estimate nothing bounds.
+	//
+	// Whitelisted callers are NOT exempt — the point is to bound the GPU, and on
+	// a router-fronted deployment the whitelisted router is all the traffic there
+	// is.
 	//
 	// Two things to check before enabling:
 	//

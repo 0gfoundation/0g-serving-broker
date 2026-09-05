@@ -293,6 +293,29 @@ const outputReserveTokens = 4096
 // sized for.
 const minTypicalRequestTokens = 8192
 
+// reserveTokenBudget takes this request's share of the in-flight KV budget.
+//
+// Returns the release to defer and whether the request may proceed; on refusal
+// the 429 is already written and the rejection recorded. When the gate does not
+// apply the release is a no-op, so both call sites read the same way.
+//
+// There are two call sites on purpose — the whitelisted branch returns before
+// the billed one — and both must keep it. Whitelisting exempts a caller from
+// billing and per-user limits because it is trusted, but trust does not create
+// GPU memory, and on a router-fronted deployment the whitelisted router is all
+// the traffic there is.
+func (p *Proxy) reserveTokenBudget(ctx *gin.Context, svcType, modelName, userAddress string, reqBody []byte) (func(), bool) {
+	weight, ok := p.tokenBudgetWeight(svcType, modelName, ctx, reqBody)
+	if !ok {
+		return func() {}, true
+	}
+	if !middleware.CheckTokenBudget(p.tokenBudgetLimiter, ctx, weight) {
+		p.rejections.record(ctx, monitor.RejectionTokenBudget, userAddress)
+		return func() {}, false
+	}
+	return func() { p.tokenBudgetLimiter.Release(weight) }, true
+}
+
 // tokenBudgetWeight returns the KV weight to charge this request and whether
 // the gate applies at all.
 //
@@ -307,11 +330,23 @@ const minTypicalRequestTokens = 8192
 // three-order-of-magnitude error in the one number this gate is built on, so
 // for such a model the byte estimate is not a usable proxy and the gate stays
 // out of the way rather than shedding traffic on a fiction.
-func (p *Proxy) tokenBudgetWeight(svcType string, reqBody []byte) (int64, bool) {
+func (p *Proxy) tokenBudgetWeight(svcType, modelName string, ctx *gin.Context, reqBody []byte) (int64, bool) {
 	if p.tokenBudgetLimiter == nil || svcType != constant.ServiceTypeChatbot {
 		return 0, false
 	}
-	mi := p.ctrl.Service.ModelInfo
+	// Resolve the metadata for the model this request actually names, not the
+	// service-level block. A multi-model provider carries its modelInfo per
+	// pricing entry and usually has no service-level one at all, so reading
+	// Service.ModelInfo there returns nil — which would quietly disable both
+	// guards below at once, treating a vision model as text and leaving the
+	// weight unbounded. That is the worst combination available.
+	mi := p.ctrl.Service.EffectiveModelInfoFor(modelName, ctrl.UpstreamIdentity(ctx))
+	if mi == nil && p.ctrl.Service.HasMultiModelPricing() {
+		// Multi-model and unresolvable means the metadata this gate needs is
+		// missing, or the model is not ours. Skipping is the honest answer;
+		// charging on an estimate we cannot bound is not.
+		return 0, false
+	}
 	if !textOnlyInput(mi) {
 		return 0, false
 	}
@@ -937,6 +972,19 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		whitelistReq.RequestHash = whitelistReq.Nonce
 		whitelistReq.ModelName = modelName
 
+		// The KV budget applies here too. Whitelisting exempts a caller from
+		// billing and from the per-user limits, because it is trusted — but trust
+		// does not create GPU memory, and on a router-fronted deployment the
+		// whitelisted router is all the traffic there is, so skipping it would
+		// leave the gate guarding nothing at all. There is no billing gate on this
+		// branch to sequence against, so the reservation is simply taken before
+		// the request is forwarded.
+		release, admitted := p.reserveTokenBudget(ctx, svcType, modelName, userAddress, reqBody)
+		if !admitted {
+			return
+		}
+		defer release()
+
 		httpReq, err := p.ctrl.PrepareHTTPRequest(ctx, targetURL, reqBody, svcType)
 		if err != nil {
 			p.handleBrokerError(ctx, err, "prepare HTTP request")
@@ -1073,25 +1121,19 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		return
 	}
 
-	// In-flight KV budget, taken here rather than earlier for two reasons.
+	// In-flight KV budget for the billed path. Taken AFTER the billing gate so a
+	// caller with no balance, or one that is not acknowledged, cannot reserve GPU
+	// capacity it will never pay for: taken before validation, a single
+	// authenticated but unfunded address could hold the whole budget with one
+	// oversized body and shed every paying request at zero cost.
 	//
-	// It is AFTER the billing gate so a caller with no balance, or one that is
-	// not acknowledged, cannot reserve GPU capacity it will never pay for. Taken
-	// before validation, a single authenticated but unfunded address could hold
-	// the whole budget with one oversized body and shed every paying request at
-	// zero cost.
-	//
-	// It is OUTSIDE the !isWhitelisted block above, because the per-user gates
-	// exempt whitelisted callers as trusted and trust does not create GPU memory.
-	// On a router-fronted deployment the whitelisted router is all the traffic
-	// there is, so exempting it would leave the gate guarding nothing.
-	if weight, ok := p.tokenBudgetWeight(svcType, reqBody); ok {
-		if !middleware.CheckTokenBudget(p.tokenBudgetLimiter, ctx, weight) {
-			p.rejections.record(ctx, monitor.RejectionTokenBudget, userAddress)
-			return
-		}
-		defer p.tokenBudgetLimiter.Release(weight)
+	// The whitelisted path takes its own reservation above — it returns before
+	// reaching here, and it is exactly the traffic this gate exists to bound.
+	release, admitted := p.reserveTokenBudget(ctx, svcType, req.ModelName, userAddress, reqBody)
+	if !admitted {
+		return
 	}
+	defer release()
 
 	httpReq, err := p.ctrl.PrepareHTTPRequest(ctx, targetURL, reqBody, svcType)
 	if err != nil {
