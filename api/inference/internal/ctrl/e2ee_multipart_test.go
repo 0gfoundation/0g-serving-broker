@@ -4,6 +4,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"bytes"
+	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
 	"mime"
 	"mime/multipart"
@@ -2212,3 +2213,122 @@ func TestForwardedStructuralRefusalIsCounted(t *testing.T) {
 		t.Errorf("counter = %v, want %v: a forwarded structural refusal must be counted", after, before+1)
 	}
 }
+
+// A 2231-encoded name the parser DECODED is an answer, and refusing it is a
+// false positive on a legal, internationalised form. The branch fires on the
+// raw header, so it did not care whether the parser had already resolved the
+// name — and because it was classed EXACT, the false positive was ungated (an
+// operator could not turn it off), uncounted (it returned before the counter, so
+// the branch most likely to fire on real traffic was invisible to the rollout
+// the counter exists for), and mislabelled (the async route said the part was
+// named `_e2ee`).
+func TestADecodedEncodedNameIsNotRefused(t *testing.T) {
+	c := strictCtrl()
+	for _, tt := range []struct {
+		name        string
+		disposition string
+		wantName    string
+	}{
+		{"utf-8, fully decoded", `form-data; name*=UTF-8''hello`, "hello"},
+		{"plain continuation, no charset", `form-data; name*0=he; name*1=llo`, "hello"},
+		{"us-ascii", `form-data; name*=us-ascii''hello`, "hello"},
+		// RFC 2231 §4.1: only the FIRST segment carries the charset, so a
+		// continuation legitimately has no `charset''` prefix. Judging it as if
+		// it did refused this, which decodes cleanly.
+		{"multi-segment, charset on the first only", `form-data; name*0*=utf-8''he; name*1*=llo`, "hello"},
+		{"multi-segment with percent escapes", `form-data; name*0*=utf-8''caf%C3%A9; name*1*=%20file`, "café file"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, params, err := mime.ParseMediaType(tt.disposition)
+			if err != nil || params["name"] != tt.wantName {
+				t.Fatalf("fixture assumes a clean decode to %q, got %q (err %v)", tt.wantName, params["name"], err)
+			}
+			body := []byte("--B\r\nContent-Disposition: " + tt.disposition + "\r\n\r\nx\r\n--B--\r\n")
+			if carries, why := carriesE2EEPart(`multipart/form-data; boundary=B`, body); carries {
+				t.Errorf("a decoded name is an answer, not a refusal: %s", why)
+			}
+			if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(`multipart/form-data; boundary=B`), body); err != nil {
+				t.Errorf("must be forwarded even when strict, got %v", err)
+			}
+		})
+	}
+}
+
+// And the complement: when the parser could NOT decode it, the branch still
+// fires — but as STRUCTURAL, so it is gated and counted like every other
+// "cannot be ruled out". Emptiness alone is not the test: an unsupported charset
+// can still yield a non-empty PARTIAL concatenation missing the segment that
+// carried the marker, and a supported charset can still fail on a bad escape.
+func TestAnUndecodableEncodedNameIsStructural(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		disposition string
+		parsedName  string
+	}{
+		{"unsupported charset", `form-data; name*=iso-8859-1''x`, ""},
+		{"empty charset", `form-data; name*=''%5Fe2ee`, ""},
+		{"partial: one segment dropped", `form-data; name*0*=iso-8859-1''%5Fe2; name*1=ee`, "ee"},
+		{"supported charset, bad escape", `form-data; name*=utf-8''%ZZe2ee`, ""},
+		// The FIRST segment has no charset delimiter, so Go drops it and keeps
+		// the rest — a non-empty name that is missing the segment which mattered.
+		// Neither half of the test alone catches this one.
+		{"first segment has no charset delimiter", `form-data; name*0*=hello; name*1=x`, "x"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, params, _ := mime.ParseMediaType(tt.disposition)
+			if params["name"] != tt.parsedName {
+				t.Fatalf("Go now yields %q, not %q: re-check the premise", params["name"], tt.parsedName)
+			}
+			body := []byte("--B\r\nContent-Disposition: " + tt.disposition + "\r\n\r\nx\r\n--B--\r\n")
+			const ct = `multipart/form-data; boundary=B`
+			// No gate assertion here, unlike the tests for the heuristic branches:
+			// every fixture necessarily contains `name*` at a parameter position,
+			// so couldNameE2EEPart is true by construction. It is also never
+			// consulted — these headers PARSE, so the verdict comes from
+			// nameVerdict's classification, which is what the strict/lax
+			// difference below is measuring.
+
+			// Strict: refused. Default: forwarded and counted.
+			if _, err := strictCtrl().MaybeUnsealRequest(ginCtxWithContentType(ct), body); err == nil {
+				t.Error("an undecodable name cannot be ruled out")
+			}
+			got, err := (&Ctrl{}).MaybeUnsealRequest(ginCtxWithContentType(ct), body)
+			if err != nil {
+				t.Errorf("with the flag off it must be forwarded, got %v", err)
+			}
+			if err == nil && !bytes.Equal(got, body) {
+				t.Error("forwarded means forwarded unchanged")
+			}
+		})
+	}
+}
+
+// The pre-authentication path must not write a log line per request: the caller
+// chooses the rate and the body decides the content. proxy/rejection.go exists
+// because that pattern turned one client into a 150k-line/day flood, and its
+// conclusion — the Prometheus counter is the real-time signal — applies here.
+func TestTheGatedPathDoesNotLogPerRequest(t *testing.T) {
+	logger := &warnCountingLogger{}
+	c := &Ctrl{logger: logger}
+	body := []byte("--B\r\nContent-Disposition: form-data; name=\"w\"\r\nContent-Type: multipart/mixed; boundary=I\r\n\r\n--I\r\nContent-Disposition: form-data; name=\"x\"\r\n\r\ny\r\n--I--\r\n--B--\r\n")
+
+	for i := 0; i < 50; i++ {
+		if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(`multipart/form-data; boundary=B`), body); err != nil {
+			t.Fatalf("with the flag off it must be forwarded, got %v", err)
+		}
+	}
+	if logger.warns != 0 {
+		t.Errorf("wrote %d log lines for 50 pre-auth requests; the counter is the signal", logger.warns)
+	}
+}
+
+// warnCountingLogger counts warnings so TestTheGatedPathDoesNotLogPerRequest can
+// assert on VOLUME rather than content. It embeds log.Logger, like the package's
+// countingLogger, so only the methods under test need implementing.
+type warnCountingLogger struct {
+	log.Logger
+	warns int
+}
+
+func (l *warnCountingLogger) Warn(args ...interface{})                 { l.warns++ }
+func (l *warnCountingLogger) Warnf(format string, args ...interface{}) { l.warns++ }

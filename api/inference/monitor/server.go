@@ -466,7 +466,7 @@ func PrometheusInit(serverName, providerAddress string) {
 	E2EEMultipartWouldRefuseTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_e2ee_multipart_would_refuse_total",
-			Help:        "Multipart requests the structural SPEC 5.3.1 branches would refuse if e2eeStrictMultipart were true, labeled by reason (unusable_boundary, unenumerated_remainder, over_budget, nested_multipart, unreadable_part_header). Non-zero means real traffic hits a fail-closed branch, so the flag is not yet safe to flip.",
+			Help:        "Multipart requests the structural SPEC 5.3.1 branches would refuse if e2eeStrictMultipart were true, labeled by reason (unusable_boundary, unenumerated_remainder, over_budget, nested_multipart, unreadable_part_header, undecodable_name). Non-zero means real traffic hits a fail-closed branch, so the flag is not yet safe to flip.",
 			ConstLabels: constLabels,
 		},
 		[]string{"reason"},
@@ -908,6 +908,11 @@ const (
 	// E2EERefuseUnreadablePartHeader: a part header could not be parsed, no name
 	// could be recovered from it, and the body could be naming the marker.
 	E2EERefuseUnreadablePartHeader = "unreadable_part_header"
+	// E2EERefuseUndecodableName: a part header RFC 2231-encodes its name in a
+	// charset mime.ParseMediaType cannot decode, so the name it resolved is
+	// absent or a partial concatenation. Expected to be the most likely of these
+	// to fire on real traffic, since RFC 2231 names appear in the wild.
+	E2EERefuseUndecodableName = "undecodable_name"
 )
 
 // RecordE2EEMultipartWouldRefuse increments the counter of multipart requests a

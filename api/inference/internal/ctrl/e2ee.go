@@ -452,6 +452,19 @@ func looksMultipart(contentType string) bool {
 // recovering from one does.
 func recoverParamValues(header, attr string) []string {
 	var out []string
+	forEachParam(header, func(name, value string) {
+		if strings.EqualFold(name, attr) {
+			out = append(out, value)
+		}
+	})
+	return out
+}
+
+// forEachParam walks a header's parameters, skipping quoted values so a `name=`
+// inside someone's filename is not mistaken for one, and calls fn with each
+// attribute and its value. An unclosed quote runs to the end of the header,
+// which is what a parser recovering from one does.
+func forEachParam(header string, fn func(name, value string)) {
 	for i := 0; i < len(header); {
 		for i < len(header) && isParamBoundary(header[i]) {
 			i++
@@ -484,15 +497,64 @@ func recoverParamValues(header, attr string) []string {
 				}
 				value = strings.TrimSpace(header[valueStart:i])
 			}
-			if strings.EqualFold(name, attr) {
-				out = append(out, value)
-			}
+			fn(name, value)
 		}
 		for i < len(header) && header[i] != ';' {
 			i++
 		}
 	}
-	return out
+}
+
+// declaresUndecodableName reports whether the header RFC 2231-encodes its `name`
+// in a charset mime.ParseMediaType cannot decode.
+//
+// It is half of the test in nameVerdict, the other half being an empty resolved
+// name. Neither alone is right: a supported charset can still fail on a bad
+// escape (`name*=utf-8”%ZZe2ee` resolves to ""), and an UNsupported one can
+// still yield a non-empty PARTIAL concatenation of the segments Go could read.
+// Go decodes us-ascii and utf-8 and silently drops the rest:
+//
+//	name*=UTF-8''hello                     -> "hello"  decoded, trustworthy
+//	name*0=he; name*1=llo                  -> "hello"  no charset at all, trustworthy
+//	name*=iso-8859-1''x                    -> ""       dropped
+//	name*=''%5Fe2ee                        -> ""       empty charset, dropped
+//	name*0*=iso-8859-1''%5Fe2; name*1=ee   -> "ee"     PARTIAL — one segment dropped
+//	name*=utf-8''%ZZe2ee                   -> ""       charset fine, escape is not
+//
+// The partial row is why "refuse when the name came back empty" is not the whole
+// rule: the parser kept one segment and dropped the one carrying the marker, so
+// a non-empty value can still be missing the part that mattered. Python's email
+// and Node's busboy decode all of these and resolve that row to `_e2ee`.
+//
+// Only the extended form carries a charset. A `name*0=` continuation without the
+// trailing `*` is plain text Go concatenates faithfully, so it is decodable.
+func declaresUndecodableName(header string) bool {
+	undecodable := false
+	forEachParam(header, func(name, value string) {
+		if !isEncodedNameAttr(name+"=") || !strings.HasSuffix(name, "*") {
+			return
+		}
+		// ONLY the first segment carries the charset (RFC 2231 §4.1): `name*=` or
+		// `name*0*=`. A continuation like `name*1*=llo` legitimately has no
+		// `charset''` prefix, and judging it as if it did refuses
+		// `name*0*=utf-8''he; name*1*=llo` — which decodes cleanly to "hello".
+		if segment := strings.TrimSuffix(strings.TrimPrefix(strings.ToLower(name), "name*"), "*"); segment != "" && segment != "0" {
+			return
+		}
+		charset, _, ok := strings.Cut(value, "'")
+		if !ok {
+			// A FIRST extended segment with no charset delimiter is not something
+			// the parser can decode. It is not covered by the empty-name half of
+			// the test either: `name*0*=hello; name*1=x` drops segment 0 and
+			// yields a non-empty "x".
+			undecodable = true
+			return
+		}
+		if !strings.EqualFold(charset, "utf-8") && !strings.EqualFold(charset, "us-ascii") {
+			undecodable = true
+		}
+	})
+	return undecodable
 }
 
 // nameVerdict applies the readings that decide a declared part name to ONE
@@ -503,18 +565,29 @@ func recoverParamValues(header, attr string) []string {
 // `where` names the header for the message; `header` is its raw value, needed by
 // declaresEncodedName because the parser drops what it cannot decode; `name` is
 // the value the parser resolved.
-func nameVerdict(where, header, name string) (bool, string) {
+func nameVerdict(where, header, name string) (SealedVerdict, string, string) {
 	switch {
 	case name == e2eeBodyMarker:
-		return true, fmt.Sprintf("a multipart part is named %q", e2eeBodyMarker)
+		return MultipartNamesMarker, "", fmt.Sprintf("a multipart part is named %q", e2eeBodyMarker)
 	case resolvesToMarker(name):
-		return true, fmt.Sprintf("%s names a part %q as a conformant parser reads it, trimming linear white space and resolving RFC 2045 quoted pairs where mime.ParseMediaType does neither, so the name it declares cannot be ruled out", where, e2eeBodyMarker)
+		return MultipartNamesMarker, "", fmt.Sprintf("%s names a part %q as a conformant parser reads it, trimming linear white space and resolving RFC 2045 quoted pairs where mime.ParseMediaType does neither, so the name it declares cannot be ruled out", where, e2eeBodyMarker)
 	case isEncodedWord(name):
-		return true, fmt.Sprintf("%s names a part with an RFC 2047 encoded word, which mime.ParseMediaType returns undecoded but other parsers resolve, so the name it declares cannot be ruled out", where)
-	case declaresEncodedName(header):
-		return true, fmt.Sprintf("%s RFC 2231-encodes a part's name, which mime.ParseMediaType resolves only for us-ascii and utf-8 (dropping the rest silently), so the name it declares cannot be ruled out", where)
+		return MultipartNamesMarker, "", fmt.Sprintf("%s names a part with an RFC 2047 encoded word, which mime.ParseMediaType returns undecoded but other parsers resolve, so the name it declares cannot be ruled out", where)
+	case declaresEncodedName(header) && (name == "" || declaresUndecodableName(header)):
+		// STRUCTURAL, not exact, and the distinction is the whole point: the name
+		// here was never read. The parser dropped the charset, so this is "cannot
+		// be ruled out" — which is what MultipartUnreadable means and what this
+		// branch's own wording says — rather than a fact about the request.
+		//
+		// Classing it exact made it ungated (an operator could not turn off a
+		// false positive), uncounted (it returned before the counter, so the one
+		// branch most likely to fire on real traffic was invisible to the very
+		// rollout the counter exists for), and mislabelled: the async route told
+		// the caller their part was named `_e2ee` when it was named whatever the
+		// undecoded segments spell.
+		return MultipartUnreadable, monitor.E2EERefuseUndecodableName, fmt.Sprintf("%s RFC 2231-encodes a part's name in a charset mime.ParseMediaType cannot decode, so the name it declares cannot be ruled out", where)
 	}
-	return false, ""
+	return NotSealed, "", ""
 }
 
 // recoverBoundary extracts the boundary from a Content-Type that
@@ -799,8 +872,8 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (SealedVerdict
 				// forwarded. Recovering the names closes that for every spelling
 				// nameVerdict knows, not just the one that was measured.
 				for _, name := range recoverParamValues(disposition, "name") {
-					if refuse, why := nameVerdict("a part's Content-Disposition", disposition, name); refuse {
-						return MultipartNamesMarker, "", why
+					if verdict, reason, why := nameVerdict("a part's Content-Disposition", disposition, name); verdict != NotSealed {
+						return verdict, reason, why
 					}
 				}
 				// Gated, unlike the budget and nested branches. Evading THIS gate
@@ -816,8 +889,8 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (SealedVerdict
 				}
 				continue
 			}
-			if refuse, why := nameVerdict("a part's Content-Disposition", disposition, dparams["name"]); refuse {
-				return MultipartNamesMarker, "", why
+			if verdict, reason, why := nameVerdict("a part's Content-Disposition", disposition, dparams["name"]); verdict != NotSealed {
+				return verdict, reason, why
 			}
 		}
 		for _, partType := range part.Header.Values("Content-Type") {
@@ -861,8 +934,8 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (SealedVerdict
 				// this header carries a name too (RFC 2045 §5), and breaking it
 				// must not clear what it declares.
 				for _, name := range recoverParamValues(partType, "name") {
-					if refuse, why := nameVerdict("a part's Content-Type (RFC 2045 §5)", partType, name); refuse {
-						return MultipartNamesMarker, "", why
+					if verdict, reason, why := nameVerdict("a part's Content-Type (RFC 2045 §5)", partType, name); verdict != NotSealed {
+						return verdict, reason, why
 					}
 				}
 				if couldName() {
@@ -870,8 +943,8 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (SealedVerdict
 				}
 				continue
 			}
-			if refuse, why := nameVerdict("a part's Content-Type (RFC 2045 §5)", partType, tparams["name"]); refuse {
-				return MultipartNamesMarker, "", why
+			if verdict, reason, why := nameVerdict("a part's Content-Type (RFC 2045 §5)", partType, tparams["name"]); verdict != NotSealed {
+				return verdict, reason, why
 			}
 		}
 	}
@@ -1016,10 +1089,14 @@ func resolveMultipartPolicy(verdict SealedVerdict, reason, why string, strictMul
 	if verdict != MultipartUnreadable || strictMultipart {
 		return verdict
 	}
+	// COUNTER ONLY, no log line. MaybeUnsealRequest runs before ValidateSession
+	// on the sync proxy, so a per-request line here is written for unauthenticated
+	// traffic at a rate the caller chooses, with content the caller's body
+	// decides — the unbounded, disk-filling log-amplification vector that
+	// proxy/rejection.go exists to have removed. That file's conclusion applies
+	// unchanged: the real-time signal is the Prometheus counter, whose `reason`
+	// label names the branch, which is what the rollout decision needs.
 	monitor.RecordE2EEMultipartWouldRefuse(reason)
-	if logger != nil {
-		logger.Warnf("e2ee: forwarding a multipart request a structural check would refuse (reason=%s): %s. Set e2eeStrictMultipart to refuse it", reason, why)
-	}
 	return NotSealed
 }
 
