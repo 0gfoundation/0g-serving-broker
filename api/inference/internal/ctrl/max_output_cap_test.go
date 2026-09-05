@@ -561,17 +561,41 @@ func TestCapMaxOutputTokens_ImagePartDoesNotConsumeTheWindow(t *testing.T) {
 	}
 }
 
-// The flat allowance still has to be charged, or a message full of images would
-// weigh nothing at all.
-func TestPromptTextBytes_ChargesNonTextPartsAnAllowance(t *testing.T) {
-	one := promptTextBytes([]byte(`{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:x"}}]}]}`))
-	many := promptTextBytes([]byte(`{"messages":[{"role":"user","content":[` +
-		strings.TrimSuffix(strings.Repeat(`{"type":"image_url","image_url":{"url":"data:x"}},`, 20), ",") + `]}]}`))
-
-	if one < nonTextPartBytes {
-		t.Fatalf("one image charged %d, want at least the %d allowance", one, nonTextPartBytes)
+// A large attachment is charged the allowance instead of its length, and each
+// one separately — a message full of images must not collapse to nothing.
+func TestPromptTextBytes_ChargesEachAttachmentTheAllowance(t *testing.T) {
+	image := func() string {
+		return `{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,` + strings.Repeat("A", 500000) + `"}}`
 	}
-	if many < one*15 {
-		t.Fatalf("20 images charged %d against %d for one — each must be charged", many, one)
+	one := promptTextBytes([]byte(`{"messages":[{"role":"user","content":[` + image() + `]}]}`))
+	two := promptTextBytes([]byte(`{"messages":[{"role":"user","content":[` + image() + `,` + image() + `]}]}`))
+
+	// Half a megabyte of base64 must not read as half a megabyte of prompt.
+	if one > 2*nonTextPartBytes {
+		t.Fatalf("one 500 KB image charged %d, want about the %d allowance", one, nonTextPartBytes)
+	}
+	// But the second one costs again, or a message of fifty images would be free.
+	if two-one < nonTextPartBytes/2 {
+		t.Fatalf("a second image only added %d, want about the %d allowance", two-one, nonTextPartBytes)
+	}
+}
+
+// The estimate must never read LOW: reading low makes the fit test say the cap
+// fits when it does not, and the upstream answers 400 on a request that worked
+// before the flag was set. Fields that carry prompt but are not enumerated
+// anywhere — tool-call arguments, a message name, Anthropic blocks whose text
+// lives under a key other than "text" — must therefore still be charged.
+func TestPromptTextBytes_ChargesUnenumeratedPromptFields(t *testing.T) {
+	payload := strings.Repeat("x", 90000)
+	for name, body := range map[string]string{
+		"tool_call arguments":    `{"messages":[{"role":"assistant","tool_calls":[{"function":{"name":"f","arguments":"` + payload + `"}}]}]}`,
+		"message name":           `{"messages":[{"role":"user","name":"` + payload + `","content":"hi"}]}`,
+		"anthropic tool_result":  `{"messages":[{"role":"user","content":[{"type":"tool_result","content":"` + payload + `"}]}]}`,
+		"anthropic thinking":     `{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"` + payload + `"}]}]}`,
+		"response_format schema": `{"response_format":{"type":"json_schema","json_schema":{"description":"` + payload + `"}},"messages":[]}`,
+	} {
+		if got := promptTextBytes([]byte(body)); got < 90000 {
+			t.Fatalf("%s: charged %d for a 90 KB payload that reaches the model", name, got)
+		}
 	}
 }
