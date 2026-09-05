@@ -18,6 +18,7 @@ package ctrl
 import (
 	"bytes"
 	"encoding/json"
+	"math"
 	"strconv"
 	"strings"
 
@@ -56,11 +57,15 @@ const conservativeBytesPerToken = 3
 // forwarded — leaving it would make the clamp bypassable. A JSON `null` is
 // treated as absent, because that is what it means: no limit.
 //
-// Runs BEFORE TranslateMaxTokensFor so the field name written when the client
-// sent none (max_tokens, the name every OpenAI-compatible upstream still
-// accepts) is then renamed by that pass if the model advertises only the newer
-// max_completion_tokens. Anthropic's /v1/messages spells it max_tokens too, so
-// the same clamp covers that surface.
+// The spelling written when the client sent no cap is chosen from the model's
+// own supportedParameters, not assumed — an upstream that accepts only
+// max_completion_tokens (OpenAI's reasoning models answer max_tokens with a 400)
+// must not be handed the other name. Config load requires that declaration
+// whenever this flag is on, so the choice is always informed.
+//
+// Runs BEFORE TranslateMaxTokensFor, which then normalizes whatever the CLIENT
+// sent; the injected spelling is already correct by construction. Anthropic's
+// /v1/messages spells it max_tokens too, so the same clamp covers that surface.
 func (c *Ctrl) CapMaxOutputTokens(body []byte, resolvedModel, identity string) ([]byte, error) {
 	if !c.Service.EnforceMaxCompletionTokens || len(body) == 0 {
 		return body, nil
@@ -100,22 +105,38 @@ func (c *Ctrl) CapMaxOutputTokens(body []byte, resolvedModel, identity string) (
 		}
 		v, ok := readOutputCapValue(raw)
 		if !ok {
-			// Not readable as a number at all ("lots", 1e400, an object). Such a
-			// value cannot be compared, so it cannot be honoured — and leaving it
-			// would let the clamp be bypassed by writing something unparseable.
-			// Replace it with the limit: no legitimate client sends a cap it cannot
-			// express as a number, so nothing correct is lost.
-			bodyMap[key] = limit
-			hasCap = true
+			// Not readable as a number at all ("lots", 1e400, an object). It cannot
+			// be compared, so it cannot be honoured — and leaving it in place would
+			// let the clamp be bypassed by writing something unparseable.
+			//
+			// Dropped rather than overwritten with the limit. Overwriting looks
+			// equivalent but is not: TranslateMaxTokensFor keeps the destination
+			// spelling and discards the source when both are present, so writing
+			// the limit into one spelling can silently replace a perfectly good
+			// smaller value the client put in the other — raising the cap, which is
+			// the one thing this pass promises never to do. Dropping leaves the
+			// sibling alone, and if there is no sibling the injection below still
+			// supplies a bound.
+			delete(bodyMap, key)
 			changed = true
 			continue
 		}
-		if v <= 0 {
-			// Zero or negative is not a usable bound. Drop it and let the injection
-			// below supply a real one, rather than treating "max_tokens: -1" —
-			// which several clients use to mean "unlimited" — as a cap.
+		if v < 0 {
+			// Negative is how several clients spell "unlimited". Drop it and let the
+			// injection below supply a real bound; going from unlimited to the cap
+			// is a reduction, so take-the-minimum holds.
 			delete(bodyMap, key)
 			changed = true
+			continue
+		}
+		if v == 0 {
+			// NOT the same as negative. Zero is what an unset int field serializes
+			// to in Go and Java when the struct tag has no omitempty, and it is an
+			// explicit "generate nothing" everywhere else. Replacing it with the
+			// limit would be this pass's single largest possible raise. Forward it
+			// and let the upstream answer for it (vLLM: "max_tokens must be at
+			// least 1").
+			hasCap = true
 			continue
 		}
 		hasCap = true
@@ -131,7 +152,7 @@ func (c *Ctrl) CapMaxOutputTokens(body []byte, resolvedModel, identity string) (
 		// whose maxCompletionTokens is a large fraction of its context length would
 		// turn a long prompt that used to work into an upstream 400.
 		if injected := c.injectableOutputCap(mi, limit, len(body)); injected > 0 {
-			bodyMap[maxTokensKey] = injected
+			bodyMap[injectionKey(mi)] = injected
 			changed = true
 		}
 	}
@@ -171,6 +192,18 @@ func (c *Ctrl) injectableOutputCap(mi *config.ModelInfo, limit int64, bodyLen in
 	return limit
 }
 
+// injectionKey picks the spelling to write a cap under: the newer
+// max_completion_tokens only when the model advertises that and not the older
+// max_tokens. Every other case takes max_tokens, which is what self-hosted
+// engines and the Anthropic surface accept.
+func injectionKey(mi *config.ModelInfo) string {
+	if containsParam(mi.SupportedParameters, maxCompletionTokensKey) &&
+		!containsParam(mi.SupportedParameters, maxTokensKey) {
+		return maxCompletionTokensKey
+	}
+	return maxTokensKey
+}
+
 // readOutputCapValue reads a cap field as a float64 for comparison.
 //
 // Two decodings, for two different reasons.
@@ -197,14 +230,30 @@ func readOutputCapValue(raw interface{}) (float64, bool) {
 		if err != nil {
 			return 0, false
 		}
-		return f, true
+		return finite(f)
 	case string:
 		f, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
 		if err != nil {
 			return 0, false
 		}
-		return f, true
+		return finite(f)
 	default:
 		return 0, false
 	}
+}
+
+// finite rejects NaN and the infinities.
+//
+// NaN is the one value that would slip past every guard at once: strconv
+// accepts the literal "NaN", and every comparison against NaN is false, so it
+// would be neither clamped (v > limit is false) nor dropped (v <= 0 is false)
+// while still counting as a cap and suppressing the injection. The result would
+// be a request forwarded with no enforceable bound — precisely what this pass
+// exists to prevent. The infinities are unreadable as a token count for the
+// same reason and take the same exit.
+func finite(f float64) (float64, bool) {
+	if math.IsNaN(f) || math.IsInf(f, 0) {
+		return 0, false
+	}
+	return f, true
 }

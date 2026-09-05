@@ -27,6 +27,7 @@ func newTestCtrlForOutputCapCtx(t *testing.T, enforce bool, maxCompletion, conte
 			ModelInfo: &config.ModelInfo{
 				MaxCompletionTokens: maxCompletion,
 				ContextLength:       contextLength,
+				SupportedParameters: []string{"max_tokens"},
 			},
 		},
 		logger:         testLogger(),
@@ -340,7 +341,7 @@ func TestCapMaxOutputTokens_StringValueBelowCapIsKept(t *testing.T) {
 func TestCapMaxOutputTokens_UnreadableValuesGetTheCap(t *testing.T) {
 	c := newTestCtrlForOutputCap(t, true, 32768)
 
-	for _, literal := range []string{`"lots"`, `1e400`, `{"a":1}`, `true`} {
+	for _, literal := range []string{`"lots"`, `1e400`, `{"a":1}`, `true`, `"NaN"`, `"nan"`, `"Inf"`, `"-Inf"`} {
 		out, err := c.CapMaxOutputTokens([]byte(`{"max_tokens":`+literal+`}`), "glm-5.3", "")
 		if err != nil {
 			t.Fatalf("%s: unexpected error: %v", literal, err)
@@ -351,12 +352,82 @@ func TestCapMaxOutputTokens_UnreadableValuesGetTheCap(t *testing.T) {
 	}
 }
 
-// Several clients spell "unlimited" as -1 or 0. Neither is a bound, so both
-// must fall through to injection rather than be accepted as one.
-func TestCapMaxOutputTokens_NonPositiveIsTreatedAsNoCap(t *testing.T) {
+// "NaN" parses as a number and then loses every comparison, so before this it
+// was neither clamped nor dropped while still suppressing the injection — a
+// request forwarded with no enforceable bound at all.
+func TestCapMaxOutputTokens_NaNDoesNotEscapeTheClamp(t *testing.T) {
 	c := newTestCtrlForOutputCap(t, true, 32768)
 
-	for _, literal := range []string{"-1", "0"} {
+	out, err := c.CapMaxOutputTokens([]byte(`{"max_tokens":"NaN"}`), "glm-5.3", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := capOf(t, out, "max_tokens"); got != 32768 {
+		t.Fatalf("max_tokens = %v, want the cap", got)
+	}
+}
+
+// An unreadable value must be dropped, not overwritten with the limit: the
+// rename pass keeps the destination spelling and discards the source, so
+// overwriting one spelling can replace a perfectly good smaller value in the
+// other — raising the cap, the one thing this pass promises never to do.
+func TestCapMaxOutputTokens_UnreadableDoesNotOverrideSibling(t *testing.T) {
+	c := newTestCtrlForOutputCap(t, true, 32768)
+
+	out, err := c.CapMaxOutputTokens([]byte(`{"max_tokens":"lots","max_completion_tokens":512}`), "glm-5.3", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	m := decodeBodyMap(t, out)
+	if _, exists := m["max_tokens"]; exists {
+		t.Fatalf("the unreadable spelling must be dropped, not set to the limit: %s", out)
+	}
+	if got := capOf(t, out, "max_completion_tokens"); got != 512 {
+		t.Fatalf("max_completion_tokens = %v, want the client's 512", got)
+	}
+}
+
+// Zero is what an unset int field serializes to in Go and Java, and it means
+// "generate nothing" everywhere else — not "unlimited". Replacing it with the
+// cap would be this pass's largest possible raise.
+func TestCapMaxOutputTokens_ZeroIsForwardedNotRaised(t *testing.T) {
+	c := newTestCtrlForOutputCap(t, true, 32768)
+	body := []byte(`{"max_tokens":0}`)
+
+	out, err := c.CapMaxOutputTokens(body, "glm-5.3", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if string(out) != string(body) {
+		t.Fatalf("zero must be forwarded for the upstream to reject, got %s", out)
+	}
+}
+
+// An upstream that accepts only max_completion_tokens must not be handed the
+// older spelling: OpenAI's reasoning models answer that with a 400.
+func TestCapMaxOutputTokens_InjectsTheSpellingTheModelAdvertises(t *testing.T) {
+	c := newTestCtrlForOutputCap(t, true, 32768)
+	c.Service.ModelInfo.SupportedParameters = []string{"max_completion_tokens"}
+
+	out, err := c.CapMaxOutputTokens([]byte(`{"model":"glm-5.3"}`), "glm-5.3", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	m := decodeBodyMap(t, out)
+	if _, exists := m["max_tokens"]; exists {
+		t.Fatalf("must not inject the spelling this model does not accept: %s", out)
+	}
+	if got := capOf(t, out, "max_completion_tokens"); got != 32768 {
+		t.Fatalf("max_completion_tokens = %v, want 32768", got)
+	}
+}
+
+// Several clients spell "unlimited" as -1. That is not a bound, so it falls
+// through to injection; going from unlimited to the cap is a reduction.
+func TestCapMaxOutputTokens_NegativeIsTreatedAsNoCap(t *testing.T) {
+	c := newTestCtrlForOutputCap(t, true, 32768)
+
+	for _, literal := range []string{"-1"} {
 		out, err := c.CapMaxOutputTokens([]byte(`{"max_tokens":`+literal+`}`), "glm-5.3", "")
 		if err != nil {
 			t.Fatalf("%s: unexpected error: %v", literal, err)

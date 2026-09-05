@@ -635,6 +635,12 @@ type Service struct {
 	// No-op unless the resolved model declares a positive maxCompletionTokens.
 	// Off by default: turning it on changes what reaches the upstream, and a
 	// provider whose advertised value is stale would start truncating.
+	//
+	// Turning it on also requires every servable model to declare max_tokens or
+	// max_completion_tokens in supportedParameters, so the cap this injects uses
+	// a spelling the upstream accepts; config load refuses otherwise. And do not
+	// pair it with stripBodyFields on either of those keys — strip runs after
+	// this pass and would delete the cap it just set.
 	EnforceMaxCompletionTokens bool `yaml:"enforceMaxCompletionTokens"`
 }
 
@@ -2320,8 +2326,24 @@ func loadConfig(cfg *Config) error {
 	// ctrl.CapMaxOutputTokens), so setting it on another modality would silently
 	// do nothing. Reject it at load for the same reason the two above are
 	// rejected.
-	if cfg.Service.EnforceMaxCompletionTokens && cfg.Service.Type != constant.ServiceTypeChatbot {
-		return fmt.Errorf("invalid config: service.enforceMaxCompletionTokens is only supported for service type '%s', got '%s'", constant.ServiceTypeChatbot, cfg.Service.Type)
+	if cfg.Service.EnforceMaxCompletionTokens {
+		if cfg.Service.Type != constant.ServiceTypeChatbot {
+			return fmt.Errorf("invalid config: service.enforceMaxCompletionTokens is only supported for service type '%s', got '%s'", constant.ServiceTypeChatbot, cfg.Service.Type)
+		}
+		// The clamp writes an output cap into requests that carry none, and the
+		// spelling it must use is upstream-specific: OpenAI's reasoning models
+		// answer max_tokens with a 400 telling you to send max_completion_tokens.
+		// ctrl.injectionKey reads supportedParameters to choose, so without that
+		// declaration the choice is a guess — and a wrong guess fails EVERY
+		// capless request on the service, which is exactly the population this
+		// flag acts on. Refuse at load rather than at runtime.
+		for _, mi := range cfg.Service.allModelInfos() {
+			if containsString(mi.SupportedParameters, maxTokensParam) ||
+				containsString(mi.SupportedParameters, maxCompletionTokensParam) {
+				continue
+			}
+			return fmt.Errorf("invalid config: service.enforceMaxCompletionTokens requires modelInfo.supportedParameters to declare %q or %q so the injected output cap uses a spelling the upstream accepts", maxTokensParam, maxCompletionTokensParam)
+		}
 	}
 
 	// Provider display metadata (applies to any provider type). Both are optional.
