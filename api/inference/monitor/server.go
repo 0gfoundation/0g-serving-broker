@@ -229,6 +229,12 @@ const (
 	// distinct from RejectionConcurrency above, which is the PER-USER one. Both
 	// shed for capacity; only this one is broker-wide.
 	RejectionGlobalConcurrency = "global_concurrency"
+
+	// RejectionTokenBudget is the in-flight KV budget: the request did not fit in
+	// the remaining context allowance, as distinct from the two above, which shed
+	// on request COUNT. On a self-hosted engine this is the one that tracks the
+	// resource that actually runs out.
+	RejectionTokenBudget = "token_budget"
 )
 
 // CtxKeyRejectionReason is the gin context key under which a request handler

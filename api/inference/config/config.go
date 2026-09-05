@@ -1073,6 +1073,34 @@ type ConcurrencyLimitConfig struct {
 	PerUserIPM           int `yaml:"perUserIPM"`           // Max images per minute per user (default: 0 = disabled, text-to-image/image-editing)
 	PerUserIPMBurst      int `yaml:"perUserIPMBurst"`      // Max burst size for per-user IPM limit (default: 0)
 
+	// InflightTokenBudget caps the total context of concurrent chatbot requests,
+	// in tokens. 0 (default) disables it and nothing changes.
+	//
+	// Every other gate here counts requests, which only works while requests are
+	// interchangeable. On a self-hosted engine they are not: KV cache is charged
+	// per token, so twenty 40k-token conversations and four 250k-token ones
+	// occupy the same GPU memory. A request-count cap tuned for one shape
+	// over-admits the other, and when KV fills the engine evicts running requests
+	// and recomputes them — throughput collapses while the request count still
+	// looks healthy. Measured on 19-glm5.3 (2026-09-03): 28 in-flight was correct
+	// for 40k contexts and catastrophic once the same 28 carried more.
+	//
+	// Set it to about 80% of the engine's KV pool (sglang reports
+	// sglang_max_total_num_tokens). The headroom absorbs the estimate below.
+	//
+	// A request weighs len(body)/4 + min(maxCompletionTokens, 4096): a byte-based
+	// prompt estimate plus an output reserve mirroring the engine's own
+	// (sglang's PrefillAdder reserves min(max_new_tokens, 4096) per request).
+	// The /4 divisor is English/JSON-shaped; CJK-heavy traffic packs closer to 3
+	// bytes per token, so lower the budget rather than raising the divisor if
+	// that is the workload.
+	//
+	// Chatbot only. Image, video and audio requests do not hold KV.
+	// Whitelisted callers are NOT exempt — the whole point is to bound the GPU,
+	// and on a router-fronted deployment the whitelisted router is all the
+	// traffic there is.
+	InflightTokenBudget int64 `yaml:"inflightTokenBudget"`
+
 	// PerUserOverrides grants specific addresses different per-user limits than
 	// the shared defaults above, without changing the limit for everyone else.
 	// Intended for heavy partners who legitimately need more headroom. Overrides

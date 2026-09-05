@@ -39,9 +39,12 @@ type Proxy struct {
 	rateLimiter               *middleware.RateLimiter
 	concurrencyLimiter        *middleware.ConcurrencyLimiter
 	perUserConcurrencyLimiter *middleware.PerUserConcurrencyLimiter
-	perUserRateLimiter        *middleware.PerUserRateLimiter
-	perUserTPMLimiter         *middleware.PerUserTPMLimiter
-	perUserIPMLimiter         *middleware.PerUserTPMLimiter
+	// tokenBudgetLimiter bounds concurrent chatbot work by context size instead
+	// of request count. nil = disabled. See ConcurrencyLimitConfig.InflightTokenBudget.
+	tokenBudgetLimiter *middleware.TokenBudgetLimiter
+	perUserRateLimiter *middleware.PerUserRateLimiter
+	perUserTPMLimiter  *middleware.PerUserTPMLimiter
+	perUserIPMLimiter  *middleware.PerUserTPMLimiter
 	// imageServeLimiter throttles the unauthenticated /v1/proxy/images/{key}/{i}
 	// endpoint per-client-IP. The endpoint bypasses session auth (UUID-as-token
 	// model), so a bandwidth-amplification bound is the only defence against a
@@ -90,6 +93,9 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 		// Configure concurrency limiter to match backend GPU capacity
 		concurrencyLimiter:        middleware.NewConcurrencyLimiter(concurrencyConfig.MaxGlobalConcurrent),
 		perUserConcurrencyLimiter: middleware.NewPerUserConcurrencyLimiter(concurrencyConfig.MaxPerUserConcurrent, concOverrides),
+		// nil when inflightTokenBudget is unset, and every call on it is then a
+		// no-op. See ConcurrencyLimitConfig.InflightTokenBudget.
+		tokenBudgetLimiter: middleware.NewTokenBudgetLimiter(concurrencyConfig.InflightTokenBudget),
 	}
 
 	// Initialize per-user rate limiter if configured
@@ -245,6 +251,42 @@ func (p *Proxy) globalConcurrencyMiddleware() gin.HandlerFunc {
 	return middleware.ConcurrencyLimitMiddleware(p.concurrencyLimiter, func(c *gin.Context) {
 		p.rejections.record(c, monitor.RejectionGlobalConcurrency, "")
 	})
+}
+
+// bytesPerTokenEstimate converts request-body bytes to an approximate prompt
+// token count. Four is the usual English/JSON ratio. It is an estimate on
+// purpose: tokenizing every request to gate it would cost more than the gate
+// saves, and the budget carries explicit headroom (see InflightTokenBudget) to
+// absorb the error. CJK text packs closer to three bytes per token, so the
+// estimate runs low there — the documented answer is to lower the budget, which
+// keeps one number to reason about instead of two.
+const bytesPerTokenEstimate = 4
+
+// outputReserveTokens is the per-request output allowance added to the prompt
+// estimate. It mirrors what sglang itself reserves when deciding whether a
+// request fits (PrefillAdder clips the reservation at CLIP_MAX_NEW_TOKENS =
+// 4096 regardless of max_new_tokens), so the broker's arithmetic and the
+// engine's agree instead of the broker being pessimistic by an order of
+// magnitude for models advertising a 32k output cap.
+const outputReserveTokens = 4096
+
+// tokenBudgetWeight returns the KV weight to charge this request and whether
+// the gate applies at all.
+//
+// Only chatbot traffic is charged: image, video and audio requests do not hold
+// KV cache on the engine, so counting them would shrink the budget for the
+// requests that do. A disabled limiter reports false so the caller skips the
+// acquire/release pair entirely.
+func (p *Proxy) tokenBudgetWeight(svcType string, reqBody []byte) (int64, bool) {
+	if p.tokenBudgetLimiter == nil || svcType != "chatbot" {
+		return 0, false
+	}
+	reserve := int64(outputReserveTokens)
+	if mi := p.ctrl.Service.ModelInfo; mi != nil && mi.MaxCompletionTokens > 0 && int64(mi.MaxCompletionTokens) < reserve {
+		// A model that cannot generate 4096 tokens should not be charged for them.
+		reserve = int64(mi.MaxCompletionTokens)
+	}
+	return int64(len(reqBody))/bytesPerTokenEstimate + reserve, true
 }
 
 // buildPerUserOverrides converts the operator-supplied per-address override
@@ -682,6 +724,23 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 				ctx.Set("ipmLimiter", p.perUserIPMLimiter)
 			}
 		}
+	}
+
+	// In-flight KV budget. Deliberately OUTSIDE the !isWhitelisted block above:
+	// the per-user gates exempt whitelisted callers because they are trusted, but
+	// trust does not create GPU memory, and on a router-fronted deployment the
+	// whitelisted router is all the traffic there is. Exempting it would leave
+	// the gate guarding nothing.
+	//
+	// Placed after session validation so an unauthenticated request cannot
+	// reserve capacity, and it charges the real body length rather than
+	// Content-Length, which a client controls independently of what it sent.
+	if weight, ok := p.tokenBudgetWeight(svcType, reqBody); ok {
+		if !middleware.CheckTokenBudget(p.tokenBudgetLimiter, ctx, weight) {
+			p.rejections.record(ctx, monitor.RejectionTokenBudget, userAddress)
+			return
+		}
+		defer p.tokenBudgetLimiter.Release(weight)
 	}
 
 	// Set rate limit response headers BEFORE forwarding to backend.
