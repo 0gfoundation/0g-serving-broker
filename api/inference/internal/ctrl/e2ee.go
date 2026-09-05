@@ -408,6 +408,75 @@ func looksMultipart(contentType string) bool {
 	return strings.HasPrefix(strings.ToLower(strings.TrimLeft(contentType, " \t")), "multipart/")
 }
 
+// nameVerdict applies the readings that decide a declared part name to ONE
+// header, so that both headers which can carry a name get exactly the same
+// treatment. Written once for that reason: finding 28 was the Content-Type
+// missing checks the Content-Disposition had, and two copies is how that
+// happens.
+//
+// `where` names the header for the message; `header` is its raw value, needed by
+// declaresEncodedName because the parser drops what it cannot decode; `name` is
+// the value the parser resolved.
+func nameVerdict(where, header, name string) (bool, string) {
+	switch {
+	case name == e2eeBodyMarker:
+		return true, fmt.Sprintf("a multipart part is named %q", e2eeBodyMarker)
+	case resolvesToMarker(name):
+		return true, fmt.Sprintf("%s names a part %q as a conformant parser reads it, trimming linear white space and resolving RFC 2045 quoted pairs where mime.ParseMediaType does neither, so the name it declares cannot be ruled out", where, e2eeBodyMarker)
+	case isEncodedWord(name):
+		return true, fmt.Sprintf("%s names a part with an RFC 2047 encoded word, which mime.ParseMediaType returns undecoded but other parsers resolve, so the name it declares cannot be ruled out", where)
+	case declaresEncodedName(header):
+		return true, fmt.Sprintf("%s RFC 2231-encodes a part's name, which mime.ParseMediaType resolves only for us-ascii and utf-8 (dropping the rest silently), so the name it declares cannot be ruled out", where)
+	}
+	return false, ""
+}
+
+// recoverBoundary extracts the boundary from a Content-Type that
+// mime.ParseMediaType rejected: everything from `boundary=` to the next `;`,
+// trimmed of surrounding white space and one layer of quotes.
+//
+// It exists because RFC 2046 §5.1.1 admits boundary characters RFC 2045 calls
+// tspecials — `: = ? / ' ( ) + , - . _` and, in bchars, space — so an UNQUOTED
+// but entirely legal boundary makes ParseMediaType fail. Measured:
+//
+//	boundary=----WebKitFormBoundaryABC123  parse ok
+//	boundary=abc:def                       parse err, recovered `abc:def`
+//	boundary=a?b/c                         parse err, recovered `a?b/c`
+//	boundary=a+b,c-d.e_f                   parse err, recovered `a+b,c-d.e_f`
+//	boundary=boundary with space           parse err, recovered `boundary with space`
+//
+// Without recovery each of those hit the structural refusal — a 400 on a legal
+// request, pre-authentication on the sync path. With it they are enumerated and
+// judged on their part names like any other body, which is both fewer false
+// positives AND real detection where there was only a blanket verdict.
+//
+// The parameter name is matched at a parameter position and case-insensitively,
+// so `xboundary=` and a `boundary=` inside another parameter's value do not
+// count. Recovery is deliberately permissive about the VALUE — a body's real
+// delimiter is whatever it is, and enumerating with a wrong guess finds no
+// parts, which lands on the same structural refusal as recovering nothing.
+func recoverBoundary(contentType string) string {
+	const attr = "boundary="
+	for i := 0; i+len(attr) <= len(contentType); i++ {
+		if !strings.EqualFold(contentType[i:i+len(attr)], attr) {
+			continue
+		}
+		if i > 0 && !isParamBoundary(contentType[i-1]) {
+			continue
+		}
+		value := contentType[i+len(attr):]
+		if end := strings.IndexByte(value, ';'); end >= 0 {
+			value = value[:end]
+		}
+		value = strings.TrimSpace(value)
+		if len(value) > 1 && strings.HasPrefix(value, `"`) && strings.HasSuffix(value, `"`) {
+			value = value[1 : len(value)-1]
+		}
+		return value
+	}
+	return ""
+}
+
 // countLineStartsWith counts the lines of the body that begin with prefix. Both
 // callers use it to ask a structural question about a body that failed to parse:
 // does it still declare part-shaped content that this enumeration never reached?
@@ -495,7 +564,14 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 		return false, ""
 	}
 	_, params, err := mime.ParseMediaType(contentType)
-	if err != nil || params["boundary"] == "" {
+	boundary := params["boundary"]
+	if err != nil {
+		// A parse failure is not the end of the question: the boundary may be
+		// perfectly legal and merely unquoted (see recoverBoundary). Recovering it
+		// turns a blanket refusal into an actual enumeration.
+		boundary = recoverBoundary(contentType)
+	}
+	if boundary == "" {
 		// UNGATED, like the budget and nested branches and unlike the per-header
 		// ones. With no readable boundary NOTHING is enumerated, so this is the
 		// strongest form of "the names were never read" — and the gating argument
@@ -504,11 +580,9 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 		// body is intact and readable by any parser that resolves the boundary
 		// differently. The name is not a guess; it is simply never looked at.
 		//
-		// Gated, that made this the way around the ungated branches: a duplicate
+		// A gate here is evadable by the one spelling it cannot see: a duplicate
 		// boundary parameter in front of an otherwise perfect part named
-		// `=?utf-8?B?X2UyZWU=?=` (or in front of a nested multipart part) forwarded
-		// the envelope, because the gate sees neither the literal marker nor
-		// `name*` in an RFC 2047 encoded word.
+		// `=?utf-8?B?X2UyZWU=?=`, which is neither the literal marker nor `name*`.
 		//
 		// STRUCTURAL, not unconditional: refuse when the body still contains a
 		// part-shaped line, forward when it contains none. A JSON body sent with a
@@ -520,7 +594,7 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 		if declaresUnreadableParts(reqBody) {
 			why := "its multipart boundary is missing from the Content-Type"
 			if err != nil {
-				why = fmt.Sprintf("its multipart boundary could not be read (%v)", err)
+				why = fmt.Sprintf("its multipart boundary could not be read or recovered (%v)", err)
 			}
 			return true, "the body declares parts that cannot be enumerated because " + why + ", so a smuggled envelope cannot be ruled out"
 		}
@@ -536,6 +610,12 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 	// maxHeadersExamined for what bounds the rest.
 	examined := 0
 	partsRead := 0
+	// One budget, three per-part loops. Written once so a fourth loop cannot be
+	// added without it — the shape of finding 19 and finding 26 both.
+	overBudget := func() bool {
+		examined++
+		return examined > maxHeadersExamined
+	}
 	gateKnown, gate := false, false
 	couldName := func() bool {
 		if !gateKnown {
@@ -544,7 +624,7 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 		return gate
 	}
 
-	reader := multipart.NewReader(bytes.NewReader(reqBody), params["boundary"])
+	reader := multipart.NewReader(bytes.NewReader(reqBody), boundary)
 	for {
 		part, err := reader.NextPart()
 		// `== io.EOF`, NOT errors.Is, is load-bearing. mime/multipart reports "no
@@ -565,8 +645,8 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 			// UNGATED too, and for the same reason: the header that broke is not
 			// the one that would carry the marker. A part header without a colon
 			// stops the enumeration, and every part after it — perfect,
-			// readable, marker-bearing — is never seen. Gated, this was the other
-			// way around the ungated branches.
+			// readable, marker-bearing — is never seen, and a gate here is evadable
+			// by the same spelling as the one above.
 			//
 			// But the decision is STRUCTURAL rather than unconditional, because
 			// this error class is wider than "a part header is malformed": a body
@@ -592,15 +672,14 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 			// The last row agrees with the io.EOF case above for the same reason:
 			// a header that never terminates has no body after it to hold an
 			// envelope.
-			delims := countLineStartsWith(reqBody, "--"+params["boundary"])
+			delims := countLineStartsWith(reqBody, "--"+boundary)
 			if delims > partsRead+1 || (delims == 0 && declaresUnreadableParts(reqBody)) {
 				return true, fmt.Sprintf("the body could not be parsed as multipart (%v) and declares part-shaped content this enumeration never reached, so a smuggled envelope cannot be ruled out", err)
 			}
 			return false, ""
 		}
 		partsRead++
-		examined++
-		if examined > maxHeadersExamined {
+		if overBudget() {
 			// UNGATED: the premise is that a name past the budget is never read,
 			// so the one spelling the gate cannot see is the one that would evade
 			// it — an RFC 2047 encoded word was forwarded from here while the
@@ -620,8 +699,7 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 		// does not depend on the answer — the body demonstrably declares the name.
 		// Values returns empty for a part with no disposition, so no separate skip.
 		for _, disposition := range part.Header.Values("Content-Disposition") {
-			examined++
-			if examined > maxHeadersExamined {
+			if overBudget() {
 				return true, fmt.Sprintf("the body declares more than %d parts or part headers, so they cannot all be enumerated from here", maxHeadersExamined)
 			}
 			_, dparams, derr := mime.ParseMediaType(disposition)
@@ -634,61 +712,17 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 				// Ungated, this refuses any part whose disposition merely fails to
 				// parse — `filename="my"file.txt"`, an unescaped quote, sloppy but
 				// real and forwarded by every other path here.
-				// TestMalformedMultipartWithoutTheMarkerIsStillForwarded guards it.
 				if couldName() {
 					return true, "the body could be naming the reserved marker and a part's Content-Disposition could not be parsed, so the name it declares cannot be ruled out"
 				}
 				continue
 			}
-			if dparams["name"] == e2eeBodyMarker {
-				return true, fmt.Sprintf("a multipart part is named %q", e2eeBodyMarker)
-			}
-			// The same name as a CONFORMANT parser reads it. Go trims nothing and
-			// unescapes a backslash only before a tspecial, so each of these
-			// compares unequal above while a parser that trims, or resolves quoted
-			// pairs, reads the marker:
-			//
-			//	name=" _e2ee"   -> ` _e2ee`    name="\_e2ee"   -> `\_e2ee`
-			//	name="_e2ee "   -> `_e2ee `    name="\ _e2ee"  -> `\ _e2ee`
-			//
-			// The trim is not a smaller claim than the rest: a parser trims BEFORE
-			// it decodes, so every upstream that makes the padded encoded word
-			// below reachable makes the padded literal reachable first.
-			if resolvesToMarker(dparams["name"]) {
-				return true, fmt.Sprintf("a multipart part's form-field name reads as %q to a conformant parser, which trims linear white space and resolves RFC 2045 quoted pairs where mime.ParseMediaType does neither, so the name it declares cannot be ruled out", e2eeBodyMarker)
-			}
-			// An RFC 2047 encoded word, which Go hands back verbatim with no error
-			// — and whose raw bytes spell neither the marker nor `name*`, so the
-			// gate is false too. RFC 2231 §5 forbids these in parameter values, but
-			// javax.mail decodes them under mail.mime.decodeparameters. Refused
-			// without deciding what the word meant, as the charset branch is.
-			if isEncodedWord(dparams["name"]) {
-				return true, "a part's form-field name is an RFC 2047 encoded word, which mime.ParseMediaType returns undecoded but other parsers resolve, so the name it declares cannot be ruled out"
-			}
-			// A clean parse is not an answer. ParseMediaType DROPS an RFC 2231
-			// parameter whose charset it cannot decode, reporting no error (its
-			// decode2231Enc returns on `// TODO: unsupported encoding`) — so a part
-			// that plainly declares a name yields "" or, worse, a partial decode:
-			//
-			//	name*=utf-8''%5Fe2ee                   -> "_e2ee"  refused
-			//	name*=iso-8859-1''%5Fe2ee              -> ""       FORWARDED
-			//	name*0*=iso-8859-1''%5Fe2; name*1*=ee  -> "ee"     FORWARDED
-			//
-			// The last row rules out "refuse when the name came back empty": the
-			// parser kept one segment and dropped the other, so the value is
-			// neither the name nor absent. And with no error, neither fail-closed
-			// branch runs. Python's email and Node's busboy resolve all three to
-			// `_e2ee`, so a 2231-encoded `name` is refused AT ALL rather than
-			// re-implementing RFC 2231 to second-guess the parser. Near-zero cost:
-			// only `filename` is 2231-encoded in the wild, and declaresEncodedName
-			// excludes it on a token boundary.
-			if declaresEncodedName(disposition) {
-				return true, "a part RFC 2231-encodes its form-field name, which mime.ParseMediaType resolves only for us-ascii and utf-8 (dropping the rest silently), so the name it declares cannot be ruled out"
+			if refuse, why := nameVerdict("a part's Content-Disposition", disposition, dparams["name"]); refuse {
+				return true, why
 			}
 		}
 		for _, partType := range part.Header.Values("Content-Type") {
-			examined++
-			if examined > maxHeadersExamined {
+			if overBudget() {
 				return true, fmt.Sprintf("the body declares more than %d parts or part headers, so they cannot all be enumerated from here", maxHeadersExamined)
 			}
 			// A part that is ITSELF multipart hides its own parts: mime/multipart
@@ -729,14 +763,8 @@ func multipartCarriesE2EEPart(contentType string, reqBody []byte) (bool, string)
 				}
 				continue
 			}
-			if resolvesToMarker(tparams["name"]) {
-				return true, fmt.Sprintf("a part's Content-Type names it %q (RFC 2045 §5), which parsers read as a form-field name when no Content-Disposition declares one", e2eeBodyMarker)
-			}
-			if isEncodedWord(tparams["name"]) {
-				return true, "a part's Content-Type names it with an RFC 2047 encoded word, which mime.ParseMediaType returns undecoded but other parsers resolve, so the name it declares cannot be ruled out"
-			}
-			if declaresEncodedName(partType) {
-				return true, "a part's Content-Type RFC 2231-encodes its `name`, which mime.ParseMediaType resolves only for us-ascii and utf-8 (dropping the rest silently), so the name it declares cannot be ruled out"
+			if refuse, why := nameVerdict("a part's Content-Type (RFC 2045 §5)", partType, tparams["name"]); refuse {
+				return true, why
 			}
 		}
 	}
@@ -767,6 +795,60 @@ func (c *Ctrl) IsSealedRequest(contentType string, reqBody []byte) (bool, string
 	return IsSealedRequest(contentType, reqBody)
 }
 
+// sealedVerdict is what a request's BYTES are, independent of which entry point
+// is asking. Both of them classify identically and then differ only in what they
+// do about it, which is the point: the sealed decision written twice is how the
+// two disagreed about the same bytes (a multipart body reached the sync proxy's
+// forward path while the async routes called it sealed), and how a
+// `looksMultipart` short-circuit on one of them forwarded a genuine envelope in
+// the clear while the other refused it.
+type sealedVerdict int
+
+const (
+	// notSealed: forward it. Includes an ordinary multipart body, whose JSON
+	// unmarshal simply fails.
+	notSealed sealedVerdict = iota
+	// smuggledIntoMultipart: a multipart request declares a part named `_e2ee`,
+	// or is malformed in a way that leaves that impossible to rule out
+	// (SPEC §5.3.1). Refuse — no multipart endpoint has a sealed request profile,
+	// so there is nothing to open even when the envelope is genuine.
+	smuggledIntoMultipart
+	// jsonEnvelope: the body IS a sealed envelope, whatever Content-Type the
+	// client put on it. Unseal it, fail-closed.
+	jsonEnvelope
+)
+
+// classifyRequest is the one place the sealed decision is made. The returned
+// wire.Request is populated only for jsonEnvelope; the string is the reason, for
+// a rejection message.
+//
+// The multipart question comes FIRST, and that ordering is load-bearing rather
+// than stylistic: a part name can be RFC 2231-encoded, so the body carries no
+// literal "_e2ee", hasE2EEMarker returns false, and an early return on it would
+// send the encoded case straight out for forwarding.
+func classifyRequest(contentType string, reqBody []byte) (sealedVerdict, wire.Request, string) {
+	if carries, why := multipartCarriesE2EEPart(contentType, reqBody); carries {
+		return smuggledIntoMultipart, nil, why
+	}
+	// No short-circuit on looksMultipart. A body is an envelope or not by its
+	// bytes; the Content-Type is the client's claim about them, and §5.3.1 read in
+	// the other direction says a body that IS an envelope is one whatever label it
+	// arrives under. An ordinary multipart body is handled correctly below anyway:
+	// its unmarshal fails and it comes back notSealed, for one bytes.Contains
+	// pass.
+	if !hasE2EEMarker(reqBody) {
+		return notSealed, nil, ""
+	}
+	var env wire.Request
+	if err := json.Unmarshal(reqBody, &env); err != nil {
+		return notSealed, nil, "" // not a JSON object → cannot be an envelope
+	}
+	if _, ok := env[e2eeBodyMarker]; !ok {
+		return notSealed, nil, "" // the substring matched inside content
+	}
+	return jsonEnvelope, env, fmt.Sprintf("the body carries a top-level %q object", e2eeBodyMarker)
+}
+
 // IsSealedRequest is the receiver-free form, exported so a caller that has no
 // Ctrl — the handler tests, which mock the rest of the interface — can ask the
 // real question instead of reimplementing it.
@@ -780,20 +862,8 @@ func (c *Ctrl) IsSealedRequest(contentType string, reqBody []byte) (bool, string
 // answers a question about the BYTES, and the enclave's keys have no bearing on
 // whether the client sent an envelope.
 func IsSealedRequest(contentType string, reqBody []byte) (bool, string) {
-	if carries, why := multipartCarriesE2EEPart(contentType, reqBody); carries {
-		return true, why
-	}
-	if !hasE2EEMarker(reqBody) {
-		return false, ""
-	}
-	var env wire.Request
-	if err := json.Unmarshal(reqBody, &env); err != nil {
-		return false, "" // not a JSON object → cannot be an envelope
-	}
-	if _, ok := env[e2eeBodyMarker]; ok {
-		return true, fmt.Sprintf("the body carries a top-level %q object", e2eeBodyMarker)
-	}
-	return false, ""
+	verdict, _, why := classifyRequest(contentType, reqBody)
+	return verdict != notSealed, why
 }
 
 // MaybeUnsealRequest unseals a sealed E2EE request in-enclave and returns the
@@ -809,42 +879,12 @@ func IsSealedRequest(contentType string, reqBody []byte) (bool, string) {
 // plaintext fallback, SPEC §6) — a sealed request that cannot be opened, whose
 // signer_addr is not this enclave, or whose key_id is unknown is rejected.
 func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, reqBody []byte) ([]byte, error) {
-	// The multipart decision comes FIRST, before the JSON path's substring gate.
-	// That ordering is load-bearing rather than stylistic: a part name can be
-	// RFC 2231-encoded, so the body carries no literal "_e2ee" and hasE2EEMarker
-	// returns false — putting its early return above this would send the encoded
-	// case straight out for forwarding without the multipart branch ever running.
-	// (It did, until a test for the encoded name caught it.)
-	//
-	// A multipart body is never a JSON envelope, so the checks further down would
-	// read it as "not sealed" and return it for forwarding — envelope and all.
-	// Decide it here instead, on part names (SPEC §5.3.1). Refusing rather than
-	// unsealing: no multipart endpoint has a sealed request profile today, so
-	// there is nothing to open even when the envelope is genuine.
-	contentType := ctx.Request.Header.Get("Content-Type")
-	if carries, why := multipartCarriesE2EEPart(contentType, reqBody); carries {
+	verdict, env, why := classifyRequest(ctx.Request.Header.Get("Content-Type"), reqBody)
+	switch verdict {
+	case notSealed:
+		return reqBody, nil
+	case smuggledIntoMultipart:
 		return nil, fmt.Errorf("multipart request must not carry a sealed envelope: %s. A sealed request is sent as JSON, and a body that cannot be parsed as an envelope is not thereby an unsealed body", why)
-	}
-	if looksMultipart(contentType) {
-		// Multipart with no part named `_e2ee`: the marker, if the body mentions it
-		// at all, is in someone's `prompt` or in the audio. Not sealed, forward
-		// unchanged — and do NOT fall through to the JSON path, which would only
-		// fail to parse.
-		return reqBody, nil
-	}
-
-	if !hasE2EEMarker(reqBody) {
-		return reqBody, nil
-	}
-
-	var env wire.Request
-	if err := json.Unmarshal(reqBody, &env); err != nil {
-		// Not a JSON object → cannot be a sealed envelope; forward unchanged.
-		return reqBody, nil
-	}
-	if _, ok := env[e2eeBodyMarker]; !ok {
-		// The substring matched inside content, not a real envelope; not sealed.
-		return reqBody, nil
 	}
 
 	// Confirmed sealed from here on: fail-closed on any error.

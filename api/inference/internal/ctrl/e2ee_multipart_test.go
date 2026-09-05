@@ -326,10 +326,15 @@ func TestUnparseableContentTypeWithARealBodyIsRefused(t *testing.T) {
 		t.Fatal("fixture must not trip the gate, or it cannot show the branch is ungated")
 	}
 
+	// The reason comes from the structural branch rather than the
+	// boundary-missing one, because recoverBoundary now salvages `x` from the
+	// duplicate parameter and the enumeration runs — and finds nothing, since
+	// the body's real delimiter is the writer's. Either way the parts exist and
+	// were never read, which is what must be asserted.
 	if sealed, why := c.IsSealedRequest(contentType, body); !sealed {
 		t.Error("parts that exist and were never enumerated cannot be cleared")
-	} else if !strings.Contains(why, "cannot be enumerated") {
-		t.Errorf("the refusal should cite the unusable boundary, got %q", why)
+	} else if !strings.Contains(why, "never reached") && !strings.Contains(why, "cannot be enumerated") {
+		t.Errorf("the refusal should cite the unread parts, got %q", why)
 	}
 	if _, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err == nil {
 		t.Fatal("must refuse rather than forward")
@@ -1273,6 +1278,133 @@ func TestGateIsNotRecomputedPerPart(t *testing.T) {
 // Closed without recursion, because "parts that cannot be enumerated from here"
 // is already the fail-closed condition. The second row is what keeps that from
 // being a blanket refusal of nested bodies.
+// RFC 2046 §5.1.1 admits boundary characters that RFC 2045 calls tspecials, so
+// an entirely legal but UNQUOTED boundary makes mime.ParseMediaType fail. Those
+// bodies used to hit the structural refusal — a 400 on a legal request,
+// pre-authentication on the sync path. Recovering the boundary enumerates them
+// instead, which removes the false positive AND gives real part-name detection
+// where there was only a blanket verdict.
+func TestLegalUnquotedBoundariesAreEnumeratedRatherThanRefused(t *testing.T) {
+	c := &Ctrl{}
+	for _, boundary := range []string{
+		`abc:def`, `abc=def`, `a?b/c`, `a'b(c)d`, `a+b,c-d.e_f`, `boundary with space`,
+	} {
+		t.Run(boundary, func(t *testing.T) {
+			contentType := "multipart/form-data; boundary=" + boundary
+			if _, _, err := mime.ParseMediaType(contentType); err == nil {
+				t.Fatal("fixture assumes Go REJECTS this Content-Type")
+			}
+
+			// An ordinary body under that boundary is forwarded...
+			ordinary := []byte("--" + boundary + "\r\nContent-Disposition: form-data; name=\"file\"\r\n\r\naudio\r\n--" + boundary + "--\r\n")
+			if carries, why := multipartCarriesE2EEPart(contentType, ordinary); carries {
+				t.Errorf("a legal unquoted boundary is not a smuggled envelope: %s", why)
+			}
+
+			// ...and the marker under the same boundary is still found BY NAME,
+			// which a blanket refusal could never report.
+			marked := []byte("--" + boundary + "\r\nContent-Disposition: form-data; name=\"" + e2eeBodyMarker + "\"\r\n\r\n" + sealedEnvelopeJSON + "\r\n--" + boundary + "--\r\n")
+			if carries, why := multipartCarriesE2EEPart(contentType, marked); !carries {
+				t.Error("the marker must still be found under a recovered boundary")
+			} else if !strings.Contains(why, "is named") {
+				t.Errorf("it should be found by name, not by a structural fallback: %q", why)
+			}
+			_ = c
+		})
+	}
+}
+
+func TestRecoverBoundary(t *testing.T) {
+	for _, tt := range []struct {
+		contentType string
+		want        string
+	}{
+		{`multipart/form-data; boundary=abc:def`, `abc:def`},
+		{`multipart/form-data; boundary="quoted one"`, `quoted one`},
+		{`multipart/form-data; boundary=with space; charset=utf-8`, `with space`},
+		{`multipart/form-data; BOUNDARY=upper`, `upper`},
+		{`multipart/form-data;boundary=nospace`, `nospace`},
+		{`multipart/form-data; boundary=  padded  `, `padded`},
+		{`multipart/form-data; boundary=x; boundary=y`, `x`},
+		// Not a parameter position, so not a boundary.
+		{`multipart/form-data; xboundary=no`, ``},
+		{`multipart/form-data; name="boundary=inside a value"`, ``},
+		{`multipart/form-data`, ``},
+		{`multipart/form-data; boundary=`, ``},
+	} {
+		t.Run(tt.contentType, func(t *testing.T) {
+			if got := recoverBoundary(tt.contentType); got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// A body is an envelope or not by its BYTES. The Content-Type is the client's
+// claim about them, and §5.3.1 read in the other direction says a body that IS
+// an envelope is one whatever label it arrives under.
+//
+// An early return on `looksMultipart` sat above the envelope check and forwarded
+// a genuine sealed envelope upstream in cleartext whenever the client labelled
+// it multipart — the exact failure this PR exists to close, on the sync path,
+// introduced by this PR. It also made the two entry points disagree about
+// identical bytes, which is finding 1 returning.
+//
+// Deleting that block left the whole suite green, so this test is the pin: it
+// asserts the two entry points AGREE, which is the property that was actually
+// broken, rather than any particular verdict.
+func TestARealEnvelopeIsNotForwardedBecauseItIsLabelledMultipart(t *testing.T) {
+	envelope := []byte(`{"` + e2eeBodyMarker + `":` + sealedEnvelopeJSON + `}`)
+
+	for _, contentType := range []string{
+		`multipart/form-data; boundary=B`,
+		`multipart/form-data`,
+		`multipart/mixed; boundary=B`,
+		`multipart/related; boundary=B; type="application/json"`,
+	} {
+		t.Run(contentType, func(t *testing.T) {
+			// The async entry point has always seen this correctly.
+			sealed, _ := IsSealedRequest(contentType, envelope)
+			if !sealed {
+				t.Fatal("a body carrying a top-level envelope is sealed whatever its label")
+			}
+
+			// The sync one must not disagree. The envelope here is not a valid
+			// one, so the sealed path fails closed on it — what matters is that
+			// it REACHES that path instead of handing the body back to be
+			// forwarded in the clear.
+			c := newE2EEFixture(t).c
+			got, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), envelope)
+			if err == nil && bytes.Equal(got, envelope) {
+				t.Fatal("the sync path forwarded a sealed envelope unchanged, in cleartext")
+			}
+			if err == nil {
+				t.Fatalf("expected the sealed path to be reached and fail closed, got a rewritten body %q", got)
+			}
+		})
+	}
+
+	// The complement, and the reason the deleted block looked reasonable: a real
+	// multipart body still forwards. It gets there through the JSON path, whose
+	// unmarshal fails — which is why IsSealedRequest never needed such a return.
+	c := newE2EEFixture(t).c
+	body, contentType := buildMultipart(t, func(w *multipart.Writer) {
+		if err := w.WriteField("prompt", "mentions _e2ee in content"); err != nil {
+			t.Fatalf("WriteField: %v", err)
+		}
+	})
+	if !hasE2EEMarker(body) {
+		t.Fatal("fixture must contain the literal marker, or it never reaches the JSON path")
+	}
+	got, err := c.MaybeUnsealRequest(ginCtxWithContentType(contentType), body)
+	if err != nil {
+		t.Fatalf("an ordinary multipart body must be forwarded, got %v", err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Error("the body must be forwarded unchanged")
+	}
+}
+
 // RFC 2045 §5 puts a `name` on Content-Type, and a part may declare it with NO
 // Content-Disposition at all — in which case the disposition loop never runs and
 // every check inside it is skipped. javax.mail's getFileName() reads it as a
