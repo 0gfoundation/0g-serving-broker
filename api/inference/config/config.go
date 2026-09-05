@@ -611,6 +611,9 @@ type Service struct {
 	// value and then inject the server's own. Empty or unset means the body is
 	// forwarded unchanged. Only applied for the chatbot service type; rejected for
 	// others at load.
+
+	StripBodyFields []string `yaml:"stripBodyFields"`
+
 	// EnforceMaxCompletionTokens makes the advertised modelInfo.maxCompletionTokens
 	// binding instead of decorative.
 	//
@@ -634,8 +637,6 @@ type Service struct {
 	// Off by default: turning it on changes what reaches the upstream, and a
 	// provider whose advertised value is stale would start truncating.
 	EnforceMaxCompletionTokens bool `yaml:"enforceMaxCompletionTokens"`
-
-	StripBodyFields []string `yaml:"stripBodyFields"`
 }
 
 // IsCentralized returns true if this service routes to a centralized API provider.
@@ -2314,6 +2315,14 @@ func loadConfig(cfg *Config) error {
 			return err
 		}
 		cfg.Service.StripBodyFields = normalized
+	}
+
+	// The output-token clamp runs on the chatbot forward path only (see
+	// ctrl.CapMaxOutputTokens), so setting it on another modality would silently
+	// do nothing. Reject it at load for the same reason the two above are
+	// rejected.
+	if cfg.Service.EnforceMaxCompletionTokens && cfg.Service.Type != constant.ServiceTypeChatbot {
+		return fmt.Errorf("invalid config: service.enforceMaxCompletionTokens is only supported for service type '%s', got '%s'", constant.ServiceTypeChatbot, cfg.Service.Type)
 	}
 
 	// Provider display metadata (applies to any provider type). Both are optional.

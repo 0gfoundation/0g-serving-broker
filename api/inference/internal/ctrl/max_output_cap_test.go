@@ -2,6 +2,7 @@ package ctrl
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/0glabs/0g-serving-broker/inference/config"
@@ -11,12 +12,22 @@ import (
 // given maxCompletionTokens, with the clamp switched on or off.
 func newTestCtrlForOutputCap(t *testing.T, enforce bool, maxCompletion int) *Ctrl {
 	t.Helper()
+	return newTestCtrlForOutputCapCtx(t, enforce, maxCompletion, 0)
+}
+
+// newTestCtrlForOutputCapCtx also sets the advertised contextLength, which
+// bounds how much output can be injected into a request that carried no cap.
+func newTestCtrlForOutputCapCtx(t *testing.T, enforce bool, maxCompletion, contextLength int) *Ctrl {
+	t.Helper()
 	return &Ctrl{
 		Service: config.Service{
 			Type:                       "chatbot",
 			ModelType:                  "glm-5.3",
 			EnforceMaxCompletionTokens: enforce,
-			ModelInfo:                  &config.ModelInfo{MaxCompletionTokens: maxCompletion},
+			ModelInfo: &config.ModelInfo{
+				MaxCompletionTokens: maxCompletion,
+				ContextLength:       contextLength,
+			},
 		},
 		logger:         testLogger(),
 		whitelistUsers: make(map[string]struct{}),
@@ -201,5 +212,111 @@ func TestCapMaxOutputTokens_NonObjectBodyIsNoOp(t *testing.T) {
 		if string(out) != body {
 			t.Fatalf("body %q must be forwarded unchanged, got %s", body, out)
 		}
+	}
+}
+
+// json.Number.Int64 is strconv.ParseInt, so it rejects every non-integer
+// literal — and 1000.0 is what a client computing its cap in floating point
+// sends. Treating that failure as "too big" would RAISE the client's value to
+// the advertised maximum, inverting the whole contract.
+func TestCapMaxOutputTokens_FloatFormattedValuesAreNotRaised(t *testing.T) {
+	c := newTestCtrlForOutputCap(t, true, 32768)
+
+	for _, literal := range []string{"1000.0", "1e3", "100.5", "1.0e2"} {
+		body := []byte(`{"max_tokens":` + literal + `}`)
+		out, err := c.CapMaxOutputTokens(body, "glm-5.3", "")
+		if err != nil {
+			t.Fatalf("%s: unexpected error: %v", literal, err)
+		}
+		if string(out) != string(body) {
+			t.Fatalf("%s: a value below the cap must be forwarded untouched, got %s", literal, out)
+		}
+	}
+}
+
+// The same float path must still clamp when the value really is too large.
+func TestCapMaxOutputTokens_FloatFormattedOverLimitIsLowered(t *testing.T) {
+	c := newTestCtrlForOutputCap(t, true, 32768)
+
+	for _, literal := range []string{"1e20", "200000.0", "5e5"} {
+		out, err := c.CapMaxOutputTokens([]byte(`{"max_tokens":`+literal+`}`), "glm-5.3", "")
+		if err != nil {
+			t.Fatalf("%s: unexpected error: %v", literal, err)
+		}
+		if got := capOf(t, out, "max_tokens"); got != 32768 {
+			t.Fatalf("%s: max_tokens = %v, want 32768", literal, got)
+		}
+	}
+}
+
+// A null next to a real sibling value must not become the cap: the sibling is
+// the client's actual request, and TranslateMaxTokensFor may later keep the
+// null's spelling and drop the sibling's.
+func TestCapMaxOutputTokens_NullBesideRealSiblingDoesNotRaise(t *testing.T) {
+	c := newTestCtrlForOutputCap(t, true, 32768)
+
+	out, err := c.CapMaxOutputTokens([]byte(`{"max_tokens":null,"max_completion_tokens":500}`), "glm-5.3", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	m := decodeBodyMap(t, out)
+	if _, exists := m["max_tokens"]; exists {
+		t.Fatalf("a null cap must be dropped, not filled with the limit: %s", out)
+	}
+	if got := capOf(t, out, "max_completion_tokens"); got != 500 {
+		t.Fatalf("max_completion_tokens = %v, want the client's 500", got)
+	}
+}
+
+// Injecting the advertised maximum can push input + max_tokens past the context
+// window, turning a request that used to work into an upstream 400. The
+// injected value must be what still fits.
+func TestCapMaxOutputTokens_InjectionRespectsContextWindow(t *testing.T) {
+	// A model whose advertised output cap is a large fraction of its context.
+	const contextLength, maxCompletion = 200000, 131072
+	c := newTestCtrlForOutputCapCtx(t, true, maxCompletion, contextLength)
+
+	// ~150k tokens of prompt at the conservative 3 bytes/token estimate.
+	body := []byte(`{"p":"` + strings.Repeat("x", 450000) + `"}`)
+	out, err := c.CapMaxOutputTokens(body, "glm-5.3", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	injected := capOf(t, out, "max_tokens")
+	if injected >= maxCompletion {
+		t.Fatalf("injected %v, want less than the advertised %d for a long prompt", injected, maxCompletion)
+	}
+	// The estimate deliberately runs high, so prompt + injected output must sit
+	// inside the window even before the real tokenizer shortens the prompt.
+	if promptEstimate := float64(len(body) / conservativeBytesPerToken); promptEstimate+injected > contextLength {
+		t.Fatalf("injected %v on top of an estimated %v prompt exceeds the %d context window", injected, promptEstimate, contextLength)
+	}
+}
+
+// When the prompt already fills the context, injecting anything is guesswork —
+// the engine computes the real remaining room from the tokenized prompt.
+func TestCapMaxOutputTokens_NoRoomInjectsNothing(t *testing.T) {
+	c := newTestCtrlForOutputCapCtx(t, true, 32768, 10000)
+	body := []byte(`{"p":"` + strings.Repeat("x", 60000) + `"}`)
+
+	out, err := c.CapMaxOutputTokens(body, "glm-5.3", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if string(out) != string(body) {
+		t.Fatalf("with no context room left, the body must be forwarded unchanged")
+	}
+}
+
+// A short prompt leaves plenty of room, so the advertised cap is used as-is.
+func TestCapMaxOutputTokens_ShortPromptGetsTheFullCap(t *testing.T) {
+	c := newTestCtrlForOutputCapCtx(t, true, 32768, 200000)
+
+	out, err := c.CapMaxOutputTokens([]byte(`{"model":"glm-5.3"}`), "glm-5.3", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := capOf(t, out, "max_tokens"); got != 32768 {
+		t.Fatalf("max_tokens = %v, want the full advertised 32768", got)
 	}
 }
