@@ -169,21 +169,6 @@ func TestCapMaxOutputTokens_NoAdvertisedLimitIsNoOp(t *testing.T) {
 	}
 }
 
-// Malformed values belong to the upstream's validator, which has a better error
-// message than anything invented here.
-func TestCapMaxOutputTokens_NonNumericLeftAlone(t *testing.T) {
-	c := newTestCtrlForOutputCap(t, true, 1000)
-	body := []byte(`{"max_tokens":"lots"}`)
-
-	out, err := c.CapMaxOutputTokens(body, "glm-5.3", "")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if string(out) != string(body) {
-		t.Fatalf("non-numeric cap must be forwarded untouched, got %s", out)
-	}
-}
-
 // Unrelated large integers must survive the round-trip as integers, not as
 // float64 in scientific notation.
 func TestCapMaxOutputTokens_PreservesOtherLargeNumbers(t *testing.T) {
@@ -318,5 +303,66 @@ func TestCapMaxOutputTokens_ShortPromptGetsTheFullCap(t *testing.T) {
 	}
 	if got := capOf(t, out, "max_tokens"); got != 32768 {
 		t.Fatalf("max_tokens = %v, want the full advertised 32768", got)
+	}
+}
+
+// The engines behind this broker validate with pydantic in lax mode, which
+// coerces "1000000" to an int — so a quoted cap really is honoured upstream.
+// Leaving it unread would make the clamp bypassable by one character.
+func TestCapMaxOutputTokens_StringValueIsClamped(t *testing.T) {
+	c := newTestCtrlForOutputCap(t, true, 32768)
+
+	out, err := c.CapMaxOutputTokens([]byte(`{"max_tokens":"1000000"}`), "glm-5.3", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := capOf(t, out, "max_tokens"); got != 32768 {
+		t.Fatalf("max_tokens = %v, want 32768", got)
+	}
+}
+
+// A quoted value below the cap is still the client's own request.
+func TestCapMaxOutputTokens_StringValueBelowCapIsKept(t *testing.T) {
+	c := newTestCtrlForOutputCap(t, true, 32768)
+	body := []byte(`{"max_tokens":"512"}`)
+
+	out, err := c.CapMaxOutputTokens(body, "glm-5.3", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if string(out) != string(body) {
+		t.Fatalf("a quoted value below the cap must be forwarded untouched, got %s", out)
+	}
+}
+
+// Values that cannot be read as a number cannot be honoured, and must not be a
+// way around the clamp either.
+func TestCapMaxOutputTokens_UnreadableValuesGetTheCap(t *testing.T) {
+	c := newTestCtrlForOutputCap(t, true, 32768)
+
+	for _, literal := range []string{`"lots"`, `1e400`, `{"a":1}`, `true`} {
+		out, err := c.CapMaxOutputTokens([]byte(`{"max_tokens":`+literal+`}`), "glm-5.3", "")
+		if err != nil {
+			t.Fatalf("%s: unexpected error: %v", literal, err)
+		}
+		if got := capOf(t, out, "max_tokens"); got != 32768 {
+			t.Fatalf("%s: max_tokens = %v, want the cap", literal, got)
+		}
+	}
+}
+
+// Several clients spell "unlimited" as -1 or 0. Neither is a bound, so both
+// must fall through to injection rather than be accepted as one.
+func TestCapMaxOutputTokens_NonPositiveIsTreatedAsNoCap(t *testing.T) {
+	c := newTestCtrlForOutputCap(t, true, 32768)
+
+	for _, literal := range []string{"-1", "0"} {
+		out, err := c.CapMaxOutputTokens([]byte(`{"max_tokens":`+literal+`}`), "glm-5.3", "")
+		if err != nil {
+			t.Fatalf("%s: unexpected error: %v", literal, err)
+		}
+		if got := capOf(t, out, "max_tokens"); got != 32768 {
+			t.Fatalf("%s: max_tokens = %v, want a real cap injected", literal, got)
+		}
 	}
 }

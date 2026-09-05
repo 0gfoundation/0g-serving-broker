@@ -18,6 +18,8 @@ package ctrl
 import (
 	"bytes"
 	"encoding/json"
+	"strconv"
+	"strings"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/inference/config"
@@ -47,9 +49,11 @@ const conservativeBytesPerToken = 3
 //   - the resolved model has no ModelInfo, or a non-positive maxCompletionTokens;
 //   - every cap field already present is at or below the limit.
 //
-// A field holding a value that is not a JSON number — a string, an object — is
-// left alone: that is a malformed request, and the upstream's own validator has
-// a better error message for it than anything invented here. A JSON `null` is
+// A field is read as a number whether it arrives as a JSON number or a quoted
+// string, because the engines behind this broker coerce the latter. Anything
+// that cannot be read as a number at all, and anything zero or negative, is not
+// a bound this pass can honour, so it is replaced or dropped rather than
+// forwarded — leaving it would make the clamp bypassable. A JSON `null` is
 // treated as absent, because that is what it means: no limit.
 //
 // Runs BEFORE TranslateMaxTokensFor so the field name written when the client
@@ -94,16 +98,24 @@ func (c *Ctrl) CapMaxOutputTokens(body []byte, resolvedModel, identity string) (
 			changed = true
 			continue
 		}
-		num, isNum := raw.(json.Number)
-		if !isNum {
-			hasCap = true // malformed, but the client did express something
+		v, ok := readOutputCapValue(raw)
+		if !ok {
+			// Not readable as a number at all ("lots", 1e400, an object). Such a
+			// value cannot be compared, so it cannot be honoured — and leaving it
+			// would let the clamp be bypassed by writing something unparseable.
+			// Replace it with the limit: no legitimate client sends a cap it cannot
+			// express as a number, so nothing correct is lost.
+			bodyMap[key] = limit
+			hasCap = true
+			changed = true
 			continue
 		}
-		v, ok := readJSONNumber(num)
-		if !ok {
-			// Unreadable as a number at all. Leave it: raising it to the limit would
-			// break the take-the-minimum promise for a value we cannot even compare.
-			hasCap = true
+		if v <= 0 {
+			// Zero or negative is not a usable bound. Drop it and let the injection
+			// below supply a real one, rather than treating "max_tokens: -1" —
+			// which several clients use to mean "unlimited" — as a cap.
+			delete(bodyMap, key)
+			changed = true
 			continue
 		}
 		hasCap = true
@@ -159,21 +171,40 @@ func (c *Ctrl) injectableOutputCap(mi *config.ModelInfo, limit int64, bodyLen in
 	return limit
 }
 
-// readJSONNumber reads a JSON number as a float64 for comparison.
+// readOutputCapValue reads a cap field as a float64 for comparison.
+//
+// Two decodings, for two different reasons.
 //
 // json.Number.Int64 is strconv.ParseInt, which rejects every non-integer
 // literal — 1e3, 1000.0 and 100.5 all fail, and 1000.0 is what any client
 // computing its cap in floating point sends. Treating those failures as "too
-// big" would RAISE a client's 1000 to the advertised maximum, which is the
-// exact opposite of this pass's contract. float64 compares all of them
-// correctly, and its 2^53 exact-integer range is far above any real token cap.
-func readJSONNumber(num json.Number) (float64, bool) {
-	if i, err := num.Int64(); err == nil {
-		return float64(i), true
-	}
-	f, err := num.Float64()
-	if err != nil {
+// big" would RAISE a client's 1000 to the advertised maximum, the exact
+// opposite of this pass's contract. float64 compares all of them correctly, and
+// its 2^53 exact-integer range is far above any real token cap.
+//
+// A JSON string is read too, because the engines behind this broker accept one.
+// sglang and vLLM validate with pydantic in its default lax mode, which
+// silently coerces "1000000" to an int — so a quoted cap is a real request that
+// really is honoured upstream. Skipping it here would leave the clamp bypassable
+// by one character.
+func readOutputCapValue(raw interface{}) (float64, bool) {
+	switch v := raw.(type) {
+	case json.Number:
+		if i, err := v.Int64(); err == nil {
+			return float64(i), true
+		}
+		f, err := v.Float64()
+		if err != nil {
+			return 0, false
+		}
+		return f, true
+	case string:
+		f, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+		if err != nil {
+			return 0, false
+		}
+		return f, true
+	default:
 		return 0, false
 	}
-	return f, true
 }

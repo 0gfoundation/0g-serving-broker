@@ -611,7 +611,6 @@ type Service struct {
 	// value and then inject the server's own. Empty or unset means the body is
 	// forwarded unchanged. Only applied for the chatbot service type; rejected for
 	// others at load.
-
 	StripBodyFields []string `yaml:"stripBodyFields"`
 
 	// EnforceMaxCompletionTokens makes the advertised modelInfo.maxCompletionTokens
