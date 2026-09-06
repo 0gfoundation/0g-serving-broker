@@ -6,11 +6,28 @@ billed to the user. It covers the trust model, the request-time and
 settlement-time flows, the data model, configuration, behavior, and how to test
 it.
 
-> **Scope.** This is the "Tier-1" integration: the broker reads a per-request
-> verdict the verifier already emits and excludes `REJECT`'d requests from the
-> TEE-signed settlement batch. **No smart-contract change. No GPU-node change.**
-> The verifier and GPU node are part of the Assay pipeline (a separate repo);
-> the broker only consumes the `ZG-Verdict` response header they already produce.
+> **Scope — read this first.** This document covers the **Tier-1** integration
+> only (landed 2026-08): the broker reads a per-request verdict the verifier
+> emits and excludes `REJECT`'d requests from the TEE-signed settlement batch.
+> *That step* needed no smart-contract change and no GPU-node change — the
+> broker only consumes the `ZG-Verdict` response header the Assay pipeline
+> already produces.
+>
+> **It is no longer the whole picture.** Since 2026-08-24 this same branch also
+> carries the **SPML payout** work: pool-funded settlement, EIP-712 payout
+> vouchers, the voucher relay, attested TLS with public-key pinning, the
+> attestation gate, and signed invoice / settlement-check requests. That work
+> *does* change the contract (`api/libs/0g-serving-contract` tracks the
+> `spml-assay-payout` branch) and *does* change the GPU node. None of it is
+> described below.
+>
+> - **Specification**: the Assay repo's `docs/spml-design.en.md` — §4 the money
+>   path, §5 the three communication layers, §7 attestation gating.
+> - **Implementation here**: `internal/ctrl/{payout_assay,payout_relay,
+>   attestation_assay,tls_pin,assay_sign,settlement_assay}.go`,
+>   `internal/handler/payout.go`, `internal/db/assay_payout.go`,
+>   `model/assay_payout.go`.
+> - **Live rollout record**: the Assay repo's `docs/spml-testnet-run.md`.
 
 ---
 
