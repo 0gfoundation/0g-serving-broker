@@ -955,6 +955,70 @@ type LoRAConfig struct {
 	EciesPrivateKey        string `yaml:"-"`                      // Override ECIES private key for adapter decryption (2-CVM setup). Set via env var LORA_ECIES_PRIVATE_KEY.
 }
 
+// AssayAttestation configures the Phase-2 verify-app loop. See the Assay
+// struct's Attestation field for semantics.
+type AssayAttestation struct {
+	Enabled bool `yaml:"enabled"`
+	// CliPath is the tapp-cli binary (default "tapp-cli" on $PATH) for
+	// exec mode. ⚠️ tapp-cli needs glibc >= 2.32; the broker image is
+	// buster (2.28), so in this deployment use OutputFile instead.
+	CliPath string `yaml:"cliPath"`
+	// OutputFile switches to file mode: a sidecar (bookworm + tapp-cli)
+	// runs verify-app on a loop and atomically writes its raw output here;
+	// the broker parses the file, taking its mtime as the verification
+	// time (staleness then falls out of maxAgeSeconds naturally — a dead
+	// sidecar looks exactly like a failed verification). In file mode the
+	// appId/registry/asPubkeyPin/policyIds fields live in the SIDECAR's
+	// command line.
+	OutputFile string `yaml:"outputFile"`
+	// AppID / Registry / RpcURL locate the app on the TappRegistry.
+	AppID    string `yaml:"appId"`
+	Registry string `yaml:"registry"`
+	RpcURL   string `yaml:"rpcUrl"`
+	// AsPubkeyPin authenticates the connection to the attestation service —
+	// verify-app has NO default for it; omitting it silently downgrades the
+	// AS channel to encrypted-but-unauthenticated. ⚠️ The AS derives its TLS
+	// key with tls_key_source=local, so THIS PIN CHANGES when the AS
+	// restarts — it must be operator-updatable.
+	AsPubkeyPin string `yaml:"asPubkeyPin"`
+	// PolicyIDs select the AS reference-value policy. ⚠️ Without (or with a
+	// wrong) policy id the AS answers ear.status="-" and the quote is
+	// UNTRUSTED — while the CLI still exits 0 and prints ALL PASS.
+	PolicyIDs []string `yaml:"policyIds"`
+	// RequireTcb is the allowed tcb_status set (e.g. ["UpToDate"]). Widen it
+	// deliberately, listing each accepted advisory state.
+	RequireTcb []string `yaml:"requireTcb"`
+	// MaxAgeSeconds: how long the last successful verification stays valid
+	// (default 3600). Interval: re-check period (default 10m).
+	MaxAgeSeconds int           `yaml:"maxAgeSeconds"`
+	Interval      time.Duration `yaml:"interval"`
+	// OnFail: "block-settlement" (default — gate settlement + invoicing;
+	// inference keeps flowing, verdicts already carry the async settlement
+	// gate) or "warn-only" (log, gate nothing).
+	OnFail string `yaml:"onFail"`
+}
+
+func (a AssayAttestation) MaxAge() time.Duration {
+	if a.MaxAgeSeconds <= 0 {
+		return time.Hour
+	}
+	return time.Duration(a.MaxAgeSeconds) * time.Second
+}
+
+func (a AssayAttestation) IntervalOrDefault() time.Duration {
+	if a.Interval <= 0 {
+		return 10 * time.Minute
+	}
+	return a.Interval
+}
+
+func (a AssayAttestation) CliPathOrDefault() string {
+	if a.CliPath == "" {
+		return "tapp-cli"
+	}
+	return a.CliPath
+}
+
 type Config struct {
 	AllowOrigins    []string `yaml:"allowOrigins"`
 	ContractAddress string   `yaml:"contractAddress"`
@@ -996,6 +1060,83 @@ type Config struct {
 		// Set to "0" to disable per-user filtering.
 		MinSettlementFee string `yaml:"minSettlementFee"`
 	} `yaml:"settlement"`
+	// Assay gates the Immaculate/LDD verifiable-inference integration. When
+	// Enabled, the broker records the verifier's ZG-Verdict per request and
+	// gates settlement on the verdicts: any REJECT in a settlement batch voids
+	// the whole batch (nothing is charged). Fail-open: a missing or
+	// non-REJECT verdict is treated as settleable.
+	Assay struct {
+		Enabled bool `yaml:"enabled"`
+		// VerifierURL is the Assay verifier's base URL (e.g.
+		// "http://verifier:8200"). When set, settlement first asks the
+		// verifier (POST /v1/settlement/check) for the batch's final
+		// verdicts — the response headers only carry PENDING/UNVERIFIED in
+		// the verifier's non-blocking mode, so this query is what resolves
+		// asynchronous audits. Empty = decide on header-recorded verdicts
+		// only (legacy synchronous verifier).
+		VerifierURL string `yaml:"verifierUrl"`
+		// SettlementCheckWaitMs is how long the verifier may hold the
+		// settlement check waiting for still-running audits to finish
+		// before answering (bounded verifier-side). 0 = answer immediately;
+		// pending requests are then retried on a later settlement cycle.
+		SettlementCheckWaitMs int `yaml:"settlementCheckWaitMs"`
+		// VerifierAddress is the verifier's secp256k1 signing address (20-byte
+		// hex Ethereum address). When set, a ZG-Verdict is only acted on if its
+		// ZG-Verdict-Sig recovers to this address over the verdict + this
+		// request's hash — the verdict is a settlement input, so it must be
+		// authenticated, not just read off a plaintext header. Empty = legacy
+		// trust-the-header mode.
+		VerifierAddress string `yaml:"verifierAddress"`
+		// StrictVerdict (requires VerifierAddress): treat a missing or
+		// badly-signed verdict as INVALID_SIG and exclude the request from
+		// settlement, so stripping the header can't launder a REJECT. Off by
+		// default (fail-open Tier-1: unauthenticated verdicts are ignored but
+		// the request still settles).
+		StrictVerdict bool `yaml:"strictVerdict"`
+		// RejectGatesSettlement decides whether a REJECT verdict actually
+		// withholds money, or is only recorded and surfaced.
+		//
+		// Off by default, deliberately. A REJECT is a threshold judgement, and
+		// the LDD thresholds are not calibrated: 0.15/0.04 are grid points
+		// from the paper's calibration SEARCH SPACE, not results of running
+		// the ceremony, and the two expert thresholds have no published
+		// provenance at all. ldd.py says as much in its own comment ("never
+		// gate penalties on uncalibrated thresholds"), and an honest node has
+		// already been observed false-REJECTing at tail_frac=0.0417 (1 token
+		// in 24) against a 0.04 budget. Until the ceremony is run against
+		// benign traffic, a false positive must not cost anyone money.
+		//
+		// This does NOT cover INVALID_SIG: that is a signature failure, not a
+		// threshold judgement, so it withholds settlement regardless.
+		RejectGatesSettlement bool `yaml:"rejectGatesSettlement"`
+		// VerifierKeyPin authenticates the TLS connection to the verifier
+		// (docs/spml-broker-assay-tls.md Phase 1): 0x-hex sha256 of the
+		// verifier endpoint's SubjectPublicKeyInfo, whose authoritative
+		// source is `tapp-cli verify-app`. When set, every TLS connection
+		// the shared provider client makes checks the presented leaf
+		// certificate against this pin INSTEAD of CA+hostname validation —
+		// the key is attested via the tapp KMS derivation, not a CA. Empty =
+		// default CA validation; plain http URLs are unaffected either way.
+		VerifierKeyPin string `yaml:"verifierKeyPin"`
+		// Payout drives the SPML voucher flow (docs/spml-design §4 C): after
+		// each successful settlement the broker accumulates every settled
+		// request's fee onto its serving node's cumulative and invoices the
+		// verifier (POST /v1/payout/invoice), which validates against its own
+		// ledger and signs PayoutVouchers the GPUs redeem on-chain.
+		Payout struct {
+			Enabled bool `yaml:"enabled"`
+			// VerifierCutBps is the assay's cut in basis points of each
+			// settled amount (also enforced on-chain via the cut cap).
+			VerifierCutBps int64 `yaml:"verifierCutBps"`
+		} `yaml:"payout"`
+		// Attestation (docs/spml-broker-assay-tls.md Phase 2): periodically
+		// re-attest the verifier by exec'ing `tapp-cli verify-app` and
+		// PARSING ITS OUTPUT (its exit code lies). While the latest verified
+		// snapshot is fresh, its attested "tls key" replaces VerifierKeyPin
+		// as the TLS pin; when it is not, settlement and invoicing are gated
+		// per OnFail. Requires the tapp-cli binary in the broker image.
+		Attestation AssayAttestation `yaml:"attestation"`
+	} `yaml:"assay"`
 	RevenueTransfer struct {
 		TargetAddress string        `yaml:"targetAddress"`
 		ReserveAmount string        `yaml:"reserveAmount"`

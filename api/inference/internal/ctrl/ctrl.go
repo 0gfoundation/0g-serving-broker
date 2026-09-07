@@ -2,6 +2,9 @@ package ctrl
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"math/big"
 	"net/http"
 	"strings"
@@ -9,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/patrickmn/go-cache"
 
 	"github.com/0glabs/0g-serving-broker/common/log"
@@ -109,6 +113,45 @@ type Ctrl struct {
 	tieredPricing     config.TieredPricingConfig
 	priceFeed         config.PriceFeedConfig
 	concurrencyLimit  config.ConcurrencyLimitConfig
+
+	// assayVerdictFilter, when true, records the Assay verifier's ZG-Verdict
+	// per request and excludes REJECT'd requests from settlement. Set from
+	// cfg.Assay.Enabled; off by default so the path is fully inert until opted in.
+	assayVerdictFilter bool
+	// assayAttestor is the Phase-2 verify-app loop (nil = attestation off);
+	// it supplies the live TLS pin and the settlement/invoice gate.
+	assayAttestor *assayAttestor
+	// assayAttCache memoises the relayed assay attestation (see attestation_relay.go).
+	assayAttCache *assayAttestationCache
+	// assayVerifierAddress, when non-nil, is the verifier's secp256k1 signing
+	// address (cfg.Assay.VerifierAddress). A verdict is then only recorded if
+	// ZG-Verdict-Sig recovers to this address over the verdict + request hash —
+	// the verdict decides settlement, so it must be authenticated. nil = legacy
+	// trust-the-header mode.
+	assayVerifierAddress *common.Address
+	// assayStrictVerdict records INVALID_SIG (settlement-excluded) for
+	// responses whose verdict is missing/unverifiable, so header stripping
+	// can't launder a REJECT. Only meaningful with assayVerifierAddress set.
+	assayStrictVerdict bool
+	// assayRejectGates decides whether a REJECT withholds settlement or is
+	// only recorded (see config.Assay.RejectGatesSettlement — off while the
+	// LDD thresholds are uncalibrated). INVALID_SIG withholds either way.
+	assayRejectGates bool
+	// assayVerifierURL, when non-empty, is where settlement fetches the
+	// batch's final verdicts (POST {url}/v1/settlement/check) before
+	// deciding to settle — required to resolve PENDING verdicts from the
+	// verifier's non-blocking mode. Empty = decide on recorded verdicts only.
+	assayVerifierURL string
+	// assayCheckWaitMs is forwarded as wait_ms on the settlement check: how
+	// long the verifier may hold the request waiting for in-flight audits.
+	assayCheckWaitMs int
+	// assayPayoutEnabled drives the SPML voucher flow: after settlement the
+	// broker accumulates each settled request's fee onto its node's
+	// cumulative and invoices the verifier for signed PayoutVouchers.
+	assayPayoutEnabled bool
+	// assayVerifierCutBps is the assay's cut in basis points of each newly
+	// settled amount (the on-chain cut cap independently bounds it).
+	assayVerifierCutBps int64
 
 	// allowTokenBilledSTT gates billSpeechToTextByTokens. Defaults to false
 	// because the requests.input_count column conflates seconds (whisper)
@@ -301,6 +344,71 @@ func New(
 		}
 	}
 
+	// Parse the Assay verifier's signing address up front: a malformed address
+	// with verification "on" must fail loudly at boot, not silently downgrade
+	// to trusting unauthenticated verdicts on the settlement path.
+	var assayVerifierAddr *common.Address
+	if cfg.Assay.VerifierAddress != "" {
+		if !common.IsHexAddress(cfg.Assay.VerifierAddress) {
+			panic(fmt.Sprintf("assay.verifierAddress must be a 20-byte hex Ethereum address, got %q",
+				cfg.Assay.VerifierAddress))
+		}
+		a := common.HexToAddress(cfg.Assay.VerifierAddress)
+		assayVerifierAddr = &a
+	}
+	if cfg.Assay.StrictVerdict && assayVerifierAddr == nil {
+		panic("assay.strictVerdict requires assay.verifierAddress to be set")
+	}
+
+	// Parse the verifier TLS key pin likewise up front: a malformed pin with
+	// https configured must fail at boot, not on the first settlement.
+	var assayKeyPin []byte
+	if cfg.Assay.VerifierKeyPin != "" {
+		pin, err := hex.DecodeString(strings.TrimPrefix(cfg.Assay.VerifierKeyPin, "0x"))
+		if err != nil || len(pin) != sha256.Size {
+			panic(fmt.Sprintf("assay.verifierKeyPin must be 32 bytes of hex (sha256 of the verifier's SPKI), got %q",
+				cfg.Assay.VerifierKeyPin))
+		}
+		assayKeyPin = pin
+	}
+
+	// Phase-2 attestor (docs/spml-broker-assay-tls.md §10–§14). Misconfig
+	// panics at boot: a gate that silently never engages is worse than none.
+	var attestor *assayAttestor
+	if cfg.Assay.Attestation.Enabled {
+		at := cfg.Assay.Attestation
+		if at.OutputFile == "" && (at.AppID == "" || at.Registry == "" || at.RpcURL == "" ||
+			at.AsPubkeyPin == "" || len(at.PolicyIDs) == 0) {
+			panic("assay.attestation (exec mode) needs appId, registry, rpcUrl, asPubkeyPin and policyIds (verify-app without --policy-ids or --as-pubkey yields worthless affirmations); or set outputFile for sidecar mode")
+		}
+		if at.OnFail == "" {
+			at.OnFail = "block-settlement"
+		}
+		if at.OnFail != "block-settlement" && at.OnFail != "warn-only" {
+			panic(fmt.Sprintf("assay.attestation.onFail must be block-settlement or warn-only, got %q", at.OnFail))
+		}
+		if len(at.RequireTcb) == 0 {
+			at.RequireTcb = []string{"UpToDate"}
+		}
+		attestor = newAssayAttestor(at, logger)
+	}
+
+	// The pin the TLS handshake checks: the freshest attested value when the
+	// attestor has one, else the static config pin. Re-read per handshake.
+	var getAssayPin func() []byte
+	if attestor != nil {
+		static := assayKeyPin
+		getAssayPin = func() []byte {
+			if p := attestor.pinOrNil(); p != nil {
+				return p
+			}
+			return static
+		}
+	} else if len(assayKeyPin) > 0 {
+		staticOnly := assayKeyPin
+		getAssayPin = func() []byte { return staticOnly }
+	}
+
 	p := &Ctrl{
 		autoSettleBufferTime: cfg.Interval.AutoSettleBufferTime,
 		minSettlementFee:     minSettlementFee,
@@ -316,6 +424,15 @@ func New(
 		priceFeed:            cfg.PriceFeed,
 		concurrencyLimit:     cfg.ConcurrencyLimit,
 		userUsageStats:       cfg.UserUsageStats,
+		assayVerdictFilter:   cfg.Assay.Enabled,
+		assayAttestor:        attestor,
+		assayVerifierAddress: assayVerifierAddr,
+		assayStrictVerdict:   cfg.Assay.StrictVerdict,
+		assayRejectGates:     cfg.Assay.RejectGatesSettlement,
+		assayVerifierURL:     strings.TrimSuffix(cfg.Assay.VerifierURL, "/"),
+		assayCheckWaitMs:     cfg.Assay.SettlementCheckWaitMs,
+		assayPayoutEnabled:   cfg.Assay.Payout.Enabled,
+		assayVerifierCutBps:  cfg.Assay.Payout.VerifierCutBps,
 		allowTokenBilledSTT:  cfg.AllowTokenBilledSpeechToText,
 		priceCache:           priceCache,
 		svcCache:             svcCache,
@@ -347,6 +464,7 @@ func New(
 				DisableKeepAlives:     false,                                  // Enable connection reuse (critical)
 				DisableCompression:    false,                                  // Allow gzip compression
 				ForceAttemptHTTP2:     false,                                  // Use HTTP/1.1 for stability
+				TLSClientConfig:       pinnedTLSConfig(getAssayPin),           // attested-key pin for the verifier (nil = default CA validation)
 			},
 		},
 		// Initialize whitelist users map
@@ -376,6 +494,13 @@ func New(
 		}
 	} else {
 		logger.Info("Whitelist: disabled")
+	}
+
+	if attestor != nil {
+		go attestor.run(context.Background())
+		logger.Infof("Assay attestation loop ON: app=%s interval=%s maxAge=%s onFail=%s",
+			cfg.Assay.Attestation.AppID, cfg.Assay.Attestation.IntervalOrDefault(),
+			cfg.Assay.Attestation.MaxAge(), cfg.Assay.Attestation.OnFail)
 	}
 
 	return p

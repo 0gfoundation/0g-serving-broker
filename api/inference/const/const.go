@@ -91,6 +91,107 @@ const (
 	PriceDenominationUSD    = "USD"
 )
 
+// Assay (Immaculate/LDD) verifiable-inference integration.
+const (
+	// HeaderZGVerdict is the response header the Assay verifier sets with the
+	// per-request LDD audit result (one of the AssayVerdict* values below).
+	HeaderZGVerdict = "ZG-Verdict"
+
+	// HeaderZGVerdictSig is the verifier's Ed25519 signature (base64) over
+	// AssayVerdictDomain + "|" + verdict + "|" + requestHash. It binds the
+	// verdict to this broker request so the settlement-affecting header can't
+	// be forged or replayed by whatever sits at targetUrl.
+	HeaderZGVerdictSig = "ZG-Verdict-Sig"
+
+	// HeaderZGRequestHash is sent BY the broker ON the upstream request: the
+	// request's settlement hash. The verifier folds it into the signed verdict
+	// payload, making each signature single-use.
+	HeaderZGRequestHash = "ZG-Request-Hash"
+
+	// HeaderZGNode is the response header naming the GPU backend that served
+	// the request (the verifier's node registry id) — end-to-end attribution
+	// for per-node payout cumulatives.
+	HeaderZGNode = "ZG-Node"
+
+	// AssayInvoicePath is the verifier endpoint the broker posts per-node
+	// cumulatives to after settlement (SPML payout step 10).
+	AssayInvoicePath = "/v1/payout/invoice"
+
+	// AssayAttestationPath is the verifier's public identity document. Unlike the
+	// invoice and voucher paths this one authenticates nobody: it exists to be read
+	// by auditors, and everything in it is checkable against the chain rather than
+	// against us.
+	AssayAttestationPath = "/v1/attestation"
+
+	// AssayAttestationRelayTTL bounds how stale a relayed attestation may be. Short
+	// enough that an upgrade shows up quickly; long enough that polling auditors do
+	// not turn into load on the verifier. The response carries fetched_at so the
+	// caller can apply a stricter bound of its own.
+	AssayAttestationRelayTTL = 10 * time.Minute
+
+	// AssayVouchersPath is the verifier endpoint listing the latest voucher per
+	// node. GPU nodes used to call it directly; they no longer can — the assay
+	// publishes no interface a node can reach, so the broker relays it (see
+	// RelayAssayVoucher). The broker is the only party that dials the assay.
+	AssayVouchersPath = "/v1/payout/vouchers"
+
+	// AssayVouchersFetchDomain is what the broker signs to read the assay's
+	// voucher ledger. GET /v1/payout/vouchers is authenticated the same way as
+	// the money POSTs — same key, same ZG-Body-Sig header, same on-chain
+	// teeSigner check — but a GET has no body, and a signature over an empty
+	// one is a constant: capture it once and it reads the ledger forever. So a
+	// timestamped payload stands in for the body:
+	//
+	//	AssayVouchersFetchDomain + "|" + <unix seconds>
+	//
+	// with the same seconds echoed in HeaderZGBodyTs so the assay can bound
+	// how long the signature stays good.
+	AssayVouchersFetchDomain = "assay-vouchers-v1"
+
+	// HeaderZGBodyTs carries the timestamp inside the signed fetch payload.
+	HeaderZGBodyTs = "ZG-Body-Ts"
+
+	// AssayVerdictDomain domain-separates verdict signatures from the GPU
+	// node's commitment signatures ("assay-commitment-v1").
+	AssayVerdictDomain = "assay-verdict-v1"
+
+	// AssayVoucherFetchDomain domain-separates the signature a GPU node makes
+	// when it asks the broker for its voucher, so that signature can never be
+	// replayed as a commitment ("assay-commitment-v1"), a TLS-fingerprint
+	// endorsement ("assay-node-tls-v1"), or a verdict.
+	AssayVoucherFetchDomain = "assay-voucher-fetch-v1"
+
+	// HeaderZGNodeSig / HeaderZGNodeTs authenticate a GPU node to the broker on
+	// GET /v1/payout/voucher: an EIP-191 signature by the node's PAYOUT key
+	// over AssayVoucherFetchDomain|<provider>|<unix seconds>. The recovered
+	// address IS the identity — the broker returns only the voucher that pays
+	// it — so no node roster has to be configured on the broker.
+	HeaderZGNodeSig = "ZG-Node-Sig"
+	HeaderZGNodeTs  = "ZG-Node-Ts"
+
+	// Assay verdict values reported via HeaderZGVerdict. UNVERIFIED means the
+	// request was sampled out of auditing; REJECT and INVALID_SIG are acted on
+	// at settlement.
+	AssayVerdictPass       = "PASS"
+	AssayVerdictReject     = "REJECT"
+	AssayVerdictUnverified = "UNVERIFIED"
+	// AssayVerdictPending is the verifier's non-blocking response verdict: the
+	// request was sampled for audit and the LDD recompute is still running in
+	// the background. The final verdict is fetched from the verifier's
+	// POST /v1/settlement/check before the request may settle.
+	AssayVerdictPending = "PENDING"
+	// AssayVerdictUnknown is returned by the verifier's settlement check for a
+	// request hash it has no record of (e.g. verifier restart; the verdict
+	// store is in-memory). Treated as no-information: fail-open outside strict
+	// mode, kept pending in strict mode.
+	AssayVerdictUnknown = "UNKNOWN"
+	// AssayVerdictInvalidSig is recorded locally (never sent by the verifier)
+	// when assay.strictVerdict is on and a response's verdict is missing or
+	// fails signature verification — such requests are excluded from
+	// settlement like REJECTs.
+	AssayVerdictInvalidSig = "INVALID_SIG"
+)
+
 // KnownCentralizedProviderURLs maps provider identity to their default API base URLs.
 var KnownCentralizedProviderURLs = map[string]string{
 	CentralizedProviderOpenAI:    "https://api.openai.com",
@@ -151,12 +252,20 @@ var (
 
 	// MinimumLockedBalance is the fixed minimum locked balance required for all service types (1 0G in neuron).
 	// This replaces the dynamic per-service-type calculation in balance adequacy validation.
-	MinimumLockedBalance = "1000000000000000000"
+	// zgTestnetAssay payout run: lowered from 1 0G to 0.005 0G to match the
+	// faucet-funded test ledger floors (:payout-lowmin image); never merge.
+	MinimumLockedBalance = "5000000000000000"
 
 	// TEE settlement batch size to avoid gas limit issues
 	TEESettlementBatchSize = 50
 
 	SkipUntilDuration = 1 * time.Hour
+
+	// AssayPendingRetryDelay parks a request whose Assay audit is still
+	// PENDING at settlement time. Much shorter than SkipUntilDuration: the
+	// audit backlog usually drains in seconds, so the request should be
+	// re-evaluated on the next settlement cycle, not an hour later.
+	AssayPendingRetryDelay = 5 * time.Minute
 
 	// EIP-712 constants matching the contract
 	// DOMAIN_TYPEHASH = keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)")

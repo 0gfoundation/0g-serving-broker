@@ -303,6 +303,15 @@ func (d *DB) Migrate() error {
 			},
 		},
 		{
+			ID: "add-verdict-to-request",
+			Migrate: func(tx *gorm.DB) error {
+				type Request struct {
+					Verdict string `gorm:"type:varchar(16);not null;default:''"`
+				}
+				return tx.AutoMigrate(&Request{})
+			},
+		},
+		{
 			ID: "create-hourly-usage-stat",
 			Migrate: func(tx *gorm.DB) error {
 				// Retained hourly rollup for broker↔provider reconciliation. Bucketed
@@ -335,6 +344,15 @@ func (d *DB) Migrate() error {
 				// docs/design/provider-reconciliation.md.
 				type Request struct {
 					RateClass string `gorm:"type:varchar(64);not null;default:''"`
+				}
+				return tx.AutoMigrate(&Request{})
+			},
+		},
+		{
+			ID: "add-node-to-request",
+			Migrate: func(tx *gorm.DB) error {
+				type Request struct {
+					Node string `gorm:"type:varchar(64);not null;default:''"`
 				}
 				return tx.AutoMigrate(&Request{})
 			},
@@ -431,6 +449,20 @@ func (d *DB) Migrate() error {
 					TeeSignerAddress string `gorm:"type:varchar(42)"`
 				}
 				return tx.AutoMigrate(&AdapterKey{})
+			},
+		},
+		{
+			ID: "create-assay-payout",
+			Migrate: func(tx *gorm.DB) error {
+				type AssayPayout struct {
+					Node           string     `gorm:"type:varchar(64);primaryKey"`
+					Cumulative     string     `gorm:"type:varchar(255);not null;default:'0'"`
+					Epoch          int64      `gorm:"type:bigint;not null;default:0"`
+					PendingCovered string     `gorm:"type:text;not null"`
+					Invoiced       bool       `gorm:"type:tinyint(1);not null;default:0"`
+					UpdatedAt      *time.Time `gorm:"type:datetime"`
+				}
+				return tx.AutoMigrate(&AssayPayout{})
 			},
 		},
 	})

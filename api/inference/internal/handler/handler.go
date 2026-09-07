@@ -101,6 +101,10 @@ func (h *Handler) Register(r *gin.Engine) {
 	// group.GET("/request", corsMiddleware(), h.ListRequest)
 
 	group.GET("/quote", corsMiddleware(), middleware.RateLimitMiddleware(h.rateLimiter), h.GetQuote)
+	// The assay's identity document, relayed. Public and unauthenticated by
+	// design: it exists to be read by auditors, and every field in it is
+	// checkable against the chain rather than against this broker.
+	group.GET("/attestation/assay", corsMiddleware(), middleware.RateLimitMiddleware(h.rateLimiter), h.GetAssayAttestation)
 	// E2EE (0g-pc SPEC §4.3): advertise the enclave HPKE enc key so a client can
 	// fetch enc_pub / key_id without parsing the quote itself (it MUST still verify
 	// enc_pub against the quote's report_data).
@@ -109,6 +113,13 @@ func (h *Handler) Register(r *gin.Engine) {
 
 	// User account query (authenticated: user can only query their own data)
 	group.GET("/user/:userAddress/unsettledfee", corsMiddleware(), middleware.RateLimitMiddleware(h.rateLimiter), h.GetUnsettledFee)
+
+	// SPML payout: a GPU node fetches its own voucher here (authenticated by
+	// its payout key). The assay publishes no interface a node can reach, so
+	// this relay is the node's only route to it — the broker forwards the
+	// assay's signed voucher, it does not issue one. The node still submits
+	// the claim() transaction to the contract itself.
+	group.GET("/payout/voucher", corsMiddleware(), middleware.RateLimitMiddleware(h.rateLimiter), h.GetPayoutVoucher)
 
 	// Provider-only endpoints for log management
 	group.GET("/logs", corsMiddleware(), h.ListLogs)                        // List all log files

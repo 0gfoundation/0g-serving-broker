@@ -157,6 +157,17 @@ func (c *Ctrl) IsTeeSignerAcknowledged(ctx context.Context) bool {
 
 // SettleFeesWithTEE implements the optimized settlement logic.
 func (c *Ctrl) SettleFeesWithTEE(ctx context.Context) error {
+	// Phase-2 gate 1 (the critical one): with the assay's attestation not
+	// current, its verdicts have no authority — money must not move on them.
+	// Skipping keeps every request row; the round is retried on the next
+	// cycle once attestation recovers. Loss ceiling = what is already in
+	// the pool, nothing new enters it.
+	if c.assayAttestor != nil {
+		if blocked, why := c.assayAttestor.blockSettlement(); blocked {
+			c.logger.Errorf("Settlement SKIPPED this round: %s", why)
+			return nil
+		}
+	}
 	// Clear expired skipUntil flags for both requests and users
 	if err := c.db.ClearExpiredSkipUntil(); err != nil {
 		c.logger.Warnf("Failed to clear expired skipUntil for requests: %v", err)
@@ -198,6 +209,12 @@ func (c *Ctrl) SettleFeesWithTEE(ctx context.Context) error {
 		if err != nil {
 			return errors.Wrap(err, "list request from db")
 		}
+		
+		// Assay gate: fetch the batch's final audit verdicts from the verifier
+		// (resolving PENDING async audits) and decide — any REJECT voids the
+		// whole batch (nothing charged), pending audits are parked for a later
+		// cycle, everything else settles. See gateSettlementWithAssay.
+		reqs = c.gateSettlementWithAssay(ctx, reqs)
 
 		if len(reqs) == 0 {
 			c.logger.Infof("No more requests to settle after %d rounds", round)
@@ -218,6 +235,11 @@ func (c *Ctrl) SettleFeesWithTEE(ctx context.Context) error {
 			execErr = c.executeAndProcessResults(ctx, batch)
 			// Don't return immediately — always process outcomes for completed batches
 		}
+
+		// SPML payout (before processOutcomes deletes the settled rows):
+		// accrue each settled request's fee onto its node's cumulative and
+		// invoice the assay for signed PayoutVouchers. Never fails settlement.
+		c.settleAssayPayout(ctx, batch.Outcomes)
 
 		// Process outcomes (delete/skip requests) — runs even if execution had partial errors
 		c.processOutcomes(batch.Outcomes)

@@ -17,6 +17,10 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/andybalholm/brotli"
+	"github.com/ethereum/go-ethereum/accounts"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/gin-gonic/gin"
 
 	"github.com/0gfoundation/0g-pc-e2ee/protocol/proof"
@@ -29,6 +33,92 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/model"
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
+
+// recordAssayVerdict persists the Assay/LDD audit verdict from the verifier's
+// ZG-Verdict response header onto the request row. With a non-blocking
+// verifier this is PENDING (audit queued) or UNVERIFIED (sampled out); the
+// final PASS/REJECT is fetched by the settlement gate from the verifier's
+// /v1/settlement/check (see gateSettlementWithAssay), which is what decides
+// whether the batch settles. No-op when the integration is disabled, for
+// whitelisted (unbilled) traffic, or when the upstream set no verdict header
+// (fail-open).
+//
+// The verdict is a settlement input, so when assay.verifierAddress is
+// configured it is only acted on if the verifier's secp256k1 signature
+// (ZG-Verdict-Sig) verifies over the verdict + this request's hash — an
+// unauthenticated plaintext header must not decide who gets paid. The hash
+// (sent upstream as ZG-Request-Hash) makes each signature single-use, so a
+// PASS captured from one response can't be replayed onto another. In strict
+// mode a missing/unverifiable verdict is recorded as INVALID_SIG (excluded
+// from settlement like REJECT); otherwise it is ignored (fail-open).
+func (c *Ctrl) recordAssayVerdict(resp *http.Response, reqModel model.Request) {
+	if !c.assayVerdictFilter || reqModel.IsWhitelisted {
+		return
+	}
+	verdict := resp.Header.Get(constant.HeaderZGVerdict)
+
+	// Node attribution (ZG-Node): which GPU served this request. Recorded
+	// unauthenticated — the assay independently re-checks attribution against
+	// its own ledger before signing any voucher (design §4 step 11), so a
+	// wrong node here can shift nothing.
+	if node := resp.Header.Get(constant.HeaderZGNode); node != "" {
+		if err := c.db.UpdateRequestNode(reqModel.RequestHash, node); err != nil {
+			c.logger.Warnf("Assay: failed to record node %q for request %s: %v", node, reqModel.RequestHash, err)
+		}
+	}
+
+	if c.assayVerifierAddress != nil {
+		sig := resp.Header.Get(constant.HeaderZGVerdictSig)
+		if verdict == "" || !verifyAssayVerdictSig(*c.assayVerifierAddress, verdict, reqModel.RequestHash, sig) {
+			if !c.assayStrictVerdict {
+				if verdict != "" {
+					c.logger.Warnf("Assay: dropping unauthenticated verdict %q for request %s (bad/missing %s)",
+						verdict, reqModel.RequestHash, constant.HeaderZGVerdictSig)
+				}
+				return
+			}
+			c.logger.Warnf("Assay: verdict %q for request %s failed signature verification; recording %s",
+				verdict, reqModel.RequestHash, constant.AssayVerdictInvalidSig)
+			verdict = constant.AssayVerdictInvalidSig
+		}
+	}
+
+	if verdict == "" {
+		return
+	}
+	if err := c.db.UpdateRequestVerdict(reqModel.RequestHash, verdict); err != nil {
+		c.logger.Warnf("Assay: failed to record verdict %q for request %s: %v", verdict, reqModel.RequestHash, err)
+	}
+}
+
+// verifyAssayVerdictSig recovers the signer of the verifier's secp256k1
+// EIP-191 signature over the domain-separated verdict payload and checks it
+// against the pinned verifier address (the same recovery on-chain ecrecover
+// performs). Pure so it can be unit-tested without a Ctrl. Payload layout must
+// match the verifier's signer (pipeline/verifier_node/serve_verifier.py in
+// 0g-assay):
+//
+//	"assay-verdict-v1|" + verdict + "|" + requestHash
+func verifyAssayVerdictSig(signer common.Address, verdict, requestHash, sigHex string) bool {
+	if sigHex == "" {
+		return false
+	}
+	sig, err := hexutil.Decode(sigHex)
+	if err != nil || len(sig) != 65 {
+		return false
+	}
+	// go-ethereum's SigToPub wants the recovery id in {0,1}; EIP-191 signers
+	// emit {27,28}.
+	if sig[64] >= 27 {
+		sig[64] -= 27
+	}
+	payload := constant.AssayVerdictDomain + "|" + verdict + "|" + requestHash
+	pub, err := crypto.SigToPub(accounts.TextHash([]byte(payload)), sig)
+	if err != nil {
+		return false
+	}
+	return crypto.PubkeyToAddress(*pub) == signer
+}
 
 // ChatSignature, SigningAlgo, ChatPrefix, and the chat-signing helpers
 // (signChatWithKey, signImageResponse, signCentralizedRoutingProof, chatCacheKey)
@@ -168,6 +258,8 @@ func (c *Ctrl) handleChatbotResponse(ctx *gin.Context, resp *http.Response, acco
 func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, account model.User, outputPrice string, reqBody []byte, reqModel model.Request) error {
 	defer resp.Body.Close()
 
+	c.recordAssayVerdict(resp, reqModel)
+
 	chatKey := uuid.NewString()
 
 	// Set ZG-Res-Key for broker-signed responses:
@@ -287,6 +379,8 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 	if isCompressedEncoding(resp.Header.Get("Content-Encoding")) {
 		c.logger.Warnf("streaming response has Content-Encoding %q despite identity request; SSE leak sanitization may be skipped", resp.Header.Get("Content-Encoding"))
 	}
+
+	c.recordAssayVerdict(resp, reqModel)
 
 	chatKey := uuid.NewString()
 
