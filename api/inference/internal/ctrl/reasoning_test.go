@@ -25,6 +25,15 @@ func newTestCtrlForReasoning(t *testing.T, supportedParams ...string) *Ctrl {
 	}
 }
 
+// newTestCtrlForReasoningWithLevels is newTestCtrlForReasoning for a model that
+// also declares the reasoning_effort levels its chat template accepts.
+func newTestCtrlForReasoningWithLevels(t *testing.T, levels []string, supportedParams ...string) *Ctrl {
+	t.Helper()
+	c := newTestCtrlForReasoning(t, supportedParams...)
+	c.Service.ModelInfo.ReasoningEffortLevels = levels
+	return c
+}
+
 // newTestCtrlForReasoningMultiModel builds a multi-model chatbot Ctrl. serviceParams
 // (when non-nil) become the service-level ModelInfo.supportedParameters used as the
 // fallback; entries maps a model id to its per-model supportedParameters — a nil
@@ -273,6 +282,161 @@ func TestTranslateReasoning_ChatTemplateEffortIsExplicit(t *testing.T) {
 				t.Errorf("reasoning_effort should be preserved when native param wins, got %v", out[reasoningEffortKey])
 			}
 		})
+	}
+}
+
+func TestResolveChatTemplateEffort(t *testing.T) {
+	// The three level sets actually seen in the wild, plus the no-declaration case.
+	glm53 := []string{"low", "high", "max"}
+	glm52 := []string{"high", "max"}
+	qwen38 := []string{"low", "medium", "xhigh"}
+	tests := []struct {
+		name     string
+		effort   string
+		declared []string
+		want     string
+	}{
+		{"no declared levels writes nothing", "low", nil, ""},
+		{"off-ladder value writes nothing", "turbo", glm53, ""},
+		{"exact match", "low", glm53, "low"},
+		{"exact match deep", "max", glm53, "max"},
+		// medium is not in GLM-5.3's set: resolves DOWN to low, never up to high —
+		// verbatim forwarding would have meant max, i.e. more than "high".
+		{"unrepresentable resolves down", "medium", glm53, "low"},
+		{"xhigh resolves down to high", "xhigh", glm53, "high"},
+		// Shallower than everything declared: the shallowest declared level.
+		{"below all declared takes shallowest", "low", glm52, "high"},
+		{"minimal below all declared", "minimal", glm52, "high"},
+		{"qwen-style medium is exact", "medium", qwen38, "medium"},
+		{"qwen-style high resolves down", "high", qwen38, "medium"},
+		{"qwen-style max resolves down", "max", qwen38, "xhigh"},
+		// Config spelling is normalized to the canonical ladder value.
+		{"canonicalizes declared spelling", "high", []string{" High ", "MAX"}, "high"},
+		{"canonicalizes client spelling", " HIGH ", glm53, "high"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := resolveChatTemplateEffort(tt.effort, tt.declared); got != tt.want {
+				t.Errorf("resolveChatTemplateEffort(%q, %v) = %q, want %q", tt.effort, tt.declared, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestResolveChatTemplateEffort_Monotone guards the property the resolution rule
+// exists for: walking the ladder from shallow to deep must never resolve to a
+// shallower level than a shallower request did. Verbatim forwarding violates this
+// (a template maps an unrecognized value to its maximum depth).
+func TestResolveChatTemplateEffort_Monotone(t *testing.T) {
+	for _, declared := range [][]string{{"low", "high", "max"}, {"high", "max"}, {"low", "medium", "xhigh"}, {"medium"}} {
+		prev := -1
+		for _, effort := range config.ReasoningEffortLadder {
+			got := resolveChatTemplateEffort(effort, declared)
+			rank, ok := config.ReasoningEffortRank(got)
+			if !ok {
+				t.Fatalf("declared=%v effort=%q resolved to %q, which is not a ladder level", declared, effort, got)
+			}
+			if rank < prev {
+				t.Errorf("declared=%v: %q resolved to %q, shallower than the previous request's level", declared, effort, got)
+			}
+			prev = rank
+		}
+	}
+}
+
+// TestTranslateReasoning_GradedChatTemplateEffort covers the end-to-end graded
+// path: a model declaring its levels gets both the enable_thinking gate and the
+// resolved nested depth, and the portable field is still consumed.
+func TestTranslateReasoning_GradedChatTemplateEffort(t *testing.T) {
+	c := newTestCtrlForReasoningWithLevels(t, []string{"low", "high", "max"},
+		"reasoning_effort", "chat_template_kwargs")
+	tests := []struct {
+		name       string
+		effort     string
+		wantOn     bool
+		wantNested interface{}
+	}{
+		{"low is honored", "low", true, "low"},
+		{"high is honored", "high", true, "high"},
+		{"medium resolves down", "medium", true, "low"},
+		// Off is fully expressed by the gate; a depth would contradict it.
+		{"none writes no depth", "none", false, nil},
+		{"minimal writes no depth", "minimal", false, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := []byte(`{"model":"glm-5.3","reasoning_effort":"` + tt.effort + `","messages":[]}`)
+			got, err := c.TranslateReasoning(body, "glm-5.3")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			var out map[string]interface{}
+			if err := json.Unmarshal(got, &out); err != nil {
+				t.Fatalf("invalid json: %v", err)
+			}
+			kw, _ := out["chat_template_kwargs"].(map[string]interface{})
+			if kw[enableThinkingKey] != tt.wantOn {
+				t.Errorf("enable_thinking = %v, want %v", kw[enableThinkingKey], tt.wantOn)
+			}
+			if kw[chatTemplateEffortKey] != tt.wantNested {
+				t.Errorf("nested reasoning_effort = %v, want %v", kw[chatTemplateEffortKey], tt.wantNested)
+			}
+			if _, ok := out[reasoningEffortKey]; ok {
+				t.Errorf("reasoning_effort should be removed from outgoing body")
+			}
+		})
+	}
+}
+
+// TestTranslateReasoning_NoDeclaredLevelsStaysBinary pins the compatibility
+// promise: a model that declares no levels is translated exactly as it was before
+// the graded path existed — the bool alone, no nested depth key invented for it.
+func TestTranslateReasoning_NoDeclaredLevelsStaysBinary(t *testing.T) {
+	c := newTestCtrlForReasoning(t, "reasoning_effort", "chat_template_kwargs")
+	for _, effort := range []string{"low", "medium", "high", "max"} {
+		t.Run(effort, func(t *testing.T) {
+			body := []byte(`{"model":"qwen3","reasoning_effort":"` + effort + `","messages":[]}`)
+			got, err := c.TranslateReasoning(body, "qwen3")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			var out map[string]interface{}
+			if err := json.Unmarshal(got, &out); err != nil {
+				t.Fatalf("invalid json: %v", err)
+			}
+			kw, _ := out["chat_template_kwargs"].(map[string]interface{})
+			if kw[enableThinkingKey] != true {
+				t.Errorf("enable_thinking = %v, want true", kw[enableThinkingKey])
+			}
+			if _, ok := kw[chatTemplateEffortKey]; ok {
+				t.Errorf("must not write a nested depth for a model declaring no levels, got %v", kw)
+			}
+		})
+	}
+}
+
+// TestTranslateReasoning_GradedRespectsExplicitNested keeps the graded path behind
+// the precedence rule: a client that wrote its own nested depth still wins, so the
+// broker adds neither the bool nor a resolved level next to it.
+func TestTranslateReasoning_GradedRespectsExplicitNested(t *testing.T) {
+	c := newTestCtrlForReasoningWithLevels(t, []string{"low", "high", "max"},
+		"reasoning_effort", "chat_template_kwargs")
+	body := []byte(`{"model":"glm-5.3","reasoning_effort":"none","chat_template_kwargs":{"reasoning_effort":"max"},"messages":[]}`)
+
+	got, err := c.TranslateReasoning(body, "glm-5.3")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(got, &out); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	kw, _ := out["chat_template_kwargs"].(map[string]interface{})
+	if _, ok := kw[enableThinkingKey]; ok {
+		t.Errorf("must not derive enable_thinking over a client's explicit nested depth, got %v", kw)
+	}
+	if kw[chatTemplateEffortKey] != "max" {
+		t.Errorf("nested reasoning_effort = %v, want \"max\" (client's own value untouched)", kw[chatTemplateEffortKey])
 	}
 }
 

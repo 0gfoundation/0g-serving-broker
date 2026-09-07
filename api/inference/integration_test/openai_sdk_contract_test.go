@@ -753,6 +753,40 @@ func TestOpenAISDK_ReasoningEffortTranslation(t *testing.T) {
 	if kwargs == nil || kwargs["enable_thinking"] != true {
 		t.Errorf("upstream received chat_template_kwargs=%v, want {enable_thinking: true}", debug["chat_template_kwargs"])
 	}
+	// No levels declared: the graded depth key must not be invented for a model
+	// whose chat template may reject an unknown reasoning_effort value.
+	if _, present := kwargs["reasoning_effort"]; present {
+		t.Errorf("upstream received a nested reasoning_effort=%v for a model declaring no reasoningEffortLevels", kwargs["reasoning_effort"])
+	}
+}
+
+// TestOpenAISDK_ReasoningEffortGradedTranslation is the same SDK request against a
+// model that declares the reasoning_effort levels its chat template accepts: the
+// depth must reach the upstream as the nested chat_template_kwargs.reasoning_effort
+// instead of being collapsed into the enable_thinking bool.
+func TestOpenAISDK_ReasoningEffortGradedTranslation(t *testing.T) {
+	baseURL, authHeader := setupContractEnv(t, func(cfg *config.Config) {
+		mi := chatContractModelInfo("chat_template_kwargs")
+		mi.ReasoningEffortLevels = []string{"low", "high", "max"} // GLM-5.3's set
+		cfg.Service.ModelInfo = mi
+	})
+
+	// The scenario sends reasoning_effort: "high", which this model accepts verbatim.
+	res := runNodeSDKScenario(t, baseURL, authHeader, "reasoning")
+	if !res.OK {
+		t.Fatalf("reasoning scenario failed: %s (%s)", res.Error, res.ErrType)
+	}
+	debug, _ := res.Result["debugReceivedBody"].(map[string]interface{})
+	if debug == nil {
+		t.Fatal("expected _debug_received_body to be echoed back by the mock upstream")
+	}
+	if _, present := debug["reasoning_effort"]; present {
+		t.Errorf("upstream received top-level reasoning_effort=%v; expected it consumed and re-expressed natively", debug["reasoning_effort"])
+	}
+	kwargs, _ := debug["chat_template_kwargs"].(map[string]interface{})
+	if kwargs == nil || kwargs["enable_thinking"] != true || kwargs["reasoning_effort"] != "high" {
+		t.Errorf("upstream received chat_template_kwargs=%v, want {enable_thinking: true, reasoning_effort: \"high\"}", debug["chat_template_kwargs"])
+	}
 }
 
 // ==========================================================================

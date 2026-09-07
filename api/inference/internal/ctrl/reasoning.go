@@ -46,8 +46,10 @@ func isNativeReasoningParam(name string) bool {
 // Native thinking-control parameter names the broker can translate reasoning_effort into.
 const (
 	// nativeParamChatTemplateKwargs is the container Qwen3/GLM models on
-	// vLLM/SGLang advertise; the thinking toggle is its nested enable_thinking bool.
-	nativeParamChatTemplateKwargs = "chat_template_kwargs"
+	// vLLM/SGLang advertise; the thinking toggle is its nested enable_thinking
+	// bool, and a model declaring reasoningEffortLevels also takes a graded
+	// reasoning_effort there (see resolveChatTemplateEffort).
+	nativeParamChatTemplateKwargs = config.ParamChatTemplateKwargs
 	// nativeParamEnableThinking is the top-level bool DashScope (Aliyun) accepts
 	// as an extra_body key — distinct from the vLLM nested form above.
 	nativeParamEnableThinking = "enable_thinking"
@@ -128,6 +130,70 @@ func normalizeReasoningEffort(effort string) reasoningIntent {
 	default:
 		return reasoningOn
 	}
+}
+
+// resolveChatTemplateEffort maps a client's reasoning_effort onto the value to
+// write into chat_template_kwargs.reasoning_effort, given the levels the model's
+// chat template declares (ModelInfo.ReasoningEffortLevels). It returns "" when the
+// model declares no levels, or when the client's value is off the ladder entirely:
+// the broker then writes only the enable_thinking bool, exactly as it did before
+// this knob existed, and the upstream's own default depth stands.
+//
+// Resolution picks the deepest declared level that does not exceed the request,
+// and the shallowest declared level when the request is shallower than everything
+// declared. Two properties motivate that rule rather than passing the client's
+// value through verbatim:
+//
+//   - Monotone. A template resolves a value it does not recognize to its maximum
+//     depth, so verbatim forwarding inverts OpenAI's ordering: GLM-5.3 takes
+//     low/high/max, and a verbatim "medium" would there mean MORE thinking than
+//     "high".
+//   - Never rounds up. An unrepresentable request is honored by the nearest level
+//     below, not above — the client asked to think less, and reasoning tokens are
+//     billed as output, so rounding up would charge for depth nobody asked for.
+func resolveChatTemplateEffort(effort string, declared []string) string {
+	if len(declared) == 0 {
+		return ""
+	}
+	want, ok := config.ReasoningEffortRank(effort)
+	if !ok {
+		return ""
+	}
+	// Resolve to the canonical ladder spelling rather than echoing the config
+	// string, so a "Low" in config still reaches the template as "low".
+	deepestBelow, deepestRank := "", -1
+	shallowestRank := len(config.ReasoningEffortLadder)
+	for _, level := range declared {
+		rank, known := config.ReasoningEffortRank(level)
+		if !known {
+			continue
+		}
+		if rank <= want && rank > deepestRank {
+			deepestRank, deepestBelow = rank, config.ReasoningEffortLadder[rank]
+		}
+		if rank < shallowestRank {
+			shallowestRank = rank
+		}
+	}
+	if deepestBelow != "" {
+		return deepestBelow
+	}
+	if shallowestRank < len(config.ReasoningEffortLadder) {
+		return config.ReasoningEffortLadder[shallowestRank]
+	}
+	return ""
+}
+
+// chatTemplateEffortLevels returns the reasoning_effort levels the resolved
+// model's chat template declares, or nil when it declares none. identity is the
+// router-named upstream (config.UpstreamIdentityHeader), matching
+// nativeReasoningParamFor's resolution so both read the same entry.
+func (c *Ctrl) chatTemplateEffortLevels(model, identity string) []string {
+	mi := c.Service.EffectiveModelInfoFor(model, identity)
+	if mi == nil {
+		return nil
+	}
+	return mi.ReasoningEffortLevels
 }
 
 // AdvertisedSupportedParameters returns supportedParameters as it should appear in
@@ -249,7 +315,7 @@ func nativeReasoningParamSet(bodyMap map[string]interface{}, nativeParam string)
 // is no shared value/type data. A name handled here must also be recognized by
 // isNativeReasoningParam; the bool return guards TranslateReasoning against
 // dropping reasoning_effort when a recognized-but-unhandled name writes nothing.
-func applyNativeReasoning(bodyMap map[string]interface{}, nativeParam string, on bool) bool {
+func applyNativeReasoning(bodyMap map[string]interface{}, nativeParam string, on bool, chatTemplateEffort string) bool {
 	switch nativeParam {
 	case nativeParamChatTemplateKwargs:
 		// Qwen3/GLM on vLLM/SGLang: bool nested under chat_template_kwargs.
@@ -260,6 +326,13 @@ func applyNativeReasoning(bodyMap map[string]interface{}, nativeParam string, on
 			bodyMap[nativeParamChatTemplateKwargs] = kw
 		}
 		kw[enableThinkingKey] = on
+		// A model that declares its levels also gets the graded depth (resolved by
+		// resolveChatTemplateEffort). Both keys are written: a template that reads
+		// only enable_thinking is unaffected by the extra kwarg, and one that reads
+		// both applies the bool as the gate and the level as the depth.
+		if chatTemplateEffort != "" {
+			kw[chatTemplateEffortKey] = chatTemplateEffort
+		}
 		return true
 	case nativeParamEnableThinking:
 		// DashScope (Aliyun): top-level bool.
@@ -304,6 +377,13 @@ func applyNativeReasoning(bodyMap map[string]interface{}, nativeParam string, on
 // When translation occurs, reasoning_effort is removed from the outgoing body:
 // it has been consumed and re-expressed natively, and a Qwen/vLLM upstream that
 // needs enable_thinking may reject the unknown OpenAI field.
+//
+// The re-expression is binary except on chat_template_kwargs, where a model that
+// declares ModelInfo.ReasoningEffortLevels also receives the graded depth as the
+// nested reasoning_effort (see resolveChatTemplateEffort). A model that declares
+// no levels behaves exactly as it did before that knob existed, because the
+// accepted level set differs per model family and a template that validates its
+// input rejects an unknown value.
 func (c *Ctrl) TranslateReasoning(body []byte, model string) ([]byte, error) {
 	return c.TranslateReasoningFor(body, model, "")
 }
@@ -351,7 +431,14 @@ func (c *Ctrl) TranslateReasoningFor(body []byte, model, identity string) ([]byt
 		return body, nil
 	}
 
-	if !applyNativeReasoning(bodyMap, nativeParam, intent == reasoningOn) {
+	// Graded depth only applies to a thinking-on request: an off request is fully
+	// expressed by the dialect's own toggle, and no level means "no reasoning".
+	var chatTemplateEffort string
+	if intent == reasoningOn && nativeParam == nativeParamChatTemplateKwargs {
+		chatTemplateEffort = resolveChatTemplateEffort(effort, c.chatTemplateEffortLevels(model, identity))
+	}
+
+	if !applyNativeReasoning(bodyMap, nativeParam, intent == reasoningOn, chatTemplateEffort) {
 		// Recognized but unhandled (should not happen while detection and the
 		// apply switch stay in sync): write nothing and leave the body untouched
 		// rather than stripping reasoning_effort without a replacement.

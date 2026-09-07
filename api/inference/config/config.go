@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -211,6 +212,42 @@ const (
 	APIFormatAnthropic = "anthropic"
 )
 
+// ParamChatTemplateKwargs is the supportedParameters entry naming the container
+// vLLM/SGLang models accept for chat-template variables. Both the request-path
+// translation (ctrl.nativeParamChatTemplateKwargs) and ModelInfo.Validate key off
+// it, so it lives here as the single source of truth.
+const ParamChatTemplateKwargs = "chat_template_kwargs"
+
+// ReasoningEffortLadder is the reasoning_effort ladder in increasing depth, as
+// accepted by vLLM's ChatCompletionRequest. "none" is deliberately absent: it
+// means "no reasoning at all" rather than a depth, and the broker expresses off
+// through the dialect's own toggle (e.g. enable_thinking: false), never as a
+// level. Order is significant — ReasoningEffortRank returns an index into it, and
+// the request path resolves a client's request to the deepest declared level that
+// does not exceed it.
+var ReasoningEffortLadder = []string{"minimal", "low", "medium", "high", "xhigh", "max"}
+
+// ReasoningEffortRank returns level's position in ReasoningEffortLadder, and
+// whether it is a known level. Matching is case-insensitive and
+// whitespace-trimmed, mirroring how the request path normalizes an inbound
+// reasoning_effort.
+func ReasoningEffortRank(level string) (int, bool) {
+	normalized := strings.ToLower(strings.TrimSpace(level))
+	for i, l := range ReasoningEffortLadder {
+		if l == normalized {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+// IsReasoningEffortLevel reports whether level names a depth on the
+// reasoning_effort ladder.
+func IsReasoningEffortLevel(level string) bool {
+	_, ok := ReasoningEffortRank(level)
+	return ok
+}
+
 // ModelInfo holds optional metadata for the /v1/models endpoint.
 // These fields enrich the on-chain service data with static model details.
 // When provided, name, description, contextLength, architecture, and supportedParameters are required.
@@ -225,6 +262,22 @@ type ModelInfo struct {
 	DefaultParameters   map[string]interface{} `yaml:"defaultParameters"`   // Optional. Default values for parameters, e.g., {"temperature": 0.7, "top_p": 0.9}
 	TeeType             string                 `yaml:"teeType"`             // Optional. TEE hardware type, e.g., "TDX", "SEV", "SGX", "H100"
 	ExpirationDate      string                 `yaml:"expirationDate"`      // Optional. Model availability expiration in RFC3339 format, e.g., "2026-12-31T00:00:00Z". After this instant the broker rejects requests for the model with HTTP 410.
+
+	// ReasoningEffortLevels lists the reasoning_effort values this model's chat
+	// template accepts as a graded thinking-depth control, e.g. ["low", "high",
+	// "max"] for GLM-5.3. Optional, and only meaningful alongside
+	// chat_template_kwargs in supportedParameters: when set, the broker
+	// re-expresses a client's reasoning_effort as the nested
+	// chat_template_kwargs.reasoning_effort instead of collapsing it to the
+	// enable_thinking bool, so graded depth survives translation.
+	//
+	// Declare only values the template really accepts. The set differs per model
+	// family and is not guessable (GLM-5.2 takes high/max, GLM-5.3 adds low,
+	// Qwen3.8-style templates take low/medium/xhigh), and a template that
+	// validates its input rejects an unknown value with a Jinja error surfaced as
+	// HTTP 400 — which is why the broker writes nothing here unless a model opts
+	// in. See docs/design/reasoning-translation.md.
+	ReasoningEffortLevels []string `yaml:"reasoningEffortLevels"`
 
 	// VideoSizeRatios maps output resolution (e.g., "1280x720") to a cost multiplier.
 	// Used for video generation billing: fee = seconds × sizeRatio × outputPrice.
@@ -268,6 +321,21 @@ func (m *ModelInfo) Validate(serviceType string) error {
 		case APIFormatOpenAI, APIFormatAnthropic:
 		default:
 			return fmt.Errorf("service.modelInfo.supportedFormats contains unknown format %q (allowed: %q, %q)", f, APIFormatOpenAI, APIFormatAnthropic)
+		}
+	}
+	// reasoningEffortLevels is optional, but a typo would be worse than useless:
+	// the broker would write an unknown value into chat_template_kwargs and the
+	// upstream template would reject the request. Validate membership in the
+	// reasoning_effort ladder, and require the container parameter that makes the
+	// declaration meaningful at all, so both mistakes fail at load time.
+	if len(m.ReasoningEffortLevels) > 0 {
+		for _, l := range m.ReasoningEffortLevels {
+			if !IsReasoningEffortLevel(l) {
+				return fmt.Errorf("service.modelInfo.reasoningEffortLevels contains unknown level %q (allowed: %s)", l, strings.Join(ReasoningEffortLadder, ", "))
+			}
+		}
+		if !slices.Contains(m.SupportedParameters, ParamChatTemplateKwargs) {
+			return fmt.Errorf("service.modelInfo.reasoningEffortLevels requires %q in supportedParameters (it names values for the nested chat_template_kwargs.reasoning_effort key)", ParamChatTemplateKwargs)
 		}
 	}
 	// Parse the optional expiration once at load time so the request path never

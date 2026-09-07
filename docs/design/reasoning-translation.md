@@ -114,6 +114,10 @@ low, medium, high (any other non-empty value) → On
 absent / ""     → Unset  → emit nothing, upstream default stands
 ```
 
+That binary intent is what every dialect below receives. `chat_template_kwargs`
+additionally carries graded depth when the model opts in — see
+[Graded depth on `chat_template_kwargs`](#graded-depth-on-chat_template_kwargs).
+
 Then a `switch` on the native parameter name writes the value in the wire location
 that dialect expects:
 
@@ -137,6 +141,55 @@ set of names recognized in step 1 stays in sync with the `switch` cases by
 construction (same vocabulary). The apply step returns whether it wrote anything,
 so a recognized-but-unhandled name never causes `reasoning_effort` to be stripped
 without a replacement.
+
+## Graded depth on `chat_template_kwargs`
+
+The binary intent above throws away everything OpenAI's ladder says beyond
+on/off: `low`, `medium`, `high` and `max` all produce the identical
+`enable_thinking: true`, so a client asking to think *less* is billed for full
+depth with no signal that the request was ignored. GLM-5.2/5.3-style templates
+do expose graded depth — as a nested `chat_template_kwargs.reasoning_effort` —
+so on that dialect the depth can be preserved.
+
+It is preserved **only for a model that declares the levels its template
+accepts**:
+
+```yaml
+supportedParameters: [temperature, reasoning_effort, chat_template_kwargs]
+reasoningEffortLevels: [low, high, max]   # GLM-5.3
+```
+
+The opt-in is not bureaucracy — there is no value the broker could write
+blindly. The accepted set differs per model family (GLM-5.2 takes `high`/`max`,
+GLM-5.3 adds `low`, Qwen3.8-style templates take `low`/`medium`/`xhigh`), and a
+template that *validates* its input rejects anything outside its own set with a
+Jinja error that surfaces as HTTP 400. A model declaring no levels is therefore
+translated exactly as it was before this path existed: the bool alone.
+`ModelInfo.Validate` rejects an unknown level, and rejects levels declared
+without `chat_template_kwargs` in `supportedParameters`, so both mistakes fail at
+load time rather than on a live request.
+
+When levels are declared, `resolveChatTemplateEffort` maps the request onto them:
+the **deepest declared level that does not exceed the request**, or the
+shallowest declared level when the request is shallower than everything
+declared. Both keys are then written — the bool as the gate, the level as the
+depth — since a template that reads only `enable_thinking` is unaffected by the
+extra kwarg.
+
+Two properties motivate that rule over forwarding the client's value verbatim:
+
+- **Monotone.** A template resolves a value it does not recognize to its
+  *maximum* depth. Forwarding verbatim therefore inverts OpenAI's ordering: on
+  GLM-5.3 (`low`/`high`/`max`) a verbatim `medium` would mean more thinking than
+  `high`. Resolution maps `medium` → `low` instead, keeping the ladder ordered.
+- **Never rounds up.** An unrepresentable request is honored by the nearest
+  level below, not above. The client asked to think less, and reasoning tokens
+  are billed as output, so rounding up would charge for depth nobody asked for.
+
+Depth applies only to a thinking-*on* request: `none` (and `minimal`, see below)
+is fully expressed by `enable_thinking: false`, and pairing that with a level
+would be contradictory. The precedence rule below still comes first — a client
+that wrote its own nested `reasoning_effort` gets neither key derived for it.
 
 ### Why not a per-model translation table
 
@@ -199,7 +252,23 @@ value. This is why no `defaultOn` flag is needed.
 
 ## Open questions
 
-- Whether `none` vs `minimal` should ever differ (today both → `Off`).
+- Whether `none` vs `minimal` should ever differ (today both → `Off`). In OpenAI's
+  semantics `minimal` means "very little reasoning" and `none` is the off switch,
+  so `Off` is an approximation for `minimal`. Mapping it to the shallowest
+  declared level *only on models that declare levels* was considered and
+  rejected: the same request would then mean "off" on one provider and "shallow"
+  on another for one canonical model id, which is the class of inconsistency this
+  work is trying to remove. Changing it uniformly is a behaviour change for every
+  dialect (DashScope, MiniMax, OpenRouter included) and belongs in its own
+  decision.
+- What `reasoning_effort: none` should do on an upstream that *cannot* disable
+  thinking. Zhipu/Tencent-hosted GLM-5.3 rejects it outright (`该模型始终思考，
+  不支持关闭思考；请使用 low、high 或 max`, HTTP 400) while a self-hosted vLLM
+  deployment of the same weights honours `enable_thinking: false` — so for one
+  canonical model id the portable request either works or 400s depending on which
+  provider the router picked. Options: reject broker-side with a clear error, or
+  downgrade to the shallowest supported level. Needs a config field expressing
+  "this upstream cannot turn thinking off".
 - Whether to validate an inbound native parameter against the model's declared
   `supportedParameters` and reject mismatches, or forward leniently (today:
   lenient — an explicit native parameter is forwarded untouched).
