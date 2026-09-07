@@ -121,6 +121,8 @@ type Ctrl struct {
 	// assayAttestor is the Phase-2 verify-app loop (nil = attestation off);
 	// it supplies the live TLS pin and the settlement/invoice gate.
 	assayAttestor *assayAttestor
+	// assayAttCache memoises the relayed assay attestation (see attestation_relay.go).
+	assayAttCache *assayAttestationCache
 	// assayVerifierAddress, when non-nil, is the verifier's secp256k1 signing
 	// address (cfg.Assay.VerifierAddress). A verdict is then only recorded if
 	// ZG-Verdict-Sig recovers to this address over the verdict + request hash —

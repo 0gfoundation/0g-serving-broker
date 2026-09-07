@@ -112,6 +112,18 @@ const (
 	// cumulatives to after settlement (SPML payout step 10).
 	AssayInvoicePath = "/v1/payout/invoice"
 
+	// AssayAttestationPath is the verifier's public identity document. Unlike the
+	// invoice and voucher paths this one authenticates nobody: it exists to be read
+	// by auditors, and everything in it is checkable against the chain rather than
+	// against us.
+	AssayAttestationPath = "/v1/attestation"
+
+	// AssayAttestationRelayTTL bounds how stale a relayed attestation may be. Short
+	// enough that an upgrade shows up quickly; long enough that polling auditors do
+	// not turn into load on the verifier. The response carries fetched_at so the
+	// caller can apply a stricter bound of its own.
+	AssayAttestationRelayTTL = 10 * time.Minute
+
 	// AssayVouchersPath is the verifier endpoint listing the latest voucher per
 	// node. GPU nodes used to call it directly; they no longer can — the assay
 	// publishes no interface a node can reach, so the broker relays it (see
