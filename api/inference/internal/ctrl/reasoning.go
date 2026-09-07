@@ -66,6 +66,16 @@ const (
 	// is a key inside a container, that is a top-level advertised param / wire key —
 	// so they are deliberately kept as separate constants.
 	enableThinkingKey = "enable_thinking"
+	// chatTemplateEffortKey is the graded depth key NESTED under
+	// chat_template_kwargs, used by GLM-5.2/5.3-style templates ("low"/"high",
+	// anything else meaning maximum depth) as an alternative to the
+	// enable_thinking bool. Like enableThinkingKey above it shares its literal
+	// with a top-level field — the portable reasoningEffortKey — while playing a
+	// different role: this is a chat-template variable the upstream reads, that is
+	// the OpenAI field the broker translates FROM. Kept separate for the same
+	// reason. The broker never writes this key (its intent is binary, see
+	// reasoningIntent); it only recognizes a client's own use of it.
+	chatTemplateEffortKey = "reasoning_effort"
 )
 
 // requiresAnthropicBudgetTokens reports whether formats declare the genuine
@@ -189,12 +199,24 @@ func (c *Ctrl) nativeReasoningParamFor(model, identity string) string {
 func nativeReasoningParamSet(bodyMap map[string]interface{}, nativeParam string) bool {
 	switch nativeParam {
 	case nativeParamChatTemplateKwargs:
+		// vLLM/SGLang: "enable_thinking" is the sub-field the broker itself writes,
+		// but a GLM-5.2/5.3-style template exposes the same on/off-implying concept
+		// as a graded "reasoning_effort" instead. Treating only enable_thinking as
+		// explicit would let the broker write enable_thinking:false into the very
+		// same map as a client's reasoning_effort:"high" — the template then reads
+		// both and thinking is off, silently inverting an explicit client request.
+		// Either sub-field being present therefore means the client already
+		// addressed reasoning natively, mirroring the reasoning object below.
 		kw, ok := bodyMap[nativeParamChatTemplateKwargs].(map[string]interface{})
 		if !ok {
 			return false
 		}
-		_, present := kw[enableThinkingKey]
-		return present
+		for _, sub := range []string{enableThinkingKey, chatTemplateEffortKey} {
+			if _, present := kw[sub]; present {
+				return true
+			}
+		}
+		return false
 	case nativeParamReasoning:
 		// OpenRouter: "enabled" is the sub-field the broker itself writes, but a
 		// client may instead address the same on/off concept via "effort" (its
