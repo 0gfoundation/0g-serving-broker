@@ -33,6 +33,6 @@ func (h *Handler) GetAssayAttestation(ctx *gin.Context) {
 		"assay":      json.RawMessage(body),
 		"relayed_by": "broker",
 		"fetched_at": fetchedAt.Format(time.RFC3339),
-		"relay_note": "The broker is a transparent pipe here. It can refuse or serve a stale copy; it cannot forge this document into one the chain will agree with. Reconcile `assay.signer` against TappRegistry yourself, and ecrecover a recent ZG-Verdict-Sig to confirm that key is serving you now.",
+		"relay_note": "What this saves you is the arguments, not the verification. Run assay.verify.command: it queries the chain and the attestation service directly, and pulls the assay's evidence from the tee_url the registry lists, so nothing in this response feeds the result. The broker can refuse to answer or serve a stale copy; it cannot make a false answer verify.",
 	})
 }
