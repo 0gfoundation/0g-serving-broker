@@ -65,6 +65,68 @@ func TestModelInfo_Validate_SupportedFormats(t *testing.T) {
 	}
 }
 
+func TestModelInfo_Validate_ReasoningEffortLevels(t *testing.T) {
+	cases := []struct {
+		name    string
+		levels  []string
+		params  []string
+		wantErr string
+	}{
+		{"unset ok", nil, []string{"temperature"}, ""},
+		{"glm-5.3 set ok", []string{"low", "high", "max"}, []string{"temperature", ParamChatTemplateKwargs}, ""},
+		{"glm-5.2 set ok", []string{"high", "max"}, []string{ParamChatTemplateKwargs}, ""},
+		{"case-insensitive ok", []string{"Low", " HIGH "}, []string{ParamChatTemplateKwargs}, ""},
+		// A typo would make the broker write a value the template rejects, so it
+		// must fail at load time rather than at request time.
+		{"unknown level rejected", []string{"low", "extreme"}, []string{ParamChatTemplateKwargs}, "unknown level"},
+		// "none" is off, not a depth — the dialect's own toggle expresses it.
+		{"none is not a level", []string{"none", "high"}, []string{ParamChatTemplateKwargs}, "unknown level"},
+		// Declared levels without the container they belong to are inert.
+		{"requires chat_template_kwargs", []string{"low"}, []string{"temperature", "enable_thinking"}, "requires"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			m := validModelInfo()
+			m.ReasoningEffortLevels = tt.levels
+			m.SupportedParameters = tt.params
+			err := m.Validate("chatbot")
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("expected no error, got %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("err = %v, want one containing %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestReasoningEffortRank(t *testing.T) {
+	// Rank must be strictly increasing in declared ladder order, and the lookup
+	// must tolerate the same spellings ModelInfo.Validate accepts.
+	prev := -1
+	for _, level := range ReasoningEffortLadder {
+		rank, ok := ReasoningEffortRank(level)
+		if !ok {
+			t.Fatalf("ReasoningEffortRank(%q) reported unknown", level)
+		}
+		if rank <= prev {
+			t.Errorf("ReasoningEffortRank(%q) = %d, want > %d (ladder must be ordered)", level, rank, prev)
+		}
+		prev = rank
+	}
+	if rank, ok := ReasoningEffortRank(" HIGH "); !ok || ReasoningEffortLadder[rank] != "high" {
+		t.Errorf("ReasoningEffortRank(\" HIGH \") = (%d,%v), want the rank of \"high\"", rank, ok)
+	}
+	for _, unknown := range []string{"", "none", "extreme"} {
+		if _, ok := ReasoningEffortRank(unknown); ok {
+			t.Errorf("ReasoningEffortRank(%q) reported known, want unknown", unknown)
+		}
+	}
+}
+
 func TestSupportedFormatsFor(t *testing.T) {
 	// Multi-model: per-model ModelInfo wins; a model without one falls back to the
 	// service-level ModelInfo; an unknown id (no wildcard) resolves to nil.
