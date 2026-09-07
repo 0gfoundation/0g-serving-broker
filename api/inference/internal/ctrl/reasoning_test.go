@@ -231,6 +231,51 @@ func TestTranslateReasoning_PreservesExistingChatTemplateKwargs(t *testing.T) {
 	}
 }
 
+// TestTranslateReasoning_ChatTemplateEffortIsExplicit verifies that a client's
+// nested chat_template_kwargs.reasoning_effort — the graded depth key
+// GLM-5.2/5.3-style templates read — counts as an explicit native set just like
+// enable_thinking. Otherwise the broker writes enable_thinking into the very same
+// map, the template reads both keys, and the client's explicit depth is silently
+// overridden (see docs/design/reasoning-translation.md).
+func TestTranslateReasoning_ChatTemplateEffortIsExplicit(t *testing.T) {
+	c := newTestCtrlForReasoning(t, "reasoning_effort", "chat_template_kwargs")
+	tests := []struct {
+		name   string
+		effort string
+		nested string
+	}{
+		// A portable "none" must not turn off a client that explicitly asked for
+		// deep thinking through the template's own key.
+		{"off effort over nested high", "none", "high"},
+		// ...nor may an "on" effort layer enable_thinking next to a nested "low".
+		{"on effort over nested low", "high", "low"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := []byte(`{"model":"glm-5.3","reasoning_effort":"` + tt.effort +
+				`","chat_template_kwargs":{"reasoning_effort":"` + tt.nested + `"},"messages":[]}`)
+			got, err := c.TranslateReasoning(body, "glm-5.3")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			var out map[string]interface{}
+			if err := json.Unmarshal(got, &out); err != nil {
+				t.Fatalf("invalid json: %v", err)
+			}
+			kw, _ := out["chat_template_kwargs"].(map[string]interface{})
+			if _, ok := kw[enableThinkingKey]; ok {
+				t.Errorf("must not derive enable_thinking alongside client's explicit nested reasoning_effort, got chat_template_kwargs=%v", kw)
+			}
+			if kw[chatTemplateEffortKey] != tt.nested {
+				t.Errorf("nested reasoning_effort = %v, want %q", kw[chatTemplateEffortKey], tt.nested)
+			}
+			if out[reasoningEffortKey] != tt.effort {
+				t.Errorf("reasoning_effort should be preserved when native param wins, got %v", out[reasoningEffortKey])
+			}
+		})
+	}
+}
+
 func TestNativeReasoningParam_PreserveThinkingNotAToggle(t *testing.T) {
 	// preserve_thinking is a multi-turn context flag, not an on/off toggle, so it
 	// must not be picked as a translation target.

@@ -158,15 +158,26 @@ Because `supportedParameters` advertises both names, a client may send
 This keeps the explicit/advanced path authoritative and prevents the broker from
 writing two conflicting controls into one upstream body.
 
-For an object-shaped native control, "set" means a specific sub-field is
-present, not merely that the container key exists — e.g. `chat_template_kwargs`
-checks its nested `enable_thinking`, so a client's *other* kwargs in that
-container don't block translation. OpenRouter's `reasoning` object extends this
-to three sub-fields: `enabled` (the one the broker itself writes), `effort`
-(OpenRouter's own low/medium/high control), and `max_tokens` (which itself
-implies reasoning is on) — any of the three being present counts as explicit,
-so the broker never layers a derived `enabled: false` next to a client's own
-`effort: "high"` in the same object.
+For an object-shaped native control, "set" means one of a specific set of
+sub-fields is present, not merely that the container key exists — so a client's
+*other* kwargs in that container don't block translation. Two containers carry
+more than one such sub-field, because the dialect addresses the same on/off
+concept in more than one way:
+
+- `chat_template_kwargs` counts `enable_thinking` (the bool the broker itself
+  writes) **and** `reasoning_effort` (the graded `"low"`/`"high"` depth key
+  GLM-5.2/5.3-style templates read, anything else meaning maximum). Counting
+  only `enable_thinking` would let the broker write `enable_thinking: false`
+  into the same map as a client's `reasoning_effort: "high"`; the template
+  reads both and thinking ends up off — silently inverting an explicit client
+  request. Note the nested `reasoning_effort` is a *chat-template variable*,
+  unrelated to the top-level OpenAI field of the same name that the broker
+  translates from; the broker recognizes the nested one but never writes it,
+  since its own intent is binary.
+- OpenRouter's `reasoning` counts `enabled` (the one the broker writes),
+  `effort` (OpenRouter's own low/medium/high control), and `max_tokens` (which
+  itself implies reasoning is on) — so the broker never layers a derived
+  `enabled: false` next to a client's own `effort: "high"` in the same object.
 
 When translation does occur, the broker removes `reasoning_effort` from the
 outgoing body: it has been consumed and re-expressed natively, and a Qwen/vLLM
