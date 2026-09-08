@@ -1,0 +1,26 @@
+name: Prune Untagged GHCR Versions
+
+on:
+  schedule:
+    # Sundays 03:00 UTC
+    - cron: '0 3 * * 0'
+  workflow_dispatch:
+
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+
+    steps:
+    # ponytail: untagged only. cosign signatures are stored under a real tag
+    # (`sha256-<digest>.sig`), so they survive this prune; if orphan sigs ever
+    # pile up, that needs its own pass.
+    - name: Delete untagged container versions
+      uses: actions/delete-package-versions@e5bc658cc4c965c472efe991f8beea3981499c55 # v5.0.0
+      with:
+        owner: ${{ github.repository_owner }}
+        package-name: 0g-serving-broker
+        package-type: container
+        delete-only-untagged-versions: true
+        min-versions-to-keep: 10
