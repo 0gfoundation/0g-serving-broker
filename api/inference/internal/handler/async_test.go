@@ -1,8 +1,10 @@
 package handler
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 )
 
@@ -42,16 +45,13 @@ func (m *mockAsyncCtrl) IsAsyncEnabled() bool {
 	return m.asyncEnabled
 }
 
-// IsSealedRequest mirrors the real Ctrl's test: a JSON object with a top-level
-// "_e2ee" key. Reimplemented here rather than stubbed to false, so a test that
-// posts a real envelope exercises the gate rather than the mock's opinion of it.
-func (m *mockAsyncCtrl) IsSealedRequest(reqBody []byte) bool {
-	var env map[string]json.RawMessage
-	if err := json.Unmarshal(reqBody, &env); err != nil {
-		return false
-	}
-	_, ok := env["_e2ee"]
-	return ok
+// RefuseAsync DELEGATES to the real implementation rather than reimplementing
+// it, so a test that posts a real envelope exercises the actual decision and not
+// the mock's opinion of it. A zero Ctrl is enough because the decision reads the
+// request bytes only — no enclave state — and if that ever stops being true this
+// fails as a compile error here rather than silently diverging.
+func (m *mockAsyncCtrl) RefuseAsync(contentType string, reqBody []byte) string {
+	return (&ctrl.Ctrl{}).RefuseAsync(contentType, reqBody)
 }
 
 func (m *mockAsyncCtrl) ValidateSession(ctx *gin.Context) (string, error) {
@@ -712,6 +712,70 @@ func TestGetAsyncJob_EmptyJobID(t *testing.T) {
 // served in plaintext, and was billed. The prompt stayed sealed, so little was
 // disclosed; what broke is that "a sealed request is fail-closed" became a
 // property of which route the client picked rather than of the enclave.
+// The same refusal, one request shape over. /v1/async/images/edits accepts
+// multipart/form-data, so an envelope has two ways in here and only one of them
+// is JSON — a JSON-only test called this "not sealed" and enqueued it.
+//
+// Exercised THROUGH the handler rather than against the classifier, because the
+// bug this guards is the handler failing to hand over the Content-Type: with the
+// ctrl-level tests alone, passing "" here changed nothing and no test noticed.
+func TestSubmitAsync_RejectsSealedEnvelopeInAMultipartPart(t *testing.T) {
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	if err := w.WriteField("model", "z-image"); err != nil {
+		t.Fatalf("WriteField: %v", err)
+	}
+	if err := w.WriteField("_e2ee", `{"v":1,"kem_id":"0x0020","ciphertext":"c"}`); err != nil {
+		t.Fatalf("WriteField: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	mock := &mockAsyncCtrl{asyncEnabled: true, sessionUser: "0xUser1", submitJobID: "job-1"}
+	h := newTestHandler(mock)
+	rec := performRequest(h.SubmitAsyncImageEdit, "POST", "/v1/async/images/edits", buf.String(),
+		map[string]string{"Content-Type": w.FormDataContentType()})
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "e2ee") {
+		t.Errorf("error should name e2ee, got: %s", rec.Body.String())
+	}
+	if mock.capturedReqBody != nil {
+		t.Errorf("a sealed request must not be submitted, got body: %s", mock.capturedReqBody)
+	}
+}
+
+// And an ordinary multipart edit still goes through, so the refusal above is
+// about the part name and not about multipart.
+func TestSubmitAsync_AcceptsOrdinaryMultipartEdit(t *testing.T) {
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	if err := w.WriteField("model", "z-image"); err != nil {
+		t.Fatalf("WriteField: %v", err)
+	}
+	if err := w.WriteField("prompt", "make it about _e2ee"); err != nil {
+		t.Fatalf("WriteField: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	mock := &mockAsyncCtrl{asyncEnabled: true, sessionUser: "0xUser1", submitJobID: "job-1"}
+	h := newTestHandler(mock)
+	rec := performRequest(h.SubmitAsyncImageEdit, "POST", "/v1/async/images/edits", buf.String(),
+		map[string]string{"Content-Type": w.FormDataContentType()})
+
+	if rec.Code == http.StatusBadRequest {
+		t.Fatalf("an ordinary multipart edit must be accepted, got: %s", rec.Body.String())
+	}
+	if mock.capturedReqBody == nil {
+		t.Error("it must actually be submitted")
+	}
+}
+
 func TestSubmitAsync_RejectsSealedRequest(t *testing.T) {
 	sealed := `{"_e2ee":{"v":1,"kem_id":"0x0020","key_id":"k","signer_addr":"0xabc","client_eph_pub":"p","enc":"e","sealed_fields":["prompt"],"ciphertext":"c"},"model":"z-image","response_format":"b64_json"}`
 
