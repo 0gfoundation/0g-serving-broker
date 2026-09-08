@@ -34,13 +34,13 @@ type mockDB struct {
 	jobs map[string]*model.AsyncJob
 
 	// Error injection fields
-	errOnCreate                    error
-	errOnUpdateStatus              error
-	errOnMarkProcessingFailed      error
-	errOnDeleteExpired             error
-	errOnUpdateExpiry              error
-	errOnCompleteWithBilling       error
-	deleteExpiredCallCount         int32
+	errOnCreate               error
+	errOnUpdateStatus         error
+	errOnMarkProcessingFailed error
+	errOnDeleteExpired        error
+	errOnUpdateExpiry         error
+	errOnCompleteWithBilling  error
+	deleteExpiredCallCount    int32
 }
 
 func newMockDB() *mockDB {
@@ -1940,29 +1940,29 @@ func (c *countingMockDB) CompleteAsyncJobWithBilling(jobID string, responseBody 
 
 type testAsyncLoggerImpl struct{}
 
-func (l *testAsyncLoggerImpl) Debug(args ...interface{})                      {}
-func (l *testAsyncLoggerImpl) Info(args ...interface{})                       {}
-func (l *testAsyncLoggerImpl) Print(args ...interface{})                      {}
-func (l *testAsyncLoggerImpl) Warn(args ...interface{})                       {}
-func (l *testAsyncLoggerImpl) Warning(args ...interface{})                    {}
-func (l *testAsyncLoggerImpl) Error(args ...interface{})                      {}
-func (l *testAsyncLoggerImpl) Fatal(args ...interface{})                      {}
-func (l *testAsyncLoggerImpl) Panic(args ...interface{})                      {}
-func (l *testAsyncLoggerImpl) Debugf(format string, args ...interface{})      {}
-func (l *testAsyncLoggerImpl) Infof(format string, args ...interface{})       {}
-func (l *testAsyncLoggerImpl) Printf(format string, args ...interface{})      {}
-func (l *testAsyncLoggerImpl) Warnf(format string, args ...interface{})       {}
-func (l *testAsyncLoggerImpl) Warningf(format string, args ...interface{})    {}
-func (l *testAsyncLoggerImpl) Errorf(format string, args ...interface{})      {}
-func (l *testAsyncLoggerImpl) Fatalf(format string, args ...interface{})      {}
-func (l *testAsyncLoggerImpl) Panicf(format string, args ...interface{})      {}
-func (l *testAsyncLoggerImpl) Debugln(args ...interface{})                    {}
-func (l *testAsyncLoggerImpl) Infoln(args ...interface{})                     {}
-func (l *testAsyncLoggerImpl) Println(args ...interface{})                    {}
-func (l *testAsyncLoggerImpl) Warnln(args ...interface{})                     {}
-func (l *testAsyncLoggerImpl) Warningln(args ...interface{})                  {}
-func (l *testAsyncLoggerImpl) Errorln(args ...interface{})                    {}
-func (l *testAsyncLoggerImpl) Fatalln(args ...interface{})                    {}
-func (l *testAsyncLoggerImpl) Panicln(args ...interface{})                    {}
-func (l *testAsyncLoggerImpl) WithFields(fields logrus.Fields) log.Logger     { return l }
-func (l *testAsyncLoggerImpl) InnerLogger() *logrus.Logger                    { return nil }
+func (l *testAsyncLoggerImpl) Debug(args ...interface{})                   {}
+func (l *testAsyncLoggerImpl) Info(args ...interface{})                    {}
+func (l *testAsyncLoggerImpl) Print(args ...interface{})                   {}
+func (l *testAsyncLoggerImpl) Warn(args ...interface{})                    {}
+func (l *testAsyncLoggerImpl) Warning(args ...interface{})                 {}
+func (l *testAsyncLoggerImpl) Error(args ...interface{})                   {}
+func (l *testAsyncLoggerImpl) Fatal(args ...interface{})                   {}
+func (l *testAsyncLoggerImpl) Panic(args ...interface{})                   {}
+func (l *testAsyncLoggerImpl) Debugf(format string, args ...interface{})   {}
+func (l *testAsyncLoggerImpl) Infof(format string, args ...interface{})    {}
+func (l *testAsyncLoggerImpl) Printf(format string, args ...interface{})   {}
+func (l *testAsyncLoggerImpl) Warnf(format string, args ...interface{})    {}
+func (l *testAsyncLoggerImpl) Warningf(format string, args ...interface{}) {}
+func (l *testAsyncLoggerImpl) Errorf(format string, args ...interface{})   {}
+func (l *testAsyncLoggerImpl) Fatalf(format string, args ...interface{})   {}
+func (l *testAsyncLoggerImpl) Panicf(format string, args ...interface{})   {}
+func (l *testAsyncLoggerImpl) Debugln(args ...interface{})                 {}
+func (l *testAsyncLoggerImpl) Infoln(args ...interface{})                  {}
+func (l *testAsyncLoggerImpl) Println(args ...interface{})                 {}
+func (l *testAsyncLoggerImpl) Warnln(args ...interface{})                  {}
+func (l *testAsyncLoggerImpl) Warningln(args ...interface{})               {}
+func (l *testAsyncLoggerImpl) Errorln(args ...interface{})                 {}
+func (l *testAsyncLoggerImpl) Fatalln(args ...interface{})                 {}
+func (l *testAsyncLoggerImpl) Panicln(args ...interface{})                 {}
+func (l *testAsyncLoggerImpl) WithFields(fields logrus.Fields) log.Logger  { return l }
+func (l *testAsyncLoggerImpl) InnerLogger() *logrus.Logger                 { return nil }

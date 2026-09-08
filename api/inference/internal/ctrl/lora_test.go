@@ -265,8 +265,8 @@ func TestCheckLoRAOwnership_ArchivedAdapter(t *testing.T) {
 
 func TestCheckLoRAOwnership_NilManager(t *testing.T) {
 	c := &Ctrl{
-		Service: config.Service{ModelType: "Qwen2.5-7B"},
-		logger:  testLogger(),
+		Service:        config.Service{ModelType: "Qwen2.5-7B"},
+		logger:         testLogger(),
 		whitelistUsers: make(map[string]struct{}),
 	}
 
@@ -501,8 +501,8 @@ func TestRewriteResponseModelLine_VLLMPathModel(t *testing.T) {
 
 func TestVllmModelNames(t *testing.T) {
 	c := &Ctrl{
-		Service: config.Service{ModelType: "Qwen2.5-7B"},
-		logger:  testLogger(),
+		Service:        config.Service{ModelType: "Qwen2.5-7B"},
+		logger:         testLogger(),
 		whitelistUsers: make(map[string]struct{}),
 	}
 	cfg := config.LoRAConfig{BaseModel: "/models/Qwen2.5-7B"}
@@ -523,8 +523,8 @@ func TestVllmModelNames(t *testing.T) {
 
 func TestVllmModelNames_SameBaseAndService(t *testing.T) {
 	c := &Ctrl{
-		Service: config.Service{ModelType: "Qwen2.5-7B"},
-		logger:  testLogger(),
+		Service:        config.Service{ModelType: "Qwen2.5-7B"},
+		logger:         testLogger(),
 		whitelistUsers: make(map[string]struct{}),
 	}
 	cfg := config.LoRAConfig{BaseModel: "Qwen2.5-7B"}
