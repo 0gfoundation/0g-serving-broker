@@ -53,9 +53,14 @@ const (
 // needed: the first refuses an honest payload that is simply too large, the second refuses
 // one that understates itself.
 //
-// 1024 against a real set of at most a few dozen — the largest per-model configuration in
-// production names 13 destinations. Three orders of magnitude of headroom, and it holds the
+// 1024 against a real set of at most a few dozen. Counted in the mainnet deployments on
+// 2026-09-08, the largest config (1-glm-openrouter, 4-qwen3.7-plus-ali) carries 11
+// targetUrl entries over 4 distinct hosts, and a set names destinations — so a real set
+// today is single digits. Two to three orders of magnitude of headroom, and it holds the
 // members at tens of kilobytes rather than hundreds of megabytes.
+//
+// A count of configured URLs, not of set members: no writer exists yet, so what a set
+// will actually hold is inferred from the config a writer would render, not measured.
 const maxUpstreamMembers = 1024
 
 // maxUpstreamLine bounds one line of an EventUpstreamSet payload.
