@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/0gfoundation/0g-pc-e2ee/protocol/proof"
 	"github.com/andybalholm/brotli"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -292,8 +293,37 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 		}
 	}
 
+	// E2EE (SPEC §7.3): if the request arrived sealed, seal the transcript before
+	// forwarding. `body` stays PLAINTEXT below — billing reads the duration out of
+	// it, and §7.3 requires that quantity to be cleartext anyway, so the sealed
+	// frame carries it too and the two agree by construction.
+	//
+	// What the profile seals is not a constant: `text` always, plus each of
+	// `segments` / `words` / `language` the frame happens to carry (§7.3). That
+	// resolution lives in the wire package and is reached through the same
+	// prepareFrameForSealing the chat and image paths use, so a `verbose_json`
+	// transcription cannot ship its per-segment transcript in the clear because
+	// this path forgot a field.
+	outBody := body
+	var e2eeSignedText string
+	if sealed, isSealed, respBindHash, sealErr := c.maybeSealNonStreamResponse(ctx, body); isSealed {
+		if sealErr != nil {
+			// Fail-closed: never forward a plaintext transcript for a sealed request.
+			c.handleBrokerError(ctx, sealErr, "seal transcription response")
+			return sealErr
+		}
+		outBody = sealed
+		reqBindHash, ok := e2eeReqBindHash(ctx)
+		if !ok {
+			err := fmt.Errorf("e2ee response: request binding hash missing from context")
+			c.handleBrokerError(ctx, err, "sign transcription response")
+			return err
+		}
+		e2eeSignedText = proof.SignedTextE2EEFromHashes(reqBindHash, respBindHash)
+	}
+
 	// Attempt to write raw response to client. If client disconnected, continue to billing.
-	if _, writeErr := ctx.Writer.Write(body); writeErr != nil {
+	if _, writeErr := ctx.Writer.Write(outBody); writeErr != nil {
 		if c.isClientDisconnectError(writeErr) {
 			ctx.Set("ignoreError", true)
 			c.logger.Warnf("Client disconnected during speech-to-text response, billing for completed response (%d bytes)", len(body))
@@ -356,7 +386,12 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 		c.logger.Debug("LLM server in the same network, signing speech-to-text response")
 		// Logged rather than discarded, for the reason in image_editing: signing is an RPC
 		// to the controller now and refuses when the running image cannot be pinned.
-		if err := c.signChatWithKey(reqBody, body, chatKey); err != nil {
+		// Through signChatResponse, not signChatWithKey: on a sealed turn the §8
+		// signature must bind the on-wire aad‖ciphertext of the sealed frame
+		// rather than a plaintext the client never received, and that is the
+		// branch e2eeSignedText selects. Unsealed turns take the same path they
+		// always did.
+		if err := c.signChatResponse(ctx, reqBody, body, chatKey, e2eeSignedText, reqModel.Upstream); err != nil {
 			c.logger.Errorf("could not sign the transcription for %s: %v", chatKey, err)
 		}
 	}

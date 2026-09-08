@@ -128,11 +128,17 @@ func TestProfileForRequest(t *testing.T) {
 		// whatever the path happened to be and must not change the answer.
 		{"text-to-image", constant.ServiceTypeTextToImage, "", wire.ProfileImage, true},
 		{"text-to-image on a chat path", constant.ServiceTypeTextToImage, config.APIFormatOpenAI, wire.ProfileImage, true},
-		// An ALLOWLIST, not a switch with a default. The multipart shapes cannot
-		// be envelopes at all; video-generation and anything added later simply
-		// have no profile specified, and guessing one would apply the wrong rule
-		// to a request shape nobody has analyzed.
-		{"speech-to-text", constant.ServiceTypeSpeechToText, "", "", false},
+		// The first JSON-ified profile (SPEC §5.3). This row read `false` until
+		// the profile existed, on the reasoning that "the multipart shapes cannot
+		// be envelopes at all" — which was true of the wire format and never of
+		// the endpoint: §5.3 converts the request to JSON before sealing and back
+		// to multipart inside the enclave, so the envelope is ordinary and only
+		// the materialization is new.
+		{"speech-to-text", constant.ServiceTypeSpeechToText, "", wire.ProfileSpeech, true},
+		// Still an ALLOWLIST, not a switch with a default. image-editing is the
+		// other multipart endpoint and §5.3 does not cover it yet, so it has no
+		// profile; video-generation and anything added later likewise. Guessing
+		// one would apply the wrong rule to a request shape nobody has analyzed.
 		{"image-editing", constant.ServiceTypeImageEditing, "", "", false},
 		{"video-generation", constant.ServiceTypeVideoGeneration, "", "", false},
 		{"a service type that does not exist yet", "some-future-type", "", "", false},

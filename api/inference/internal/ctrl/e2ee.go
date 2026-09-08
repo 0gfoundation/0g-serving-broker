@@ -17,6 +17,7 @@ import (
 	"mime"
 	"mime/multipart"
 	"slices"
+	"strconv"
 	"strings"
 
 	pccrypto "github.com/0gfoundation/0g-pc-e2ee/protocol/crypto"
@@ -176,6 +177,26 @@ func multipartNamesE2EEPart(contentType string, reqBody []byte) bool {
 	}
 }
 
+// isJSONMediaType reports whether a Content-Type declares a JSON body. The
+// parameters (`charset`) are ignored, and an unparseable header is not JSON —
+// the multipart check above has already had its say on those bytes.
+func isJSONMediaType(contentType string) bool {
+	mediatype, _, err := mime.ParseMediaType(contentType)
+	return err == nil && mediatype == "application/json"
+}
+
+// jsonIfiedServiceType reports whether this service type's endpoint carries its
+// payload as multipart and therefore reaches the protocol JSON-ified (SPEC §5.3),
+// which is what makes a JSON body there a sealed envelope or nothing.
+//
+// image-editing is the other multipart endpoint and is deliberately NOT here: it
+// has no profile yet (SPEC §5.3 covers speech first), so a JSON body on it is
+// neither an envelope this broker can open nor a request it can refuse on the
+// strength of a rule that does not yet apply.
+func jsonIfiedServiceType(svcType string) bool {
+	return svcType == constant.ServiceTypeSpeechToText
+}
+
 // isSealedJSON reports whether reqBody is a sealed envelope (SPEC §5): a JSON
 // object with a top-level "_e2ee" key. It is the same test MaybeUnsealRequest
 // makes before committing to fail-closed.
@@ -237,8 +258,20 @@ func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, reqBody []byte) ([]byte, err
 	// Asked FIRST, and of the Content-Type rather than the body: a multipart body
 	// never parses as JSON, so every test below it would call an envelope in a
 	// form part "not sealed" and forward it. See multipartNamesE2EEPart.
-	if multipartNamesE2EEPart(ctx.Request.Header.Get("Content-Type"), reqBody) {
+	contentType := ctx.Request.Header.Get("Content-Type")
+	if multipartNamesE2EEPart(contentType, reqBody) {
 		return nil, fmt.Errorf("multipart request must not carry a sealed envelope: a part is named %q. A sealed request is sent as JSON", e2eeBodyMarker)
+	}
+	// The other half of the same rule (SPEC §5.3.1), on the endpoints that now
+	// accept two content types: a JSON body there MUST be a valid sealed envelope
+	// or be REFUSED. It must not be forwarded as an unsealed JSON request "just in
+	// case" — this endpoint has no unsealed JSON contract, so falling through is
+	// how "is this sealed?" stops being a question anyone answers.
+	//
+	// Scoped to the service types that have a JSON-ified profile. Elsewhere a JSON
+	// body is simply an ordinary request on a JSON endpoint.
+	if isJSONMediaType(contentType) && jsonIfiedServiceType(c.Service.Type) && !isSealedJSON(reqBody) {
+		return nil, fmt.Errorf("this endpoint takes multipart/form-data, or a sealed JSON envelope carrying a top-level %q object (SPEC §5.3.1). A JSON body that is not an envelope is refused rather than forwarded", e2eeBodyMarker)
 	}
 	if !hasE2EEMarker(reqBody) {
 		return reqBody, nil
@@ -334,13 +367,39 @@ func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, reqBody []byte) ([]byte, err
 		return nil, fmt.Errorf("re-encode unsealed request: %w", err)
 	}
 
+	// SPEC §5.3: a JSON-ified profile's upstream speaks only multipart, so the
+	// request is materialized back here — inside the enclave, after the AAD has
+	// been verified over the JSON form.
+	//
+	// The Content-Type has to move with the body. Everything downstream (form
+	// parsing for the billed duration, the upstream request itself) reads the
+	// boundary out of the header, so forwarding a multipart body under the
+	// envelope's `application/json` would hand the upstream a body it cannot
+	// parse. Content-Length too: the sealed envelope's length describes bytes that
+	// no longer exist.
+	forward := plaintext
+	if profile == wire.ProfileSpeech {
+		materialized, contentType, merr := materializeSpeechRequest(reconstructed)
+		if merr != nil {
+			return nil, fmt.Errorf("materialize the unsealed speech request: %w", merr)
+		}
+		ctx.Request.Header.Set("Content-Type", contentType)
+		ctx.Request.Header.Set("Content-Length", strconv.Itoa(len(materialized)))
+		ctx.Request.ContentLength = int64(len(materialized))
+		forward = materialized
+	}
+
 	ctx.Set(CtxKeyE2EESealed, true)
 	ctx.Set(CtxKeyE2EEProfile, profile)
 	ctx.Set(CtxKeyE2EEClientEphPub, pccrypto.PublicKey(clientEphPub))
+	// The JSON form, deliberately, even where the forwarded body is multipart:
+	// this is the request the AAD covered and the §8 binding was taken over, so it
+	// is the one an audit of the sealed exchange needs. The materialized body is a
+	// rendering for the upstream, not the protocol's request.
 	ctx.Set(CtxKeyE2EEPlaintextReq, plaintext)
 	ctx.Set(CtxKeyE2EEReqBindHash, reqBindHash)
 	c.logger.Debugf("E2EE: unsealed request (sealed_fields=%v, key_id=%s)", e2ee.SealedFields, e2ee.KeyID)
-	return plaintext, nil
+	return forward, nil
 }
 
 // profileForRequest maps the endpoint this broker serves — service type AND the
@@ -393,6 +452,12 @@ func profileForRequest(svcType, surface string) (p wire.Profile, sealable bool) 
 		}
 	case constant.ServiceTypeTextToImage:
 		return wire.ProfileImage, true
+	case constant.ServiceTypeSpeechToText:
+		// The first JSON-ified profile (SPEC §5.3): the client seals a JSON object
+		// and the enclave materializes multipart for the upstream. Nothing about
+		// the envelope or the crypto is multipart-aware — see
+		// materializeSpeechRequest.
+		return wire.ProfileSpeech, true
 	default:
 		return "", false
 	}
