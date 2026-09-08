@@ -41,13 +41,20 @@ jobs:
         # target should not follow a fork, a transfer or a rename on its own.
         owner: 0gfoundation
         package: 0g-serving-broker
-        # Age floor for keep-n-untagged (it does not gate delete-orphaned-images
-        # below, which scans the full tag list). This bounds, but cannot by
-        # itself protect, the nine legacy digests that are live yet untagged:
-        # keep-n-untagged holds the newest ten *of the candidate set*, so as
-        # newer builds cross the age line they take the slots. The real fix is
-        # upstream in docker-publish.yml, which now also pushes an immutable
-        # `<tag>-<sha>` alias so a published digest never becomes untagged.
+        # Every digest CI publishes from now on carries a permanent
+        # `<tag>-<sha>-<run>.<attempt>` alias (docker-publish.yml), so it never
+        # becomes untagged in the first place. These nine predate that and are
+        # the exception: published and signed by CI, then had their mutable tag
+        # moved off them, leaving nothing to keep them reachable. exclude-tags
+        # is matched against digests as well as tags (image-filter.ts
+        # applyExclusionFilters), which is the only handle they have.
+        #
+        # One line on purpose: the action does `split(',')` without trimming, so
+        # a folded or wrapped value yields patterns with a leading space that
+        # match nothing.
+        exclude-tags: sha256:06ccbdfb9c14dd4a23d9297674c2a6bf4ce11e7a90cb7ce93abc7971375df40d,sha256:197d24c41f9b9a1c7704902bb455e68b116530c7d1855c58a95de5f909b2bb6a,sha256:26db37394f5d915d3867613c5626c340d0d484887de1766b5b10092169d9cbbe,sha256:29924954a5e310ac7b1cf3de6a78acec4c2a507183c17a037c072d2c40dd06cd,sha256:47ab3cab9713cbc0f1d8e29f7759ad7cceb9df03b8beec258b4ef4263815559b,sha256:551f338589280e1f3f4c692e1ffdda8bac9facec58ad3d5e4fb03cea3bb17669,sha256:8d53a0472062f0d525aa8021d25f82c2aaf6c70904e5f6797f9641dc79e81634,sha256:ae0f1dff0dc98e094acd666ac6fce6116c0c8f943bb4488ca7704f7235177069,sha256:e4df3cdac0b01ce78327f862e13fdac69714dda11c784467bd72a9e4cabe86a5
+        # Age floor for keep-n-untagged. It does not gate delete-orphaned-images
+        # below, which scans the full tag list.
         older-than: 3 months
         keep-n-untagged: 10
         # Sweep signatures and attestations whose subject image is already gone.

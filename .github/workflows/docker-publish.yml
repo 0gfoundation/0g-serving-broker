@@ -84,16 +84,25 @@ jobs:
         # the next dispatch points it at a new build and strands this digest
         # untagged, where the weekly prune (ghcr-cleanup.yml) will eventually
         # collect it even though a CVM may still be pinned to it by digest.
-        IMMUTABLE_IMAGE="${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}-${GITHUB_SHA:0:12}"
+        #
+        # Keyed on run id + attempt, not on the commit: `make release` bakes a
+        # fresh `--created` timestamp into the image config, so rebuilding the
+        # same commit yields a different digest. A sha-only alias would move on
+        # a retry or a "Re-run all jobs" and strand the digest it was meant to
+        # hold. The short sha stays in the name for readability only.
+        IMMUTABLE_IMAGE="${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}-${GITHUB_SHA:0:7}-${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}"
 
         if docker image inspect "$LOCAL_IMAGE" >/dev/null 2>&1; then
           echo "Found local image: $LOCAL_IMAGE"
 
-          docker tag "$LOCAL_IMAGE" "$REGISTRY_IMAGE"
-          docker push "$REGISTRY_IMAGE"
-
+          # Alias first: if it fails, the mutable tag has not moved yet and the
+          # digest it still points at stays reachable. The other order strands
+          # a digest whenever the second push fails.
           docker tag "$LOCAL_IMAGE" "$IMMUTABLE_IMAGE"
           docker push "$IMMUTABLE_IMAGE"
+
+          docker tag "$LOCAL_IMAGE" "$REGISTRY_IMAGE"
+          docker push "$REGISTRY_IMAGE"
 
           DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' "$REGISTRY_IMAGE" | cut -d'@' -f2)
           echo "digest=${DIGEST}" >> $GITHUB_OUTPUT
