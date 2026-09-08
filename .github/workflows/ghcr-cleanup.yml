@@ -5,6 +5,18 @@ on:
     # Sundays 03:00 UTC
     - cron: '0 3 * * 0'
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Only report what would be deleted'
+        type: boolean
+        default: true
+
+# The action is not safe to run twice against the same package: two runs each
+# load their own working set, so the second either 404s on versions the first
+# removed or applies the keep budget to a stale snapshot.
+concurrency:
+  group: ghcr-cleanup-0g-serving-broker
+  cancel-in-progress: false
 
 jobs:
   prune:
@@ -23,8 +35,15 @@ jobs:
       uses: dataaxiom/ghcr-cleanup-action@d52806a0dc70b430571a37da1fde39733ffd640f # v1.2.2
       with:
         owner: ${{ github.repository_owner }}
+        # Deliberately literal. This job deletes things; the target should not
+        # follow a fork or a rename on its own.
         package: 0g-serving-broker
-        # Buffer for anyone running a digest pulled just before its tag moved.
+        # Nothing recent is ever a candidate. Without this the window is purely
+        # count-based, so how long an image survives depends on unrelated build
+        # churn -- and nine of the ten slots are already taken by live,
+        # CI-signed images whose tag has since moved.
+        older-than: 3 months
         keep-n-untagged: 10
         # Sweep signatures and attestations whose subject image is already gone.
         delete-orphaned-images: true
+        dry-run: ${{ inputs.dry_run || false }}
