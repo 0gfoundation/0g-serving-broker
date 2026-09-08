@@ -20,6 +20,9 @@ concurrency:
 
 jobs:
   prune:
+    # A fork that enables Actions would otherwise aim this at upstream's package
+    # every Sunday and collect a weekly red run it cannot act on.
+    if: github.repository == '0gfoundation/0g-serving-broker'
     runs-on: ubuntu-latest
     permissions:
       packages: write
@@ -39,10 +42,12 @@ jobs:
         owner: 0gfoundation
         package: 0g-serving-broker
         # Age floor for keep-n-untagged (it does not gate delete-orphaned-images
-        # below, which scans the full tag list). Without it the window is purely
-        # count-based, so how long an image survives depends on unrelated build
-        # churn -- and nine of the ten slots are already taken by live,
-        # CI-signed images whose tag has since moved.
+        # below, which scans the full tag list). This bounds, but cannot by
+        # itself protect, the nine legacy digests that are live yet untagged:
+        # keep-n-untagged holds the newest ten *of the candidate set*, so as
+        # newer builds cross the age line they take the slots. The real fix is
+        # upstream in docker-publish.yml, which now also pushes an immutable
+        # `<tag>-<sha>` alias so a published digest never becomes untagged.
         older-than: 3 months
         keep-n-untagged: 10
         # Sweep signatures and attestations whose subject image is already gone.
