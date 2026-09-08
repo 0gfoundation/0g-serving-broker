@@ -13,14 +13,18 @@ jobs:
       packages: write
 
     steps:
-    # ponytail: untagged only. cosign signatures are stored under a real tag
-    # (`sha256-<digest>.sig`), so they survive this prune; if orphan sigs ever
-    # pile up, that needs its own pass.
-    - name: Delete untagged container versions
-      uses: actions/delete-package-versions@e5bc658cc4c965c472efe991f8beea3981499c55 # v5.0.0
+    # Not actions/delete-package-versions: GHCR has no Referrers API, so
+    # attest-build-provenance stores a release's SLSA bundle as an untagged
+    # child of a `sha256-<digest>` index. That action sees the child as a
+    # plain untagged version and would delete released images' provenance.
+    # This one drops referrer and cosign children from the working set before
+    # applying any retention rule.
+    - name: Prune untagged container versions
+      uses: dataaxiom/ghcr-cleanup-action@d52806a0dc70b430571a37da1fde39733ffd640f # v1.2.2
       with:
         owner: ${{ github.repository_owner }}
-        package-name: 0g-serving-broker
-        package-type: container
-        delete-only-untagged-versions: true
-        min-versions-to-keep: 10
+        package: 0g-serving-broker
+        # Buffer for anyone running a digest pulled just before its tag moved.
+        keep-n-untagged: 10
+        # Sweep signatures and attestations whose subject image is already gone.
+        delete-orphaned-images: true
