@@ -86,7 +86,10 @@ func TestSaveDatasetIsFoundUnderAnotherSpellingOfTheSameAddress(t *testing.T) {
 	}
 
 	// Exactly the expression services/setup.go uses to find an uploaded dataset.
-	found := filepath.Join(utils.ResolveDatasetDir(lookup), hash)
+	found, err := utils.ResolveDatasetPath(lookup, hash)
+	if err != nil {
+		t.Fatalf("ResolveDatasetPath: %v", err)
+	}
 	if _, err := os.Stat(found); err != nil {
 		t.Fatalf("a dataset uploaded as %s is not visible to a task created as %s: %v\nlooked at %s", upload, lookup, err, found)
 	}
@@ -97,7 +100,11 @@ func TestSaveDatasetIsFoundUnderAnotherSpellingOfTheSameAddress(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SaveDataset (lower): %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(utils.ResolveDatasetDir(upload), hash2)); err != nil {
+	back, err := utils.ResolveDatasetPath(upload, hash2)
+	if err != nil {
+		t.Fatalf("ResolveDatasetPath: %v", err)
+	}
+	if _, err := os.Stat(back); err != nil {
 		t.Fatalf("a dataset uploaded as %s is not visible to a task created as %s: %v", lookup, upload, err)
 	}
 
