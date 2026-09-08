@@ -124,6 +124,34 @@ routing/billing:
 The reconstructed plaintext (pre-upstream-rewrite) is stashed on the context for
 the §8 signature.
 
+### An envelope smuggled into a multipart body (SPEC §5.3.1)
+
+Step 1 detects an envelope in a JSON body. A client can also put one in a
+`multipart/form-data` part — the speech-to-text and image-editing shape — where
+step 1 never looks, because the body is not JSON. §5.3.1 is the rule against
+that: *a body that cannot be parsed as an envelope is not thereby an unsealed
+body*, and a body that **is** an envelope is one whatever `Content-Type` carries
+it. So `multipartNamesE2EEPart` enumerates the parts and refuses a request
+declaring one named `_e2ee`, on both entry points (`MaybeUnsealRequest` for the
+sync proxy, `RefuseAsync` for the async submit routes, which never reach the
+proxy and were the same hole one request shape over).
+
+The rule is on part **names**, never on the raw bytes: `prompt` carries arbitrary
+caller text, so a substring rule would 400 a legitimate transcription for
+mentioning the protocol.
+
+**Scope, deliberately.** It reads what Go's `mime/multipart` reads and nothing
+more. A malformed body, an unreadable boundary, a nested part, or a name spelled
+in an encoding Go declines to decode is **forwarded**. That is not an oversight:
+no endpoint accepting multipart has a sealed request profile, so a client
+evading the check has forwarded its own ciphertext upstream and gets garbage
+back — there is no adversary with a motive here, only an honest client with a
+bug, and `_e2ee` is plain ASCII that such a client has no reason to encode. The
+forwarded shapes are asserted by `TestMalformedAndExoticBodiesAreForwarded` so
+the limit is a decision on record. When speech-to-text gains a sealed request
+profile this rule inverts — multipart will legitimately carry sealed data — so
+the check is written to be replaced, not extended.
+
 ### Stale enc key self-heal (409)
 
 The enc key is measurement-tied, so a provider upgrade can rotate it while the

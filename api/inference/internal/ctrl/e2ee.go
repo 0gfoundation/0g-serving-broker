@@ -14,6 +14,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"mime"
+	"mime/multipart"
 	"slices"
 	"strings"
 
@@ -134,21 +136,50 @@ func hasE2EEMarker(reqBody []byte) bool {
 	return bytes.Contains(reqBody, []byte(e2eeBodyMarker))
 }
 
-// IsSealedRequest reports whether reqBody is a sealed envelope (SPEC §5): a JSON
-// object with a top-level "_e2ee" key. It is the same test MaybeUnsealRequest
-// makes before committing to fail-closed, exposed for entry points that cannot
-// SERVE a sealed request and so must refuse it rather than forward it.
+// multipartNamesE2EEPart reports whether a multipart body declares a form part
+// named `_e2ee` (SPEC §5.3.1).
 //
-// The async submit routes are those entry points. They do not go through the
-// proxy, so they never reach MaybeUnsealRequest; without this, a sealed envelope
-// POSTed to /v1/async/images/generations was enqueued verbatim, had its
-// cleartext rewritten by forceB64ResponseFormat (which also invalidates the
-// AAD), was forwarded upstream still sealed, and had its result served in
-// plaintext — while the user was billed for the garbage job. The prompt stayed
-// sealed throughout, so little was disclosed; what broke is that "a sealed
-// request is fail-closed" stopped being a property of the enclave and became a
-// property of which route the client picked.
-func (c *Ctrl) IsSealedRequest(reqBody []byte) bool {
+// Every other sealed-request test here begins by parsing the body as JSON. A
+// multipart body is not JSON, so hasE2EEMarker matched, json.Unmarshal failed,
+// and both entry points concluded "not an envelope, forward it" — sending the
+// envelope upstream inside a form field. §5.3.1 is the rule against exactly
+// that: a body that cannot be parsed as an envelope is not thereby an unsealed
+// body, and a body that IS an envelope is one whatever Content-Type carries it.
+//
+// Deliberately only what Go's own parser reads, and deliberately not
+// adversarial. Evading this check gains a client nothing: no endpoint accepting
+// multipart has a sealed request profile, so the payload stays ciphertext and
+// goes upstream as garbage either way — there is no attacker with a motive, only
+// an honest client with a bug. So a malformed body, an unreadable boundary, or a
+// name spelled in some encoding Go declines to decode is forwarded, as it was
+// before this existed. On the marker name itself there is nothing to disagree
+// about: `_e2ee` is plain ASCII with no tspecials, so a client sending that name
+// has no reason to encode it.
+//
+// FormName is empty for a part whose disposition is not form-data, which is the
+// wanted answer: such a part is not a form field and no client sends the marker
+// that way.
+func multipartNamesE2EEPart(contentType string, reqBody []byte) bool {
+	mediatype, params, err := mime.ParseMediaType(contentType)
+	if err != nil || !strings.HasPrefix(mediatype, "multipart/") || params["boundary"] == "" {
+		return false
+	}
+	reader := multipart.NewReader(bytes.NewReader(reqBody), params["boundary"])
+	for {
+		part, err := reader.NextPart()
+		if err != nil {
+			return false
+		}
+		if part.FormName() == e2eeBodyMarker {
+			return true
+		}
+	}
+}
+
+// isSealedJSON reports whether reqBody is a sealed envelope (SPEC §5): a JSON
+// object with a top-level "_e2ee" key. It is the same test MaybeUnsealRequest
+// makes before committing to fail-closed.
+func isSealedJSON(reqBody []byte) bool {
 	if !hasE2EEMarker(reqBody) {
 		return false
 	}
@@ -158,6 +189,36 @@ func (c *Ctrl) IsSealedRequest(reqBody []byte) bool {
 	}
 	_, ok := env[e2eeBodyMarker]
 	return ok
+}
+
+// RefuseAsync returns the reason the async submit routes must refuse reqBody, or
+// "" if they may serve it.
+//
+// Those routes cannot SERVE a sealed request: they do not go through the proxy,
+// so they never reach MaybeUnsealRequest. Without this, a sealed envelope POSTed
+// to /v1/async/images/generations was enqueued verbatim, had its cleartext
+// rewritten by forceB64ResponseFormat (which also invalidates the AAD), was
+// forwarded upstream still sealed, and had its result served in plaintext —
+// while the user was billed for the garbage job. The prompt stayed sealed
+// throughout, so little was disclosed; what broke is that "a sealed request is
+// fail-closed" stopped being a property of the enclave and became a property of
+// which route the client picked.
+//
+// It takes the Content-Type because an envelope has two ways in and only one of
+// them is JSON: /v1/async/images/edits accepts multipart/form-data, so a
+// JSON-only test called a body carrying the envelope in a form part "not sealed"
+// — the same hole, one request shape over.
+//
+// A reason string rather than a verdict enum, so a new refusal cannot be added
+// without a message, and no caller can fall through a switch into serving one.
+func (c *Ctrl) RefuseAsync(contentType string, reqBody []byte) string {
+	switch {
+	case multipartNamesE2EEPart(contentType, reqBody):
+		return fmt.Sprintf("e2ee: this multipart request declares a part named %q. A sealed request is sent as JSON, and no multipart endpoint can serve one", e2eeBodyMarker)
+	case isSealedJSON(reqBody):
+		return "e2ee: a sealed request cannot be served on the async endpoints, which enqueue the body and serve the result from a store in plaintext. Send it to the synchronous endpoint instead"
+	}
+	return ""
 }
 
 // MaybeUnsealRequest unseals a sealed E2EE request in-enclave and returns the
@@ -173,6 +234,12 @@ func (c *Ctrl) IsSealedRequest(reqBody []byte) bool {
 // plaintext fallback, SPEC §6) — a sealed request that cannot be opened, whose
 // signer_addr is not this enclave, or whose key_id is unknown is rejected.
 func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, reqBody []byte) ([]byte, error) {
+	// Asked FIRST, and of the Content-Type rather than the body: a multipart body
+	// never parses as JSON, so every test below it would call an envelope in a
+	// form part "not sealed" and forward it. See multipartNamesE2EEPart.
+	if multipartNamesE2EEPart(ctx.Request.Header.Get("Content-Type"), reqBody) {
+		return nil, fmt.Errorf("multipart request must not carry a sealed envelope: a part is named %q. A sealed request is sent as JSON", e2eeBodyMarker)
+	}
 	if !hasE2EEMarker(reqBody) {
 		return reqBody, nil
 	}
