@@ -34,11 +34,12 @@ jobs:
     - name: Prune untagged container versions
       uses: dataaxiom/ghcr-cleanup-action@d52806a0dc70b430571a37da1fde39733ffd640f # v1.2.2
       with:
-        owner: ${{ github.repository_owner }}
-        # Deliberately literal. This job deletes things; the target should not
-        # follow a fork or a rename on its own.
+        # Both halves deliberately literal. This job deletes things; the
+        # target should not follow a fork, a transfer or a rename on its own.
+        owner: 0gfoundation
         package: 0g-serving-broker
-        # Nothing recent is ever a candidate. Without this the window is purely
+        # Age floor for keep-n-untagged (it does not gate delete-orphaned-images
+        # below, which scans the full tag list). Without it the window is purely
         # count-based, so how long an image survives depends on unrelated build
         # churn -- and nine of the ten slots are already taken by live,
         # CI-signed images whose tag has since moved.
