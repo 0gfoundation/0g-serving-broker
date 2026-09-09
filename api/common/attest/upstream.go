@@ -278,6 +278,105 @@ func upstreamTallyError(want, got int) error {
 	return fmt.Errorf("%s payload says %s%d and spells %d member(s), so the set it names is not the set it lists", EventUpstreamSet, upstreamCountPrefix, want, got)
 }
 
+// RenderUpstreamSet renders the payload for one EventUpstreamSet record, or refuses.
+//
+// This is the writer's half of the encoding parseUpstreamSet reads, and it is here
+// rather than in the controller for the reason UpstreamSetHash is: one definition, or
+// the two sides drift. A writer holding its own copy of the grammar would be a second
+// implementation to keep correct, and the failure it produces is silent — a record
+// this reader calls unknown, or worse, one it reads as a different set.
+//
+// # It validates by round-tripping, not by restating the rules
+//
+// The payload is built, then parsed back with parseUpstreamSet, and the result
+// compared field by field against what was asked for. So every refusal the READER has
+// is automatically a refusal here, with the reader's own message, and a rule added to
+// the reader tightens the writer in the same commit. Restating the rules is what would
+// let them diverge, and this function exists to make that impossible rather than to
+// make it unlikely.
+//
+// It also means the caps come for free: a member line over maxUpstreamLine, or a name
+// spelled twice, is refused by the parse rather than by a check here that has to
+// remember to exist.
+//
+// Refusing LOCALLY is the point. A writer that emits a record the reader cannot read
+// has already extended RTMR3 with it — the register only appends, so the record is
+// permanent for the boot and the set reads as unknown until a good record lands. An
+// error returned here, before EmitEvent, is a config problem the operator can see and
+// fix; the same problem discovered by a verifier is one nobody is watching for.
+//
+// # What the record does and does not carry
+//
+// Exactly Name, URL and Identity — the three fields the grammar has. Upstream's other
+// fields are what a READER derives about a member (which compose service it matches,
+// which image that service pins); they are not claims a writer gets to make, so they
+// are not rendered, and the comparison below deliberately names the three fields
+// rather than comparing the struct, so that adding a derived field does not silently
+// start requiring the writer to supply it.
+//
+// # Order
+//
+// Sorted by name, so the payload is a function of the SET and not of the order the
+// caller happened to assemble it in. Without this, a config file whose upstreams were
+// reordered would produce a different payload — a new record, a new RTMR3 digest, and
+// a record that looks like a change when nothing changed. Callers that want the
+// config's order back can read it off Upstreams; UpstreamSetHash sorts regardless.
+//
+// The caller's slice is not reordered.
+func RenderUpstreamSet(members []Upstream) (string, error) {
+	// Before anything is built, and not left to the parse below to catch, because the
+	// rendering itself is what would cost: this is the one place a caller's own slice
+	// length sizes the work, and an unbounded one would spend the memory before the
+	// reader got a chance to refuse it. The rule parseUpstreamSet settles applies to
+	// its writer too.
+	if len(members) > maxUpstreamMembers {
+		return "", fmt.Errorf("cannot record %d upstreams: the %s grammar holds at most %d, so this config names more destinations than a set can", len(members), EventUpstreamSet, maxUpstreamMembers)
+	}
+
+	sorted := make([]Upstream, len(members))
+	copy(sorted, members)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s%d", upstreamCountPrefix, len(sorted))
+	for _, u := range sorted {
+		b.WriteString("\n")
+		b.WriteString(u.Name)
+		b.WriteString(" ")
+		b.WriteString(u.URL)
+		if u.Identity != "" {
+			b.WriteString(" ")
+			b.WriteString(u.Identity)
+		}
+	}
+	payload := b.String()
+
+	back, err := parseUpstreamSet(payload)
+	if err != nil {
+		return "", fmt.Errorf("this set cannot be recorded: %w", err)
+	}
+	// Unreachable while the header above is written from len(sorted): the parse already
+	// refuses a payload whose members disagree with its count, so agreeing with the count
+	// means agreeing with this length. A mutation deleting these three lines fails no
+	// test, and that is stated rather than papered over.
+	//
+	// Kept because it is the difference between "the count happened to match" and "the
+	// set that came back is the set that went in", and it becomes load-bearing the moment
+	// the header stops being derived from this slice — which is the kind of edit that
+	// happens. The same reasoning, and the same honesty about it, as the precedence line
+	// in resolve.go.
+	if len(back) != len(sorted) {
+		return "", fmt.Errorf("rendering %d upstreams produced a record of %d: the encoding here and the one in parseUpstreamSet disagree", len(sorted), len(back))
+	}
+	for i := range sorted {
+		if back[i].Name != sorted[i].Name || back[i].URL != sorted[i].URL || back[i].Identity != sorted[i].Identity {
+			return "", fmt.Errorf("upstream %q rendered as %q %q %q and read back as %q %q %q: the encoding here and the one in parseUpstreamSet disagree",
+				sorted[i].Name, sorted[i].Name, sorted[i].URL, sorted[i].Identity, back[i].Name, back[i].URL, back[i].Identity)
+		}
+	}
+	return payload, nil
+}
+
 // upstreamChanges reports how the set moved from prev to next, one line per name that
 // the two do not bind the same way, sorted by name:
 //
@@ -445,11 +544,21 @@ func describeUpstream(u Upstream) string {
 // A note for whoever writes the writer: these rules are STRICTER than what
 // inference/config accepts for a targetUrl today. Config never trims a trailing
 // slash from the service-level targetUrl, and it accepts a bare "/" path, a default
-// port and an uppercase host. A writer that emits configured URLs verbatim will
-// therefore produce a record this refuses, and the whole set goes unknown for a live,
-// valid deployment. Since readers must ship before writers, the writer cannot fix
-// that by relaxing this — it has to normalise before it emits, to exactly these
-// rules.
+// port and an uppercase host — so a config CAN hold a URL this refuses, and a writer
+// that emits one verbatim records a set that goes unknown for a live, valid
+// deployment. Since readers must ship before writers, the writer cannot fix that by
+// relaxing this.
+//
+// What that risk is NOT is a normalisation requirement. An earlier version of this
+// note asserted a writer emitting configured URLs verbatim "will therefore produce a
+// record this refuses". Measured against the 18 distinct targetUrl values in the 32
+// mainnet deployments on 2026-09-09: none is refused
+// (TestEveryRealDeploymentURLPassesVerbatim, which fails if that stops being true).
+// Config's looser grammar is headroom nobody has used, so a writer needs a
+// VALIDATION step — refuse locally and log, rather than record a set that reads as
+// unknown — and a normalising step would be speculative code on the one path where a
+// bug silently records the wrong destination. RenderUpstreamSet is that validation,
+// and it validates by round-tripping through this reader rather than restating it.
 // The caller splits each payload line with strings.Fields, so raw never arrives with
 // surrounding whitespace and this does not check for it.
 func validUpstreamURL(raw string) error {
