@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/0glabs/0g-serving-broker/common/attest"
 	"github.com/0glabs/0g-serving-broker/inference/config"
@@ -234,6 +235,71 @@ func TestRecordUpstreamSetReturnsAFailedEmit(t *testing.T) {
 	if err := c2.InvalidateUpstreamSet(context.Background()); err == nil {
 		t.Fatal("a failed invalidation was swallowed")
 	}
+}
+
+// Neither path may block without bound.
+//
+// This is the one that could take a deployment down. main.go calls RecordUpstreamSet
+// with context.Background() BEFORE it starts the attestation proxy and the HTTP server,
+// and the dstack SDK adds no deadline of its own — so a hung /var/run/dstack.sock left
+// the controller stuck at boot, and with it the proxy the broker needs for quotes and
+// the /health endpoint that would have reported it. A record of where plaintext may go
+// must not be able to take the deployment down to write itself.
+//
+// Asserted by inspecting the DEADLINE the emitter is handed, under the unbounded parent
+// context main.go really passes — not by waiting for a hung socket to time out. Waiting
+// is the obvious version and it cost 60 seconds of every run of this package for a
+// property that is decided the moment the context is built; and it would have measured
+// the length of the timeout rather than the existence of one, which is not the bug.
+//
+// It catches the same thing: with context.Background() passed straight through,
+// ctx.Deadline() reports no deadline and this fails.
+func TestNeitherRecordingPathBoundsItself(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		call func(c *Ctrl) error
+	}{
+		{"the record", func(c *Ctrl) error { return c.RecordUpstreamSet(context.Background()) }},
+		{"the invalidation", func(c *Ctrl) error { return c.InvalidateUpstreamSet(context.Background()) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := recordCtrl(t, true, config.Service{TargetURL: "http://vllm:8000/v1"}, nil)
+			seen := &deadlineCapturingEmitter{}
+			c.emitter = seen
+
+			before := time.Now()
+			if err := tc.call(c); err != nil {
+				t.Fatalf("%v", err)
+			}
+			if !seen.called {
+				t.Fatal("nothing was emitted, so no deadline was observed and this proves nothing")
+			}
+			if !seen.hasDeadline {
+				t.Fatal("the emit ran on a context with NO deadline: at boot that is a hung dstack socket wedging the controller before the attestation proxy and /health start")
+			}
+			// Bounded by the constant, allowing for the time between the two reads. The upper
+			// bound is what matters; an implementation setting an hour would satisfy "has a
+			// deadline" while still being a boot that never finishes in practice.
+			if limit := before.Add(recordUpstreamSetTimeout + time.Second); seen.deadline.After(limit) {
+				t.Errorf("deadline is %v past the budget: want at most %v from the call", seen.deadline.Sub(limit), recordUpstreamSetTimeout)
+			}
+		})
+	}
+}
+
+// deadlineCapturingEmitter records whether the context it was handed carries a deadline,
+// and when. It is the whole apparatus needed to answer "does this path bound itself",
+// which a hanging socket answers far more slowly.
+type deadlineCapturingEmitter struct {
+	called      bool
+	hasDeadline bool
+	deadline    time.Time
+}
+
+func (e *deadlineCapturingEmitter) EmitEvent(ctx context.Context, event string, payload []byte) error {
+	e.called = true
+	e.deadline, e.hasDeadline = ctx.Deadline()
+	return nil
 }
 
 // The naming rule, in isolation, because it is what a name derived from the set would

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"time"
 
 	"github.com/0glabs/0g-serving-broker/common/attest"
 	"github.com/0glabs/0g-serving-broker/inference/config"
@@ -17,6 +18,25 @@ import (
 // reason: RTMR3 only appends, so a record that has become wrong cannot be withdrawn —
 // it can only be superseded by one that says less.
 const upstreamSetInvalidated = "invalidated"
+
+// recordUpstreamSetTimeout bounds the one emit each of the two functions below makes.
+//
+// It exists because the boot path had none. main.go calls RecordUpstreamSet with
+// context.Background() BEFORE it starts the attestation proxy and the HTTP server, and
+// the dstack SDK builds every call with http.NewRequestWithContext and adds no deadline
+// of its own — so a hung /var/run/dstack.sock blocked the controller forever, and with
+// it the proxy the broker needs for quotes and the /health endpoint that would have
+// said so. A record of where plaintext may go must not be able to take the deployment
+// down to write itself.
+//
+// 30 seconds, the same as restoreTimeout, which bounds the other paths whose whole
+// remaining work is one emit. Long enough that a busy socket is not mistaken for a dead
+// one, short enough that a dead one is a slow boot rather than no boot.
+//
+// Nested under whatever the caller already has: ApplyCoreConfig runs on
+// configChangeTimeout, and context.WithTimeout keeps the earlier of the two deadlines,
+// so this can only tighten a budget and never extend one.
+const recordUpstreamSetTimeout = 30 * time.Second
 
 // RecordUpstreamSet records the set of destinations this deployment permits.
 //
@@ -57,6 +77,9 @@ func (c *Ctrl) RecordUpstreamSet(ctx context.Context) error {
 		// every reader of this deployment's quote can read the record — see the field.
 		return nil
 	}
+
+	ctx, cancel := context.WithTimeout(ctx, recordUpstreamSetTimeout)
+	defer cancel()
 
 	members, err := upstreamsFromConfig(&c.fullConfig.Service)
 	if err != nil {
@@ -106,6 +129,9 @@ func (c *Ctrl) InvalidateUpstreamSet(ctx context.Context) error {
 	if !c.config.RecordUpstreamSet {
 		return nil
 	}
+
+	ctx, cancel := context.WithTimeout(ctx, recordUpstreamSetTimeout)
+	defer cancel()
 
 	if err := c.emitter.EmitEvent(ctx, attest.EventUpstreamSet, []byte(upstreamSetInvalidated)); err != nil {
 		return fmt.Errorf("superseding the recorded upstream set after a config change: %w", err)
