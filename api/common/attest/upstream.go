@@ -387,6 +387,18 @@ func composeServiceLookup(services map[string]string) map[string]composeService 
 	lookup := make(map[string]composeService, len(services))
 	ambiguous := make(map[string]bool)
 	for name, image := range services {
+		// A service with no image is skipped, which is what makes PinnedImage's "set
+		// exactly when ComposeService is" hold HERE rather than only at the one caller.
+		//
+		// PinnedImages already drops imageless services, so through the resolver this
+		// never fires. But the invariant was stated unconditionally in PinnedImage's doc
+		// while being enforced a function away, and a caller handed a map with an empty
+		// image got a classified member with no image — a member reported as a container
+		// this deployment declares, with nothing said about what runs in it, which is the
+		// one combination the two fields are documented not to produce.
+		if image == "" {
+			continue
+		}
 		host := strings.ToLower(name)
 		if _, seen := lookup[host]; seen {
 			ambiguous[host] = true

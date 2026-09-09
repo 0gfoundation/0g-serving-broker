@@ -495,6 +495,15 @@ func ResolveRunningState(v VerifiedQuote, tcbInfoJSON []byte, brokerService stri
 	// the function's own premise is gone. And the alternative is worse than an error:
 	// leaving every member unclassified would report a set in which nothing is inside the
 	// boundary, which is a claim, and a false one.
+	// The state test is redundant against the length test today, and stated rather than
+	// left to look load-bearing: an unreadable record sets Upstreams to nil along with the
+	// state, and an unrecorded one never sets it, so neither reaches a non-zero length. A
+	// mutation dropping the state test fails no test.
+	//
+	// Kept because the two say different things — "the set is known" and "there is
+	// something in it" — and the first becomes the only guard the moment a future state
+	// carries members it does not vouch for, which is exactly the kind of edit a fourth
+	// state would be.
 	if state.UpstreamsState == UpstreamsKnown && len(state.Upstreams) > 0 {
 		images, err := PinnedImages(tcbInfoJSON)
 		if err != nil {
