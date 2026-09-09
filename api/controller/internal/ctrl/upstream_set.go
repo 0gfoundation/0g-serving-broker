@@ -119,6 +119,19 @@ func (c *Ctrl) RecordUpstreamSet(ctx context.Context) error {
 // A later change can re-derive instead of invalidating, which needs the new content
 // parsed with the same precedence the loader applies (TARGET_URL over the file). That
 // is a separate change; this is the fail-closed floor under it.
+//
+// # Why ApplyCoreConfig is the only caller
+//
+// It is the only path that can change the effective set. The other two that touch a
+// container leave it alone, and that rests on something worth naming because it could
+// change: docker.imageEnvUpdates rewrites exactly IMAGE_REPO and IMAGE_DIGEST and
+// mergeEnv preserves everything else, so an upgrade cannot move TARGET_URL — which is
+// the one input to the set that does not live in the config file. UpdatePrometheusConfig
+// rewrites only PROMETHEUS_CONFIG.
+//
+// So if imageEnvUpdates ever grows to include TARGET_URL, UpdateImages needs this call
+// too, and until then adding it there would record an invalidation for a change that
+// did not happen.
 func (c *Ctrl) InvalidateUpstreamSet(ctx context.Context) error {
 	// Gated on the same switch as the record itself, and it has to be: a deployment that
 	// never recorded a set has nothing to supersede, and writing this record anyway would
