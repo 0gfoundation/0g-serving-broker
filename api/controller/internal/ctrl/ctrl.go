@@ -537,6 +537,20 @@ func (c *Ctrl) ApplyCoreConfig(ctx context.Context, configContent string) error 
 		return fmt.Errorf("recording the config change in RTMR3: %w", err)
 	}
 
+	// Before the write, for the reason the config hash above is recorded before it: the
+	// new file may permit different destinations, and the recorded set must not still name
+	// the old ones once the broker restarts onto it.
+	//
+	// Superseded rather than re-derived, because this process cannot read the new set.
+	// c.fullConfig was parsed at startup and nothing reloads it, and the effective set is
+	// not a function of the file alone — TARGET_URL in the compose takes precedence over
+	// it. Re-deriving needs the new content run through the loader with that precedence
+	// applied, which is a separate change; leaving the old record standing is the one
+	// outcome that must not happen, so this is the floor under it.
+	if err := c.InvalidateUpstreamSet(ctx); err != nil {
+		return c.abortConfigChange(ctx, err)
+	}
+
 	if err := os.WriteFile(c.config.ConfigFile, []byte(configContent), 0644); err != nil {
 		return c.abortConfigChange(ctx, err)
 	}

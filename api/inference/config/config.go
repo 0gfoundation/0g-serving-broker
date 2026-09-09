@@ -1362,6 +1362,22 @@ type ControllerConfig struct {
 	Logger         *config.LoggerConfig `yaml:"logger"`         // Logger config
 	ConfigFile     string               `yaml:"-"`              // Resolved config file path (set at runtime, not from yaml)
 
+	// RecordUpstreamSet turns on recording the permitted upstream set into RTMR3
+	// (attest.EventUpstreamSet). Default OFF, and the default is the point.
+	//
+	// attest.ResolveRunningState HARD-FAILS on a zg- event it does not recognise — it
+	// cannot say what a CVM is running when the log holds a record it cannot read — so
+	// the first deployment to emit this record makes itself unverifiable to every reader
+	// that predates attest's support for it. That ordering is a property of the ledger,
+	// not a choice: readers must be updated first, and a reader in an SDK or a router is
+	// updated by whoever deployed it, not by merging here.
+	//
+	// So this exists to make merging the writer safe while that rollout happens. Turning
+	// it on is a per-deployment decision to be made once every consumer of that
+	// deployment's quote can read the record, and there is no way for this process to
+	// check that for itself.
+	RecordUpstreamSet bool `yaml:"recordUpstreamSet"`
+
 	// Deprecated: the managed container names are compile-time constants in
 	// controller/internal/ctrl and nothing reads this field.
 	//
