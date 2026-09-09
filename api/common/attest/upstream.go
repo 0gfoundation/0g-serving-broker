@@ -312,9 +312,16 @@ func ValidUpstreamName(s string) bool {
 // let them diverge, and this function exists to make that impossible rather than to
 // make it unlikely.
 //
-// It also means the caps come for free: a member line over maxUpstreamLine, or a name
-// spelled twice, is refused by the parse rather than by a check here that has to
-// remember to exist.
+// It also means most refusals come for free: a name spelled twice, an unrenderable URL,
+// an identity the pattern will not take — all refused by the parse rather than by a
+// check here that has to remember to exist.
+//
+// The two SIZE caps are the exception, and both are checked before anything is built.
+// Round-tripping cannot bound the cost of producing the thing it refuses: measured on
+// 1024 members with 1 MiB URLs, building the payload and then letting the parse refuse
+// its first line allocated 5.37 GB. A cap enforced only after the whole payload exists
+// is not a cap on the writer, so the member count and the line length are both checked
+// on the way in.
 //
 // Refusing LOCALLY is the point. A writer that emits a record the reader cannot read
 // has already extended RTMR3 with it — the register only appends, so the record is
@@ -357,6 +364,25 @@ func RenderUpstreamSet(members []Upstream) (string, error) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s%d", upstreamCountPrefix, len(sorted))
 	for _, u := range sorted {
+		// Before the line is built, and not left to the parse below.
+		//
+		// An earlier version of this function's doc said the caps "come for free" because
+		// the parse enforces them. Half true: the MEMBER cap is checked above, but the LINE
+		// cap was enforced only after the whole payload existed. Measured on 1024 members
+		// with 1 MiB URLs — a config field holding a pasted file, not an attack: 5.37 GB
+		// allocated to produce a refusal about the first line. On a CVM that is the
+		// controller OOMing at boot, which is the failure this function's own timeout was
+		// added to prevent.
+		//
+		// Two bytes for the separators, and the identity's only when there is one, so this
+		// is the length the loop below actually writes rather than an approximation of it.
+		line := len(u.Name) + 1 + len(u.URL)
+		if u.Identity != "" {
+			line += 1 + len(u.Identity)
+		}
+		if line > maxUpstreamLine {
+			return "", fmt.Errorf("upstream %q renders a %d-byte line, over the %d-byte limit: a member is a name, a base URL and an optional identity", u.Name, line, maxUpstreamLine)
+		}
 		b.WriteString("\n")
 		b.WriteString(u.Name)
 		b.WriteString(" ")

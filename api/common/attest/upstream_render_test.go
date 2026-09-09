@@ -2,6 +2,7 @@ package attest
 
 import (
 	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -249,6 +250,97 @@ func TestRenderRefusesWhatTheReaderWouldRefuse(t *testing.T) {
 			}
 			if tc.wantErr != "" && !strings.Contains(err.Error(), tc.wantErr) {
 				t.Errorf("error %q does not mention %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// What RenderUpstreamSet allocates must be bounded by what it has VALIDATED, not by
+// what it was handed — the same rule parseUpstreamSet settles, applied to its writer.
+//
+// Asserted as a budget rather than as the absence of a particular mistake, because the
+// mistake this caught is the shape that keeps coming back: round-tripping bounds what
+// the writer ACCEPTS but not what it costs to produce the thing being refused. Building
+// the payload first and letting the parse refuse its first line allocated 5.37 GB on
+// the case below, which on a CVM is the controller OOMing at boot.
+//
+// The input is a config file rather than an RTMR3 payload, so this is an operator's
+// mistake and not an attacker's — a targetUrl field holding a pasted file. It still
+// takes the deployment down, and a caller of an exported function is entitled to a
+// refusal that costs less than the thing it refuses.
+func TestRenderAllocationDoesNotScaleWithTheInput(t *testing.T) {
+	// A megabyte per member across a full set: 1 GiB of input, all of it refusable on the
+	// first line. The budget is generous on purpose — it is not measuring a figure, it is
+	// asserting that the cost does not track the input, and the mistake missed it by four
+	// orders of magnitude.
+	const budget = 8 << 20
+	pad := strings.Repeat("p", 1<<20)
+	members := make([]Upstream, 0, maxUpstreamMembers)
+	for i := 0; i < maxUpstreamMembers; i++ {
+		members = append(members, Upstream{
+			Name: fmt.Sprintf("n%d", i),
+			URL:  fmt.Sprintf("http://h%d:1/%s", i, pad),
+		})
+	}
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	payload, err := RenderUpstreamSet(members)
+	runtime.ReadMemStats(&after)
+
+	if err == nil {
+		t.Fatalf("rendered a %d-byte payload from 1 MiB member lines, want a refusal", len(payload))
+	}
+	if alloc := after.TotalAlloc - before.TotalAlloc; alloc > budget {
+		t.Errorf("refusing the set allocated %d bytes, over the %d-byte budget: the cost is tracking the input rather than what was validated", alloc, budget)
+	}
+}
+
+// The line cap's boundary, and WHICH guard enforces it.
+//
+// The budget test above passes whether the arithmetic here is exact or a couple of bytes
+// out — being off by the separators over-builds by 4 KB, not by a gigabyte — so two
+// mutations that miscounted the line survived it. What separates them is who refuses: a
+// line this check gets right is refused here, naming the member, while one it
+// under-counts slips through and is refused by the parse, naming a payload the operator
+// never wrote.
+//
+// So the assertions are on the error text, and a line at exactly the cap has to render.
+func TestRenderLineCapBoundaryIsEnforcedHere(t *testing.T) {
+	// name(1) + " "(1) + url = maxUpstreamLine exactly.
+	atCap := Upstream{Name: "n", URL: "http://h/" + strings.Repeat("p", maxUpstreamLine-2-len("http://h/"))}
+	if got := len(atCap.Name) + 1 + len(atCap.URL); got != maxUpstreamLine {
+		t.Fatalf("the fixture renders %d bytes, want exactly %d", got, maxUpstreamLine)
+	}
+	if _, err := RenderUpstreamSet([]Upstream{atCap}); err != nil {
+		t.Errorf("a line of exactly %d bytes was refused: %v", maxUpstreamLine, err)
+	}
+
+	// One byte over, in each of the three fields that make up the line, so a miscount of
+	// any one of them is caught.
+	for _, tc := range []struct {
+		name string
+		u    Upstream
+	}{
+		{"one byte over in the URL", Upstream{Name: "n", URL: atCap.URL + "p"}},
+		{"one byte over in the name", Upstream{Name: "nn", URL: atCap.URL}},
+		{"one byte over in the identity", Upstream{
+			Name: "n",
+			URL:  atCap.URL[:len(atCap.URL)-2],
+			// name(1) + " "(1) + url(cap-4) + " "(1) + identity(2) = cap+1
+			Identity: "ab",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := RenderUpstreamSet([]Upstream{tc.u})
+			if err == nil {
+				t.Fatal("a line over the cap rendered")
+			}
+			// "upstream %q renders a …-byte line" is this check; "payload has a …-byte line"
+			// is the parse. Reaching the parse means the line was built first.
+			if !strings.Contains(err.Error(), "renders a") {
+				t.Errorf("refused by the parse rather than before the build, so the line was built: %v", err)
 			}
 		})
 	}
