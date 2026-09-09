@@ -83,6 +83,50 @@ func TestRenderRoundTripsThroughTheReader(t *testing.T) {
 	}
 }
 
+// ValidUpstreamName must answer for exactly the strings a record's name field accepts,
+// because a writer deriving a name asks it BEFORE it has a set to render — so a
+// disagreement here surfaces as a set that reads as unknown, not as a local refusal.
+func TestValidUpstreamNameAgreesWithTheRecord(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		want bool
+	}{
+		{"engine1", true},
+		{"a", true},
+		{"0gm-sglang", true},
+		{"phala-inference-guard", true},
+		{"qwavity-sia-vllm", true},
+		{"api", true},
+		{"vllm", true},
+		{"a_b-c9", true},
+		{strings.Repeat("a", 63), true},
+		{"", false},
+		{strings.Repeat("a", 64), false},
+		{"openrouter.ai", false}, // a dotted FQDN, which is why an identity is required there
+		{"Engine1", false},
+		{"-engine", false},
+		{"_engine", false},
+		{"engine 1", false},
+		{"engine=1", false},
+		{"еngine1", false}, // Cyrillic first letter
+	} {
+		t.Run(fmt.Sprintf("%q", tc.name), func(t *testing.T) {
+			if got := ValidUpstreamName(tc.name); got != tc.want {
+				t.Fatalf("ValidUpstreamName(%q) = %v, want %v", tc.name, got, tc.want)
+			}
+			// And the record itself must agree, which is the property that matters: a name
+			// this accepts has to survive a render, and one it rejects has to be refused.
+			_, err := RenderUpstreamSet([]Upstream{{Name: tc.name, URL: "http://h:1/v1"}})
+			if tc.want && err != nil {
+				t.Errorf("ValidUpstreamName accepted %q but the record refused it: %v", tc.name, err)
+			}
+			if !tc.want && err == nil {
+				t.Errorf("ValidUpstreamName rejected %q but the record accepted it", tc.name)
+			}
+		})
+	}
+}
+
 // The exact bytes, pinned.
 //
 // The round-trip cannot pin them: strings.Fields collapses any run of whitespace, so a

@@ -278,6 +278,23 @@ func upstreamTallyError(want, got int) error {
 	return fmt.Errorf("%s payload says %s%d and spells %d member(s), so the set it names is not the set it lists", EventUpstreamSet, upstreamCountPrefix, want, got)
 }
 
+// ValidUpstreamName says whether s may be a member's name in an EventUpstreamSet
+// record.
+//
+// Exported for a writer that DERIVES names rather than reading them from a field — a
+// controller naming an upstream after its compose service, say. Such a writer has to
+// answer "can this string be a name" before it has a set to render, and the answer has
+// to be this pattern and not a second copy of it: the name goes into the canonical text
+// UpstreamSetHash covers, so a writer accepting a name this reader would refuse records
+// a set that reads as unknown, and RenderUpstreamSet would only tell it so once the
+// whole set was assembled.
+//
+// It is the pattern and nothing else — no opinion on whether the name is a good one,
+// which is the writer's business.
+func ValidUpstreamName(s string) bool {
+	return upstreamNamePattern.MatchString(s)
+}
+
 // RenderUpstreamSet renders the payload for one EventUpstreamSet record, or refuses.
 //
 // This is the writer's half of the encoding parseUpstreamSet reads, and it is here
