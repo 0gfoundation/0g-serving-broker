@@ -31,6 +31,23 @@ const (
 	// EventConfigUpdate carries hex(sha256(config file content)).
 	EventConfigUpdate = "zg-config-update"
 
+	// EventUpstreamSet carries the WHOLE set of destinations the broker may forward
+	// unsealed plaintext to: a header line naming how many members follow, then one
+	// member per line.
+	//
+	//	count=2
+	//	engine1 http://engine-1:8000/v1
+	//	vendor https://vendor.example/v1 openrouter
+	//
+	// That set is the complete list of places a request can end up, which is what the
+	// config's mapping of models onto names cannot itself establish — the mapping
+	// lives in the config file, and no boot measurement covers its content.
+	//
+	// A record is a snapshot, not a mutation, so the last one decides and the earlier
+	// ones are history. See parseUpstreamSet for that, and for why the count has to
+	// travel in the same payload as the members it counts.
+	EventUpstreamSet = "zg-upstream-set"
+
 	// EventNamespace prefixes every event this project writes. dstack already
 	// writes app-id, compose-hash and system-ready into RTMR3, and other
 	// components may add their own; an unprefixed "image-update" could collide
@@ -157,8 +174,117 @@ type RunningState struct {
 	// learns that the file changed and when, relative to the image records — not what it
 	// changed to.
 	ConfigSHA256 string
+	// Upstreams is the set of destinations the ledger permits, in the order the last
+	// EventUpstreamSet record listed them. Meaningful only when UpstreamsState is
+	// UpstreamsKnown.
+	//
+	// The order is for reading the set, not for identifying it: UpstreamSetHash sorts,
+	// so two deployments permitting the same destinations agree whatever order their
+	// records listed them in.
+	//
+	// What the set is worth depends on the provider, which this package does not
+	// know: for a self-hosted deployment every entry is a container inside the CVM,
+	// so the set says the plaintext did not leave; for one forwarding to an external
+	// vendor the plaintext leaves by definition, and the set says which vendors could
+	// have received it. This package reports the set; the caller decides what it
+	// establishes.
+	Upstreams []Upstream
+	// UpstreamsState is UpstreamsUnrecorded, UpstreamsKnown or UpstreamsUnknown, and
+	// it is the single source of truth for which of the three this answer is.
+	//
+	// A string rather than a bool pair, and certainly rather than "is UpstreamsErr
+	// nil": this type is destined for the SDK, so it gets transported, and an `error`
+	// field marshals to `{}` under encoding/json. A verifier on the far side of that
+	// would render an unreplayable log as "records appeared, zero permitted
+	// destinations" — the fail-open direction the three states exist to prevent.
+	//
+	//   UpstreamsUnrecorded  no record appeared. The deployment predates these
+	//                        records or never writes them, so it forwards according
+	//                        to a config no measurement covers and NOTHING here
+	//                        bounds where plaintext goes.
+	//   UpstreamsKnown       the set is Upstreams, and it may be empty. Empty is the
+	//                        opposite of unrecorded: a record said "none", which is a
+	//                        bound of zero.
+	//   UpstreamsUnknown     the deciding record could not be read. UpstreamsErr says
+	//                        why.
+	//
+	// Collapsing unrecorded and empty would be worst once the set feeds the signing
+	// key's derivation path: an unbounded deployment and one explicitly bounded to
+	// nothing would derive the same key.
+	UpstreamsState string
+	// UpstreamsErr says why the set is unknown, and is empty in the other two states.
+	//
+	// A string and not an `error`, for the reason UpstreamsState is a string: an
+	// `error` field marshals to `{}` and cannot be unmarshalled back at all, so the
+	// ONE state that carries a reason — unknown — would fail to decode, and an SDK
+	// consumer doing the ordinary `if err := json.Unmarshal(...)` would discard the
+	// whole RunningState for precisely the log a verifier most needs to see.
+	//
+	// Nothing matches on this value, so no error identity is lost by flattening it.
+	//
+	// Unknown is reported rather than returned as a hard error because the rest of
+	// this answer does not depend on it: which image the broker runs and which keys it
+	// holds are established by other records, and an unreadable upstream record must
+	// not take them down with it. It is also recoverable — appending a readable record
+	// after it is a complete fix, exactly as it is for the image record — so failing
+	// the whole call would be refusing to answer a question a live CVM can still
+	// settle.
+	//
+	// What is NOT done is reporting the members of an unreadable record that happened
+	// to parse. A partial set understates where plaintext can go, which is the
+	// direction that misleads.
+	UpstreamsErr string
+	// UpstreamChanges is the history the final set does not show: one line for every
+	// way a record differed from the record before it, in the order the records
+	// appeared.
+	//
+	//   "<name>: added as <URL> (<identity>)"
+	//   "<name>: <old URL> (<old identity>) -> <new URL> (<new identity>)"
+	//   "<name>: <old URL> (<old identity>) -> withdrawn"
+	//   "a superseded <event> record could not be read: <reason>"
+	//
+	// The first record of the boot contributes nothing — it is the baseline, not a
+	// change — and neither does a record identical to its predecessor, which is what a
+	// writer re-emitting its unchanged table produces. So empty is the ordinary case,
+	// including on a CVM that has rebooted many times.
+	//
+	// The last line is the one case where an unreadable record still leaves a trace.
+	// Only the last record decides the set, so a garbage record followed by a good one
+	// resolves to UpstreamsKnown; without this the fact that the log held something
+	// unreadable would not appear in either value a caller consumes.
+	//
+	// It exists because Upstreams and UpstreamSetHash — the two values a caller
+	// actually consumes — describe only the final state. Telling a caller to walk
+	// Events for the rest is not a mitigation: neither of those values does that.
+	//
+	// Both directions of change are fail-open. Rewriting a name from an external vendor
+	// to something that looks like an in-CVM container makes a deployment appear to have
+	// kept plaintext inside. Withdrawing an external vendor leaves a set of nothing but
+	// in-CVM containers, which reads the same way — while the log itself holds the
+	// evidence that plaintext could have left minutes earlier. And this is the one place
+	// in this ledger where last-wins has no cross-check: an image record's signer must
+	// match the quote's report_data, and nothing yet ties an upstream record to anything
+	// outside the log.
+	//
+	// A caller treating a non-empty value as suspicious is making a judgement this
+	// package does not make: a legitimate reconfiguration produces one too.
+	UpstreamChanges []string
 	// Events is the full runtime event sequence whose replay matched the quote.
 	Events []RuntimeEvent
+}
+
+// Upstream is one permitted destination for unsealed plaintext.
+type Upstream struct {
+	// Name is what the config's model mapping refers to. Unique within a set: a name
+	// bound to two URLs at once would make that mapping unreadable, which is the whole
+	// point of recording the set, so a record naming one twice is refused outright.
+	Name string
+	// URL is the destination's base URL, exactly as recorded.
+	URL string
+	// Identity is the upstream's machine-key identity, empty when the record
+	// carried none. Only meaningful for upstreams outside this CVM, where it is
+	// what a routing proof attributes the request to.
+	Identity string
 }
 
 // ResolveRunningState answers "what is this CVM running", and only that.
@@ -239,6 +365,10 @@ func ResolveRunningState(v VerifiedQuote, tcbInfoJSON []byte, brokerService stri
 	// writer emitting it: refusing beats believing the record it replaced.
 	state := &RunningState{ComposeHash: composeHash, Events: events}
 	var imageErr, configErr error
+	// The last set that could be read, and whether there was one. Kept separately from
+	// state.Upstreams because an unreadable record clears that — see the upstream case.
+	var lastSet []Upstream
+	var haveSet bool
 	for _, event := range ledger {
 		if !strings.HasPrefix(event.Event, EventNamespace) {
 			continue
@@ -253,6 +383,41 @@ func ResolveRunningState(v VerifiedQuote, tcbInfoJSON []byte, brokerService stri
 				configErr = fmt.Errorf("%s payload %q is not a hex sha256", EventConfigUpdate, sum)
 			}
 			state.ConfigSHA256 = sum
+		case EventUpstreamSet:
+			// One record carries the whole set, so the last one decides — the same rule as
+			// the two record types above, and it holds for the same reason: RTMR3 only
+			// appends, so the only way to correct a record is to write a better one after
+			// it, and treating an earlier record as binding would let one bad write make a
+			// CVM unverifiable for the rest of its boot with no repair available.
+			//
+			// Unlike the image record, an unreadable last record is reported rather than
+			// returned as an error, because the answers that do not depend on it still
+			// hold — see UpstreamsErr for why that asymmetry is deliberate.
+			next, err := parseUpstreamSet(string(event.Payload))
+			if err != nil {
+				// Any earlier set is dropped along with the state, because this record
+				// superseded it: reporting a set the log has already moved past would be a
+				// claim about where plaintext goes now, and it would be wrong.
+				state.Upstreams, state.UpstreamsState, state.UpstreamsErr = nil, UpstreamsUnknown, err.Error()
+				break
+			}
+			if state.UpstreamsState == UpstreamsUnknown {
+				// This record repairs the set, and that repair is the whole reason an earlier
+				// bad record is not fatal. But it also erases the only trace of it from both
+				// values a caller consumes, so the fact is kept here.
+				state.UpstreamChanges = append(state.UpstreamChanges, fmt.Sprintf("a superseded %s record could not be read: %s", EventUpstreamSet, state.UpstreamsErr))
+			}
+			// Compared against the last set that READ, not against state.Upstreams, which an
+			// unreadable record in between will have cleared. Otherwise an unreadable record
+			// would suppress the change log across itself: write garbage, then the rewritten
+			// set, and the rewrite goes unreported — and the garbage is written by whoever
+			// writes the records, so that would be a way to hide exactly what this log
+			// exists to show.
+			if haveSet {
+				state.UpstreamChanges = append(state.UpstreamChanges, upstreamChanges(lastSet, next)...)
+			}
+			lastSet, haveSet = next, true
+			state.Upstreams, state.UpstreamsState, state.UpstreamsErr = next, UpstreamsKnown, ""
 		default:
 			return nil, fmt.Errorf("unrecognised %s event %q: this reader is older than the CVM that wrote the log, so it cannot say what is running", EventNamespace, event.Event)
 		}
@@ -263,7 +428,6 @@ func ResolveRunningState(v VerifiedQuote, tcbInfoJSON []byte, brokerService stri
 	if configErr != nil {
 		return nil, configErr
 	}
-
 	// A record wins over the compose pin, and the two are mutually exclusive.
 	//
 	// Redundant today, deliberately: digestOfImageRef cannot answer with an empty digest and no
