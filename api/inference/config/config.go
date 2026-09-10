@@ -626,6 +626,23 @@ func (s *Service) IsStandard() bool {
 	return s.ProviderType == constant.ProviderTypeStandard
 }
 
+// IsSPML returns true for the verifiable-inference provider: LDD-verified
+// serving with pool-funded GPU payouts. See constant.ProviderTypeSPML.
+func (s *Service) IsSPML() bool {
+	return s.ProviderType == constant.ProviderTypeSPML
+}
+
+// IsSelfHosted returns true when the model runs beside the broker rather than
+// behind someone else's API — decentralized and spml.
+//
+// This exists so that "not a forwarder" stops being written as an implicit else
+// branch. Every such branch was correct only because decentralized happened to
+// be the default; spell the predicate out and adding a fifth type stays a
+// local change instead of an audit of every conditional.
+func (s *Service) IsSelfHosted() bool {
+	return !s.IsForwarder()
+}
+
 // IsForwarder returns true for provider types that proxy to an external upstream
 // rather than co-locating the model with the broker (centralized and standard).
 // These share forwarding behavior: TargetSeparated is forced, per-model pricing is
@@ -996,6 +1013,41 @@ type AssayAttestation struct {
 	// inference keeps flowing, verdicts already carry the async settlement
 	// gate) or "warn-only" (log, gate nothing).
 	OnFail string `yaml:"onFail"`
+	// Source selects the evidence source: "tapp-cli" (default; exec or
+	// sidecar file mode above, boot-chain answered by the shared AS's policy
+	// library) or "tappscan" (docs/spml-attestation-relay.md: read tappscan's
+	// record for the app, cross-check the signer against the TappRegistry
+	// and the TLS key against the assay's live port, sign the statement with
+	// the TEE key). The tappscan source needs no policy id at all.
+	Source string `yaml:"source"`
+	// Tappscan locates the scan service for source=tappscan. PubkeyPin is
+	// sha256 of its TLS SPKI — the same key the shared AS serves, since
+	// both run on the same tapp; tls_key_source=local, so it changes when
+	// that host restarts. MaxAgeSeconds bounds how old the record's own
+	// checked_at may be (default 6h; tappscan re-checks roughly hourly).
+	Tappscan struct {
+		URL           string `yaml:"url"`
+		PubkeyPin     string `yaml:"pubkeyPin"`
+		MaxAgeSeconds int    `yaml:"maxAgeSeconds"`
+	} `yaml:"tappscan"`
+	// Expected is what the record must say about the assay's boot chain:
+	// Image is the reference-values path tappscan reports as matched (e.g.
+	// gcp/uki/v0.7.0/dev.json); Uki optionally pins the measurement itself.
+	Expected struct {
+		Image string `yaml:"image"`
+		Uki   string `yaml:"uki"`
+	} `yaml:"expected"`
+}
+
+// IsTappscan reports whether the tappscan source is selected.
+func (a AssayAttestation) IsTappscan() bool { return a.Source == "tappscan" }
+
+// MaxAge of the tappscan record's own checked_at (default 6h).
+func (a AssayAttestation) TappscanMaxAge() time.Duration {
+	if a.Tappscan.MaxAgeSeconds <= 0 {
+		return 6 * time.Hour
+	}
+	return time.Duration(a.Tappscan.MaxAgeSeconds) * time.Second
 }
 
 func (a AssayAttestation) MaxAge() time.Duration {
@@ -1060,13 +1112,20 @@ type Config struct {
 		// Set to "0" to disable per-user filtering.
 		MinSettlementFee string `yaml:"minSettlementFee"`
 	} `yaml:"settlement"`
-	// Assay gates the Immaculate/LDD verifiable-inference integration. When
-	// Enabled, the broker records the verifier's ZG-Verdict per request and
+	// Assay configures the Immaculate/LDD verifiable-inference integration,
+	// which runs when providerType is "spml". The broker records the
+	// verifier's ZG-Verdict per request and
 	// gates settlement on the verdicts: any REJECT in a settlement batch voids
 	// the whole batch (nothing is charged). Fail-open: a missing or
 	// non-REJECT verdict is treated as settleable.
+	// There is no `enabled` flag here. Whether this integration runs is
+	// service.providerType == "spml" and nothing else: one switch, and the
+	// combination that cannot work (an external upstream whose logits we
+	// would have to FP32-recompute) becomes unrepresentable rather than
+	// merely rejected. Configs carrying the old key fail to load —
+	// UnmarshalStrict refuses unknown fields — which is the intended way to
+	// find them.
 	Assay struct {
-		Enabled bool `yaml:"enabled"`
 		// VerifierURL is the Assay verifier's base URL (e.g.
 		// "http://verifier:8200"). When set, settlement first asks the
 		// verifier (POST /v1/settlement/check) for the batch's final
@@ -1433,6 +1492,91 @@ var IngressAllowedEnvKeys = []string{
 // non-negative decimal.  Duplicates the minimal subset of
 // pricefeed.ParseUSDPerMillion needed at config-load time; kept in-package
 // to avoid a config → pricefeed import cycle (factory.go imports config).
+// validateSPMLService asserts, in one place, everything SPML needs in order to
+// mean what it claims.
+//
+// These preconditions exist today too — they just live in a runbook as
+// deployment-order folklore ("bring the signing broker up FIRST or the assay
+// 401s you"), and getting one wrong surfaces at 3am as a 502 rather than at
+// startup as a sentence. Two of them do worse than fail: they silently answer a
+// weaker question than the operator believes they asked. Those are the reason
+// this function exists.
+//
+// Nothing here is new policy. Every rule is a comment already written somewhere
+// in this file, promoted to something the process refuses to start without.
+//
+// One rule is absent on purpose: there is no check that assay is "enabled",
+// because there is no such flag. The provider type is the switch, so
+// "verification on, against an upstream we cannot recompute" is not a
+// configuration you can express and then have rejected — it is one you cannot
+// write down.
+func validateSPMLService(cfg *Config) error {
+	if !cfg.Service.IsSPML() {
+		return nil
+	}
+
+	// Defensive: spml is decentralized's specialization, so this is true by
+	// construction. Asserted anyway — if a later edit makes spml a forwarder,
+	// the failure should be this sentence and not a mystery verdict.
+	if cfg.Service.IsForwarder() {
+		return fmt.Errorf("invalid config: providerType 'spml' cannot be a forwarder")
+	}
+	if cfg.Service.ModelType == "" {
+		return fmt.Errorf("invalid config: providerType 'spml' requires service.model — the verifier loads exactly one FP32 reference model and a mismatch silently changes every verdict")
+	}
+	if cfg.Assay.VerifierURL == "" {
+		return fmt.Errorf("invalid config: providerType 'spml' requires assay.verifierUrl — without it settlement decides on header-recorded verdicts alone and never resolves the asynchronous audits")
+	}
+	if cfg.Assay.VerifierAddress == "" {
+		return fmt.Errorf("invalid config: providerType 'spml' requires assay.verifierAddress — a verdict is a settlement input, so it has to be authenticated rather than read off a plaintext header")
+	}
+
+	// The verifier's certificate is KMS-derived and self-signed, so CA
+	// validation can never succeed on it. Over https the choice is a pin or
+	// nothing; "nothing" is an encrypted channel to an unauthenticated peer.
+	if strings.HasPrefix(strings.ToLower(cfg.Assay.VerifierURL), "https://") &&
+		cfg.Assay.VerifierKeyPin == "" && !cfg.Assay.Attestation.Enabled {
+		return fmt.Errorf("invalid config: providerType 'spml' with an https assay.verifierUrl requires assay.verifierKeyPin, or assay.attestation.enabled to supply the pin — the verifier's cert is KMS-derived and self-signed, so CA validation cannot authenticate it and an unpinned connection is encrypted but anonymous")
+	}
+
+	at := cfg.Assay.Attestation
+	if at.Enabled && at.Source != "" && at.Source != "tapp-cli" && at.Source != "tappscan" {
+		return fmt.Errorf("invalid config: assay.attestation.source must be 'tapp-cli' or 'tappscan', got %q", at.Source)
+	}
+	if at.Enabled && at.IsTappscan() {
+		// The tappscan source has its own two anchors (chain signer, live
+		// TLS key); what it cannot do without is knowing where tappscan is,
+		// which key it serves, and which reference file the assay must match.
+		if at.AppID == "" || at.Registry == "" || at.RpcURL == "" {
+			return fmt.Errorf("invalid config: assay.attestation.source=tappscan needs appId, registry and rpcUrl — the record's signer is checked against TappRegistry.getNodeList, which is the check tappscan cannot fake")
+		}
+		if at.Tappscan.URL == "" || at.Tappscan.PubkeyPin == "" {
+			return fmt.Errorf("invalid config: assay.attestation.source=tappscan needs tappscan.url and tappscan.pubkeyPin — unpinned, anyone on the path can hand back a passing record")
+		}
+		if at.Expected.Image == "" {
+			return fmt.Errorf("invalid config: assay.attestation.source=tappscan needs expected.image (the reference-values path the assay's boot chain must match, e.g. gcp/uki/v0.7.0/dev.json)")
+		}
+	}
+	if cfg.Assay.Attestation.Enabled && !at.IsTappscan() {
+		// Both of these change the ANSWER, not the detail — and both fail
+		// quietly. verify-app exits 0 and prints ALL PASS either way, so the
+		// operator sees success and gets something weaker.
+		if cfg.Assay.Attestation.AsPubkeyPin == "" {
+			return fmt.Errorf("invalid config: assay.attestation.asPubkeyPin is required under providerType 'spml' — verify-app has no default for it, and without it the attestation-service channel is encrypted but unauthenticated, so anyone on the path can return any verdict while the CLI still reports success")
+		}
+		if len(cfg.Assay.Attestation.PolicyIDs) == 0 {
+			return fmt.Errorf("invalid config: assay.attestation.policyIds is required under providerType 'spml' — with no policy the AS falls back to a default that skips the boot-chain check and answers `contraindicated`, which reads as a failed attestation and is really an unasked question (measured: no policy -> contraindicated; wrong policy -> warning; right policy -> affirming)")
+		}
+	}
+
+	// SPML serves one model against one FP32 reference; per-model pricing
+	// describes a multi-model upstream, which this is not.
+	if len(cfg.Service.ModelPricing) > 0 {
+		return fmt.Errorf("invalid config: service.modelPricing is not supported under providerType 'spml' — the verifier holds a single FP32 reference model, so this provider serves exactly one model")
+	}
+	return nil
+}
+
 func validateUSDPriceString(field, value string) error {
 	trimmed := strings.TrimSpace(value)
 	if trimmed == "" {
@@ -2262,8 +2406,12 @@ func loadConfig(cfg *Config) error {
 	}
 	if cfg.Service.ProviderType != constant.ProviderTypeDecentralized &&
 		cfg.Service.ProviderType != constant.ProviderTypeCentralized &&
-		cfg.Service.ProviderType != constant.ProviderTypeStandard {
-		return fmt.Errorf("invalid config: service.providerType must be '%s', '%s', or '%s', got '%s'", constant.ProviderTypeDecentralized, constant.ProviderTypeCentralized, constant.ProviderTypeStandard, cfg.Service.ProviderType)
+		cfg.Service.ProviderType != constant.ProviderTypeStandard &&
+		cfg.Service.ProviderType != constant.ProviderTypeSPML {
+		return fmt.Errorf("invalid config: service.providerType must be '%s', '%s', '%s', or '%s', got '%s'", constant.ProviderTypeDecentralized, constant.ProviderTypeCentralized, constant.ProviderTypeStandard, constant.ProviderTypeSPML, cfg.Service.ProviderType)
+	}
+	if err := validateSPMLService(cfg); err != nil {
+		return err
 	}
 	if cfg.Service.ProviderType == constant.ProviderTypeCentralized {
 		if cfg.Service.ProviderIdentity == "" {

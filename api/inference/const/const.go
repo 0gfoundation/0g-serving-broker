@@ -27,6 +27,18 @@ const (
 	ProviderTypeDecentralized = "decentralized"
 	ProviderTypeCentralized   = "centralized"
 	ProviderTypeStandard      = "standard"
+	// ProviderTypeSPML is a decentralized provider whose inference is
+	// LDD-verified and whose GPUs are paid from the on-chain assay pool.
+	//
+	// It is a SPECIALIZATION of decentralized, not a fourth kind of upstream:
+	// the model is still co-located, so IsForwarder() stays false and every
+	// branch written as "not a forwarder" keeps behaving correctly. What the
+	// separate value buys is a single place to assert SPML's preconditions —
+	// they are otherwise spread across the assay block, the attestation block
+	// and the service block, and today nothing stops a configuration that
+	// cannot work (centralized + assay.enabled being the clearest: you cannot
+	// FP32-recompute someone else's API).
+	ProviderTypeSPML = "spml"
 )
 
 // VerifiabilityStandard is the verifiability marker written on-chain for a

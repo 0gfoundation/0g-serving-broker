@@ -41,6 +41,9 @@ type assayAttestor struct {
 	cfg    config.AssayAttestation
 	logger log.Logger
 	snap   atomic.Value // attestedAssay
+	// scan, when set, replaces the tapp-cli exec/file path as the evidence
+	// source (config source=tappscan). Same snapshot, same gates.
+	scan *scanSource
 }
 
 func newAssayAttestor(cfg config.AssayAttestation, logger log.Logger) *assayAttestor {
@@ -68,6 +71,43 @@ func (a *assayAttestor) pinOrNil() []byte {
 		return s.pin
 	}
 	return nil
+}
+
+// AssayAttestationSnapshot is what this broker got the last time it ran the
+// verification itself, for surfacing next to the command we hand a client.
+//
+// Read the asymmetry before trusting it. A PASS here is worth little: we are
+// reporting on ourselves, and a broker that lies about this has every incentive
+// to lie in exactly this direction. A FAIL is worth a lot: this same result
+// gates our own settlement and invoicing, so saying "not verified" costs us
+// money. Nobody pays to slander themselves.
+//
+// So: treat ok=false as a real signal, and ok=true as a hint that running the
+// command yourself is likely to be uneventful — never as a substitute for it.
+type AssayAttestationSnapshot struct {
+	OK         bool      `json:"ok"`
+	CheckedAt  time.Time `json:"checked_at"`
+	Detail     string    `json:"detail"`
+	Fresh      bool      `json:"fresh"`
+	GatesMoney bool      `json:"gates_settlement"`
+}
+
+// AssayAttestationStatus reports our own last verification, or nil when the
+// attestation loop is not configured (in which case we verify nothing and have
+// nothing to report — which is itself worth saying out loud).
+func (c *Ctrl) AssayAttestationStatus() *AssayAttestationSnapshot {
+	if c.assayAttestor == nil {
+		return nil
+	}
+	s := c.assayAttestor.current()
+	blocked, _ := c.assayAttestor.blockSettlement()
+	return &AssayAttestationSnapshot{
+		OK:         s.ok,
+		CheckedAt:  s.checkedAt,
+		Detail:     s.detail,
+		Fresh:      c.assayAttestor.fresh(),
+		GatesMoney: blocked,
+	}
 }
 
 // blockSettlement is the gate consulted by settlement and invoicing.
@@ -120,6 +160,9 @@ func (a *assayAttestor) verifyOnce(ctx context.Context) {
 }
 
 func (a *assayAttestor) executeAndParse(ctx context.Context) attestedAssay {
+	if a.scan != nil {
+		return a.scan.verifyOnce(ctx)
+	}
 	if a.cfg.OutputFile != "" {
 		return a.readAndParse()
 	}

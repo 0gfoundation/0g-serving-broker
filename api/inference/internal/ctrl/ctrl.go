@@ -116,7 +116,7 @@ type Ctrl struct {
 
 	// assayVerdictFilter, when true, records the Assay verifier's ZG-Verdict
 	// per request and excludes REJECT'd requests from settlement. Set from
-	// cfg.Assay.Enabled; off by default so the path is fully inert until opted in.
+	// providerType "spml"; inert for every other provider type.
 	assayVerdictFilter bool
 	// assayAttestor is the Phase-2 verify-app loop (nil = attestation off);
 	// it supplies the live TLS pin and the settlement/invoice gate.
@@ -377,7 +377,7 @@ func New(
 	var attestor *assayAttestor
 	if cfg.Assay.Attestation.Enabled {
 		at := cfg.Assay.Attestation
-		if at.OutputFile == "" && (at.AppID == "" || at.Registry == "" || at.RpcURL == "" ||
+		if !at.IsTappscan() && at.OutputFile == "" && (at.AppID == "" || at.Registry == "" || at.RpcURL == "" ||
 			at.AsPubkeyPin == "" || len(at.PolicyIDs) == 0) {
 			panic("assay.attestation (exec mode) needs appId, registry, rpcUrl, asPubkeyPin and policyIds (verify-app without --policy-ids or --as-pubkey yields worthless affirmations); or set outputFile for sidecar mode")
 		}
@@ -391,6 +391,21 @@ func New(
 			at.RequireTcb = []string{"UpToDate"}
 		}
 		attestor = newAssayAttestor(at, logger)
+		if at.IsTappscan() {
+			if at.AppID == "" || at.Registry == "" || at.RpcURL == "" ||
+				at.Tappscan.URL == "" || at.Tappscan.PubkeyPin == "" || at.Expected.Image == "" {
+				panic("assay.attestation source=tappscan needs appId, registry, rpcUrl, tappscan.url, tappscan.pubkeyPin and expected.image")
+			}
+			var sign func([]byte) ([]byte, error)
+			if teeService != nil {
+				sign = teeService.Sign
+			}
+			scan, err := newScanSource(at, cfg.Assay.VerifierURL, sign, logger)
+			if err != nil {
+				panic(err)
+			}
+			attestor.scan = scan
+		}
 	}
 
 	// The pin the TLS handshake checks: the freshest attested value when the
@@ -424,7 +439,7 @@ func New(
 		priceFeed:            cfg.PriceFeed,
 		concurrencyLimit:     cfg.ConcurrencyLimit,
 		userUsageStats:       cfg.UserUsageStats,
-		assayVerdictFilter:   cfg.Assay.Enabled,
+		assayVerdictFilter:   cfg.Service.IsSPML(),
 		assayAttestor:        attestor,
 		assayVerifierAddress: assayVerifierAddr,
 		assayStrictVerdict:   cfg.Assay.StrictVerdict,
@@ -497,6 +512,9 @@ func New(
 	}
 
 	if attestor != nil {
+		if attestor.scan != nil {
+			attestor.scan.provider = p.ProviderAddress()
+		}
 		go attestor.run(context.Background())
 		logger.Infof("Assay attestation loop ON: app=%s interval=%s maxAge=%s onFail=%s",
 			cfg.Assay.Attestation.AppID, cfg.Assay.Attestation.IntervalOrDefault(),

@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	constant "github.com/0glabs/0g-serving-broker/inference/const"
 )
 
 func validModelInfo() *ModelInfo {
@@ -1778,7 +1780,7 @@ service:
 	if err == nil {
 		t.Fatal("expected error for invalid providerType")
 	}
-	if !strings.Contains(err.Error(), "must be 'decentralized', 'centralized', or 'standard'") {
+	if !strings.Contains(err.Error(), "must be 'decentralized', 'centralized', 'standard', or 'spml'") {
 		t.Errorf("unexpected error message: %v", err)
 	}
 }
@@ -3806,6 +3808,168 @@ func TestValidatePricingTiers_FractionalMultipliers(t *testing.T) {
 	for _, c := range invalid {
 		if err := validatePricingTiers("t", c.tiers); err == nil {
 			t.Errorf("%s: expected rejection, got nil", c.name)
+		}
+	}
+}
+
+// --- providerType: spml -----------------------------------------------------
+//
+// The point of the type is the precondition block: each of these configs is one
+// an operator could plausibly write and that cannot do what they think it does.
+// A test per rule, because a validation nobody proves is a validation that rots.
+
+func spmlConfig(t *testing.T, extra string) string {
+	t.Helper()
+	return `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "http://verifier:8200/v1"
+  model: "Qwen/Qwen3-0.6B"
+  verifiability: "TeeML"
+  providerType: "spml"
+` + extra
+}
+
+func loadSPML(t *testing.T, extra string) error {
+	t.Helper()
+	t.Setenv("CONFIG_FILE", writeTestConfig(t, spmlConfig(t, extra)))
+	return loadConfig(&Config{})
+}
+
+func TestSPML_Valid(t *testing.T) {
+	err := loadSPML(t, `
+assay:
+  verifierUrl: "http://verifier:8200"
+  verifierAddress: "0x1111111111111111111111111111111111111111"
+`)
+	if err != nil {
+		t.Fatalf("a complete spml config should load, got: %v", err)
+	}
+}
+
+// There is no assay.enabled any more: the provider type is the switch. A config
+// still carrying the old key must fail loudly rather than be ignored, which is
+// what UnmarshalStrict gives us for free.
+func TestSPML_RejectsStaleEnabledKey(t *testing.T) {
+	err := loadSPML(t, "assay:\n  enabled: true\n")
+	if err == nil {
+		t.Fatal("a config carrying the removed assay.enabled key must not load")
+	}
+	if !strings.Contains(err.Error(), "enabled") {
+		t.Errorf("the error should name the offending key, got: %v", err)
+	}
+}
+
+func TestSPML_RequiresVerifierURL(t *testing.T) {
+	err := loadSPML(t, `
+assay:
+  verifierAddress: "0x1111111111111111111111111111111111111111"
+`)
+	if err == nil || !strings.Contains(err.Error(), "requires assay.verifierUrl") {
+		t.Errorf("spml without a verifier url must be refused, got: %v", err)
+	}
+}
+
+func TestSPML_RequiresVerifierAddress(t *testing.T) {
+	err := loadSPML(t, `
+assay:
+  verifierUrl: "http://verifier:8200"
+`)
+	if err == nil || !strings.Contains(err.Error(), "requires assay.verifierAddress") {
+		t.Errorf("spml without a verifier address must be refused, got: %v", err)
+	}
+}
+
+// https to a KMS-derived self-signed cert with no pin is an encrypted channel
+// to an anonymous peer — worse than plaintext, because it looks authenticated.
+func TestSPML_HTTPSRequiresPinOrAttestation(t *testing.T) {
+	err := loadSPML(t, `
+assay:
+  verifierUrl: "https://verifier:8200"
+  verifierAddress: "0x1111111111111111111111111111111111111111"
+`)
+	if err == nil || !strings.Contains(err.Error(), "verifierKeyPin") {
+		t.Errorf("https without a pin must be refused, got: %v", err)
+	}
+
+	if err := loadSPML(t, `
+assay:
+  verifierUrl: "https://verifier:8200"
+  verifierAddress: "0x1111111111111111111111111111111111111111"
+  verifierKeyPin: "0xaa"
+`); err != nil {
+		t.Errorf("https with a pin should load, got: %v", err)
+	}
+}
+
+// The two that fail silently: verify-app exits 0 and prints ALL PASS either
+// way, so an operator who omits them sees success and gets something weaker.
+func TestSPML_AttestationRequiresASPin(t *testing.T) {
+	err := loadSPML(t, `
+assay:
+  verifierUrl: "http://verifier:8200"
+  verifierAddress: "0x1111111111111111111111111111111111111111"
+  attestation:
+    enabled: true
+    policyIds: ["0g-tapp-gcp-uki-v0.7.0-dev"]
+`)
+	if err == nil || !strings.Contains(err.Error(), "asPubkeyPin") {
+		t.Errorf("attestation without an AS pin must be refused, got: %v", err)
+	}
+}
+
+func TestSPML_AttestationRequiresPolicyIDs(t *testing.T) {
+	err := loadSPML(t, `
+assay:
+  verifierUrl: "http://verifier:8200"
+  verifierAddress: "0x1111111111111111111111111111111111111111"
+  attestation:
+    enabled: true
+    asPubkeyPin: "0xbb"
+`)
+	if err == nil || !strings.Contains(err.Error(), "policyIds") {
+		t.Errorf("attestation without policy ids must be refused, got: %v", err)
+	}
+}
+
+// You cannot FP32-recompute someone else's API. With the flag gone that
+// combination is not rejected — it is unrepresentable: a centralized provider
+// simply is not spml, so the integration never runs, and leftover assay
+// settings are inert configuration for a path that is off.
+func TestAssayInertOnForwarder(t *testing.T) {
+	t.Setenv("CONFIG_FILE", writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://api.openai.com/v1"
+  model: "gpt-4o"
+  verifiability: "TeeML"
+  providerType: "centralized"
+  providerIdentity: "openai"
+assay:
+  verifierUrl: "http://verifier:8200"
+`))
+	cfg := &Config{}
+	if err := loadConfig(cfg); err != nil {
+		t.Fatalf("centralized config should still load: %v", err)
+	}
+	if cfg.Service.IsSPML() {
+		t.Error("a centralized provider must never be spml")
+	}
+}
+
+func TestSPMLPredicates(t *testing.T) {
+	spml := &Service{ProviderType: constant.ProviderTypeSPML}
+	if !spml.IsSPML() || spml.IsForwarder() || !spml.IsSelfHosted() {
+		t.Error("spml must be self-hosted and not a forwarder")
+	}
+	dec := &Service{ProviderType: constant.ProviderTypeDecentralized}
+	if dec.IsSPML() || !dec.IsSelfHosted() {
+		t.Error("decentralized stays self-hosted and is not spml")
+	}
+	for _, pt := range []string{constant.ProviderTypeCentralized, constant.ProviderTypeStandard} {
+		s := &Service{ProviderType: pt}
+		if s.IsSelfHosted() || s.IsSPML() {
+			t.Errorf("%s must not be self-hosted", pt)
 		}
 	}
 }

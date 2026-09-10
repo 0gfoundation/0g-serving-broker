@@ -53,6 +53,33 @@ type invoiceResponse struct {
 	Cut     *invoiceResult  `json:"cut"`
 }
 
+// payableFee decides whether a settled request's fee goes onto its node's
+// cumulative. nil fee = not invoiced, with the reason. Three cases:
+//   - unparseable fee: nothing sensible to add;
+//   - no node attribution (header lost + settlement check didn't fill it):
+//     nobody can be invoiced for it;
+//   - verdict REJECT: settled (REJECT is advisory until the LDD thresholds
+//     are calibrated) but NOT payable — the assay's ledger refuses a REJECT
+//     hash, and refuses the whole invoice with it. Folding the fee in would
+//     wedge the node's payouts for good: every later invoice carries the
+//     hash and is refused (seen live 2026-09-10).
+//
+// In all three the money reaches the pool and stays there — the design's
+// loss ceiling. Pure, so the rule is testable without a database.
+func payableFee(req *model.Request) (*big.Int, string) {
+	fee, ok := new(big.Int).SetString(req.Fee, 10)
+	if !ok {
+		return nil, fmt.Sprintf("unparseable fee %q", req.Fee)
+	}
+	if req.Node == "" {
+		return nil, fmt.Sprintf("no node attribution; fee %s stays unattributed in the pool", req.Fee)
+	}
+	if req.Verdict == constant.AssayVerdictReject {
+		return nil, fmt.Sprintf("REJECT'd by the assay on node %s; fee %s stays in the pool", req.Node, req.Fee)
+	}
+	return fee, ""
+}
+
 // settleAssayPayout runs after settlement outcomes are known and before the
 // settled request rows are deleted. Never fails the settlement — payout
 // problems are logged and retried next cycle.
@@ -70,16 +97,9 @@ func (c *Ctrl) settleAssayPayout(ctx context.Context, outcomes []*SettlementOutc
 			continue
 		}
 		for _, req := range outcome.SettledRequests {
-			fee, ok := new(big.Int).SetString(req.Fee, 10)
-			if !ok {
-				c.logger.Warnf("Payout: request %s has unparseable fee %q; skipped", req.RequestHash, req.Fee)
-				continue
-			}
-			if req.Node == "" {
-				// No attribution (header lost + settlement check didn't fill
-				// it): nobody can be invoiced for it. The money stays in the
-				// pool (solvency-safe), only this request's payout is lost.
-				c.logger.Warnf("Payout: settled request %s has no node attribution; its fee %s stays unattributed", req.RequestHash, req.Fee)
+			fee, why := payableFee(req)
+			if fee == nil {
+				c.logger.Warnf("Payout: settled request %s not invoiced: %s", req.RequestHash, why)
 				continue
 			}
 			if sums[req.Node] == nil {

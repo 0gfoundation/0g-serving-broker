@@ -105,6 +105,7 @@ func (h *Handler) Register(r *gin.Engine) {
 	// design: it exists to be read by auditors, and every field in it is
 	// checkable against the chain rather than against this broker.
 	group.GET("/attestation/assay", corsMiddleware(), middleware.RateLimitMiddleware(h.rateLimiter), h.GetAssayAttestation)
+	group.GET("/attestation/assay/scan", corsMiddleware(), middleware.RateLimitMiddleware(h.rateLimiter), h.GetAssayScan)
 	// E2EE (0g-pc SPEC §4.3): advertise the enclave HPKE enc key so a client can
 	// fetch enc_pub / key_id without parsing the quote itself (it MUST still verify
 	// enc_pub against the quote's report_data).

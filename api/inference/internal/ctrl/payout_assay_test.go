@@ -2,7 +2,11 @@ package ctrl
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
+
+	constant "github.com/0glabs/0g-serving-broker/inference/const"
+	"github.com/0glabs/0g-serving-broker/inference/model"
 )
 
 func TestEncodeDecodeCovered(t *testing.T) {
@@ -112,5 +116,37 @@ func TestRemoveHashesPreservesOrderAndKeepsNewWork(t *testing.T) {
 	// Nothing to drop -> unchanged.
 	if got := removeHashes(all, nil); len(got) != len(all) {
 		t.Errorf("removeHashes(all, nil) = %v, want %v", got, all)
+	}
+}
+
+// A REJECT'd request settles (advisory) but must not be invoiced: the assay
+// refuses the hash and the whole invoice with it, wedging the node's payouts.
+func TestPayableFeeSkipsRejectAndUnattributed(t *testing.T) {
+	cases := []struct {
+		name    string
+		req     model.Request
+		payable bool
+		reason  string
+	}{
+		{"pass", model.Request{Fee: "4600", Node: "node_0", Verdict: constant.AssayVerdictPass}, true, ""},
+		{"unverified", model.Request{Fee: "4600", Node: "node_0", Verdict: "UNVERIFIED"}, true, ""},
+		{"no verdict", model.Request{Fee: "4600", Node: "node_0"}, true, ""},
+		{"reject", model.Request{Fee: "6000", Node: "node_0", Verdict: constant.AssayVerdictReject}, false, "REJECT"},
+		{"no node", model.Request{Fee: "4600", Verdict: constant.AssayVerdictPass}, false, "no node attribution"},
+		{"bad fee", model.Request{Fee: "x", Node: "node_0"}, false, "unparseable"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fee, why := payableFee(&tc.req)
+			if (fee != nil) != tc.payable {
+				t.Fatalf("payable=%v, want %v (%s)", fee != nil, tc.payable, why)
+			}
+			if tc.payable && fee.String() != tc.req.Fee {
+				t.Fatalf("fee %s", fee)
+			}
+			if !tc.payable && !strings.Contains(why, tc.reason) {
+				t.Fatalf("reason %q lacks %q", why, tc.reason)
+			}
+		})
 	}
 }
