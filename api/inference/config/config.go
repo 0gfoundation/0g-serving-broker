@@ -2062,6 +2062,58 @@ func migrateDeprecated(cfg *Config, raw map[string]interface{}) error {
 // place a user can read it from an attested source. See loadConfig for why it wins.
 const targetURLEnvVar = "TARGET_URL"
 
+// applyTargetURLEnv is the TARGET_URL precedence, extracted so loadConfig and
+// ServiceFromYAML apply the same one.
+//
+// Two copies would drift, and the drift is expensive: the controller derives the
+// recorded upstream set from this value, so a copy that resolved it differently would
+// record a set naming a destination the broker does not use — a bound that reads as
+// verified and is not the deployment's.
+func applyTargetURLEnv(cfg *Config) {
+	envTarget := strings.TrimSpace(os.Getenv(targetURLEnvVar))
+	if envTarget == "" {
+		return
+	}
+	if cfg.Service.TargetURL != "" && cfg.Service.TargetURL != envTarget {
+		log.Printf("[CONFIG] %s=%q takes precedence over service.targetUrl=%q from the config file",
+			targetURLEnvVar, envTarget, cfg.Service.TargetURL)
+	}
+	cfg.Service.TargetURL = envTarget
+}
+
+// ServiceFromYAML reads config content into the Service section the way the loader
+// would, without touching the running process's configuration.
+//
+// It exists for the controller: ApplyCoreConfig holds the NEW config as bytes and has
+// to know which upstreams it permits before it writes the file, because the RTMR3
+// record has to be in place before the broker restarts onto it. GetConfig cannot
+// answer that — it is a once.Do singleton over the file on disk, which is still the
+// old one.
+//
+// # Why this is faithful for Service, and only for Service
+//
+// The loader's pipeline is UnmarshalStrict, then migrateDeprecated, then the
+// TARGET_URL and DATABASE_DSN precedences. Of those, migrateDeprecated touches
+// Interval, RevenueTransfer, LoRA, Async, ProviderHttp, Database, Event, ZK and
+// Network — and no Service field; GetConfig's defaults likewise set none. So for
+// Service, strict-unmarshalling into a zero Config and applying the same TARGET_URL
+// precedence is what the loader does, not an approximation of it.
+//
+// That is why this returns *Service rather than *Config. A *Config from here would be
+// missing every default and every migration, and a caller reaching for another section
+// would get a value the running process does not have.
+//
+// Strict, like the loader: a key the broker will refuse must be refused here too, or
+// the controller would derive a set from content the broker cannot even parse.
+func ServiceFromYAML(data []byte) (*Service, error) {
+	var cfg Config
+	if err := yaml.UnmarshalStrict(data, &cfg); err != nil {
+		return nil, fmt.Errorf("parsing config content: %w", err)
+	}
+	applyTargetURLEnv(&cfg)
+	return &cfg.Service, nil
+}
+
 // databaseDSNEnvVar overrides the database connection string from the compose file, for
 // the same reason TARGET_URL exists: it decides where unsealed request and response
 // bodies are written, so a verifier has to be able to read it from an attested source.
@@ -2120,13 +2172,7 @@ func loadConfig(cfg *Config) error {
 	//
 	// Precedence rather than fallback: if the file could override it, the half a user
 	// cannot verify would decide, which is the whole point of moving the value.
-	if envTarget := strings.TrimSpace(os.Getenv(targetURLEnvVar)); envTarget != "" {
-		if cfg.Service.TargetURL != "" && cfg.Service.TargetURL != envTarget {
-			log.Printf("[CONFIG] %s=%q takes precedence over service.targetUrl=%q from the config file",
-				targetURLEnvVar, envTarget, cfg.Service.TargetURL)
-		}
-		cfg.Service.TargetURL = envTarget
-	}
+	applyTargetURLEnv(cfg)
 
 	// DATABASE_DSN, for the same reason and with the same precedence.
 	//

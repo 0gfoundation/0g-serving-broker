@@ -81,44 +81,45 @@ func (c *Ctrl) RecordUpstreamSet(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, recordUpstreamSetTimeout)
 	defer cancel()
 
-	members, err := upstreamsFromConfig(&c.fullConfig.Service)
-	if err != nil {
-		c.logger.Errorf("[RecordUpstreamSet] Cannot express this config's upstreams as a set, recording it as unreadable: %v", err)
-		return c.emitter.EmitEvent(ctx, attest.EventUpstreamSet, []byte(upstreamSetInvalidated))
-	}
-
-	payload, err := attest.RenderUpstreamSet(members)
-	if err != nil {
-		// The reader's own refusal, surfaced here rather than by a verifier. Recorded as
-		// unreadable for the same reason as above — the config permits destinations this
-		// grammar cannot name, and that is not "permits nothing".
-		c.logger.Errorf("[RecordUpstreamSet] This config's upstreams cannot be recorded, recording the set as unreadable: %v", err)
-		return c.emitter.EmitEvent(ctx, attest.EventUpstreamSet, []byte(upstreamSetInvalidated))
-	}
-
-	if err := c.emitter.EmitEvent(ctx, attest.EventUpstreamSet, []byte(payload)); err != nil {
-		return fmt.Errorf("recording the permitted upstream set in RTMR3: %w", err)
-	}
-	c.logger.Infof("[RecordUpstreamSet] Recorded %d permitted upstream(s)", len(members))
-	return nil
+	return c.recordUpstreamSet(ctx, "RecordUpstreamSet", &c.fullConfig.Service)
 }
 
-// InvalidateUpstreamSet supersedes the recorded set with one a reader refuses.
+// RecordUpstreamSetFromContent records the set a config that is about to be written
+// permits, rather than the set the running one does.
 //
-// Called when the config on disk has changed and this process can no longer say what
-// the new set is: c.fullConfig was parsed at startup and nothing reloads it, so after
-// ApplyCoreConfig the members this controller would render describe the OLD file while
-// the broker restarts onto the new one.
+// # Why this is not just RecordUpstreamSet
 //
-// Leaving the old record standing is the one outcome that must not happen. It would
-// state a bound that is no longer the deployment's — a verifier reading "plaintext goes
-// only to these two in-CVM engines" while the new config has added a vendor — and a
-// record that lies is worse than no record, because the reader trusts it. Unknown is
-// the honest answer, and the next boot replaces it with the truth.
+// c.fullConfig is a once.Do singleton over the file on disk and nothing reloads it, so
+// during ApplyCoreConfig it still describes the OLD file while the broker is about to
+// restart onto the new one. Recording from it would state a bound that is not the
+// deployment's.
 //
-// A later change can re-derive instead of invalidating, which needs the new content
-// parsed with the same precedence the loader applies (TARGET_URL over the file). That
-// is a separate change; this is the fail-closed floor under it.
+// The previous version superseded the record with one a reader refuses instead — honest,
+// but it left every config change reading as UpstreamsUnknown until the next boot, which
+// is exactly the case this whole feature exists for: adding an upstream IS a config
+// change, and "you can add one without a restart" is worth little if the record cannot
+// say what you added until you restart anyway.
+//
+// # Order
+//
+// Called BEFORE the file is written, for the reason the config hash is: the record has to
+// be in place before the broker restarts onto the content, or a quote taken in between
+// names a set the deployment has already moved past. So the content arrives as bytes
+// rather than being read back from disk.
+//
+// # Fail-closed, and what is deliberately NOT closed
+//
+// Content the loader would refuse is recorded as unreadable rather than skipped. A config
+// whose keys the broker cannot parse is a config whose permitted set nobody can state,
+// and unknown is that answer; staying silent would leave the OLD record standing, which
+// is the one outcome that must not happen — a record that lies is worse than no record,
+// because a reader trusts it.
+//
+// The config change itself is not refused on a parse failure. ApplyCoreConfig validates
+// YAML shape and not schema today, so refusing here would make the controller accept or
+// reject the same config depending on whether this switch is on — a validation rule
+// hiding inside a recording switch. Tightening ApplyCoreConfig's own validation is worth
+// doing and is not this.
 //
 // # Why ApplyCoreConfig is the only caller
 //
@@ -130,15 +131,12 @@ func (c *Ctrl) RecordUpstreamSet(ctx context.Context) error {
 // rewrites only PROMETHEUS_CONFIG.
 //
 // So if imageEnvUpdates ever grows to include TARGET_URL, UpdateImages needs this call
-// too, and until then adding it there would record an invalidation for a change that
-// did not happen.
-func (c *Ctrl) InvalidateUpstreamSet(ctx context.Context) error {
-	// Gated on the same switch as the record itself, and it has to be: a deployment that
-	// never recorded a set has nothing to supersede, and writing this record anyway would
-	// move it from UpstreamsUnrecorded to UpstreamsUnknown — a claim that a record was
-	// written and could not be read, about a deployment that wrote none. It would also be
-	// the FIRST zg-upstream-set event such a deployment ever emitted, which is exactly the
-	// hard-fail the switch exists to keep off.
+// too, and until then adding it there would record a change that did not happen.
+func (c *Ctrl) RecordUpstreamSetFromContent(ctx context.Context, content string) error {
+	// Gated on the same switch as the boot record, and it has to be: a deployment that
+	// never recorded a set has nothing to correct, and writing anything here would be the
+	// FIRST zg-upstream-set event it ever emitted — which is exactly the hard-fail the
+	// switch exists to keep off.
 	if !c.config.RecordUpstreamSet {
 		return nil
 	}
@@ -146,10 +144,60 @@ func (c *Ctrl) InvalidateUpstreamSet(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, recordUpstreamSetTimeout)
 	defer cancel()
 
-	if err := c.emitter.EmitEvent(ctx, attest.EventUpstreamSet, []byte(upstreamSetInvalidated)); err != nil {
-		return fmt.Errorf("superseding the recorded upstream set after a config change: %w", err)
+	svc, err := config.ServiceFromYAML([]byte(content))
+	if err != nil {
+		c.logger.Errorf("[ApplyCoreConfig] The new config cannot be read the way the broker reads it, so the set it permits is unknown: %v", err)
+		return c.invalidateUpstreamSet(ctx, "ApplyCoreConfig")
 	}
-	c.logger.Info("[ApplyCoreConfig] Recorded upstream set superseded as unreadable; the next boot records the new one")
+	return c.recordUpstreamSet(ctx, "ApplyCoreConfig", svc)
+}
+
+// recordUpstreamSet is the body both entry points share: derive, render, emit, and fall
+// back to the invalidation on anything that makes the set unstateable.
+//
+// Unexported because it assumes the two things a caller must not be able to skip — the
+// switch has been checked, and the context is bounded.
+//
+// tag is the caller's log prefix, so an operator reading the journal can tell a boot
+// record from one a config change wrote.
+func (c *Ctrl) recordUpstreamSet(ctx context.Context, tag string, svc *config.Service) error {
+	members, err := upstreamsFromConfig(svc)
+	if err != nil {
+		c.logger.Errorf("[%s] Cannot express this config's upstreams as a set, recording it as unreadable: %v", tag, err)
+		return c.invalidateUpstreamSet(ctx, tag)
+	}
+
+	payload, err := attest.RenderUpstreamSet(members)
+	if err != nil {
+		// The reader's own refusal, surfaced here rather than by a verifier. Recorded as
+		// unreadable for the same reason as above — the config permits destinations this
+		// grammar cannot name, and that is not "permits nothing".
+		c.logger.Errorf("[%s] This config's upstreams cannot be recorded, recording the set as unreadable: %v", tag, err)
+		return c.invalidateUpstreamSet(ctx, tag)
+	}
+
+	if err := c.emitter.EmitEvent(ctx, attest.EventUpstreamSet, []byte(payload)); err != nil {
+		return fmt.Errorf("recording the permitted upstream set in RTMR3: %w", err)
+	}
+	c.logger.Infof("[%s] Recorded %d permitted upstream(s)", tag, len(members))
+	return nil
+}
+
+// invalidateUpstreamSet records a set a reader refuses, which is the honest answer when
+// this process cannot state one.
+//
+// Unknown and unrecorded are different answers: unrecorded says no record was ever
+// written, which a reader must treat as unbounded; unknown says a record was written and
+// says no set. Leaving a previous record standing would be a third thing and the only
+// unacceptable one — a bound that is no longer the deployment's.
+//
+// RTMR3 only appends, so this is the only way to withdraw a record: supersede it with one
+// that says less.
+func (c *Ctrl) invalidateUpstreamSet(ctx context.Context, tag string) error {
+	if err := c.emitter.EmitEvent(ctx, attest.EventUpstreamSet, []byte(upstreamSetInvalidated)); err != nil {
+		return fmt.Errorf("recording the upstream set as unreadable: %w", err)
+	}
+	c.logger.Infof("[%s] Recorded the upstream set as unreadable; the next boot or config change records a readable one", tag)
 	return nil
 }
 
