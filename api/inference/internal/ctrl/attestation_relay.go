@@ -68,18 +68,28 @@ func (c *Ctrl) AssayAttestation(ctx context.Context, force bool) (json.RawMessag
 	}
 	cache := c.assayAttCache
 
-	cache.mu.Lock()
-	if force && time.Since(cache.forcedAt) >= AssayAttestationForceFloor {
-		cache.forcedAt = time.Now()
-		force = true
-	} else {
-		force = false // too soon, or not asked: the TTL decides
-	}
-	fresh := cache.body != nil && time.Since(cache.fetchedAt) < cache.ttl
+	// The ordinary path stays a read lock: this endpoint is public, and making
+	// every caller queue behind a writer would hand out a contention point.
+	cache.mu.RLock()
+	warm := cache.body != nil && time.Since(cache.fetchedAt) < cache.ttl
 	body, at := cache.body, cache.fetchedAt
-	cache.mu.Unlock()
-	if fresh && !force {
+	cache.mu.RUnlock()
+	if warm && !force {
 		return body, at, nil
+	}
+	if force && warm {
+		// Claim the bypass only when it would actually change the answer, and
+		// only once per floor. Claimed AFTER the warm check so an ordinary
+		// expiry never spends someone's budget.
+		cache.mu.Lock()
+		allowed := time.Since(cache.forcedAt) >= AssayAttestationForceFloor
+		if allowed {
+			cache.forcedAt = time.Now()
+		}
+		cache.mu.Unlock()
+		if !allowed {
+			return body, at, nil // asked too soon: the cached copy, honestly dated
+		}
 	}
 
 	url := c.assayVerifierURL + constant.AssayAttestationPath
@@ -94,6 +104,12 @@ func (c *Ctrl) AssayAttestation(ctx context.Context, force bool) (json.RawMessag
 	// want auditors to read), and the assay's nginx allowlists it accordingly.
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		// A forced re-fetch that fails must not take the cached document with
+		// it: the caller asked for fresher, not for nothing. They can still see
+		// it is stale — fetched_at says so.
+		if warm {
+			return body, at, nil
+		}
 		return nil, time.Time{}, fmt.Errorf("assay unreachable: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
