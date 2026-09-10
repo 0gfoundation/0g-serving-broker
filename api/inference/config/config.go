@@ -976,32 +976,10 @@ type LoRAConfig struct {
 // struct's Attestation field for semantics.
 type AssayAttestation struct {
 	Enabled bool `yaml:"enabled"`
-	// CliPath is the tapp-cli binary (default "tapp-cli" on $PATH) for
-	// exec mode. ⚠️ tapp-cli needs glibc >= 2.32; the broker image is
-	// buster (2.28), so in this deployment use OutputFile instead.
-	CliPath string `yaml:"cliPath"`
-	// OutputFile switches to file mode: a sidecar (bookworm + tapp-cli)
-	// runs verify-app on a loop and atomically writes its raw output here;
-	// the broker parses the file, taking its mtime as the verification
-	// time (staleness then falls out of maxAgeSeconds naturally — a dead
-	// sidecar looks exactly like a failed verification). In file mode the
-	// appId/registry/asPubkeyPin/policyIds fields live in the SIDECAR's
-	// command line.
-	OutputFile string `yaml:"outputFile"`
 	// AppID / Registry / RpcURL locate the app on the TappRegistry.
 	AppID    string `yaml:"appId"`
 	Registry string `yaml:"registry"`
 	RpcURL   string `yaml:"rpcUrl"`
-	// AsPubkeyPin authenticates the connection to the attestation service —
-	// verify-app has NO default for it; omitting it silently downgrades the
-	// AS channel to encrypted-but-unauthenticated. ⚠️ The AS derives its TLS
-	// key with tls_key_source=local, so THIS PIN CHANGES when the AS
-	// restarts — it must be operator-updatable.
-	AsPubkeyPin string `yaml:"asPubkeyPin"`
-	// PolicyIDs select the AS reference-value policy. ⚠️ Without (or with a
-	// wrong) policy id the AS answers ear.status="-" and the quote is
-	// UNTRUSTED — while the CLI still exits 0 and prints ALL PASS.
-	PolicyIDs []string `yaml:"policyIds"`
 	// RequireTcb is the allowed tcb_status set (e.g. ["UpToDate"]). Widen it
 	// deliberately, listing each accepted advisory state.
 	RequireTcb []string `yaml:"requireTcb"`
@@ -1013,14 +991,11 @@ type AssayAttestation struct {
 	// inference keeps flowing, verdicts already carry the async settlement
 	// gate) or "warn-only" (log, gate nothing).
 	OnFail string `yaml:"onFail"`
-	// Source selects the evidence source: "tapp-cli" (default; exec or
-	// sidecar file mode above, boot-chain answered by the shared AS's policy
-	// library) or "tappscan" (docs/spml-attestation-relay.md: read tappscan's
-	// record for the app, cross-check the signer against the TappRegistry
-	// and the TLS key against the assay's live port, sign the statement with
-	// the TEE key). The tappscan source needs no policy id at all.
+	// Source is kept only so an existing `source: "tappscan"` still parses,
+	// and so a config still naming the removed "tapp-cli" source is rejected
+	// loudly rather than silently getting a different check than it asked for.
 	Source string `yaml:"source"`
-	// Tappscan locates the scan service for source=tappscan. PubkeyPin is
+	// Tappscan locates the scan service. PubkeyPin is
 	// sha256 of its TLS SPKI — the same key the shared AS serves, since
 	// both run on the same tapp; tls_key_source=local, so it changes when
 	// that host restarts. MaxAgeSeconds bounds how old the record's own
@@ -1038,9 +1013,6 @@ type AssayAttestation struct {
 		Uki   string `yaml:"uki"`
 	} `yaml:"expected"`
 }
-
-// IsTappscan reports whether the tappscan source is selected.
-func (a AssayAttestation) IsTappscan() bool { return a.Source == "tappscan" }
 
 // MaxAge of the tappscan record's own checked_at (default 6h).
 func (a AssayAttestation) TappscanMaxAge() time.Duration {
@@ -1064,12 +1036,6 @@ func (a AssayAttestation) IntervalOrDefault() time.Duration {
 	return a.Interval
 }
 
-func (a AssayAttestation) CliPathOrDefault() string {
-	if a.CliPath == "" {
-		return "tapp-cli"
-	}
-	return a.CliPath
-}
 
 type Config struct {
 	AllowOrigins    []string `yaml:"allowOrigins"`
@@ -1540,10 +1506,10 @@ func validateSPMLService(cfg *Config) error {
 	}
 
 	at := cfg.Assay.Attestation
-	if at.Enabled && at.Source != "" && at.Source != "tapp-cli" && at.Source != "tappscan" {
-		return fmt.Errorf("invalid config: assay.attestation.source must be 'tapp-cli' or 'tappscan', got %q", at.Source)
+	if at.Enabled && at.Source != "" && at.Source != "tappscan" {
+		return fmt.Errorf("invalid config: assay.attestation.source must be 'tappscan' (the tapp-cli source is gone: its boot-chain answer came from a policy on a shared attestation service that anyone can overwrite, and one was, after which it failed a healthy CVM), got %q", at.Source)
 	}
-	if at.Enabled && at.IsTappscan() {
+	if at.Enabled {
 		// The tappscan source has its own two anchors (chain signer, live
 		// TLS key); what it cannot do without is knowing where tappscan is,
 		// which key it serves, and which reference file the assay must match.
@@ -1557,18 +1523,6 @@ func validateSPMLService(cfg *Config) error {
 			return fmt.Errorf("invalid config: assay.attestation.source=tappscan needs expected.image (the reference-values path the assay's boot chain must match, e.g. gcp/uki/v0.7.0/dev.json)")
 		}
 	}
-	if cfg.Assay.Attestation.Enabled && !at.IsTappscan() {
-		// Both of these change the ANSWER, not the detail — and both fail
-		// quietly. verify-app exits 0 and prints ALL PASS either way, so the
-		// operator sees success and gets something weaker.
-		if cfg.Assay.Attestation.AsPubkeyPin == "" {
-			return fmt.Errorf("invalid config: assay.attestation.asPubkeyPin is required under providerType 'spml' — verify-app has no default for it, and without it the attestation-service channel is encrypted but unauthenticated, so anyone on the path can return any verdict while the CLI still reports success")
-		}
-		if len(cfg.Assay.Attestation.PolicyIDs) == 0 {
-			return fmt.Errorf("invalid config: assay.attestation.policyIds is required under providerType 'spml' — with no policy the AS falls back to a default that skips the boot-chain check and answers `contraindicated`, which reads as a failed attestation and is really an unasked question (measured: no policy -> contraindicated; wrong policy -> warning; right policy -> affirming)")
-		}
-	}
-
 	// SPML serves one model against one FP32 reference; per-model pricing
 	// describes a multi-model upstream, which this is not.
 	if len(cfg.Service.ModelPricing) > 0 {

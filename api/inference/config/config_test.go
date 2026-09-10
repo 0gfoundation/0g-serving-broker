@@ -3902,33 +3902,43 @@ assay:
 	}
 }
 
-// The two that fail silently: verify-app exits 0 and prints ALL PASS either
-// way, so an operator who omits them sees success and gets something weaker.
-func TestSPML_AttestationRequiresASPin(t *testing.T) {
+// A config still asking for the removed source must be refused, not quietly
+// given the tappscan check instead: the operator asked for a specific evidence
+// path and is entitled to hear that it is gone rather than to believe they are
+// running something they are not.
+func TestSPML_AttestationRejectsTappCliSource(t *testing.T) {
 	err := loadSPML(t, `
 assay:
   verifierUrl: "http://verifier:8200"
   verifierAddress: "0x1111111111111111111111111111111111111111"
   attestation:
     enabled: true
-    policyIds: ["0g-tapp-gcp-uki-v0.7.0-dev"]
+    source: "tapp-cli"
 `)
-	if err == nil || !strings.Contains(err.Error(), "asPubkeyPin") {
-		t.Errorf("attestation without an AS pin must be refused, got: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "tappscan") {
+		t.Errorf("the removed tapp-cli source must be refused, got: %v", err)
 	}
 }
 
-func TestSPML_AttestationRequiresPolicyIDs(t *testing.T) {
+// expected.image is what the measured boot chain is held against. Without it
+// the check would pass on any image the assay happened to boot.
+func TestSPML_AttestationRequiresExpectedImage(t *testing.T) {
 	err := loadSPML(t, `
 assay:
   verifierUrl: "http://verifier:8200"
   verifierAddress: "0x1111111111111111111111111111111111111111"
   attestation:
     enabled: true
-    asPubkeyPin: "0xbb"
+    source: "tappscan"
+    appId: "assay-verifier"
+    registry: "0x2222222222222222222222222222222222222222"
+    rpcUrl: "https://rpc.example"
+    tappscan:
+      url: "https://scan.example"
+      pubkeyPin: "0xbb"
 `)
-	if err == nil || !strings.Contains(err.Error(), "policyIds") {
-		t.Errorf("attestation without policy ids must be refused, got: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "expected.image") {
+		t.Errorf("attestation without expected.image must be refused, got: %v", err)
 	}
 }
 

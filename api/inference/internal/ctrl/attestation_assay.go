@@ -2,12 +2,7 @@ package ctrl
 
 import (
 	"context"
-	"encoding/hex"
 	"fmt"
-	"os"
-	"os/exec"
-	"regexp"
-	"strings"
 	"sync/atomic"
 	"time"
 
@@ -17,11 +12,15 @@ import (
 
 // Phase 2 of docs/spml-broker-assay-tls.md: instead of trusting a pin frozen
 // in the config, the broker periodically re-attests the assay verifier by
-// exec'ing `tapp-cli verify-app` (the reference implementation — ~1100 lines
-// of TDX quote / eventlog / chain reconciliation we deliberately do not
-// rewrite in Go) and parsing its OUTPUT. The exit code is worthless: the CLI
-// exits 0 and prints "ALL PASS ✅" even when the quote is untrusted (wrong
-// policy id, wrong AS pin — both captured as test fixtures).
+// reading tappscan's record for the app, cross-checking the signer against the
+// TappRegistry and the TLS key against the assay's live port (attestation_scan.go).
+//
+// This used to exec `tapp-cli verify-app` and parse its output instead. That
+// path is gone: its boot-chain answer came from a policy on a shared
+// attestation service that anyone can overwrite, and on 2026-09-07 one was —
+// after which the check failed a CVM that was fine. tappscan compares the
+// measurement against the reference-value files in the public 0g-tapp repo, so
+// the same overwrite cannot reach it.
 //
 // The result is an atomic snapshot consumed at three points:
 //   - the TLS pin for the shared http client (a fresh pin is accepted ONLY
@@ -41,8 +40,7 @@ type assayAttestor struct {
 	cfg    config.AssayAttestation
 	logger log.Logger
 	snap   atomic.Value // attestedAssay
-	// scan, when set, replaces the tapp-cli exec/file path as the evidence
-	// source (config source=tappscan). Same snapshot, same gates.
+	// scan is the evidence source. Never nil once the loop is running.
 	scan *scanSource
 }
 
@@ -160,115 +158,5 @@ func (a *assayAttestor) verifyOnce(ctx context.Context) {
 }
 
 func (a *assayAttestor) executeAndParse(ctx context.Context) attestedAssay {
-	if a.scan != nil {
-		return a.scan.verifyOnce(ctx)
-	}
-	if a.cfg.OutputFile != "" {
-		return a.readAndParse()
-	}
-	args := []string{
-		"verify-app",
-		"--app-id", a.cfg.AppID,
-		"--contract", a.cfg.Registry,
-		"--rpc-url", a.cfg.RpcURL,
-		"--as-pubkey", a.cfg.AsPubkeyPin, // NO default upstream: omitting it = encrypted-but-unauthenticated AS
-	}
-	for _, p := range a.cfg.PolicyIDs {
-		args = append(args, "--policy-ids", p)
-	}
-	cctx, cancel := context.WithTimeout(ctx, 90*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(cctx, a.cfg.CliPathOrDefault(), args...).CombinedOutput()
-	now := time.Now()
-	if err != nil {
-		// A non-zero exit is a hard failure (unknown app, no binary, timeout)
-		// — but the reverse is NOT true, so parsing continues on exit 0.
-		return attestedAssay{checkedAt: now, ok: false,
-			detail: fmt.Sprintf("verify-app failed: %v (%.400s)", err, string(out))}
-	}
-	pin, perr := parseVerifyAppOutput(string(out), a.cfg.RequireTcb)
-	if perr != nil {
-		return attestedAssay{checkedAt: now, ok: false, detail: perr.Error()}
-	}
-	return attestedAssay{pin: pin, checkedAt: now, ok: true,
-		detail: fmt.Sprintf("verified at %s", now.Format(time.RFC3339))}
-}
-
-// readAndParse is file mode: the sidecar owns the exec, we own the parse.
-// checkedAt is the file's mtime, so a sidecar that stops refreshing ages the
-// snapshot past MaxAge and the gates engage without any extra liveness logic.
-func (a *assayAttestor) readAndParse() attestedAssay {
-	st, err := os.Stat(a.cfg.OutputFile)
-	if err != nil {
-		return attestedAssay{checkedAt: time.Now(), ok: false,
-			detail: fmt.Sprintf("attestation output missing (sidecar down?): %v", err)}
-	}
-	raw, err := os.ReadFile(a.cfg.OutputFile)
-	if err != nil {
-		return attestedAssay{checkedAt: time.Now(), ok: false,
-			detail: fmt.Sprintf("attestation output unreadable: %v", err)}
-	}
-	pin, perr := parseVerifyAppOutput(string(raw), a.cfg.RequireTcb)
-	if perr != nil {
-		return attestedAssay{checkedAt: st.ModTime(), ok: false, detail: perr.Error()}
-	}
-	return attestedAssay{pin: pin, checkedAt: st.ModTime(), ok: true,
-		detail: fmt.Sprintf("verified by sidecar output of %s", st.ModTime().Format(time.RFC3339))}
-}
-
-var (
-	reEarStatus = regexp.MustCompile(`ear\.status=([A-Za-z-]+)`)
-	reTcbStatus = regexp.MustCompile(`tcb_status=([A-Za-z-]+)`)
-	reTlsKey    = regexp.MustCompile(`tls key\s*:\s*0x([0-9a-fA-F]{64})`)
-	reNodeCount = regexp.MustCompile(`\((\d+) node\(s\)\)`)
-)
-
-// parseVerifyAppOutput enforces the five conditions of implplan §4.2. It
-// never looks at the exit code and treats "ALL PASS ✅" as noise. Only a
-// single-node app is accepted (ours is one) — with several nodes one bad
-// quote must not hide behind a good one.
-func parseVerifyAppOutput(out string, requireTcb []string) ([]byte, error) {
-	if m := reNodeCount.FindStringSubmatch(out); m != nil && m[1] != "1" {
-		return nil, fmt.Errorf("app has %s nodes; this parser only accepts exactly 1", m[1])
-	}
-	if strings.Contains(out, "quote untrusted") {
-		return nil, fmt.Errorf("quote untrusted (wrong --policy-ids or unauthenticated AS?)")
-	}
-	if !strings.Contains(out, "=> reconcile PASS ; quote trusted") {
-		return nil, fmt.Errorf("no 'reconcile PASS ; quote trusted' line (reconcile failure or unexpected output)")
-	}
-	m := reEarStatus.FindStringSubmatch(out)
-	if m == nil || m[1] != "affirming" {
-		got := "-"
-		if m != nil {
-			got = m[1]
-		}
-		return nil, fmt.Errorf("ear.status=%s, need affirming", got)
-	}
-	m = reTcbStatus.FindStringSubmatch(out)
-	if m == nil {
-		return nil, fmt.Errorf("no tcb_status in output")
-	}
-	allowed := false
-	for _, want := range requireTcb {
-		if m[1] == want {
-			allowed = true
-			break
-		}
-	}
-	if !allowed {
-		return nil, fmt.Errorf("tcb_status=%s not in allowed set %v", m[1], requireTcb)
-	}
-	if !strings.Contains(out, "boot-chain : ✓") {
-		return nil, fmt.Errorf("boot-chain not verified (missing 'boot-chain : ✓')")
-	}
-	km := reTlsKey.FindStringSubmatch(out)
-	if km == nil {
-		return nil, fmt.Errorf("no attested 'tls key' in output — refusing an empty pin")
-	}
-	pin, err := hex.DecodeString(km[1])
-	if err != nil {
-		return nil, fmt.Errorf("bad tls key hex: %w", err)
-	}
-	return pin, nil
+	return a.scan.verifyOnce(ctx)
 }

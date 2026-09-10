@@ -377,10 +377,6 @@ func New(
 	var attestor *assayAttestor
 	if cfg.Assay.Attestation.Enabled {
 		at := cfg.Assay.Attestation
-		if !at.IsTappscan() && at.OutputFile == "" && (at.AppID == "" || at.Registry == "" || at.RpcURL == "" ||
-			at.AsPubkeyPin == "" || len(at.PolicyIDs) == 0) {
-			panic("assay.attestation (exec mode) needs appId, registry, rpcUrl, asPubkeyPin and policyIds (verify-app without --policy-ids or --as-pubkey yields worthless affirmations); or set outputFile for sidecar mode")
-		}
 		if at.OnFail == "" {
 			at.OnFail = "block-settlement"
 		}
@@ -391,10 +387,10 @@ func New(
 			at.RequireTcb = []string{"UpToDate"}
 		}
 		attestor = newAssayAttestor(at, logger)
-		if at.IsTappscan() {
+		{
 			if at.AppID == "" || at.Registry == "" || at.RpcURL == "" ||
 				at.Tappscan.URL == "" || at.Tappscan.PubkeyPin == "" || at.Expected.Image == "" {
-				panic("assay.attestation source=tappscan needs appId, registry, rpcUrl, tappscan.url, tappscan.pubkeyPin and expected.image")
+				panic("assay.attestation needs appId, registry, rpcUrl, tappscan.url, tappscan.pubkeyPin and expected.image")
 			}
 			var sign func([]byte) ([]byte, error)
 			if teeService != nil {
