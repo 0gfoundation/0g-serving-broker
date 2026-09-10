@@ -54,7 +54,7 @@ func start(t *testing.T, reached *[]string) *http.Client {
 	dstackPath := fakeDstack(t, dir, reached)
 	listenPath := filepath.Join(dir, "tee.sock")
 
-	p := New(listenPath, dstackPath, func(context.Context) (string, error) { return testDigest, nil }, testLogger(t))
+	p := New(listenPath, dstackPath, func(context.Context) (KeyIdentity, error) { return KeyIdentity{Digest: testDigest}, nil }, testLogger(t))
 	ctx, cancel := context.WithCancel(context.Background())
 	served := make(chan error, 1)
 	go func() { served <- p.Serve(ctx) }()
@@ -193,7 +193,7 @@ func TestServeReplacesAStaleSocket(t *testing.T) {
 	}
 	_ = stale.Close() // closing leaves the file behind
 
-	p := New(listenPath, dstackPath, func(context.Context) (string, error) { return testDigest, nil }, testLogger(t))
+	p := New(listenPath, dstackPath, func(context.Context) (KeyIdentity, error) { return KeyIdentity{Digest: testDigest}, nil }, testLogger(t))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	served := make(chan error, 1)
@@ -252,15 +252,27 @@ func TestSigningRefusesWhenTheImageIsUnknown(t *testing.T) {
 	dstackPath := fakeDstack(t, dir, &reached)
 	listenPath := filepath.Join(dir, "tee.sock")
 
-	for name, digest := range map[string]func(context.Context) (string, error){
-		"error":     func(context.Context) (string, error) { return "", errors.New("no broker container") },
-		"empty":     func(context.Context) (string, error) { return "", nil },
-		"tag only":  func(context.Context) (string, error) { return "ghcr.io/x:latest", nil },
-		"truncated": func(context.Context) (string, error) { return "sha256:abc", nil },
+	// The set hash is the other half of the identity and gets the same treatment: a value
+	// this cannot verify would become a path segment, deriving a key for a set nobody can
+	// name and producing signatures that match no record.
+	for name, identity := range map[string]CurrentKeyIdentityFunc{
+		"error":     func(context.Context) (KeyIdentity, error) { return KeyIdentity{}, errors.New("no broker container") },
+		"empty":     func(context.Context) (KeyIdentity, error) { return KeyIdentity{}, nil },
+		"tag only":  func(context.Context) (KeyIdentity, error) { return KeyIdentity{Digest: "ghcr.io/x:latest"}, nil },
+		"truncated": func(context.Context) (KeyIdentity, error) { return KeyIdentity{Digest: "sha256:abc"}, nil },
+		"set hash not hex": func(context.Context) (KeyIdentity, error) {
+			return KeyIdentity{Digest: testDigest, UpstreamSetHash: "not-a-hash"}, nil
+		},
+		"set hash too short": func(context.Context) (KeyIdentity, error) {
+			return KeyIdentity{Digest: testDigest, UpstreamSetHash: strings.Repeat("a", 63)}, nil
+		},
+		"set hash uppercase": func(context.Context) (KeyIdentity, error) {
+			return KeyIdentity{Digest: testDigest, UpstreamSetHash: strings.Repeat("A", 64)}, nil
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			sock := listenPath + "-" + strings.ReplaceAll(name, " ", "")
-			p := New(sock, dstackPath, digest, testLogger(t))
+			p := New(sock, dstackPath, identity, testLogger(t))
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan error, 1)
 			go func() { done <- p.Serve(ctx) }()

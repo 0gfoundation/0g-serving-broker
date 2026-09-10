@@ -78,17 +78,17 @@ type Proxy struct {
 	// is then dropped without CloseIdleConnections, so its read and write loops stay
 	// reachable forever — three goroutines and a descriptor per call, and /Sign runs once
 	// per response.
-	keyClient      *http.Client
-	currentImageFn CurrentImageFunc
-	server         *http.Server
-	listener       net.Listener
-	logger         log.Logger
+	keyClient         *http.Client
+	currentIdentityFn CurrentKeyIdentityFunc
+	server            *http.Server
+	listener          net.Listener
+	logger            log.Logger
 }
 
 // New prepares a proxy that listens on listenPath and forwards to dstackPath.
 //
 // Nothing is dialled or created yet; Serve does that.
-func New(listenPath, dstackPath string, currentImage CurrentImageFunc, logger log.Logger) *Proxy {
+func New(listenPath, dstackPath string, currentIdentity CurrentKeyIdentityFunc, logger log.Logger) *Proxy {
 	// A fixed host: the transport below ignores it and dials the socket, but net/http
 	// still needs a syntactically valid URL to build requests against.
 	target, _ := url.Parse("http://dstack")
@@ -105,10 +105,10 @@ func New(listenPath, dstackPath string, currentImage CurrentImageFunc, logger lo
 	}
 
 	p := &Proxy{
-		listenPath:     listenPath,
-		dstackPath:     dstackPath,
-		currentImageFn: currentImage,
-		logger:         logger,
+		listenPath:        listenPath,
+		dstackPath:        dstackPath,
+		currentIdentityFn: currentIdentity,
+		logger:            logger,
 		keyClient: &http.Client{Transport: &http.Transport{
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 				return (&net.Dialer{}).DialContext(ctx, "unix", dstackPath)
