@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"os"
 	"time"
 
 	"github.com/0glabs/0g-serving-broker/common/attest"
+	"github.com/0glabs/0g-serving-broker/controller/internal/attestproxy"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 )
 
@@ -176,10 +178,109 @@ func (c *Ctrl) recordUpstreamSet(ctx context.Context, tag string, svc *config.Se
 		return c.invalidateUpstreamSet(ctx, tag)
 	}
 
+	// The hash BEFORE the emit, because a set that cannot be hashed cannot be bound and
+	// must not be recorded as though it could. UpstreamSetHash refuses the three no-set
+	// states, and reaching it with UpstreamsKnown and these members is the only shape that
+	// answers.
+	//
+	// The refusal below is unreachable from here, and stated rather than left to look
+	// load-bearing: UpstreamSetHash fails only on whitespace inside a field or a name
+	// spelled twice, and RenderUpstreamSet has already round-tripped these members through
+	// parseUpstreamSet, which refuses both. A mutation replacing this branch with `hash =
+	// ""` fails no test.
+	//
+	// Kept because the two functions could stop agreeing — a rule relaxed in the parser, a
+	// field added to Upstream that the hash covers and the grammar does not — and the
+	// alternative to refusing is binding nothing while recording the set as readable,
+	// which reports a bound that nothing enforces.
+	hash, err := (&attest.RunningState{Upstreams: members, UpstreamsState: attest.UpstreamsKnown}).UpstreamSetHash()
+	if err != nil {
+		c.logger.Errorf("[%s] The set has no hash, so no key could be bound to it; recording it as unreadable: %v", tag, err)
+		return c.invalidateUpstreamSet(ctx, tag)
+	}
+
 	if err := c.emitter.EmitEvent(ctx, attest.EventUpstreamSet, []byte(payload)); err != nil {
 		return fmt.Errorf("recording the permitted upstream set in RTMR3: %w", err)
 	}
 	c.logger.Infof("[%s] Recorded %d permitted upstream(s)", tag, len(members))
+
+	return c.bindKeysToUpstreamSet(ctx, tag, hash)
+}
+
+// bindKeysToUpstreamSet makes the signing and encryption keys a function of the set just
+// recorded, and writes the image record that lets a reader check it.
+//
+// # What binding buys, and what it costs
+//
+// The derivation path gains the set hash, so changing the permitted set changes the signer
+// address. Service.teeSignerAcknowledged on chain is keyed on that address, so the change
+// resets it and the contract owner has to acknowledge again. That is the accountability the
+// record exists for: a deployment cannot widen where it forwards plaintext without an
+// on-chain event nobody can suppress.
+//
+// The cost is that same sentence read the other way. Every config change that alters the
+// destinations costs one on-chain acknowledgement, and a request sealed to the old enc key
+// just before the change cannot be opened after it.
+//
+// # Why an image record, and what it gives up
+//
+// A reader compares the quote's report_data against a RECORD, and the only record carrying
+// a signer is zg-image-update. So binding is only checkable if one is written — which at
+// boot means writing one where none was written before, moving DigestSource from
+// "compose" to "event".
+//
+// That is a real reduction: a compose-pinned digest is bound to the quote by compose_hash
+// in the signed report body, while a recorded one is the CVM's own claim. It is
+// recoverable by the caller and needs no reader change — attest.PinnedImages is exported
+// and RunningState carries ComposeHash, so anyone who cares can check that the recorded
+// digest equals the compose pin and treat the two as equally strong when they agree.
+// Stated here because a caller who does not know to check has silently lost something.
+//
+// # Without the attestation proxy there is nothing to bind
+//
+// The broker then derives its own keys at fixed paths (tee.getSigningKey at "/",
+// getEncKey at the bare suffix), so a record naming a controller-derived address would
+// name one no quote can ever match — permanently, since RTMR3 only appends. UpdateImages
+// refuses outright for exactly this reason. Here the set is still worth recording, so it
+// is: the record is written and left UNBOUND, loudly, because a set nobody can read is
+// strictly less than a set that is merely unenforced.
+func (c *Ctrl) bindKeysToUpstreamSet(ctx context.Context, tag, hash string) error {
+	if os.Getenv(attestproxy.SocketEnvVar) == "" {
+		c.logger.Warnf("[%s] Recorded the upstream set but bound no key to it: %s is unset, so the broker derives its own keys and a record naming one derived here could never match its quote. The set is recorded and readable; changing it will NOT rotate the signer or reset the on-chain acknowledgement.", tag, attestproxy.SocketEnvVar)
+		return nil
+	}
+
+	digest, err := c.RunningBrokerDigest(ctx)
+	if err != nil {
+		// Unbound rather than half-bound. Binding needs the digest as much as the hash, and
+		// storing the hash without being able to write the record would make the broker
+		// derive a key nothing describes.
+		c.logger.Errorf("[%s] Recorded the upstream set but could not resolve the broker's digest, so no key is bound to it: %v", tag, err)
+		return nil
+	}
+
+	id := attestproxy.KeyIdentity{Digest: digest, UpstreamSetHash: hash}
+	signer, encPub, err := c.deriver.ImageKeys(ctx, id)
+	if err != nil {
+		c.logger.Errorf("[%s] Recorded the upstream set but could not derive the keys bound to it, so none is bound: %v", tag, err)
+		return nil
+	}
+
+	// Bound BEFORE the record is written, and the record written before this returns —
+	// which is before main.go starts the proxy and before ApplyCoreConfig restarts the
+	// broker. So there is no moment at which the broker can obtain a key from this value
+	// while the ledger still describes the previous one.
+	c.bindUpstreamSetHash(hash)
+
+	payload := c.config.ImageRepo + "@" + digest + " " + signer + " " + encPub
+	if err := c.emitter.EmitEvent(ctx, attest.EventImageUpdate, []byte(payload)); err != nil {
+		// Unbind, or the broker would publish an address no record names. The set record
+		// stands and stays readable; only the binding is gone, which is the same state a
+		// deployment without the proxy is in.
+		c.bindUpstreamSetHash("")
+		return fmt.Errorf("binding the keys to the recorded upstream set: %w", err)
+	}
+	c.logger.Infof("[%s] Keys bound to the recorded set; signer %s", tag, signer)
 	return nil
 }
 
@@ -194,6 +295,15 @@ func (c *Ctrl) recordUpstreamSet(ctx context.Context, tag string, svc *config.Se
 // RTMR3 only appends, so this is the only way to withdraw a record: supersede it with one
 // that says less.
 func (c *Ctrl) invalidateUpstreamSet(ctx context.Context, tag string) error {
+	// Unbound first, and unconditionally. Whatever hash was bound describes the set this
+	// record supersedes, and a key still derived for it would be a key the ledger no longer
+	// describes — the same mismatch that makes a stale record worse than none.
+	//
+	// Before the emit, because the emit can fail: the ledger would then still name the old
+	// set while this process has stopped standing behind it, and unbound is the honest half
+	// of that. A running broker is unaffected either way, since it cached its keys at start.
+	c.bindUpstreamSetHash("")
+
 	if err := c.emitter.EmitEvent(ctx, attest.EventUpstreamSet, []byte(upstreamSetInvalidated)); err != nil {
 		return fmt.Errorf("recording the upstream set as unreadable: %w", err)
 	}
