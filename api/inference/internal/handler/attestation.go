@@ -71,7 +71,7 @@ func (h *Handler) GetAssayAttestation(ctx *gin.Context) {
 		"assay":      json.RawMessage(body),
 		"relayed_by": "broker",
 		"fetched_at": fetchedAt.Format(time.RFC3339),
-		"relay_note": "What this saves you is the arguments, not the verification. Run assay.verify.command: it queries the chain and the attestation service directly, and pulls the assay's evidence from the tee_url the registry lists, so nothing in this response feeds the result. The broker can refuse to answer or serve a stale copy; it cannot make a false answer verify.",
+		"relay_note": "What this saves you is the arguments, not the verification. Fetch assay.verify.scan_record yourself, pinned to assay.verify.params.scan_pubkey_pin, and check it against assay.verify.expect: the record is tappscan's and the reconciliation is the chain's, so nothing in this response feeds the result. The broker can refuse to answer or serve a stale copy; it cannot make a false answer verify.",
 	}
 	if h.ctrl.AssayScanEnabled() {
 		out["scan_endpoint"] = "/v1/attestation/assay/scan"
@@ -79,10 +79,10 @@ func (h *Handler) GetAssayAttestation(ctx *gin.Context) {
 	}
 	if snap := h.ctrl.AssayAttestationStatus(); snap != nil {
 		out["broker_own_check"] = snap
-		out["broker_own_check_note"] = "Our own run of the same verification. A failure here is worth acting on — the identical result gates our settlement and invoicing, so we lose money by reporting it. A pass is only a hint: we are reporting on ourselves. Run assay.verify.command to get an answer that does not depend on us."
+		out["broker_own_check_note"] = "Our own run of the same verification. A failure here is worth acting on — the identical result gates our settlement and invoicing, so we lose money by reporting it. A pass is only a hint: we are reporting on ourselves. Fetch assay.verify.scan_record yourself to get an answer that does not depend on us."
 	} else {
 		out["broker_own_check"] = nil
-		out["broker_own_check_note"] = "This broker is not running the attestation loop, so it verifies the assay for itself not at all — and neither gates its settlement on it. Run assay.verify.command yourself."
+		out["broker_own_check_note"] = "This broker is not running the attestation loop, so it verifies the assay for itself not at all — and neither gates its settlement on it. Fetch assay.verify.scan_record yourself."
 	}
 	ctx.JSON(http.StatusOK, out)
 }
