@@ -36,12 +36,30 @@ type assayAttestationCache struct {
 	body      json.RawMessage
 	fetchedAt time.Time
 	ttl       time.Duration
+	// forcedAt rate-limits the ?fresh=1 bypass. Without a floor the bypass
+	// would undo the reason the cache exists, since anyone may ask for it.
+	forcedAt time.Time
 }
+
+// AssayAttestationForceFloor is the shortest interval between two forced
+// re-fetches. The cache is what stops a public endpoint from being an
+// amplifier pointed at a host nobody else can reach, so the escape hatch out
+// of it needs its own floor — generous enough to confirm a redeploy at once,
+// tight enough that a loop gains nothing over the ordinary TTL.
+const AssayAttestationForceFloor = 30 * time.Second
 
 // AssayAttestation returns the assay's attestation document plus the time we
 // fetched it. The caller decides whether that age is acceptable — we do not
 // pretend a cached document is fresh.
-func (c *Ctrl) AssayAttestation(ctx context.Context) (json.RawMessage, time.Time, error) {
+//
+// force skips the TTL. It exists because nothing here can tell that the assay's
+// document changed: the obvious signal would be its TLS pin, and that pin is
+// KMS-derived precisely so that it SURVIVES a redeploy. So after one, this
+// relay serves parameters describing the previous instance until the TTL runs
+// out — on the one endpoint whose whole purpose is to let someone verify us.
+// A caller who has reason to think that happened can say so; the floor above
+// keeps that from becoming the amplifier the cache is here to prevent.
+func (c *Ctrl) AssayAttestation(ctx context.Context, force bool) (json.RawMessage, time.Time, error) {
 	if c.assayVerifierURL == "" {
 		return nil, time.Time{}, fmt.Errorf("assay is not configured on this broker")
 	}
@@ -50,13 +68,19 @@ func (c *Ctrl) AssayAttestation(ctx context.Context) (json.RawMessage, time.Time
 	}
 	cache := c.assayAttCache
 
-	cache.mu.RLock()
-	if cache.body != nil && time.Since(cache.fetchedAt) < cache.ttl {
-		body, at := cache.body, cache.fetchedAt
-		cache.mu.RUnlock()
+	cache.mu.Lock()
+	if force && time.Since(cache.forcedAt) >= AssayAttestationForceFloor {
+		cache.forcedAt = time.Now()
+		force = true
+	} else {
+		force = false // too soon, or not asked: the TTL decides
+	}
+	fresh := cache.body != nil && time.Since(cache.fetchedAt) < cache.ttl
+	body, at := cache.body, cache.fetchedAt
+	cache.mu.Unlock()
+	if fresh && !force {
 		return body, at, nil
 	}
-	cache.mu.RUnlock()
 
 	url := c.assayVerifierURL + constant.AssayAttestationPath
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)

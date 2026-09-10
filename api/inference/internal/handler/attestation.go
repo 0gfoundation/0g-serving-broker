@@ -52,7 +52,11 @@ func (h *Handler) GetAssayScan(ctx *gin.Context) {
 //	@Router		/attestation/assay [get]
 //	@Success	200
 func (h *Handler) GetAssayAttestation(ctx *gin.Context) {
-	body, fetchedAt, err := h.ctrl.AssayAttestation(ctx.Request.Context())
+	// ?fresh=1 bypasses the relay cache (rate-limited in the controller). The
+	// caller who just redeployed the assay, or who does not want to reason
+	// about fetched_at, can ask for the document as it is now.
+	fresh := ctx.Query("fresh") == "1"
+	body, fetchedAt, err := h.ctrl.AssayAttestation(ctx.Request.Context(), fresh)
 	if err != nil {
 		// 502, not 500: the failure is upstream of us, and saying so lets an
 		// auditor tell "the broker is broken" from "the broker will not show
@@ -71,6 +75,7 @@ func (h *Handler) GetAssayAttestation(ctx *gin.Context) {
 		"assay":      json.RawMessage(body),
 		"relayed_by": "broker",
 		"fetched_at": fetchedAt.Format(time.RFC3339),
+		"cached_note": "This document is cached for up to 10 minutes and fetched_at says when we took it; add ?fresh=1 to make us re-fetch now (rate-limited). The cache is here because the assay's port is reachable only through us, so an uncached public endpoint would be an amplifier pointed at it.",
 		"relay_note": "What this saves you is the arguments, not the verification. Fetch assay.verify.scan_record yourself, pinned to assay.verify.params.scan_pubkey_pin, and check it against assay.verify.expect: the record is tappscan's and the reconciliation is the chain's, so nothing in this response feeds the result. The broker can refuse to answer or serve a stale copy; it cannot make a false answer verify.",
 	}
 	if h.ctrl.AssayScanEnabled() {
