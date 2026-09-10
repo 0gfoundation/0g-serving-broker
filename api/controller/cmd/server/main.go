@@ -58,6 +58,24 @@ func Main() {
 	}
 	defer controller.Close()
 
+	// Record what this deployment permits, every boot.
+	//
+	// Unlike the image and config records, this one has no compose fallback: which
+	// destinations a model resolves to lives in the config file's targetUrl values, and
+	// compose_hash covers BROKER_CONFIG=${BROKER_CONFIG:-} rather than the content. So
+	// without this the set is UpstreamsUnrecorded, which reads as "nothing bounds where
+	// plaintext goes". And RTMR3 is cleared at every boot, so it has to be every start.
+	//
+	// Logged rather than fatal. A failed emit leaves the set unrecorded, which is where
+	// every deployment already is, so refusing to start would trade today's fail-open
+	// state for a new way to be down — and the enforcement that actually closes it is
+	// binding the set hash into the signing key's derivation path, where no set means no
+	// key and the deployment cannot serve at all. That is mechanical; a Fatal here would
+	// only be a second, weaker copy of it.
+	if err := controller.RecordUpstreamSet(context.Background()); err != nil {
+		logger.Errorf("Could not record the permitted upstream set; this deployment starts with nothing in RTMR3 bounding where plaintext may go: %v", err)
+	}
+
 	// Serve quotes and derived keys to the broker, when a deployment has asked for it.
 	//
 	// Only when asked: this is how a deployment stops mounting dstack's socket into the
