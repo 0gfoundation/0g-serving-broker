@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -226,17 +227,20 @@ func (c *Ctrl) CreateEngine(ctx context.Context, spec EngineSpec) error {
 // record over-states the set — a destination that no longer exists is named — which is
 // the safe direction. Recording first would understate it: a container still serving
 // would be absent from the ledger.
-func (c *Ctrl) RemoveEngine(ctx context.Context, name string) error {
+// Returns the upstream URLs a config on disk still points at the removed container, so
+// the caller learns that a model is now routed at nothing. Advisory: see
+// engineStillRouted.
+func (c *Ctrl) RemoveEngine(ctx context.Context, name string) ([]string, error) {
 	// Same gate as CreateEngine, and reachable only if that gate was once open: with
 	// recording off nothing here created an engine, and removing a container this
 	// controller did not create is refused one layer down anyway. An operator who turned
 	// the switch off with engines running is told that rather than being allowed a removal
 	// the ledger would never reflect.
 	if !c.config.RecordUpstreamSet {
-		return refusef("cannot remove an engine: controller.recordUpstreamSet is off, so the correction could not be recorded and the ledger would go on naming it")
+		return nil, refusef("cannot remove an engine: controller.recordUpstreamSet is off, so the correction could not be recorded and the ledger would go on naming it")
 	}
 	if !c.changing.TryLock() {
-		return ErrChangeInProgress
+		return nil, ErrChangeInProgress
 	}
 	defer c.changing.Unlock()
 
@@ -256,17 +260,72 @@ func (c *Ctrl) RemoveEngine(ctx context.Context, name string) error {
 	// This also moves the label check ahead of the removal: a container this controller
 	// did not create is refused before it is touched rather than after it is resolved.
 	if err := c.engineExists(ctx, name); err != nil {
-		return err
+		return nil, err
 	}
 
+	// Collected before the removal, because afterwards the answer is the same and the
+	// reason to want it is gone: the caller is told what they have just disconnected.
+	routed := c.engineStillRouted(name)
+
 	if err := c.dockerClient.RemoveEngine(ctx, name); err != nil {
-		return err
+		return nil, err
 	}
 	if err := c.recordEngineSet(ctx, c.engineSetFromDocker(ctx)); err != nil {
-		return fmt.Errorf("%q was removed and the record could not be corrected, so the ledger still names it: %w", name, err)
+		return routed, fmt.Errorf("%q was removed and the record could not be corrected, so the ledger still names it: %w", name, err)
+	}
+	if len(routed) > 0 {
+		c.logger.Warnf("[RemoveEngine] Removed %q while the config still routes %v at it; those models now reach nothing until the config is changed", name, routed)
 	}
 	c.logger.Infof("[RemoveEngine] Removed %q", name)
-	return nil
+	return routed, nil
+}
+
+// engineStillRouted reports the upstream URLs a config on disk still points at a
+// container, so a removal can say which models it just disconnected.
+//
+// Read off the FILE rather than off c.fullConfig, which is a once.Do singleton that
+// nothing reloads — after an ApplyCoreConfig it describes the previous config while the
+// broker is running the new one. A warning built on the stale copy would be wrong in
+// both directions, and a wrong warning on a destructive endpoint is worse than none.
+//
+// Advisory throughout: every failure returns no answer rather than failing the removal.
+// A config this cannot read is a reason not to claim anything about routing, never a
+// reason to keep a container the caller asked to remove — and the removal is still
+// recorded either way, which is the part that has to be right.
+//
+// It does NOT refuse the removal. Replacing an engine in place — remove, then create
+// under the same name — is a flow where the config pointing at that name is exactly
+// correct, and refusing would block the main reason this endpoint exists.
+func (c *Ctrl) engineStillRouted(name string) []string {
+	if c.config.ConfigFile == "" {
+		return nil
+	}
+	data, err := os.ReadFile(c.config.ConfigFile)
+	if err != nil {
+		c.logger.Warnf("[RemoveEngine] Could not read %s, so this removal cannot say which models routed at %q: %v", c.config.ConfigFile, name, err)
+		return nil
+	}
+	svc, err := config.ServiceFromYAML(data)
+	if err != nil {
+		c.logger.Warnf("[RemoveEngine] Could not read the service config, so this removal cannot say which models routed at %q: %v", name, err)
+		return nil
+	}
+	members, err := upstreamsFromConfig(svc)
+	if err != nil {
+		c.logger.Warnf("[RemoveEngine] Could not collect the config's upstreams, so this removal cannot say which models routed at %q: %v", name, err)
+		return nil
+	}
+	var out []string
+	for _, u := range members {
+		parsed, err := url.Parse(u.URL)
+		if err != nil {
+			continue
+		}
+		if parsed.Hostname() == name {
+			out = append(out, u.URL)
+		}
+	}
+	return out
 }
 
 // ListEngines reports the engines this controller created.

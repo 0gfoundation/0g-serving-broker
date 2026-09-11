@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -674,7 +676,7 @@ func TestRemoveEngineRemovesThenRecords(t *testing.T) {
 		gpus: "7", hasGPU: true, engine: true,
 	})
 
-	if err := c.RemoveEngine(context.Background(), "whisper"); err != nil {
+	if _, err := c.RemoveEngine(context.Background(), "whisper"); err != nil {
 		t.Fatalf("RemoveEngine() = %v, want nil", err)
 	}
 
@@ -713,7 +715,7 @@ func TestRemoveEngineRefusesAContainerItDidNotCreate(t *testing.T) {
 		gpus: "all", hasGPU: true, // no label
 	})
 
-	err := c.RemoveEngine(context.Background(), "glm53-engine")
+	_, err := c.RemoveEngine(context.Background(), "glm53-engine")
 	if err == nil || !strings.Contains(err.Error(), "no engine named") {
 		t.Fatalf("RemoveEngine() = %v, want a refusal", err)
 	}
@@ -732,7 +734,7 @@ func TestRemoveEngineRefusedWhenRecordingIsOff(t *testing.T) {
 	})
 	c.config.RecordUpstreamSet = false
 
-	err := c.RemoveEngine(context.Background(), "whisper")
+	_, err := c.RemoveEngine(context.Background(), "whisper")
 	if err == nil || !strings.Contains(err.Error(), "recordUpstreamSet is off") {
 		t.Fatalf("RemoveEngine() = %v, want a refusal naming the switch", err)
 	}
@@ -934,7 +936,7 @@ func TestRemoveEngineRefusesWhileAnotherChangeRuns(t *testing.T) {
 	c.changing.Lock()
 	defer c.changing.Unlock()
 
-	if err := c.RemoveEngine(context.Background(), "whisper"); !errors.Is(err, ErrChangeInProgress) {
+	if _, err := c.RemoveEngine(context.Background(), "whisper"); !errors.Is(err, ErrChangeInProgress) {
 		t.Errorf("RemoveEngine() = %v, want ErrChangeInProgress", err)
 	}
 }
@@ -1093,7 +1095,7 @@ func TestRemoveEngineSurvivesTheCallerHangingUp(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	if err := c.RemoveEngine(ctx, "whisper"); err != nil {
+	if _, err := c.RemoveEngine(ctx, "whisper"); err != nil {
 		t.Fatalf("RemoveEngine() = %v, want a cancelled caller not to abort the change", err)
 	}
 	if !hasDeadline {
@@ -1146,7 +1148,7 @@ func TestRemoveEngineNeedsTheExactName(t *testing.T) {
 
 	for _, name := range []string{"isper", "whisp", "", "glm"} {
 		t.Run("refuses "+name, func(t *testing.T) {
-			err := c.RemoveEngine(context.Background(), name)
+			_, err := c.RemoveEngine(context.Background(), name)
 			if err == nil || !strings.Contains(err.Error(), "no engine named") {
 				t.Fatalf("RemoveEngine(%q) = %v, want a refusal naming nothing removed", name, err)
 			}
@@ -1165,7 +1167,7 @@ func TestRemoveEngineNeedsTheExactName(t *testing.T) {
 
 	// And the exact name still works, so the refusal is about resolution and not about
 	// having broken the endpoint.
-	if err := c.RemoveEngine(context.Background(), "whisper"); err != nil {
+	if _, err := c.RemoveEngine(context.Background(), "whisper"); err != nil {
 		t.Fatalf("RemoveEngine(\"whisper\") = %v, want nil", err)
 	}
 }
@@ -1247,5 +1249,79 @@ func TestGPUAllocationStillReportsAMonitoringClaim(t *testing.T) {
 	}
 	if !claims[0].Monitoring {
 		t.Error("the exporter's claim is not flagged as monitoring, so a reader cannot tell why it does not block")
+	}
+}
+
+// engineConfigFile writes a service config and points the Ctrl at it, which is where the
+// removal reads routing from — c.fullConfig is a once.Do singleton that nothing reloads,
+// so after an ApplyCoreConfig it describes the previous config while the broker runs the
+// new one.
+func engineConfigFile(t *testing.T, c *Ctrl, body string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("writing the config: %v", err)
+	}
+	c.config.ConfigFile = path
+}
+
+func TestRemoveEngineReportsWhatStillRoutesAtIt(t *testing.T) {
+	// The signal an operator needs and would otherwise get from the model's own errors:
+	// the container is gone and the config still sends requests to its name.
+	c, _, _ := engineCtrl(t, fakeContainer{
+		id: "eeee" + strings.Repeat("1", 60), name: "whisper", image: engineRef,
+		gpus: "7", hasGPU: true, engine: true,
+	})
+	engineConfigFile(t, c, "service:\n  targetUrl: \"http://whisper:8000/v1\"\n  providerIdentity: \"self\"\n")
+
+	routed, err := c.RemoveEngine(context.Background(), "whisper")
+	if err != nil {
+		t.Fatalf("RemoveEngine() = %v, want nil", err)
+	}
+	if len(routed) != 1 || routed[0] != "http://whisper:8000/v1" {
+		t.Errorf("routed = %v, want the upstream the config still names", routed)
+	}
+}
+
+func TestRemoveEngineReportsNothingWhenNothingRoutesAtIt(t *testing.T) {
+	// And it does not refuse: replacing an engine in place — remove, then create under the
+	// same name — is a flow where the config pointing at that name is exactly correct.
+	c, _, _ := engineCtrl(t, fakeContainer{
+		id: "eeee" + strings.Repeat("1", 60), name: "whisper", image: engineRef,
+		gpus: "7", hasGPU: true, engine: true,
+	})
+	engineConfigFile(t, c, "service:\n  targetUrl: \"http://glm53:8000/v1\"\n  providerIdentity: \"self\"\n")
+
+	routed, err := c.RemoveEngine(context.Background(), "whisper")
+	if err != nil {
+		t.Fatalf("RemoveEngine() = %v, want nil", err)
+	}
+	if len(routed) != 0 {
+		t.Errorf("routed = %v, want nothing: the config names a different host", routed)
+	}
+}
+
+func TestRemoveEngineStillRemovesWhenTheConfigCannotBeRead(t *testing.T) {
+	// Advisory throughout: a config this cannot read is a reason not to claim anything
+	// about routing, never a reason to keep a container the caller asked to remove. The
+	// removal is still recorded, which is the part that has to be right.
+	c, m, l := engineCtrl(t, fakeContainer{
+		id: "eeee" + strings.Repeat("1", 60), name: "whisper", image: engineRef,
+		gpus: "7", hasGPU: true, engine: true,
+	})
+	c.config.ConfigFile = filepath.Join(t.TempDir(), "does-not-exist.yaml")
+
+	routed, err := c.RemoveEngine(context.Background(), "whisper")
+	if err != nil {
+		t.Fatalf("RemoveEngine() = %v, want the removal to go through", err)
+	}
+	if routed != nil {
+		t.Errorf("routed = %v, want no claim about routing", routed)
+	}
+	if names := m.names(); contains(names, "whisper") {
+		t.Errorf("machine = %v, want the engine gone", names)
+	}
+	if payload := emittedEngineSet(t, l); !strings.Contains(payload, "count=0") {
+		t.Errorf("payload = %q, want the correction recorded regardless", payload)
 	}
 }

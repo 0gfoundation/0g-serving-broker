@@ -367,12 +367,21 @@ func (h *Handler) CreateEngine(ctx *gin.Context) {
 }
 
 // DeleteEngine removes an engine container and records the set without it.
+//
+// The response carries the upstreams a config on disk still points at the container, so
+// a caller who took a serving model offline is told rather than finding out from the
+// model's own errors. Absent when there are none.
 func (h *Handler) DeleteEngine(ctx *gin.Context) {
-	if err := h.ctrl.RemoveEngine(ctx, ctx.Param("name")); err != nil {
+	routed, err := h.ctrl.RemoveEngine(ctx, ctx.Param("name"))
+	if err != nil {
 		h.writeEngineError(ctx, err)
 		return
 	}
-	ctx.JSON(http.StatusOK, gin.H{"name": ctx.Param("name"), "status": "removed"})
+	body := gin.H{"name": ctx.Param("name"), "status": "removed"}
+	if len(routed) > 0 {
+		body["stillRoutedBy"] = routed
+	}
+	ctx.JSON(http.StatusOK, body)
 }
 
 // GetGPUAllocation reports which cards are held and by which container.
