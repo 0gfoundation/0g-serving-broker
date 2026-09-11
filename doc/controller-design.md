@@ -64,6 +64,27 @@ controller:
   docker:
     host: "unix:///var/run/docker.sock"
     apiVersion: "1.41"
+  recordUpstreamSet: false       # record the permitted upstream set, and gate the engine API (§4.5)
+  engineNetwork: "zg"            # the compose network a created engine joins, so the broker resolves it by name
+  engineVolumes:                 # named volumes only; a host path is refused
+    - "hfcache:/root/.cache/huggingface"
+  engineEnv:                     # no secrets: this file is inside app_compose
+    HF_HOME: "/root/.cache/huggingface"
+  engines:                       # the allowlist, and the per-image flag table (§4.5)
+    - imageRepo: "lmsysorg/sglang"
+      modelFlag: "--model-path"
+      revisionFlag: "--revision"
+      portFlag: "--port"
+      hostFlag: "--host"
+      ipcHost: true
+      shmSize: "32gb"
+    - imageRepo: "vllm/vllm-openai"
+      modelFlag: "--model"
+      revisionFlag: "--revision"
+      portFlag: "--port"
+      hostFlag: "--host"
+      ipcHost: true
+      shmSize: "32gb"
 ```
 
 `controller.imageRepo` names a repository and nothing else. A value carrying a
@@ -352,6 +373,107 @@ return 404, indistinguishable from an unknown path. Neither `/v1/admin/ips`
 write route ever affected traffic: enforcement
 uses the startup snapshot held by `IPWhitelistMiddleware`, so both only ever
 edited what `GET /v1/admin/ips` reported.
+
+### 4.5 Engine API
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST   | `/v1/engines` | Record and create an engine container |
+| DELETE | `/v1/engines/:name` | Remove an engine container and record the correction |
+| GET    | `/v1/engines` | List the engine containers this controller created |
+| GET    | `/v1/gpus` | Report which GPUs are claimed, and by which container |
+
+An **engine** is an inference server the controller created after the CVM launched —
+a model the `app-compose.json` did not ship. That is the whole reason this API is
+awkward: `compose_hash` is computed at launch from the submitted manifest, so a
+container created afterwards is outside it, and without a record a destination
+pointing at it classifies as an **external vendor** (`attest.classifyUpstreams`
+matches a URL host against the compose's services and finds nothing). Fail-closed,
+and useless for the one case dynamic engines exist for.
+
+So every create writes `zg-engine-set` into RTMR3 **before** the container exists,
+and every removal writes the correction **after** it is gone. Both orders follow one
+rule: the ledger must never understate where plaintext may go. A record of a
+container that does not exist over-states the set and is harmless; a container that
+exists and is not in the ledger is the outcome the whole design refuses.
+
+```json
+POST /v1/engines
+{
+  "name": "dsv4flash",
+  "image": "lmsysorg/sglang@sha256:<64 lowercase hex>",
+  "gpus": "6,7",
+  "port": 8000,
+  "model": { "repo": "deepseek-ai/DeepSeek-V4-Flash", "revision": "<40 hex chars>" },
+  "args": ["--tp", "2", "--mem-fraction-static", "0.85", "--kv-cache-dtype", "fp8_e4m3"]
+}
+```
+
+`name` is the container name, and therefore the host an upstream URL spells. `args`
+is passed through verbatim — every engine's tuning flags differ per model, not per
+image, so no template could hold them.
+
+**`model.revision` is required, and it is the single most load-bearing rule here.**
+sglang and vLLM both take `--trust-remote-code`, which executes modeling code out of
+the model repository. A repo id names what was *asked for*; only a revision names
+what *arrived*. Without it the record would say "this container runs code from repo
+X" while the code under that name could change at any time — so the record would
+describe nothing. It is a separate field rather than an argument because finding it
+inside an array means parsing, and `--revision=x` and `--revision x` are the same
+flag and two different strings.
+
+**What the request may not decide.** Mounts, capabilities, host namespaces,
+published ports and the environment are the controller's, from
+`controller.engineVolumes` / `engineEnv` / `engineNetwork` (§3.1) — all inside
+`app_compose`, so a user who reviewed the manifest reviewed them. A request that
+could name a mount could reach the host filesystem; one that could mount the docker
+socket could create containers this controller never records, which would break the
+only chain that makes the record worth anything. `HF_TOKEN` comes from the
+controller's own environment for the same reason in reverse: the spec is published
+in the record, so a request field carrying it would publish it.
+
+**The allowlist is `controller.engines`, and it doubles as the flag table.** An image
+with no entry there cannot be run at all — not because running it is forbidden in
+principle, but because without a rule the controller would not know which flag
+carries the model repository, and a record built from a guess would describe
+something else. Each entry names `modelFlag`, `revisionFlag`, `portFlag` and
+optionally `hostFlag`; those four are exactly the flags a **request may not pass**,
+since the controller sets them and a caller that could also set them could make the
+container disagree with the record. `hostFlag` is forced to `0.0.0.0`, which inside a
+container with no published ports means "reachable from the broker and nothing else".
+
+**GPU placement** is read off docker rather than off NVIDIA: assignment is a
+docker-level fact, and asking docker avoids an NVML dependency and a second source
+that can disagree with the one that decides. A container holds cards if it has a
+device request **or** `runtime: nvidia` — both spellings are in use in this
+project's own compose — and `NVIDIA_VISIBLE_DEVICES` is what narrows the claim. An
+unnarrowed claim (`all`, or unset on a GPU container) is read as holding **every**
+card, which is why a machine already running one whole-machine engine refuses a
+second one that does not name its cards. What docker cannot say is how much memory a
+card has *left*; that is dcgm-exporter's answer, and a caller that needs it asks
+there.
+
+**Status codes.** `409` when another change holds the controller (the upgrade and
+`PUT /v1/config/core` share that lock). `400` for a refusal — a spec the allowlist
+rejects, an occupied card, or `controller.recordUpstreamSet` being off — all of
+which are permanent until something outside the process changes, so a `500` would
+invite a retry into the same answer. `500` for a failure: docker unreachable, a pull
+that failed, an emit that failed. Those may well succeed on a retry, which a `400`
+would discourage.
+
+**Gated on `controller.recordUpstreamSet`**, deliberately not on a switch of its own.
+Both records land in the same append-only log and `attest.ResolveRunningState`
+hard-fails on a `zg-` event it does not recognise, so emitting either one to a reader
+that predates it makes the CVM unverifiable for *every* question. One switch means
+one decision, taken once. It also means the container cannot exist unrecorded.
+
+**No boot recovery.** Containers this controller created do not come back after a
+reboot — the compose brings up its own services and nothing brings up these — and
+RTMR3 is cleared at every boot, so the record is gone too. Both halves vanish
+together, which is the consistent outcome; re-creating an engine after a reboot is an
+operator action, and it writes a fresh record.
+
+---
 
 ---
 

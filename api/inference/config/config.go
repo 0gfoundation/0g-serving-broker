@@ -1378,6 +1378,43 @@ type ControllerConfig struct {
 	// check that for itself.
 	RecordUpstreamSet bool `yaml:"recordUpstreamSet"`
 
+	// Engines is the allowlist of images POST /v1/engines may run, and at the same time
+	// the table that says how each one takes a model.
+	//
+	// One list serving both jobs is deliberate. An image nothing here describes cannot be
+	// run at all — not because running it would be forbidden in principle, but because
+	// without a rule the controller would not know which flag carries the model
+	// repository, and a record built from a guess would describe something other than
+	// what runs. Configuring an image is therefore the same act as permitting it, and
+	// there is no way to permit one without saying how it works.
+	//
+	// The list lives in the config file, which is inside app_compose and therefore inside
+	// compose_hash: which images a CVM may ever run is a launch-time claim a verifier can
+	// check, not something a request decides.
+	Engines []EngineImage `yaml:"engines"`
+
+	// EngineNetwork is the docker network a created engine joins, which is how the broker
+	// resolves it by container name. Empty means the daemon's default bridge, where the
+	// broker cannot resolve it — so a deployment that creates engines has to set this to
+	// its compose network.
+	EngineNetwork string `yaml:"engineNetwork"`
+
+	// EngineVolumes are the "source:target" mounts every created engine gets, typically
+	// one named volume for the HuggingFace cache so a second engine does not re-download
+	// weights. Named volumes only; docker.CreateEngine refuses a source that looks like a
+	// host path, because a caller-reachable host mount would let an engine read the CVM's
+	// filesystem.
+	//
+	// Config-level and not per-request for the same reason: a request naming a mount is a
+	// request naming a path, and the check for that belongs where the manifest a verifier
+	// reads can carry it.
+	EngineVolumes []string `yaml:"engineVolumes"`
+
+	// EngineEnv is the environment every created engine gets. Cache directories mostly —
+	// they have to agree with EngineVolumes. Secrets do not belong here: this file is part
+	// of app_compose. HF_TOKEN is taken from the controller's OWN environment instead.
+	EngineEnv map[string]string `yaml:"engineEnv"`
+
 	// Deprecated: the managed container names are compile-time constants in
 	// controller/internal/ctrl and nothing reads this field.
 	//
@@ -1402,6 +1439,57 @@ type ControllerConfig struct {
 	// a boot failure of all three. migrateDeprecated logs a [CONFIG-REMOVED]
 	// line naming it.
 	Image string `yaml:"image"`
+}
+
+// EngineImage is one permitted engine image and how it takes a model.
+//
+// It exists because "which flag carries the model" is not uniform: sglang wants
+// --model-path, vLLM wants --model, and both spell the port and the bind address
+// differently again. A template per engine would have to hold every tuning flag too, and
+// those differ per model, not per image — so the request carries the arguments and this
+// carries only the handful the controller must set itself.
+//
+// Every flag named here is one a REQUEST MAY NOT PASS. That is the point of naming them:
+// the controller sets them, so a caller that could also set them could disagree with the
+// record. --host in particular decides whether the engine is reachable by anything but
+// the broker.
+type EngineImage struct {
+	// ImageRepo is the repository, with no tag and no digest — a request supplies the
+	// digest. A tag here would mean the permitted image could change under a fixed
+	// config, which is the property the digest exists to remove.
+	ImageRepo string `yaml:"imageRepo"`
+
+	// ModelFlag carries the model repository, e.g. "--model-path" (sglang) or "--model"
+	// (vLLM). Required: without it there is nowhere to put the model.
+	ModelFlag string `yaml:"modelFlag"`
+
+	// RevisionFlag carries the model revision, e.g. "--revision". Required, and the
+	// revision itself is required of every request.
+	//
+	// This is the load-bearing one. Both engines take --trust-remote-code, which executes
+	// modeling code out of the model repository; a repo id names what was asked for and
+	// only a revision names what arrived. An image without this flag cannot be permitted,
+	// because a record naming its repo would describe code that can change under that
+	// name at any time.
+	RevisionFlag string `yaml:"revisionFlag"`
+
+	// PortFlag carries the listen port. Required, because the controller publishes no
+	// ports and the broker reaches the engine on this one over the compose network.
+	PortFlag string `yaml:"portFlag"`
+
+	// HostFlag carries the bind address, which the controller forces to 0.0.0.0 so the
+	// engine is reachable from the broker's container. Optional only for an image that
+	// has no such flag; when present a request may not pass it.
+	HostFlag string `yaml:"hostFlag"`
+
+	// IPCHost puts the container in the host IPC namespace, which multi-process tensor
+	// parallelism needs for its shared-memory transport. Per image rather than per
+	// request: it is a namespace, and namespaces are not a caller's to choose.
+	IPCHost bool `yaml:"ipcHost"`
+
+	// ShmSize is /dev/shm for the container, in the compose spelling ("32gb"). Same
+	// reason as IPCHost.
+	ShmSize string `yaml:"shmSize"`
 }
 
 // DockerConfig Docker connection configuration
