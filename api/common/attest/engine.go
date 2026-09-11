@@ -33,9 +33,9 @@ const (
 // Every field is the record's claim. Unlike a compose service, nothing here is covered
 // by compose_hash — the container did not exist when the CVM launched, so the signed
 // report body says nothing about it. What makes the claim worth anything is the chain
-// the package doc describes: compose_hash pins the controller's image and pins that only
-// it holds the docker socket, and that controller records before it creates. A reader
-// who has not reviewed those two things should treat this as unverified.
+// EventEngineSet describes: app_compose declares the controller's image and declares that
+// only it holds the docker socket, and that controller records before it creates. A
+// reader who has not reviewed those two things should treat this as unverified.
 type Engine struct {
 	// Name is the container name, which is also the host the compose network resolves to
 	// it. It is what an upstream URL's host must match for the destination to be a

@@ -59,12 +59,20 @@ const (
 	// without a record, a destination pointing at one is indistinguishable from an external
 	// vendor, which is the fail-closed but useless answer.
 	//
-	// What the record is worth rests on a chain, not on itself: compose_hash pins the
-	// controller's image AND pins that only the controller holds the docker socket, and that
-	// controller records before it creates. A reader who has reviewed the manifest can
+	// What the record is worth rests on a chain, not on itself: app_compose DECLARES the
+	// controller's image and declares that only the controller holds the docker socket, and
+	// that controller records before it creates. A reader who has reviewed the manifest can
 	// therefore treat the set as complete; one who has not should treat it as unverified.
 	// That is strictly weaker than a compose service, which is why Upstream.ImageSource
 	// exists to tell the two apart.
+	//
+	// "Declares", not "compose_hash pins", which is what an earlier version of this said.
+	// compose_hash is computed at launch from the SUBMITTED app_compose; editing the compose
+	// inside a running CVM and bringing it back up does not change it. The manifest is what
+	// a reader can check, and what makes the running controller match it is the boot chain
+	// rather than this hash. The distinction matters more here than anywhere else in this
+	// package, because unlike zg-image-update there is no second source to compare this
+	// record against at all.
 	//
 	// A snapshot, last-record-wins, exactly like the upstream set — see parseUpstreamSet for
 	// why an incremental encoding invents a state the source never has.
