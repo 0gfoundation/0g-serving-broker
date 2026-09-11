@@ -84,7 +84,7 @@ func TestClassifyUpstreams(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := classifyUpstreams([]Upstream{tt.in}, services)
+			got := classifyUpstreams([]Upstream{tt.in}, services, nil)
 			if len(got) != 1 {
 				t.Fatalf("classifyUpstreams() returned %d members, want 1", len(got))
 			}
@@ -114,7 +114,7 @@ func TestClassifyUpstreamsRefusesAnAmbiguousServiceName(t *testing.T) {
 	got := classifyUpstreams([]Upstream{
 		{Name: "a", URL: "http://engine:8000/v1"},
 		{Name: "b", URL: "http://safe:8000/v1"},
-	}, services)
+	}, services, nil)
 	if got[0].ComposeService != "" || got[0].PinnedImage != "" {
 		t.Errorf("member a = %+v, want no service claimed: two services answer to that host", got[0])
 	}
@@ -128,7 +128,7 @@ func TestClassifyUpstreamsRefusesAnAmbiguousServiceName(t *testing.T) {
 // through it would be a way for classification to leak into the change log.
 func TestClassifyUpstreamsDoesNotWriteThroughItsInput(t *testing.T) {
 	in := []Upstream{{Name: "a", URL: "http://engine-1:8000/v1"}}
-	out := classifyUpstreams(in, map[string]string{"engine-1": "ghcr.io/example/engine@" + engineDigest})
+	out := classifyUpstreams(in, map[string]string{"engine-1": "ghcr.io/example/engine@" + engineDigest}, nil)
 	if in[0].ComposeService != "" || in[0].PinnedImage != "" {
 		t.Fatalf("the input member was modified: %+v", in[0])
 	}
