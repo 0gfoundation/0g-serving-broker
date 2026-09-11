@@ -52,8 +52,14 @@ type Engine struct {
 	// a container held.
 	GPUs string
 
-	// Args is the container's whole argument list, verbatim, space-joined as the
-	// container received it.
+	// Args is the container's whole argument list as the record spells it, verbatim.
+	//
+	// "As the record spells it" and not "as the container received it": nothing here can
+	// tell the two apart. A reader holds the writer's claim about the arguments, and the
+	// writer is the party being described — the same standing every field on this type
+	// has. An earlier version of this comment said "space-joined as the container
+	// received it", which described a writer that does not exist yet and asserted a
+	// correspondence no reader can check.
 	//
 	// Recorded in full rather than filtered. The filtered version was the earlier design
 	// and it was worse in the direction that matters: it hid the performance knobs, and
@@ -225,6 +231,13 @@ func describeEngine(e Engine) string {
 // A name two engines share once lowercased is dropped rather than resolved by last-wins,
 // for the reason composeServiceLookup drops one: the output is a statement about which
 // container sees the plaintext, and picking between two candidates would make it up.
+//
+// Unreachable through the resolver, and stated rather than left to look load-bearing:
+// parseEngineSet refuses a name outside upstreamNamePattern, which admits no uppercase,
+// so two entries cannot differ by case alone and a duplicate is already refused there.
+// Kept because this function is exported to no one but is called with whatever a future
+// caller holds, and because the parser could relax — the compose side has the same guard
+// for a map that CAN genuinely collide, and the two should not answer differently.
 func engineLookup(engines []Engine) map[string]Engine {
 	lookup := make(map[string]Engine, len(engines))
 	ambiguous := make(map[string]bool)
