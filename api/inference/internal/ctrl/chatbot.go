@@ -113,6 +113,19 @@ type CompletionChunk struct {
 
 type PromptTokensDetails struct {
 	CachedTokens int `json:"cached_tokens"`
+	// CacheWriteTokens is where the OpenAI-compatible ecosystem actually reports
+	// cache-creation tokens. OpenRouter documents it here, nested beside
+	// cached_tokens, and dgrid's OpenAI-surface models emit it here too; no
+	// upstream we integrate reports it at the usage top level. sanitize.go has
+	// always classified it as a token-detail sub-field (leakKeysIfZero), so this
+	// is where the rest of the codebase already assumed it lived.
+	//
+	// Read cache-write counts through Usage.EffectiveCacheWriteTokens rather than
+	// touching either field directly, so a new decode path cannot miss one.
+	//
+	// omitempty: this field is decode-only, so keeping it out of any re-marshalled
+	// usage object leaves the response shape clients see exactly as it was.
+	CacheWriteTokens int `json:"cache_write_tokens,omitempty"`
 }
 
 type Usage struct {
@@ -122,12 +135,18 @@ type Usage struct {
 	PromptTokensDetails *PromptTokensDetails `json:"prompt_tokens_details,omitempty"`
 	// CacheWriteTokens is the number of DEFAULT-tier (5-minute) cache-creation
 	// ("cache write") input tokens: a subset of PromptTokens that the upstream
-	// charged a write premium for. On the OpenAI path OpenRouter reports it as
-	// usage.cache_write_tokens; on the Anthropic path toUsage populates it from
+	// charged a write premium for. On the Anthropic path toUsage populates it from
 	// cache_creation.ephemeral_5m_input_tokens (or the whole
-	// cache_creation_input_tokens when no TTL breakdown is present). Billed at a
-	// premium when cacheTokenBilling.WriteMultiplier* is configured (see
-	// computeInputFee); otherwise it bills at full input price.
+	// cache_creation_input_tokens when no TTL breakdown is present).
+	//
+	// On the OpenAI path this top-level field stays zero: every upstream measured
+	// nests the count in prompt_tokens_details instead (see
+	// PromptTokensDetails.CacheWriteTokens). It is kept because the Anthropic path
+	// populates it and because an upstream may yet report it here.
+	//
+	// Billed at a premium when cacheTokenBilling.WriteMultiplier* is configured
+	// (see computeInputFee); otherwise it bills at full input price. Read it via
+	// EffectiveCacheWriteTokens, which covers both locations.
 	CacheWriteTokens int `json:"cache_write_tokens,omitempty"`
 	// CacheWrite1hTokens is the number of 1-hour-TTL cache-creation input tokens,
 	// a subset of PromptTokens disjoint from CacheWriteTokens. On the Anthropic
@@ -135,6 +154,26 @@ type Usage struct {
 	// Billed at cacheTokenBilling.Write1hMultiplier* when configured, otherwise at
 	// the default write multiplier, otherwise at full input price.
 	CacheWrite1hTokens int `json:"cache_write_1h_tokens,omitempty"`
+}
+
+// EffectiveCacheWriteTokens is the DEFAULT-tier (5-minute) cache-write token
+// count, taken from wherever the upstream reported it: the usage top level (the
+// Anthropic path, populated by toUsage) or nested in prompt_tokens_details (the
+// OpenAI path, which is where OpenRouter and dgrid put it). The top level wins
+// when both are non-zero; the two are the same quantity, never additive, so
+// summing them would double-charge the write premium.
+//
+// Every cache-write read goes through here. Reading either field directly is how
+// the OpenAI path silently billed cache-creation tokens at 1x input for as long
+// as only the top-level field was consulted.
+func (u *Usage) EffectiveCacheWriteTokens() int {
+	if u.CacheWriteTokens > 0 {
+		return u.CacheWriteTokens
+	}
+	if u.PromptTokensDetails != nil {
+		return u.PromptTokensDetails.CacheWriteTokens
+	}
+	return 0
 }
 
 type Choice struct {
@@ -532,7 +571,7 @@ func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType s
 			if usage.PromptTokensDetails != nil {
 				cached = int64(usage.PromptTokensDetails.CachedTokens)
 			}
-			cacheWrite = int64(usage.CacheWriteTokens + usage.CacheWrite1hTokens)
+			cacheWrite = int64(usage.EffectiveCacheWriteTokens() + usage.CacheWrite1hTokens)
 			// Stamp the applied input-length tier so whitelisted chatbot traffic (unbilled by
 			// the broker, but still billed by the vendor at the tiered rate) reconciles per-tier
 			// like billable traffic. Best-effort: a pricing lookup failure just leaves it "".
@@ -899,8 +938,8 @@ func computeInputFee(inputPrice string, usage *Usage, cacheBilling config.CacheT
 			}
 		}
 		remaining := usage.PromptTokens - cachedTokens
-		if writeDen > 0 && usage.CacheWriteTokens > 0 {
-			writeTokens = usage.CacheWriteTokens
+		if writeDen > 0 && usage.EffectiveCacheWriteTokens() > 0 {
+			writeTokens = usage.EffectiveCacheWriteTokens()
 			if writeTokens > remaining {
 				writeTokens = remaining
 			}
@@ -1013,7 +1052,7 @@ func (c *Ctrl) updateAccountWithUsage(ctx context.Context, usage *Usage, outputP
 	// Reconciliation sub-categories: record the reported cache read/write token counts
 	// regardless of whether cache billing discounts them, so reconciliation can align
 	// token definitions and the cost dimension against vendor statements. Cache-write is
-	// the sum of both TTL tiers (5-minute + 1-hour); see Usage.CacheWriteTokens.
+	// the sum of both TTL tiers (5-minute + 1-hour); see EffectiveCacheWriteTokens.
 	reportedCached := 0
 	if usage.PromptTokensDetails != nil {
 		reportedCached = usage.PromptTokensDetails.CachedTokens
@@ -1021,7 +1060,7 @@ func (c *Ctrl) updateAccountWithUsage(ctx context.Context, usage *Usage, outputP
 			reportedCached = usage.PromptTokens
 		}
 	}
-	reportedCacheWrite := usage.CacheWriteTokens + usage.CacheWrite1hTokens
+	reportedCacheWrite := usage.EffectiveCacheWriteTokens() + usage.CacheWrite1hTokens
 
 	// Reconciliation cost dimension: stamp the applied input-length tier as rate_class so a
 	// cost reconciliation can group usage the way a tiered vendor statement does. Derived from
