@@ -12,6 +12,11 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/config"
 )
 
+// validConfigContent is the smallest config the loader accepts that names an upstream.
+// The config-change path takes content rather than a parsed Service, so tests of that
+// path need real YAML.
+const validConfigContent = "service:\n  targetUrl: http://vllm:8000/v1\n"
+
 // recordCtrl is a Ctrl with nothing but what RecordUpstreamSet touches: the switch, the
 // service config the set comes from, and an emitter that records what was written.
 func recordCtrl(t *testing.T, on bool, svc config.Service, emitErr error) (*Ctrl, *opLog) {
@@ -46,7 +51,7 @@ func TestRecordUpstreamSetWritesNothingWhenOff(t *testing.T) {
 		call func(c *Ctrl) error
 	}{
 		{"the record", func(c *Ctrl) error { return c.RecordUpstreamSet(context.Background()) }},
-		{"the invalidation", func(c *Ctrl) error { return c.InvalidateUpstreamSet(context.Background()) }},
+		{"the config-change record", func(c *Ctrl) error { return c.RecordUpstreamSetFromContent(context.Background(), validConfigContent) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c, l := recordCtrl(t, false, svc, nil)
@@ -232,8 +237,21 @@ func TestRecordUpstreamSetReturnsAFailedEmit(t *testing.T) {
 		t.Fatal("a failed emit was swallowed")
 	}
 	c2, _ := recordCtrl(t, true, config.Service{TargetURL: "http://vllm:8000/v1"}, boom)
-	if err := c2.InvalidateUpstreamSet(context.Background()); err == nil {
-		t.Fatal("a failed invalidation was swallowed")
+	if err := c2.RecordUpstreamSetFromContent(context.Background(), validConfigContent); err == nil {
+		t.Fatal("a failed emit on the config-change path was swallowed")
+	}
+
+	// And on the INVALIDATION, which is a different emit and was not covered: the two
+	// cases above both reach the record path, so the fallback's error return had no test
+	// and a mutation swallowing it survived.
+	//
+	// It matters because of what the caller does with the answer. ApplyCoreConfig aborts
+	// the change when this returns an error; swallowing it lets the new config be written
+	// while the ledger still holds the OLD set — a bound that is no longer the
+	// deployment's, which is the one outcome the whole path exists to prevent.
+	c3, _ := recordCtrl(t, true, config.Service{TargetURL: "http://vllm:8000/v1"}, boom)
+	if err := c3.RecordUpstreamSetFromContent(context.Background(), "service:\n  name: unreadable\n"); err == nil {
+		t.Fatal("a failed invalidation was swallowed, so the config would be written with the old set still recorded")
 	}
 }
 
@@ -260,7 +278,7 @@ func TestNeitherRecordingPathBoundsItself(t *testing.T) {
 		call func(c *Ctrl) error
 	}{
 		{"the record", func(c *Ctrl) error { return c.RecordUpstreamSet(context.Background()) }},
-		{"the invalidation", func(c *Ctrl) error { return c.InvalidateUpstreamSet(context.Background()) }},
+		{"the config-change record", func(c *Ctrl) error { return c.RecordUpstreamSetFromContent(context.Background(), validConfigContent) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c, _ := recordCtrl(t, true, config.Service{TargetURL: "http://vllm:8000/v1"}, nil)
@@ -383,23 +401,26 @@ func TestAddingAnUpstreamRenamesNothing(t *testing.T) {
 	}
 }
 
-// The config path must supersede the recorded set BEFORE it writes the new file.
+// The config path records the set the NEW CONTENT permits, before it writes the file.
 //
-// This is the ordering that keeps the record from lying. c.fullConfig is parsed at
-// startup and nothing reloads it, so once the file on disk changes, the set this
-// process would render describes the OLD file while the broker restarts onto the new
-// one — and a record stating a bound that is no longer the deployment's is worse than
-// no record, because a reader trusts it.
+// Two properties in one test, because each alone passes for the wrong reason:
 //
-// Asserted by observing the CONFIG FILE at the moment of the emit, not by the emit's
-// position in the op log. The op log does not record os.WriteFile, so moving the
-// invalidation after the write leaves it at the same log index — an earlier version of
-// this test asserted that index and passed with the call moved, which is to say it
-// tested nothing. What distinguishes the two orders is what is on disk when the record
-// is written.
-func TestConfigChangeSupersedesTheRecordedSetBeforeWritingTheFile(t *testing.T) {
-	const before = "service:\n  name: before\n"
-	const after = "service:\n  name: after\n"
+//   - The payload must name the upstream the NEW content names, not the one c.fullConfig
+//     holds. That singleton is a once.Do over the file on disk and nothing reloads it, so
+//     a version deriving from it would record the OLD set on every config change and the
+//     ordering assertion below would still pass.
+//   - The record must be written while the OLD file is still on disk. The op log does not
+//     record os.WriteFile, so position in the log cannot tell "before the write" from
+//     "after it" — an earlier version of this test asserted that position and passed with
+//     the call moved. What separates them is what is on disk at the moment of the emit.
+//
+// The content here also has to be something the LOADER accepts. An earlier version used
+// "service:\n  name: before\n", and Service has no name field — so strict unmarshalling
+// refused it, the path recorded an invalidation, and the test passed while exercising the
+// fallback rather than the record.
+func TestConfigChangeRecordsTheNewSetBeforeWritingTheFile(t *testing.T) {
+	const before = "service:\n  targetUrl: http://vllm:8000/v1\n"
+	const after = "service:\n  targetUrl: http://0gm-sglang:8000/v1\n"
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
@@ -409,9 +430,9 @@ func TestConfigChangeSupersedesTheRecordedSetBeforeWritingTheFile(t *testing.T) 
 
 	l := &opLog{}
 	c := newChangeCtrl(t, l, nil, path, okPull)
-	// The switch the whole feature is behind, plus a service to render — newChangeCtrl
-	// builds neither, and without the switch this path is the no-op every other test in
-	// this package exercises.
+	// The switch the whole feature is behind, plus a running config that names a DIFFERENT
+	// upstream than the new content — which is what makes the payload assertion below
+	// distinguish "derived from the content" from "derived from the running config".
 	c.config.RecordUpstreamSet = true
 	c.fullConfig = &config.Config{Service: config.Service{TargetURL: "http://vllm:8000/v1"}}
 	watcher := &fileWatchingEmitter{log: l, path: path, at: map[string]string{}}
@@ -421,26 +442,83 @@ func TestConfigChangeSupersedesTheRecordedSetBeforeWritingTheFile(t *testing.T) 
 		t.Fatalf("ApplyCoreConfig() = %v", err)
 	}
 
+	got := emitted(l)
+	if len(got) != 1 {
+		t.Fatalf("emitted %d upstream records, want 1: %q", len(got), got)
+	}
+	want := "count=1\n0gm-sglang http://0gm-sglang:8000/v1"
+	if got[0] != want {
+		t.Errorf("recorded\n %q\nwant\n %q\nthe set must come from the new content, not from the running config", got[0], want)
+	}
+
 	onDisk, recorded := watcher.at[attest.EventUpstreamSet]
 	if !recorded {
-		t.Fatalf("ops = %v, want the recorded set superseded", l.all())
+		t.Fatalf("ops = %v, want the set recorded", l.all())
 	}
 	if onDisk != before {
-		t.Errorf("the set was superseded with %q already on disk; it must be recorded while the old config is still there, or the ledger names the old set while the broker serves the new one", onDisk)
+		t.Errorf("the set was recorded with %q already on disk; it must be recorded while the old config is still there, or a quote taken in between names a set the deployment has moved past", onDisk)
 	}
-	// The record still has to be written, and the broker still has to restart within the
-	// same call — the restart is what publishes it, since a broker seals its quote at
-	// start.
+
+	// The restart is what publishes the record, since a broker seals its quote at start.
 	if i := indexOfOp(l.all(), "restart broker"); i < 0 {
 		t.Errorf("ops = %v, want the broker restarted in the same call", l.all())
 	}
-	// And the new content did land, so this is not passing because the change was aborted.
-	got, err := os.ReadFile(path)
+	// And the new content did land, so none of the above is passing because the change
+	// was aborted.
+	onDiskAfter, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading the config file back: %v", err)
 	}
-	if string(got) != after {
-		t.Errorf("config file = %q, want %q: the change did not happen, so the ordering above proves nothing", got, after)
+	if string(onDiskAfter) != after {
+		t.Errorf("config file = %q, want %q: the change did not happen, so the ordering above proves nothing", onDiskAfter, after)
+	}
+}
+
+// Content the loader would refuse is recorded as UNREADABLE, never skipped.
+//
+// Skipping would leave the previous record standing, and that record now describes a
+// config the deployment has replaced — a bound that is no longer the deployment's, which
+// a reader trusts. Unknown is the honest answer.
+//
+// The change itself still goes through: ApplyCoreConfig validates YAML shape and not
+// schema, and refusing here would make the controller accept or reject the same config
+// depending on whether this switch is on.
+func TestConfigChangeRecordsUnknownWhenTheNewContentCannotBeRead(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		content string
+	}{
+		// Valid YAML, and a key the Service struct does not have — which is exactly what
+		// the broker's own strict loader will refuse when it restarts onto this file.
+		{"a key the loader does not know", "service:\n  name: whatever\n"},
+		{"a value of the wrong type", "service:\n  targetUrl:\n    nested: yes\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.yaml")
+			if err := os.WriteFile(path, []byte("service:\n  targetUrl: http://vllm:8000/v1\n"), 0o644); err != nil {
+				t.Fatalf("seeding the config file: %v", err)
+			}
+
+			l := &opLog{}
+			c := newChangeCtrl(t, l, nil, path, okPull)
+			c.config.RecordUpstreamSet = true
+			c.fullConfig = &config.Config{Service: config.Service{TargetURL: "http://vllm:8000/v1"}}
+
+			if err := c.ApplyCoreConfig(context.Background(), tc.content); err != nil {
+				t.Fatalf("ApplyCoreConfig() = %v, want the change to go through with the set recorded as unknown", err)
+			}
+			got := emitted(l)
+			if len(got) != 1 || got[0] != upstreamSetInvalidated {
+				t.Fatalf("recorded %q, want the invalidation %q", got, upstreamSetInvalidated)
+			}
+			// And specifically NOT the old set, which is what skipping would have left.
+			for _, payload := range got {
+				if strings.Contains(payload, "vllm") {
+					t.Errorf("recorded %q, which still names the old upstream", payload)
+				}
+			}
+		})
 	}
 }
 
