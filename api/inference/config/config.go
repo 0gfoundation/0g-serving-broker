@@ -833,10 +833,11 @@ type PriceFeedConfig struct {
 // TTL:
 //
 //   - The DEFAULT / 5-minute tier: inputPrice * WriteMultiplierNumerator /
-//     WriteMultiplierDenominator. Applies to the OpenAI-path usage.cache_write_tokens,
-//     to Anthropic's cache_creation.ephemeral_5m_input_tokens, and to any
-//     cache-creation tokens with no TTL breakdown. Anthropic's 5-minute rate is
-//     1.25x (num=5, den=4).
+//     WriteMultiplierDenominator. Applies to the OpenAI path's
+//     usage.prompt_tokens_details.cache_write_tokens (where OpenRouter and dgrid
+//     report it), to Anthropic's cache_creation.ephemeral_5m_input_tokens, and to
+//     any cache-creation tokens with no TTL breakdown. Anthropic's 5-minute rate
+//     is 1.25x (num=5, den=4).
 //   - The 1-hour tier: inputPrice * Write1hMultiplierNumerator /
 //     Write1hMultiplierDenominator. Applies to Anthropic's
 //     cache_creation.ephemeral_1h_input_tokens. Anthropic's 1-hour rate is 2x
