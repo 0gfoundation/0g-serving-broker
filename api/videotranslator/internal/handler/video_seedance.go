@@ -21,17 +21,52 @@ import (
 )
 
 // SeedanceVideoHandler serves the OpenAI Video API surface the broker
-// expects, translating each call 1:1 to/from ByteDance Seedance 2.5. It
-// holds no cross-request state: polling to completion is the broker's job,
-// not this sidecar's.
+// expects, translating each call 1:1 to/from ByteDance Seedance. It holds no
+// cross-request state: polling to completion is the broker's job, not this
+// sidecar's.
+//
+// createFn/validateFn are the only two things that differ between Seedance
+// 2.5 and 2.0 (duration/resolution rules, output_format support — see
+// translate.ToSeedanceV2CreateRequest's doc) — everything else in this file
+// (routing, error mapping, content streaming) is identical for both, so one
+// handler type serves both, wired to the right pair of translate functions by
+// which constructor built it. GetVideo/GetVideoContent need no per-version
+// function at all: the response mapping (translate.FromSeedanceGetTaskResponse)
+// and status mapping are already version-independent.
 type SeedanceVideoHandler struct {
-	client *seedance.Client
-	logger log.Logger
+	client     *seedance.Client
+	logger     log.Logger
+	createFn   func(translate.CreateVideoRequest) seedance.CreateRequest
+	validateFn func(translate.CreateVideoRequest) error
 }
 
-// NewSeedanceVideoHandler builds a SeedanceVideoHandler.
+// NewSeedanceVideoHandler builds a SeedanceVideoHandler wired to ByteDance
+// Seedance 2.5's own rules — translate.ToSeedanceCreateRequest and
+// translate.ValidateSeedanceCreateRequest, exactly as this handler called
+// them directly before createFn/validateFn existed. A deployment serving 2.5
+// (the only version this integration ran before Seedance 2.0 was added
+// alongside it) is unaffected by that refactor: same two functions, same
+// call sites, just reached through a field instead of the package name.
 func NewSeedanceVideoHandler(client *seedance.Client, logger log.Logger) *SeedanceVideoHandler {
-	return &SeedanceVideoHandler{client: client, logger: logger}
+	return &SeedanceVideoHandler{
+		client:     client,
+		logger:     logger,
+		createFn:   translate.ToSeedanceCreateRequest,
+		validateFn: translate.ValidateSeedanceCreateRequest,
+	}
+}
+
+// NewSeedance20VideoHandler builds a SeedanceVideoHandler wired to ByteDance
+// Seedance 2.0's own rules instead — translate.ToSeedanceV2CreateRequest and
+// translate.ValidateSeedanceV2CreateRequest. See cmd/server/seedance.go for
+// how a deployment selects this constructor over NewSeedanceVideoHandler.
+func NewSeedance20VideoHandler(client *seedance.Client, logger log.Logger) *SeedanceVideoHandler {
+	return &SeedanceVideoHandler{
+		client:     client,
+		logger:     logger,
+		createFn:   translate.ToSeedanceV2CreateRequest,
+		validateFn: translate.ValidateSeedanceV2CreateRequest,
+	}
 }
 
 // CreateVideo handles POST /videos.
@@ -52,13 +87,13 @@ func (h *SeedanceVideoHandler) CreateVideo(c *gin.Context) {
 	// image-to-video (the two Seedance capabilities with a real OpenAI Video
 	// API field), so there is no last-frame/reference-array rule left to
 	// enforce here.
-	if err := translate.ValidateSeedanceCreateRequest(req); err != nil {
+	if err := h.validateFn(req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": err.Error()}})
 		return
 	}
 
 	authHeader := c.GetHeader("Authorization")
-	sdReq := translate.ToSeedanceCreateRequest(req)
+	sdReq := h.createFn(req)
 	sdResp, err := h.client.CreateTask(c.Request.Context(), authHeader, sdReq)
 	if err != nil {
 		h.writeSeedanceError(c, "seedance create task failed", "failed to create video generation task", err)

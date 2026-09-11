@@ -28,6 +28,19 @@ type Config struct {
 	// only (no path) — the /api/v3 version lives in the client's path
 	// constants; a path suffix here would double-prefix every call.
 	SeedanceBaseURL string
+	// SeedanceModelVersion selects which Seedance generation's
+	// duration/resolution/output_format rules this sidecar enforces: "2.0" or
+	// "2.5" (case-insensitive). Empty (the default, and every deployment
+	// before 2.0 was added) means 2.5 — this default is deliberate: an
+	// existing 33-seedance-style deployment that never sets this env var
+	// must keep running Seedance 2.5 exactly as before, unaffected by 2.0
+	// existing at all. A provider that wants 2.0 sets
+	// SEEDANCE_MODEL_VERSION=2.0 in its own docker-compose (see
+	// deploy/phala/2-mainnet/36-seedance20/docker-compose.yml) — one sidecar
+	// process serves one version for its lifetime, the same way one provider
+	// deployment already gets its own wire model id; this is not a
+	// per-request choice.
+	SeedanceModelVersion string
 	// RequestTimeout bounds each outbound API call to the vendor.
 	RequestTimeout time.Duration
 	// Logger configures the translator's own logger.
@@ -69,11 +82,12 @@ func GetConfig() *Config {
 	}
 
 	return &Config{
-		Port:             port,
-		DashScopeBaseURL: os.Getenv("DASHSCOPE_BASE_URL"),
-		MiniMaxBaseURL:   os.Getenv("MINIMAX_BASE_URL"),
-		SeedanceBaseURL:  os.Getenv("SEEDANCE_BASE_URL"),
-		RequestTimeout:   timeout,
+		Port:                 port,
+		DashScopeBaseURL:     os.Getenv("DASHSCOPE_BASE_URL"),
+		MiniMaxBaseURL:       os.Getenv("MINIMAX_BASE_URL"),
+		SeedanceBaseURL:      os.Getenv("SEEDANCE_BASE_URL"),
+		SeedanceModelVersion: os.Getenv("SEEDANCE_MODEL_VERSION"),
+		RequestTimeout:       timeout,
 		Logger: &commonconfig.LoggerConfig{
 			Level:  level,
 			Format: commonconfig.LogFormat(format),
