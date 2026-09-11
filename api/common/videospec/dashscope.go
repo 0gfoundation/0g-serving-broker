@@ -83,3 +83,23 @@ func (d dashScope) Tier(size string) string {
 	}
 	return "720P"
 }
+
+// Duration: no floor and no ceiling, so Min/Max are absent rather than zero and
+// nothing is clamped. An unreadable value is omitted and the vendor picks.
+func (dashScope) Duration() DurationSpec {
+	return DurationSpec{
+		OutOfRange:  OutOfRangePassThrough,
+		Unspecified: UnspecifiedVendorDefault,
+		Rounding:    RoundingCeil,
+	}
+}
+
+// Resolution: no configured default — when nothing in the request determines a
+// tier, Tier returns "" and the vendor applies its own, which this integration
+// does not name. Pixel dimensions DO select a tier (by the threshold above).
+func (dashScope) Resolution() ResolutionSpec {
+	return ResolutionSpec{
+		RecognizedTiers: copyTokens(dashScopeResolutionTokens),
+		PixelSize:       PixelSizeSelectsTier,
+	}
+}
