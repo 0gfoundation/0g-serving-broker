@@ -2,6 +2,7 @@ package attest
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -154,6 +155,67 @@ func parseEngineSet(payload string) ([]Engine, error) {
 // only, so it needs no bounding.
 func engineTallyError(want, got int) error {
 	return fmt.Errorf("%s payload says %s%d and describes %d engine(s), so the set it names is not the set it lists", EventEngineSet, upstreamCountPrefix, want, got)
+}
+
+// engineChanges reports how the engine set moved from prev to next, one line per name
+// the two do not describe the same way, sorted by name:
+//
+//	"<name>: created as <image> on GPU <gpus>"
+//	"<name>: <old image> on GPU <old> -> <new image> on GPU <new>"
+//	"<name>: <old image> on GPU <old> -> removed"
+//
+// Nil when the two agree, which is the ordinary case — a writer re-emitting its unchanged
+// table at boot produces nothing here.
+//
+// It exists for the reason upstreamChanges does, and the argument is that doc's argument:
+// Engines describes only the FINAL state, and both directions of change are fail-open. A
+// CVM that ran one image, served requests, and then re-recorded the same container name
+// with a different image leaves a final state showing only the second — and the plaintext
+// went to the first. Withdrawing a container is the same shape: the set that remains reads
+// as though it was always the whole set.
+//
+// Telling a caller to walk Events instead is not an answer, for the same reason it was not
+// one there: the values a caller actually consumes do not do that.
+//
+// The argument list is compared but not printed. It is the largest field by far and a
+// change to a performance knob is not what a reader is looking for here; a change to it
+// still produces a line, because the image and GPU shown will be the current pair and the
+// line's existence is the signal. A reader who needs the arguments has Engines.
+func engineChanges(prev, next []Engine) []string {
+	before := make(map[string]Engine, len(prev))
+	for _, e := range prev {
+		before[e.Name] = e
+	}
+	var lines []string
+	for _, e := range next {
+		switch old, existed := before[e.Name]; {
+		case !existed:
+			lines = append(lines, fmt.Sprintf("%s: created as %s", e.Name, describeEngine(e)))
+		case old != e:
+			lines = append(lines, fmt.Sprintf("%s: %s -> %s", e.Name, describeEngine(old), describeEngine(e)))
+		}
+		delete(before, e.Name)
+	}
+	for _, e := range before {
+		lines = append(lines, fmt.Sprintf("%s: %s -> removed", e.Name, describeEngine(e)))
+	}
+	// Sorted because the removals come out of a map, so without this the same pair of
+	// snapshots would report a different order on every run — and a caller diffing two
+	// verifications would see changes that did not happen.
+	sort.Strings(lines)
+	return lines
+}
+
+// describeEngine renders one engine for a change line: the image it runs and the GPUs it
+// holds. "GPU" is spelled out rather than left blank for an empty value, because losing a
+// GPU assignment is a change a reader needs to see and an empty string beside an arrow
+// reads like a formatting slip.
+func describeEngine(e Engine) string {
+	gpus := e.GPUs
+	if gpus == "" {
+		gpus = "(none)"
+	}
+	return e.Image + " on GPU " + gpus
 }
 
 // engineLookup keys engines by the host that resolves to them, which is the container

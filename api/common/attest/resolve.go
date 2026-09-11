@@ -318,6 +318,23 @@ type RunningState struct {
 	// EnginesErr says why the set is unknown, and is empty in the other two states. A
 	// string for the reason UpstreamsErr is one.
 	EnginesErr string
+	// EngineChanges is the history the final set does not show: one line for every way a
+	// record differed from the record before it, in the order the records appeared.
+	//
+	//   "<name>: created as <image> on GPU <gpus>"
+	//   "<name>: <old image> on GPU <old> -> <new image> on GPU <new>"
+	//   "<name>: <old image> on GPU <old> -> removed"
+	//   "a superseded <event> record could not be read: <reason>"
+	//
+	// It exists for the reason UpstreamChanges does, and Engines has the same fail-open
+	// shape: a CVM that ran one image, served requests, and then re-recorded the same
+	// container with a different image leaves a final state showing only the second, while
+	// the plaintext went to the first. Empty is the ordinary case — a writer re-emitting an
+	// unchanged table produces nothing.
+	//
+	// A caller treating a non-empty value as suspicious is making a judgement this package
+	// does not make: replacing a model is a legitimate operation and produces one too.
+	EngineChanges []string
 	// Events is the full runtime event sequence whose replay matched the quote.
 	Events []RuntimeEvent
 }
@@ -482,6 +499,10 @@ func ResolveRunningState(v VerifiedQuote, tcbInfoJSON []byte, brokerService stri
 	// state.Upstreams because an unreadable record clears that — see the upstream case.
 	var lastSet []Upstream
 	var haveSet bool
+	// The same pair for the engine set, and separate from state.Engines for the same
+	// reason: an unreadable record clears that.
+	var lastEngines []Engine
+	var haveEngines bool
 	for _, event := range ledger {
 		if !strings.HasPrefix(event.Event, EventNamespace) {
 			continue
@@ -541,6 +562,20 @@ func ResolveRunningState(v VerifiedQuote, tcbInfoJSON []byte, brokerService stri
 				state.Engines, state.EnginesState, state.EnginesErr = nil, EnginesUnknown, err.Error()
 				break
 			}
+			if state.EnginesState == EnginesUnknown {
+				// This record repairs the set, and that repair erases the only trace of the
+				// bad one from both values a caller consumes — so the fact is kept here.
+				state.EngineChanges = append(state.EngineChanges, fmt.Sprintf("a superseded %s record could not be read: %s", EventEngineSet, state.EnginesErr))
+			}
+			// Compared against the last set that READ, not against state.Engines, which an
+			// unreadable record in between will have cleared. Otherwise writing garbage and
+			// then a rewritten set would suppress the change across the garbage — and the
+			// garbage is written by whoever writes the records, so that would be a way to
+			// hide exactly what this log exists to show.
+			if haveEngines {
+				state.EngineChanges = append(state.EngineChanges, engineChanges(lastEngines, next)...)
+			}
+			lastEngines, haveEngines = next, true
 			state.Engines, state.EnginesState, state.EnginesErr = next, EnginesKnown, ""
 		default:
 			return nil, fmt.Errorf("unrecognised %s event %q: this reader is older than the CVM that wrote the log, so it cannot say what is running", EventNamespace, event.Event)
