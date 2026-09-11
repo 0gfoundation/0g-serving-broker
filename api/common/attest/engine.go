@@ -254,3 +254,75 @@ func engineLookup(engines []Engine) map[string]Engine {
 	}
 	return lookup
 }
+
+// RenderEngineSet builds an EventEngineSet payload from the engines it is given, and
+// refuses rather than producing one the reader would reject.
+//
+// Validation is by round trip through parseEngineSet, exactly as RenderUpstreamSet does
+// it and for the same reason: the reader IS the specification, so a writer with its own
+// copy of the rules is a writer that can drift from them. Every refusal here — an
+// unpinned image, an unmatchable name, a duplicate, a line over the cap — is the reader's
+// refusal, quoted back at the caller before it reaches the ledger.
+//
+// Sorted by name, so the payload is a function of the SET rather than of the order docker
+// happened to list the containers in. Without it, two identical machines would write
+// different records, and a restart that reordered a listing would look like a change.
+//
+// The caller's slice is not reordered.
+func RenderEngineSet(engines []Engine) (string, error) {
+	// Checked before anything is built, for the reason RenderUpstreamSet states at
+	// length: this is the one place a caller's slice length sizes the work, and leaving
+	// the cap to the parse below means paying for the whole payload to earn a refusal
+	// about its first line.
+	if len(engines) > maxUpstreamMembers {
+		return "", fmt.Errorf("cannot record %d engines: the %s grammar holds at most %d", len(engines), EventEngineSet, maxUpstreamMembers)
+	}
+
+	sorted := make([]Engine, len(engines))
+	copy(sorted, engines)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s%d", upstreamCountPrefix, len(sorted))
+	for _, e := range sorted {
+		// A tab in any field would move the field boundaries, so the line would read as a
+		// different engine or as the wrong number of them; a newline would split it in two.
+		// Refused here rather than at the parse, because the parse can only report the shape
+		// it ended up with — "5 fields, want 4" — and not which field carried it.
+		for _, f := range []struct{ what, value string }{
+			{"name", e.Name}, {"image", e.Image}, {"GPU list", e.GPUs}, {"argument list", e.Args},
+		} {
+			if strings.ContainsAny(f.value, "\t\n\r") {
+				return "", fmt.Errorf("engine %q has a tab or newline in its %s, which would move the field boundaries of its record", e.Name, f.what)
+			}
+		}
+		// Before the line is built, not after: the cap has to bound the allocation, and an
+		// argument list is the field a caller can make arbitrarily long.
+		line := len(e.Name) + len(e.Image) + len(e.GPUs) + len(e.Args) + (engineFieldCount-1)*len(engineFieldSep)
+		if line > maxUpstreamLine {
+			return "", fmt.Errorf("engine %q renders a %d-byte line, over the %d-byte limit", e.Name, line, maxUpstreamLine)
+		}
+		b.WriteString("\n")
+		b.WriteString(strings.Join([]string{e.Name, e.Image, e.GPUs, e.Args}, engineFieldSep))
+	}
+	payload := b.String()
+
+	back, err := parseEngineSet(payload)
+	if err != nil {
+		return "", fmt.Errorf("this engine set cannot be recorded: %w", err)
+	}
+	// Unreachable while the header is written from len(sorted) — the parse already refuses
+	// a payload whose members disagree with its count. Kept for the reason
+	// RenderUpstreamSet keeps its twin: it is the difference between "the count matched"
+	// and "the set that came back is the set that went in", and it becomes load-bearing
+	// the moment the header stops being derived from this slice.
+	if len(back) != len(sorted) {
+		return "", fmt.Errorf("rendering %d engines produced a record of %d: the encoding here and the one in parseEngineSet disagree", len(sorted), len(back))
+	}
+	for i := range sorted {
+		if back[i] != sorted[i] {
+			return "", fmt.Errorf("engine %q rendered as %+v and read back as %+v: the encoding here and the one in parseEngineSet disagree", sorted[i].Name, sorted[i], back[i])
+		}
+	}
+	return payload, nil
+}
