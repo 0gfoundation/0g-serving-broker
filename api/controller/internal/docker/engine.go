@@ -180,11 +180,19 @@ func (c *Client) ListContainers(ctx context.Context) ([]Container, error) {
 //
 // Everything security-relevant is absent by design: no mounts the caller names, no
 // capabilities, no privileged flag, no host namespaces beyond the IPC one the engine
-// needs for multi-process tensor parallelism. Those are the controller's to decide, and
-// the controller's image is pinned by compose_hash — so a user who reviewed the manifest
-// reviewed them. A caller that could name a mount could reach the host filesystem, and a
-// caller that could mount the docker socket could create containers this controller never
-// records.
+// needs for multi-process tensor parallelism. Those come from config, which lives inside
+// app_compose — so a user who reviewed the manifest reviewed them.
+//
+// "Reviewed the manifest" and not "is guaranteed by compose_hash", which is the stronger
+// claim the surrounding documents sometimes make in shorthand. compose_hash is computed
+// at launch from the SUBMITTED app_compose; editing the compose inside a running CVM and
+// bringing it back up does not change it. So the manifest is what a reader can check, and
+// what makes the running controller match it is the boot chain, not this hash.
+//
+// A caller that could name a mount could reach the host filesystem, and a caller that
+// could mount the docker socket could create containers this controller never records —
+// which would break the only chain that makes the engine record worth anything, since
+// unlike zg-image-update there is no second source to compare it against.
 type CreateEngineSpec struct {
 	Name    string
 	Image   string // must already be pulled; CreateEngine does not pull

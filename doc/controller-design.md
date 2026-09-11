@@ -68,6 +68,8 @@ controller:
   engineNetwork: "zg"            # the compose network a created engine joins, so the broker resolves it by name
   engineVolumes:                 # named volumes only; a host path is refused
     - "hfcache:/root/.cache/huggingface"
+  engineGPUIgnore:               # containers that SEE cards without allocating on them (§4.5)
+    - "dcgm-exporter"
   engineEnv:                     # no secrets: this file is inside app_compose
     HF_HOME: "/root/.cache/huggingface"
   engines:                       # the allowlist, and the per-image flag table (§4.5)
@@ -448,10 +450,30 @@ that can disagree with the one that decides. A container holds cards if it has a
 device request **or** `runtime: nvidia` — both spellings are in use in this
 project's own compose — and `NVIDIA_VISIBLE_DEVICES` is what narrows the claim. An
 unnarrowed claim (`all`, or unset on a GPU container) is read as holding **every**
-card, which is why a machine already running one whole-machine engine refuses a
-second one that does not name its cards. What docker cannot say is how much memory a
-card has *left*; that is dcgm-exporter's answer, and a caller that needs it asks
-there.
+card. What docker cannot say is how much memory a card has *left*; that is
+dcgm-exporter's answer, and a caller that needs it asks there.
+
+**`controller.engineGPUIgnore` is the one exception, and it is not optional in
+practice.** Every deployment here runs `dcgm-exporter` with `runtime: nvidia` and
+`NVIDIA_VISIBLE_DEVICES=all` — it sees every card and allocates on none, which is what
+a metrics exporter *is*. Read as occupancy it holds the whole machine forever, and
+without this list the engine API refuses every request on every deployment it exists
+for. Exact container names; a prefix that matched would silently exempt a container
+that does occupy.
+
+It is a claim the **operator** makes, and nothing here can check it: docker says which
+cards a container may see, never whether it allocated on them. It lives in the config
+file, inside `app_compose`, so a verifier reads which containers were declared
+non-occupying and can judge the claim — an entry naming a model server is visible as
+exactly that. `GET /v1/gpus` still reports such a claim, flagged `"monitoring": true`,
+because the report answers "which cards can this container see" (docker's answer) while
+only the placement *decision* uses the operator's.
+
+**A deployment requirement no request can work around:** the engine services in this
+project's own compose also run with `NVIDIA_VISIBLE_DEVICES=all`, so every card on such
+a machine is occupied and nothing can be placed until the compose narrows its own engine
+to the cards it actually uses. The second engine naming its cards does not help — the
+first one has to stop claiming all of them.
 
 **Status codes.** `409` when another change holds the controller (the upgrade and
 `PUT /v1/config/core` share that lock). `400` for a refusal — a spec the allowlist

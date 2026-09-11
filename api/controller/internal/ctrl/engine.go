@@ -71,6 +71,11 @@ type GPUClaim struct {
 	GPU      string `json:"gpu"`
 	HeldBy   string `json:"heldBy"`
 	ByEngine bool   `json:"byEngine"`
+	// Monitoring is true when controller.engineGPUIgnore names this container: it can see
+	// the card but is declared not to allocate on it. Reported rather than filtered out,
+	// so the answer stays what docker actually says and only the placement DECISION uses
+	// the operator's declaration.
+	Monitoring bool `json:"monitoring,omitempty"`
 }
 
 // GPUAllocation reports which cards are claimed and by whom.
@@ -85,15 +90,27 @@ type GPUClaim struct {
 // any — every engine in this project's own deployments, which run with
 // NVIDIA_VISIBLE_DEVICES=all. A caller looking for a free card has to treat that entry
 // as covering the whole machine, which is what gpusAreFree does.
+//
+// Reports what docker says, including the containers controller.engineGPUIgnore declares
+// non-occupying: those are flagged rather than dropped. The two questions are different —
+// "which cards can this container see" is docker's answer and this is it, while "is that
+// card available" also needs the operator's claim about which visibility is occupancy.
 func (c *Ctrl) GPUAllocation(ctx context.Context) (map[string][]GPUClaim, error) {
 	containers, err := c.dockerClient.ListContainers(ctx)
 	if err != nil {
 		return nil, err
 	}
+	monitoring := map[string]bool{}
+	for _, name := range c.config.EngineGPUIgnore {
+		monitoring[name] = true
+	}
 	out := map[string][]GPUClaim{}
 	for _, cont := range containers {
 		for _, gpu := range cont.HeldGPUs() {
-			out[gpu] = append(out[gpu], GPUClaim{GPU: gpu, HeldBy: cont.Name, ByEngine: cont.Engine})
+			out[gpu] = append(out[gpu], GPUClaim{
+				GPU: gpu, HeldBy: cont.Name, ByEngine: cont.Engine,
+				Monitoring: monitoring[cont.Name],
+			})
 		}
 	}
 	return out, nil
@@ -161,7 +178,7 @@ func (c *Ctrl) CreateEngine(ctx context.Context, spec EngineSpec) error {
 		return err
 	}
 	if !free {
-		return refusef("cannot create %q: it asks for GPU %q and that is already held", spec.Name, spec.GPUs)
+		return refusef("cannot create %q: it asks for GPU %q and that is already occupied. A container running with %s=all occupies every card; narrow it in the compose, or name it in controller.engineGPUIgnore if it only observes the cards", spec.Name, spec.GPUs, docker.GPUEnvVar)
 	}
 
 	// Pulled before the record, because a pull is the long step and a record naming an
@@ -360,14 +377,23 @@ func (c *Ctrl) engineEnv() map[string]string {
 	return env
 }
 
-// gpusAreFree says whether every card the value names is unheld.
+// gpusAreFree says whether every card the value names is unoccupied.
 //
 // Two directions, both of which have to hold: a request for a specific card is refused
-// when something holds docker.GPUAll, and a request for docker.GPUAll is refused when
-// anything holds any card. An unnarrowed holder can use every card, so it collides with
-// everything — which on a machine already running one whole-machine engine means a
-// second engine has to name its cards, and that is the correct answer rather than a
-// limitation.
+// when something occupies docker.GPUAll, and a request for docker.GPUAll is refused when
+// anything occupies any card. An unnarrowed holder can use every card, so it collides
+// with everything.
+//
+// That has a consequence worth stating, because it is a DEPLOYMENT requirement and not
+// something a request can work around: the engines in this project's own compose run with
+// NVIDIA_VISIBLE_DEVICES=all, so on such a machine every card is occupied and nothing can
+// be placed until the compose narrows its own engine to the cards it actually uses. The
+// second engine naming its cards does not help; the first one has to stop claiming all of
+// them.
+//
+// Containers controller.engineGPUIgnore names are skipped — see that field. Without it
+// dcgm-exporter alone, which every deployment here runs with `runtime: nvidia` and
+// NVIDIA_VISIBLE_DEVICES=all, would occupy the whole machine forever.
 //
 // Racy by construction: the check and the create are two calls, and nothing stops a
 // compose from starting a container in between. It is the cheap answer that catches the
@@ -378,8 +404,16 @@ func (c *Ctrl) gpusAreFree(ctx context.Context, want string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	occupied := func(gpu string) bool {
+		for _, claim := range alloc[gpu] {
+			if !claim.Monitoring {
+				return true
+			}
+		}
+		return false
+	}
 	for _, gpu := range (docker.Container{HasGPU: true, GPUs: want}).HeldGPUs() {
-		if len(alloc[gpu]) > 0 || len(alloc[docker.GPUAll]) > 0 {
+		if occupied(gpu) || occupied(docker.GPUAll) {
 			return false, nil
 		}
 	}

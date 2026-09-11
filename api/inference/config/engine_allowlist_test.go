@@ -24,6 +24,8 @@ controller:
   engineNetwork: "zg"
   engineVolumes:
     - "hfcache:/root/.cache/huggingface"
+  engineGPUIgnore:
+    - "dcgm-exporter"
   engineEnv:
     HF_HOME: "/root/.cache/huggingface"
   engines:
@@ -57,6 +59,12 @@ controller:
 	}
 	if c.EngineEnv["HF_HOME"] != "/root/.cache/huggingface" {
 		t.Errorf("engineEnv = %v", c.EngineEnv)
+	}
+	// The one key a deployment cannot omit in practice: without it dcgm-exporter, which
+	// every deployment here runs with NVIDIA_VISIBLE_DEVICES=all, occupies the whole
+	// machine and no engine can ever be placed.
+	if len(c.EngineGPUIgnore) != 1 || c.EngineGPUIgnore[0] != "dcgm-exporter" {
+		t.Errorf("engineGPUIgnore = %v", c.EngineGPUIgnore)
 	}
 	if len(c.Engines) != 2 {
 		t.Fatalf("engines = %+v, want 2", c.Engines)
