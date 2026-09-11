@@ -1408,6 +1408,20 @@ type ControllerConfig struct {
 	// Config-level and not per-request for the same reason: a request naming a mount is a
 	// request naming a path, and the check for that belongs where the manifest a verifier
 	// reads can carry it.
+	//
+	// # A SHARED cache volume is a trade-off, and it is the operator's to make
+	//
+	// Every engine listed here gets the SAME volume, so one engine can write what another
+	// later reads. The HuggingFace cache trusts a cached blob rather than re-verifying it,
+	// so an engine that wrote into that cache could change the weights a LATER engine
+	// loads while the record still names the legitimate repository and revision — the one
+	// way an engine's record can be made to describe something other than what it runs.
+	//
+	// Reaching it needs an admin wallet and a configured image, which is a caller who can
+	// already rewrite this file. It is not mitigated in code because the alternative costs
+	// a full re-download per engine — 300 GB for the models this runs — and that is a real
+	// operational decision rather than an oversight. A deployment that wants the stronger
+	// property gives each engine its own volume, or omits the cache entirely.
 	EngineVolumes []string `yaml:"engineVolumes"`
 
 	// EngineGPUIgnore names containers whose GPU visibility is NOT occupancy, so the

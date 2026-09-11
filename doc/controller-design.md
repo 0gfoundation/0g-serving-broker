@@ -434,6 +434,18 @@ only chain that makes the record worth anything. `HF_TOKEN` comes from the
 controller's own environment for the same reason in reverse: the spec is published
 in the record, so a request field carrying it would publish it.
 
+**A shared cache volume is a trade-off, and it is the operator's to make.** Every
+engine gets the same `engineVolumes`, so one can write what another later reads —
+and the HuggingFace cache trusts a cached blob rather than re-verifying it. An
+engine that wrote into that cache could change the weights a *later* engine loads
+while the record still names the legitimate repository and revision, which is the
+one way an engine's record can be made to describe something other than what it
+runs. Reaching it needs an admin wallet and a configured image, which is a caller
+who can already rewrite this config file (§4.4). Not mitigated in code, because
+the alternative costs a full re-download per engine — 300 GB for the models this
+runs. A deployment that wants the stronger property gives each engine its own
+volume, or omits the cache.
+
 **The allowlist is `controller.engines`, and it doubles as the flag table.** An image
 with no entry there cannot be run at all — not because running it is forbidden in
 principle, but because without a rule the controller would not know which flag
@@ -488,6 +500,25 @@ Both records land in the same append-only log and `attest.ResolveRunningState`
 hard-fails on a `zg-` event it does not recognise, so emitting either one to a reader
 that predates it makes the CVM unverifiable for *every* question. One switch means
 one decision, taken once. It also means the container cannot exist unrecorded.
+
+**A removal says what it disconnected.** `DELETE /v1/engines/:name` returns
+`stillRoutedBy` — the upstream URLs a config on disk still points at the container it
+just removed — so a caller who took a serving model offline is told, rather than finding
+out from the model's own errors. Read off the config **file**, not the controller's
+in-memory copy, which is a `once.Do` singleton that nothing reloads: after a
+`PUT /v1/config/core` it describes the previous config while the broker runs the new one,
+and a warning built on the stale copy would be wrong in both directions.
+
+It does **not** refuse. Replacing an engine in place — remove, then create under the same
+name — is a flow where the config pointing at that name is exactly correct, and refusing
+would block the main reason this endpoint exists. It is also advisory in failure: a config
+the controller cannot read means no claim about routing, never a kept container.
+
+**Changing the engine configuration needs a controller restart.** `controller.engines`,
+`engineGPUIgnore`, `engineVolumes`, `engineEnv` and `engineNetwork` are read from the
+controller's own startup snapshot, like `adminAddresses` (§4.4). A `PUT /v1/config/core`
+write lands in the file the controller loads at its next start; it does not take effect
+on the running one.
 
 **No boot recovery.** Containers this controller created do not come back after a
 reboot — the compose brings up its own services and nothing brings up these — and
