@@ -74,7 +74,11 @@ type SignerDeriver interface {
 	// its own — and a client seals its REQUEST to that key before any response signature exists
 	// to contradict it. The prompt would reach unreviewed code and the signature check would
 	// come too late to matter.
-	ImageKeys(ctx context.Context, digest string) (signer, encPub string, err error)
+	// id names everything the keys are derived for, not just the image — see
+	// attestproxy.KeyIdentity. It is one value rather than two arguments because the
+	// halves must come from one snapshot: a key derived from a digest and a set hash that
+	// were never current together is one no record names.
+	ImageKeys(ctx context.Context, id attestproxy.KeyIdentity) (signer, encPub string, err error)
 }
 
 // dstackSignerDeriver derives through the guest agent, which is the only thing holding the app
@@ -83,33 +87,33 @@ type dstackSignerDeriver struct {
 	client *dstack.DstackClient
 }
 
-func (d dstackSignerDeriver) ImageKeys(ctx context.Context, digest string) (string, string, error) {
-	if !imageDigestPattern.MatchString(digest) {
-		return "", "", fmt.Errorf("cannot derive keys for %q, which is not a digest", digest)
+func (d dstackSignerDeriver) ImageKeys(ctx context.Context, id attestproxy.KeyIdentity) (string, string, error) {
+	if !imageDigestPattern.MatchString(id.Digest) {
+		return "", "", fmt.Errorf("cannot derive keys for %q, which is not a digest", id.Digest)
 	}
 
-	signerMaterial, err := d.client.GetKey(ctx, attestproxy.SignerKeyPath(digest), "")
+	signerMaterial, err := d.client.GetKey(ctx, attestproxy.SignerKeyPath(id), "")
 	if err != nil {
-		return "", "", fmt.Errorf("deriving the signing key for %s: %w", digest, err)
+		return "", "", fmt.Errorf("deriving the signing key for %s: %w", id.Digest, err)
 	}
 	// Both steps shared with the proxy that signs with this key, deliberately: the address in
 	// the record has to be the address that signs, and two copies of "parse, take the address,
 	// pick a spelling" would drift.
 	key, err := attestproxy.SignerKeyFromMaterial(signerMaterial.Key)
 	if err != nil {
-		return "", "", fmt.Errorf("deriving the signer for %s: %w", digest, err)
+		return "", "", fmt.Errorf("deriving the signer for %s: %w", id.Digest, err)
 	}
 
 	// Same path and same pass-through the broker uses: EncPublicKeyFromMaterial hands the
 	// material to deriveEncKey exactly as getEncKey does, hex string as bytes and not decoded.
 	// Diverge on either and the recorded key is not the one requests can be opened with.
-	encMaterial, err := d.client.GetKey(ctx, attestproxy.EncKeyPath(digest), "")
+	encMaterial, err := d.client.GetKey(ctx, attestproxy.EncKeyPath(id), "")
 	if err != nil {
-		return "", "", fmt.Errorf("deriving the enc key for %s: %w", digest, err)
+		return "", "", fmt.Errorf("deriving the enc key for %s: %w", id.Digest, err)
 	}
 	encPub, err := tee.EncPublicKeyFromMaterial(encMaterial.Key)
 	if err != nil {
-		return "", "", fmt.Errorf("deriving the enc public key for %s: %w", digest, err)
+		return "", "", fmt.Errorf("deriving the enc public key for %s: %w", id.Digest, err)
 	}
 
 	return attestproxy.SignerAddressOf(key), hex.EncodeToString(encPub), nil
@@ -725,7 +729,7 @@ func (c *Ctrl) restoreImageRecord(ctx context.Context) error {
 			c.logger.Warnf("[UpdateImages] Could not resolve the broker's digest to restore the RTMR3 record, recording it as unknown: %v", digestErr)
 			break
 		}
-		signer, encPub, keyErr := c.deriver.ImageKeys(lookupCtx, digest)
+		signer, encPub, keyErr := c.deriver.ImageKeys(lookupCtx, attestproxy.KeyIdentity{Digest: digest})
 		if keyErr != nil {
 			c.logger.Warnf("[UpdateImages] Could not derive the keys for %s to restore the RTMR3 record, recording it as unknown: %v", digest, keyErr)
 			break
@@ -1009,7 +1013,7 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 		return nil, fmt.Errorf("refusing to upgrade: %s is unset, so the broker does not sign through this controller and any record written here would name an address no quote can match. On a TEE node, regenerate the deployment so the controller serves the attestation proxy. Elsewhere there is no dstack guest agent to record a change against, and in-place upgrade is not available at all", attestproxy.SocketEnvVar)
 	}
 
-	signer, encPub, err := c.deriver.ImageKeys(ctx, digest)
+	signer, encPub, err := c.deriver.ImageKeys(ctx, attestproxy.KeyIdentity{Digest: digest})
 	if err != nil {
 		return nil, fmt.Errorf("deriving the keys for %s, which the RTMR3 record must bind: %w", ref, err)
 	}
@@ -1230,6 +1234,24 @@ func (c *Ctrl) GetPrometheusConfig(ctx context.Context) (string, error) {
 		return "", err
 	}
 	return env["PROMETHEUS_CONFIG"], nil
+}
+
+// CurrentKeyIdentity reports what the broker's keys are derived for: the image it runs,
+// and — once a deployment records its permitted upstream set — the hash of that set.
+//
+// It is the attestation proxy's single source for both, so the two cannot be read from
+// different moments. See attestproxy.KeyIdentity for why that matters.
+//
+// The set hash is EMPTY here, and this change leaves it so on purpose: every derivation
+// path stays byte for byte what it was, so nothing in the fleet rotates a key. Filling it
+// in is the follow-up, and it is the part that changes signer addresses and resets on-chain
+// acknowledgements.
+func (c *Ctrl) CurrentKeyIdentity(ctx context.Context) (attestproxy.KeyIdentity, error) {
+	digest, err := c.RunningBrokerDigest(ctx)
+	if err != nil {
+		return attestproxy.KeyIdentity{}, err
+	}
+	return attestproxy.KeyIdentity{Digest: digest}, nil
 }
 
 // RunningBrokerDigest reports the digest of the image the broker container runs.

@@ -65,7 +65,7 @@ func startWithDigest(t *testing.T, digest *string, askedFor *[]string) *http.Cli
 	dstackPath := keyServingDstack(t, dir, askedFor)
 	listenPath := filepath.Join(dir, "tee.sock")
 
-	p := New(listenPath, dstackPath, func(context.Context) (string, error) { return *digest, nil }, testLogger(t))
+	p := New(listenPath, dstackPath, func(context.Context) (KeyIdentity, error) { return KeyIdentity{Digest: *digest}, nil }, testLogger(t))
 	ctx, cancel := context.WithCancel(context.Background())
 	served := make(chan error, 1)
 	go func() { served <- p.Serve(ctx) }()
@@ -186,7 +186,7 @@ func TestSignMatchesWhatLocalSigningWouldProduce(t *testing.T) {
 		t.Fatalf("the signature is not hex: %v", err)
 	}
 
-	key, err := crypto.HexToECDSA(keyForPath(signerKeyPath(testDigest)))
+	key, err := crypto.HexToECDSA(keyForPath(signerKeyPath(KeyIdentity{Digest: testDigest})))
 	if err != nil {
 		t.Fatalf("parsing the expected key: %v", err)
 	}
@@ -240,7 +240,7 @@ func TestTheEncKeyIsPerImageAndASiblingOfTheSigningKey(t *testing.T) {
 		t.Error("both images derived the same enc key — it must be per image")
 	}
 
-	signPath, encPath := signerKeyPath(testDigest), encKeyPath(testDigest)
+	signPath, encPath := signerKeyPath(KeyIdentity{Digest: testDigest}), encKeyPath(KeyIdentity{Digest: testDigest})
 	if signPath == encPath {
 		t.Fatal("the signing and enc keys share a derivation path")
 	}
@@ -303,7 +303,7 @@ func TestTheServedAddressIsTheRecordedAddress(t *testing.T) {
 	served := field(t, body, "address")
 
 	// What a recorder computes from the same material, through the exported steps.
-	key, err := SignerKeyFromMaterial(keyForPath(SignerKeyPath(digest)))
+	key, err := SignerKeyFromMaterial(keyForPath(SignerKeyPath(KeyIdentity{Digest: digest})))
 	if err != nil {
 		t.Fatalf("SignerKeyFromMaterial: %v", err)
 	}
