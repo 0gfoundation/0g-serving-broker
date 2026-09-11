@@ -362,3 +362,68 @@ func TestCreateEngineBuildsTheEnvironmentDeterministically(t *testing.T) {
 		}
 	}
 }
+
+// The label guard, tested at this layer because the ctrl layer no longer reaches it: it
+// resolves an engine by exact labelled name and refuses before calling here. This guard
+// stays because this function is the last thing between a name and a removal, and a
+// second caller would inherit none of the API's checks — it is what keeps this from
+// being a general "delete any container" endpoint.
+func TestRemoveEngineRefusesAnUnlabelledContainer(t *testing.T) {
+	const id = "eeee" + "111111111111111111111111111111111111111111111111111111111111"
+
+	var removed bool
+	labels := map[string]string{}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/_ping"):
+			w.Header().Set("Api-Version", "1.47")
+		case strings.HasSuffix(r.URL.Path, "/containers/json"):
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{"Id": id, "Names": []string{"/prometheus"}},
+				// The controller's own container, which every write path resolves first.
+				{"Id": strings.Repeat("c", 64), "Names": []string{"/0g-controller"}},
+			})
+		case r.Method == http.MethodDelete:
+			removed = true
+			w.WriteHeader(http.StatusNoContent)
+		case strings.HasSuffix(r.URL.Path, "/json"):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"Id":     id,
+				"Name":   "/prometheus",
+				"Config": map[string]any{"Labels": labels},
+				"State":  map[string]any{"Status": "running"},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(SetHostnameForTests(strings.Repeat("c", 12)))
+
+	c, err := NewClient(config.ControllerConfig{
+		Docker: config.DockerConfig{Host: srv.URL, APIVersion: "1.47"},
+	})
+	if err != nil {
+		t.Fatalf("building docker client: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+
+	err = c.RemoveEngine(context.Background(), "prometheus")
+	if err == nil || !strings.Contains(err.Error(), "not an engine this controller created") {
+		t.Fatalf("RemoveEngine() = %v, want a refusal", err)
+	}
+	if removed {
+		t.Error("the container was removed despite the refusal")
+	}
+
+	// And with the label it goes through, so the refusal is about the label and not about
+	// the fixture.
+	labels[EngineLabel] = "true"
+	if err := c.RemoveEngine(context.Background(), "prometheus"); err != nil {
+		t.Fatalf("RemoveEngine() = %v, want nil once it carries the label", err)
+	}
+	if !removed {
+		t.Error("the container was not removed")
+	}
+}
