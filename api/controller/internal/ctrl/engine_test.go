@@ -702,13 +702,19 @@ func TestRemoveEngineRefusesAContainerItDidNotCreate(t *testing.T) {
 	// The compose's own services are not the controller's to remove: a reboot brings
 	// them back anyway, and an endpoint that could delete them would be a general
 	// "delete any container" API wearing an engine's name.
+	//
+	// The refusal comes from the resolution now, not from the removal — the label is what
+	// makes a container resolvable as an engine at all, so a compose service is refused
+	// before anything touches it. The docker layer keeps its own label guard for a second
+	// caller that would inherit none of this; TestRemoveEngineRefusesAnUnlabelledContainer
+	// in the docker package covers that one.
 	c, m, l := engineCtrl(t, fakeContainer{
 		id: "eeee" + strings.Repeat("1", 60), name: "glm53-engine", image: engineRef,
 		gpus: "all", hasGPU: true, // no label
 	})
 
 	err := c.RemoveEngine(context.Background(), "glm53-engine")
-	if err == nil || !strings.Contains(err.Error(), "not an engine this controller created") {
+	if err == nil || !strings.Contains(err.Error(), "no engine named") {
 		t.Fatalf("RemoveEngine() = %v, want a refusal", err)
 	}
 	if names := m.names(); !contains(names, "glm53-engine") {
@@ -1124,5 +1130,42 @@ func TestCreateEnginePassesTheTokenToTheContainerAndNotToTheLedger(t *testing.T)
 	// environment, because that is where the one secret is.
 	if payload := emittedEngineSet(t, l); strings.Contains(payload, "hf_secretvalue") {
 		t.Errorf("payload = %q, want no trace of the token in a record RTMR3 publishes", payload)
+	}
+}
+
+func TestRemoveEngineNeedsTheExactName(t *testing.T) {
+	// The docker layer falls back to substring matching when nothing matches exactly —
+	// the upgrade path needs it, because compose prefixes its containers with the project
+	// name. On a destructive endpoint that fallback turns "no engine called that" into
+	// "removed a different engine whose name contains it", and the outcome is a model
+	// going offline.
+	c, m, l := engineCtrl(t,
+		fakeContainer{id: "eeee" + strings.Repeat("1", 60), name: "whisper", image: engineRef, gpus: "7", hasGPU: true, engine: true},
+		fakeContainer{id: "ffff" + strings.Repeat("2", 60), name: "glm53", image: engineRef, gpus: "0", hasGPU: true, engine: true},
+	)
+
+	for _, name := range []string{"isper", "whisp", "", "glm"} {
+		t.Run("refuses "+name, func(t *testing.T) {
+			err := c.RemoveEngine(context.Background(), name)
+			if err == nil || !strings.Contains(err.Error(), "no engine named") {
+				t.Fatalf("RemoveEngine(%q) = %v, want a refusal naming nothing removed", name, err)
+			}
+			if !errors.Is(err, ErrEngineRefused) {
+				t.Errorf("RemoveEngine(%q) = %v, want a 404-shaped refusal rather than a server error", name, err)
+			}
+		})
+	}
+
+	if names := m.names(); !contains(names, "whisper") || !contains(names, "glm53") {
+		t.Errorf("machine = %v, want both engines untouched", names)
+	}
+	if ops := l.all(); len(ops) != 0 {
+		t.Errorf("ops = %v, want nothing recorded for a removal that did not happen", ops)
+	}
+
+	// And the exact name still works, so the refusal is about resolution and not about
+	// having broken the endpoint.
+	if err := c.RemoveEngine(context.Background(), "whisper"); err != nil {
+		t.Fatalf("RemoveEngine(\"whisper\") = %v, want nil", err)
 	}
 }

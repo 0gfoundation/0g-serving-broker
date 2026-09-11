@@ -226,6 +226,22 @@ func (c *Ctrl) RemoveEngine(ctx context.Context, name string) error {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), engineChangeTimeout)
 	defer cancel()
 
+	// Resolved to an EXACT name before anything is removed, because the docker layer
+	// resolves a name by substring when no container matches it exactly — a fallback the
+	// upgrade path needs, since compose prefixes its containers with the project name.
+	//
+	// On a destructive endpoint that fallback is the wrong behaviour and not merely a
+	// loose one: "no engine called that" would silently become "removed a different
+	// engine whose name happens to contain it". DELETE /v1/engines/isper removing
+	// `whisper` is a caller getting an outcome they did not ask for, and the outcome is
+	// a model going offline.
+	//
+	// This also moves the label check ahead of the removal: a container this controller
+	// did not create is refused before it is touched rather than after it is resolved.
+	if err := c.engineExists(ctx, name); err != nil {
+		return err
+	}
+
 	if err := c.dockerClient.RemoveEngine(ctx, name); err != nil {
 		return err
 	}
@@ -294,6 +310,25 @@ func (c *Ctrl) engineSetFromDocker(ctx context.Context) []attest.Engine {
 		})
 	}
 	return out
+}
+
+// engineExists refuses a name that is not, exactly, an engine this controller created.
+func (c *Ctrl) engineExists(ctx context.Context, name string) error {
+	containers, err := c.dockerClient.ListContainers(ctx)
+	if err != nil {
+		return err
+	}
+	var engines []string
+	for _, cont := range containers {
+		if !cont.Engine {
+			continue
+		}
+		if cont.Name == name {
+			return nil
+		}
+		engines = append(engines, cont.Name)
+	}
+	return refusef("no engine named %q; this controller created %v", name, engines)
 }
 
 // recordEngineSet renders the set and writes it, refusing rather than writing something a
