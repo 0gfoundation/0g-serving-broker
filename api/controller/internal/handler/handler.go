@@ -344,6 +344,12 @@ func (h *Handler) ListEngines(ctx *gin.Context) {
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	// [] and not null for the empty case. A nil slice marshals to null, and "no engines"
+	// then arrives as a value a client has to special-case before it can iterate — on the
+	// endpoint whose ordinary answer, on a deployment that has created none, is empty.
+	if engines == nil {
+		engines = []ctrl.EngineStatus{}
+	}
 	ctx.JSON(http.StatusOK, gin.H{"engines": engines})
 }
 
