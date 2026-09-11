@@ -1376,7 +1376,111 @@ type ControllerConfig struct {
 	// it on is a per-deployment decision to be made once every consumer of that
 	// deployment's quote can read the record, and there is no way for this process to
 	// check that for itself.
+	//
+	// # Turning it on is service-affecting on a deployment that signs through the controller
+	//
+	// Reading the field name, this looks like a switch that only starts writing a record.
+	// It is not. The set hash enters the signing key's derivation path, so going from off
+	// to on moves the signer from the unbound path to a bound one: a DIFFERENT signer
+	// address and a different encryption key. What follows, traced through the code:
+	//
+	//  1. ApplyCoreConfig records the set, binds the new keys, and restarts the broker.
+	//  2. The broker reads its signer address from the controller at startup, finds it
+	//     differs from the on-chain one (contract.identicalServiceExceptPrice compares
+	//     TeeSignerAddress), and pushes the new one itself — one provider-paid transaction,
+	//     no operator action.
+	//  3. Service.teeSignerAcknowledged is keyed on that address, so it is now unset and
+	//     the CONTRACT OWNER has to acknowledge before the provider is trusted again.
+	//
+	// Step 3 is the one nothing here can do. It is one on-chain acknowledgement to ENABLE
+	// the switch, before any destination has changed — the same cost every later
+	// destination change carries, paid once up front. A request sealed to the old
+	// encryption key just before the restart cannot be opened after it.
+	//
+	// See ctrl.bindKeysToUpstreamSet for the mechanism and for what the binding buys.
+	//
+	// It costs nothing on a deployment without the attestation proxy (ATTEST_PROXY_SOCKET
+	// unset): the broker derives its own keys there, nothing is bound, and the set is
+	// recorded unbound with a warning. 11 of the 13 non-deprecated deployments are in that
+	// state today.
+	//
+	// # And check the config can be expressed as a set before flipping it
+	//
+	// Every live config can today. A config whose targetUrl has no providerIdentity and
+	// whose host is a dotted FQDN cannot — see ctrl.upstreamsFromConfig — and turning this
+	// on with one of those records the set as unreadable for the whole boot, since RTMR3
+	// only appends. The fix is one config line and the error message names it.
 	RecordUpstreamSet bool `yaml:"recordUpstreamSet"`
+
+	// Engines is the allowlist of images POST /v1/engines may run, and at the same time
+	// the table that says how each one takes a model.
+	//
+	// One list serving both jobs is deliberate. An image nothing here describes cannot be
+	// run at all — not because running it would be forbidden in principle, but because
+	// without a rule the controller would not know which flag carries the model
+	// repository, and a record built from a guess would describe something other than
+	// what runs. Configuring an image is therefore the same act as permitting it, and
+	// there is no way to permit one without saying how it works.
+	//
+	// The list lives in the config file, which is inside app_compose and therefore inside
+	// compose_hash: which images a CVM may ever run is a launch-time claim a verifier can
+	// check, not something a request decides.
+	Engines []EngineImage `yaml:"engines"`
+
+	// EngineNetwork is the docker network a created engine joins, which is how the broker
+	// resolves it by container name. Empty means the daemon's default bridge, where the
+	// broker cannot resolve it — so a deployment that creates engines has to set this to
+	// its compose network.
+	EngineNetwork string `yaml:"engineNetwork"`
+
+	// EngineVolumes are the "source:target" mounts every created engine gets, typically
+	// one named volume for the HuggingFace cache so a second engine does not re-download
+	// weights. Named volumes only; docker.CreateEngine refuses a source that looks like a
+	// host path, because a caller-reachable host mount would let an engine read the CVM's
+	// filesystem.
+	//
+	// Config-level and not per-request for the same reason: a request naming a mount is a
+	// request naming a path, and the check for that belongs where the manifest a verifier
+	// reads can carry it.
+	//
+	// # A SHARED cache volume is a trade-off, and it is the operator's to make
+	//
+	// Every engine listed here gets the SAME volume, so one engine can write what another
+	// later reads. The HuggingFace cache trusts a cached blob rather than re-verifying it,
+	// so an engine that wrote into that cache could change the weights a LATER engine
+	// loads while the record still names the legitimate repository and revision — the one
+	// way an engine's record can be made to describe something other than what it runs.
+	//
+	// Reaching it needs an admin wallet and a configured image, which is a caller who can
+	// already rewrite this file. It is not mitigated in code because the alternative costs
+	// a full re-download per engine — 300 GB for the models this runs — and that is a real
+	// operational decision rather than an oversight. A deployment that wants the stronger
+	// property gives each engine its own volume, or omits the cache entirely.
+	EngineVolumes []string `yaml:"engineVolumes"`
+
+	// EngineGPUIgnore names containers whose GPU visibility is NOT occupancy, so the
+	// placement check does not read them as holding the cards they can see.
+	//
+	// This exists because of one container every deployment here runs: dcgm-exporter, with
+	// `runtime: nvidia` and NVIDIA_VISIBLE_DEVICES=all. It sees every card and allocates
+	// memory on none — that is what a metrics exporter is. Without this list it reads as
+	// holding the whole machine and no engine could ever be placed, which made the engine
+	// API refuse every request on every deployment it exists for.
+	//
+	// Exact container names, not substrings, for the reason RemoveEngine resolves exactly:
+	// a prefix that matched an engine would silently exempt a container that does occupy.
+	//
+	// It is a claim the OPERATOR makes, and it lives in the config file — inside
+	// app_compose — so a verifier reads which containers were declared non-occupying and
+	// can judge it. An entry naming a model server would be visible as exactly that.
+	// Nothing here can check it: docker says which cards a container may see, never
+	// whether it allocated on them.
+	EngineGPUIgnore []string `yaml:"engineGPUIgnore"`
+
+	// EngineEnv is the environment every created engine gets. Cache directories mostly —
+	// they have to agree with EngineVolumes. Secrets do not belong here: this file is part
+	// of app_compose. HF_TOKEN is taken from the controller's OWN environment instead.
+	EngineEnv map[string]string `yaml:"engineEnv"`
 
 	// Deprecated: the managed container names are compile-time constants in
 	// controller/internal/ctrl and nothing reads this field.
@@ -1402,6 +1506,57 @@ type ControllerConfig struct {
 	// a boot failure of all three. migrateDeprecated logs a [CONFIG-REMOVED]
 	// line naming it.
 	Image string `yaml:"image"`
+}
+
+// EngineImage is one permitted engine image and how it takes a model.
+//
+// It exists because "which flag carries the model" is not uniform: sglang wants
+// --model-path, vLLM wants --model, and both spell the port and the bind address
+// differently again. A template per engine would have to hold every tuning flag too, and
+// those differ per model, not per image — so the request carries the arguments and this
+// carries only the handful the controller must set itself.
+//
+// Every flag named here is one a REQUEST MAY NOT PASS. That is the point of naming them:
+// the controller sets them, so a caller that could also set them could disagree with the
+// record. --host in particular decides whether the engine is reachable by anything but
+// the broker.
+type EngineImage struct {
+	// ImageRepo is the repository, with no tag and no digest — a request supplies the
+	// digest. A tag here would mean the permitted image could change under a fixed
+	// config, which is the property the digest exists to remove.
+	ImageRepo string `yaml:"imageRepo"`
+
+	// ModelFlag carries the model repository, e.g. "--model-path" (sglang) or "--model"
+	// (vLLM). Required: without it there is nowhere to put the model.
+	ModelFlag string `yaml:"modelFlag"`
+
+	// RevisionFlag carries the model revision, e.g. "--revision". Required, and the
+	// revision itself is required of every request.
+	//
+	// This is the load-bearing one. Both engines take --trust-remote-code, which executes
+	// modeling code out of the model repository; a repo id names what was asked for and
+	// only a revision names what arrived. An image without this flag cannot be permitted,
+	// because a record naming its repo would describe code that can change under that
+	// name at any time.
+	RevisionFlag string `yaml:"revisionFlag"`
+
+	// PortFlag carries the listen port. Required, because the controller publishes no
+	// ports and the broker reaches the engine on this one over the compose network.
+	PortFlag string `yaml:"portFlag"`
+
+	// HostFlag carries the bind address, which the controller forces to 0.0.0.0 so the
+	// engine is reachable from the broker's container. Optional only for an image that
+	// has no such flag; when present a request may not pass it.
+	HostFlag string `yaml:"hostFlag"`
+
+	// IPCHost puts the container in the host IPC namespace, which multi-process tensor
+	// parallelism needs for its shared-memory transport. Per image rather than per
+	// request: it is a namespace, and namespaces are not a caller's to choose.
+	IPCHost bool `yaml:"ipcHost"`
+
+	// ShmSize is /dev/shm for the container, in the compose spelling ("32gb"). Same
+	// reason as IPCHost.
+	ShmSize string `yaml:"shmSize"`
 }
 
 // DockerConfig Docker connection configuration

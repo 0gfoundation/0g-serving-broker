@@ -337,14 +337,23 @@ func (c *Ctrl) invalidateUpstreamSet(ctx context.Context, tag string) error {
 //   - providerIdentity when set. Already required alongside a per-model targetUrl, and
 //     it is the same lowercase-alphanumeric-with-hyphens shape the record's identity
 //     field takes.
-//   - otherwise the URL's hostname. Measured: the 5 deployments with no service-level
-//     providerIdentity all target an in-CVM container, and all 5 hostnames
-//     (phala-inference-guard, 0gm-sglang, qwavity-sia-vllm, api, vllm) are compose
-//     service names that the record's name pattern already admits. So this names the
+//   - otherwise the URL's hostname. Measured across the 12 LIVE deployments (44 upstream
+//     entries): 5 have no providerIdentity, all 5 target an in-CVM container, and all 5
+//     hostnames (phala-inference-guard, 0gm-sglang, qwavity-sia-vllm, api, vllm) are
+//     compose service names the record's name pattern already admits. So this names the
 //     container, which is what a reader is trying to identify anyway.
 //   - otherwise refused, with the fix in the message. A hostname that is not a valid
-//     name means a dotted public FQDN — an external vendor with no identity — which is
-//     a config nobody has today and which providerIdentity exists to describe.
+//     name means a dotted public FQDN — an external vendor with no identity — which
+//     providerIdentity exists to describe.
+//
+// An earlier version of this said that shape is "a config nobody has today". That was
+// measured on the live deployments only, and it is false beyond them: 5 DEPRECATED
+// configs point service.targetUrl at https://api.red-pill.ai/v1 with no
+// providerIdentity, which is exactly the refused shape. Nothing breaks — no live
+// deployment has it, and recordUpstreamSet is off everywhere — but reviving one of those
+// configs and turning the switch on would record the set as unreadable for that boot,
+// with the one-line fix in the error. Stated because "nobody has this" is the kind of
+// claim that stops being checked once written.
 //
 // Two distinct URLs deriving one name is refused rather than disambiguated: the writer
 // cannot say which is which, so it must not claim it can. Measured zero occurrences —
