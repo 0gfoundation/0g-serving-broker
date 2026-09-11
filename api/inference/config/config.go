@@ -1410,6 +1410,25 @@ type ControllerConfig struct {
 	// reads can carry it.
 	EngineVolumes []string `yaml:"engineVolumes"`
 
+	// EngineGPUIgnore names containers whose GPU visibility is NOT occupancy, so the
+	// placement check does not read them as holding the cards they can see.
+	//
+	// This exists because of one container every deployment here runs: dcgm-exporter, with
+	// `runtime: nvidia` and NVIDIA_VISIBLE_DEVICES=all. It sees every card and allocates
+	// memory on none — that is what a metrics exporter is. Without this list it reads as
+	// holding the whole machine and no engine could ever be placed, which made the engine
+	// API refuse every request on every deployment it exists for.
+	//
+	// Exact container names, not substrings, for the reason RemoveEngine resolves exactly:
+	// a prefix that matched an engine would silently exempt a container that does occupy.
+	//
+	// It is a claim the OPERATOR makes, and it lives in the config file — inside
+	// app_compose — so a verifier reads which containers were declared non-occupying and
+	// can judge it. An entry naming a model server would be visible as exactly that.
+	// Nothing here can check it: docker says which cards a container may see, never
+	// whether it allocated on them.
+	EngineGPUIgnore []string `yaml:"engineGPUIgnore"`
+
 	// EngineEnv is the environment every created engine gets. Cache directories mostly —
 	// they have to agree with EngineVolumes. Secrets do not belong here: this file is part
 	// of app_compose. HF_TOKEN is taken from the controller's OWN environment instead.

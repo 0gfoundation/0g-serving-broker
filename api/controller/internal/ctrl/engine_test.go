@@ -533,7 +533,7 @@ func TestCreateEngineRefusesAnOccupiedCard(t *testing.T) {
 	})
 
 	err := c.CreateEngine(context.Background(), okSpec())
-	if err == nil || !strings.Contains(err.Error(), "already held") {
+	if err == nil || !strings.Contains(err.Error(), "already occupied") {
 		t.Fatalf("CreateEngine() = %v, want a refusal naming the held card", err)
 	}
 	if ops := l.all(); len(ops) != 0 {
@@ -550,7 +550,7 @@ func TestCreateEngineRefusesACardHeldByAWholeMachineEngine(t *testing.T) {
 	})
 
 	err := c.CreateEngine(context.Background(), okSpec())
-	if err == nil || !strings.Contains(err.Error(), "already held") {
+	if err == nil || !strings.Contains(err.Error(), "already occupied") {
 		t.Fatalf("CreateEngine() = %v, want a refusal: an engine that can use every card holds every card", err)
 	}
 }
@@ -581,7 +581,7 @@ func TestCreateEngineCountsTheOlderNvidiaRuntimeSpelling(t *testing.T) {
 	})
 
 	err := c.CreateEngine(context.Background(), okSpec())
-	if err == nil || !strings.Contains(err.Error(), "already held") {
+	if err == nil || !strings.Contains(err.Error(), "already occupied") {
 		t.Fatalf("CreateEngine() = %v, want a refusal: `runtime: nvidia` gives a container cards too", err)
 	}
 }
@@ -870,7 +870,7 @@ func TestCreateEngineRefusesACardHeldByAStoppedEngine(t *testing.T) {
 	})
 
 	err := c.CreateEngine(context.Background(), okSpec())
-	if err == nil || !strings.Contains(err.Error(), "already held") {
+	if err == nil || !strings.Contains(err.Error(), "already occupied") {
 		t.Fatalf("CreateEngine() = %v, want a refusal: a stopped engine still holds its cards", err)
 	}
 	if ops := l.all(); len(ops) != 0 {
@@ -1167,5 +1167,85 @@ func TestRemoveEngineNeedsTheExactName(t *testing.T) {
 	// having broken the endpoint.
 	if err := c.RemoveEngine(context.Background(), "whisper"); err != nil {
 		t.Fatalf("RemoveEngine(\"whisper\") = %v, want nil", err)
+	}
+}
+
+// The regression that made this API refuse every request on every deployment it exists
+// for. dcgm-exporter runs with `runtime: nvidia` and NVIDIA_VISIBLE_DEVICES=all on all of
+// them: it sees every card and allocates on none, which is what a metrics exporter is.
+// Read as occupancy it holds the whole machine forever.
+func TestCreateEngineIgnoresAMonitoringContainersClaim(t *testing.T) {
+	c, _, _ := engineCtrl(t, fakeContainer{
+		id: "eeee" + strings.Repeat("1", 60), name: "dcgm-exporter",
+		gpus: "all", runtime: "nvidia",
+	})
+
+	// Without the declaration the refusal stands, which is the fail-closed default: a
+	// container that can use every card is treated as using them.
+	err := c.CreateEngine(context.Background(), okSpec())
+	if err == nil || !strings.Contains(err.Error(), "already occupied") {
+		t.Fatalf("CreateEngine() = %v, want a refusal before the exporter is declared", err)
+	}
+	if !strings.Contains(err.Error(), "engineGPUIgnore") {
+		t.Errorf("CreateEngine() = %v, want the refusal to name the way out", err)
+	}
+
+	c.config.EngineGPUIgnore = []string{"dcgm-exporter"}
+	if err := c.CreateEngine(context.Background(), okSpec()); err != nil {
+		t.Fatalf("CreateEngine() = %v, want nil once the exporter is declared non-occupying", err)
+	}
+}
+
+func TestEngineGPUIgnoreNeedsTheExactContainerName(t *testing.T) {
+	// A prefix that matched would silently exempt a container that does occupy, which is
+	// the same reasoning the removal's exact resolution rests on.
+	c, _, _ := engineCtrl(t, fakeContainer{
+		id: "eeee" + strings.Repeat("1", 60), name: "dcgm-exporter",
+		gpus: "all", runtime: "nvidia",
+	})
+	c.config.EngineGPUIgnore = []string{"dcgm"}
+
+	if err := c.CreateEngine(context.Background(), okSpec()); err == nil {
+		t.Fatal("CreateEngine() = nil, want a refusal: the declaration named no container")
+	}
+}
+
+func TestEngineGPUIgnoreDoesNotExemptARealEngine(t *testing.T) {
+	// The declaration is the operator's claim, and nothing here can check it — docker says
+	// which cards a container may see, never whether it allocated on them. What this test
+	// pins is the shape: a declared container stops blocking, an undeclared one does not,
+	// so a claim covering one container cannot quietly cover another.
+	c, _, _ := engineCtrl(t,
+		fakeContainer{id: "eeee" + strings.Repeat("1", 60), name: "dcgm-exporter", gpus: "all", runtime: "nvidia"},
+		fakeContainer{id: "ffff" + strings.Repeat("2", 60), name: "glm53", image: engineRef, gpus: "6,7", hasGPU: true, engine: true},
+	)
+	c.config.EngineGPUIgnore = []string{"dcgm-exporter"}
+
+	err := c.CreateEngine(context.Background(), okSpec())
+	if err == nil || !strings.Contains(err.Error(), "already occupied") {
+		t.Fatalf("CreateEngine() = %v, want the real engine still to occupy cards 6 and 7", err)
+	}
+}
+
+func TestGPUAllocationStillReportsAMonitoringClaim(t *testing.T) {
+	// The report says what docker says; only the placement DECISION uses the operator's
+	// declaration. Dropping the claim from the report would hide a container that really
+	// can see the card, which is the fact an operator diagnosing the machine needs.
+	c, _, _ := engineCtrl(t, fakeContainer{
+		id: "eeee" + strings.Repeat("1", 60), name: "dcgm-exporter",
+		gpus: "all", runtime: "nvidia",
+	})
+	c.config.EngineGPUIgnore = []string{"dcgm-exporter"}
+
+	alloc, err := c.GPUAllocation(context.Background())
+	if err != nil {
+		t.Fatalf("GPUAllocation() = %v", err)
+	}
+	claims := alloc[docker.GPUAll]
+	if len(claims) != 1 || claims[0].HeldBy != "dcgm-exporter" {
+		t.Fatalf("alloc[all] = %+v, want the exporter still reported", claims)
+	}
+	if !claims[0].Monitoring {
+		t.Error("the exporter's claim is not flagged as monitoring, so a reader cannot tell why it does not block")
 	}
 }
