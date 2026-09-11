@@ -1,0 +1,181 @@
+package attest
+
+import (
+	"fmt"
+	"strconv"
+	"strings"
+)
+
+// engineFieldSep separates an engine record's fields.
+//
+// A tab rather than a space, because the last field is a container's whole argument
+// list and arguments contain spaces. Everything before it — a container name, an image
+// reference, a GPU list — cannot contain a tab, and an argument that does is refused
+// rather than accommodated: no engine takes one, and allowing it would make the field
+// count depend on the arguments.
+const engineFieldSep = "\t"
+
+// engineFieldCount is how many fields one engine line carries. Fixed, so a line that
+// grew or lost one is refused rather than read as a different engine.
+const engineFieldCount = 4
+
+// The three states RunningState.EnginesState can hold, mirroring the upstream set's for
+// the same reason: the zero value must not read as "recorded, and there are none".
+const (
+	EnginesUnrecorded = "" // no engine record appeared
+	EnginesKnown      = "known"
+	EnginesUnknown    = "unknown" // the deciding record could not be read
+)
+
+// Engine is one container the controller created, as the record describes it.
+//
+// Every field is the record's claim. Unlike a compose service, nothing here is covered
+// by compose_hash — the container did not exist when the CVM launched, so the signed
+// report body says nothing about it. What makes the claim worth anything is the chain
+// the package doc describes: compose_hash pins the controller's image and pins that only
+// it holds the docker socket, and that controller records before it creates. A reader
+// who has not reviewed those two things should treat this as unverified.
+type Engine struct {
+	// Name is the container name, which is also the host the compose network resolves to
+	// it. It is what an upstream URL's host must match for the destination to be a
+	// container this deployment declares.
+	Name string
+
+	// Image is the reference the container runs, "<repo>@sha256:<64hex>". A digest, not a
+	// tag: a tag names what was asked for, not what arrived, and this record is the only
+	// account of an image compose_hash does not cover.
+	Image string
+
+	// GPUs is the NVIDIA_VISIBLE_DEVICES value, verbatim. Placement rather than
+	// behaviour, recorded because an operator reading the ledger needs to know which card
+	// a container held.
+	GPUs string
+
+	// Args is the container's whole argument list, verbatim, space-joined as the
+	// container received it.
+	//
+	// Recorded in full rather than filtered. The filtered version was the earlier design
+	// and it was worse in the direction that matters: it hid the performance knobs, and
+	// with them any flag that moves data OFF the container — a request-content log, an
+	// external trace endpoint — which is exactly what a reader needs to see. Publishing
+	// everything means an argument carrying a credential would be published too, and that
+	// is the operator's to avoid; the reader's need to see where data can go wins.
+	Args string
+}
+
+// parseEngineSet reads one EventEngineSet payload into the engines it names.
+//
+// The payload is the WHOLE set, and the last record decides — the same shape and the
+// same reasoning as parseUpstreamSet, including why the count travels in the payload.
+// See there; this does not restate it.
+//
+//	count=<n>
+//	<name>\t<image>\t<gpus>\t<args>
+//	…                              ← n of these
+//
+// The caps and the "size nothing from the payload" rule are shared with that parser
+// deliberately: the input is the same untrusted event log, so the bound has to be the
+// same one.
+func parseEngineSet(payload string) ([]Engine, error) {
+	var engines []Engine
+	seen := map[string]struct{}{}
+	want := -1
+
+	for line := range strings.SplitSeq(payload, "\n") {
+		if len(line) > maxUpstreamLine {
+			return nil, fmt.Errorf("%s payload has a %d-byte line, over the %d-byte limit; an engine is a name, an image, a GPU list and an argument list", EventEngineSet, len(line), maxUpstreamLine)
+		}
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if want < 0 {
+			if !strings.HasPrefix(line, upstreamCountPrefix) || strings.Contains(line, engineFieldSep) {
+				return nil, fmt.Errorf("%s payload starts with %q, want a header %s<n> naming how many engines follow", EventEngineSet, line, upstreamCountPrefix)
+			}
+			n, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, upstreamCountPrefix)))
+			if err != nil || n < 0 {
+				return nil, fmt.Errorf("%s payload header %q does not name an engine count", EventEngineSet, line)
+			}
+			if n > maxUpstreamMembers {
+				return nil, fmt.Errorf("%s payload says %s%d, over the %d-engine limit", EventEngineSet, upstreamCountPrefix, n, maxUpstreamMembers)
+			}
+			want = n
+			continue
+		}
+
+		fields := strings.Split(line, engineFieldSep)
+		if len(fields) != engineFieldCount {
+			return nil, fmt.Errorf("%s payload line %q has %d tab-separated fields, want %d: a name, an image, a GPU list and an argument list", EventEngineSet, line, len(fields), engineFieldCount)
+		}
+		name := fields[0]
+		// The same pattern an upstream member's name takes, and it has to be: this name is
+		// a container name, which is the host the compose network resolves, and an upstream
+		// URL's host is matched against it. A name the URL grammar cannot spell could never
+		// be matched, so accepting one here would record an engine no destination can
+		// reach.
+		if !upstreamNamePattern.MatchString(name) {
+			return nil, fmt.Errorf("%s payload line %q names %q, which is not a container name a URL host could match", EventEngineSet, line, name)
+		}
+		if _, dup := seen[name]; dup {
+			return nil, fmt.Errorf("%s payload names %q twice; within one set a container has one description", EventEngineSet, name)
+		}
+		seen[name] = struct{}{}
+
+		// A digest, checked rather than trusted. A tag here would make the record name
+		// what was asked for instead of what runs, and this record is the only account of
+		// an image compose_hash does not cover — so a tag would leave nothing accountable
+		// at all.
+		image := fields[1]
+		repo, digest, pinned := strings.Cut(image, "@")
+		if !pinned || repo == "" || !digestPattern.MatchString(digest) {
+			return nil, fmt.Errorf("%s payload line %q carries image %q, which does not pin a digest as <repo>@sha256:<64hex>", EventEngineSet, line, image)
+		}
+
+		engines = append(engines, Engine{Name: name, Image: image, GPUs: fields[2], Args: fields[3]})
+		if len(engines) > want {
+			return nil, engineTallyError(want, len(engines))
+		}
+	}
+
+	if want < 0 {
+		return nil, fmt.Errorf("%s payload is %d bytes of nothing but whitespace; even the empty set is written out, as %s0", EventEngineSet, len(payload), upstreamCountPrefix)
+	}
+	if len(engines) != want {
+		return nil, engineTallyError(want, len(engines))
+	}
+	if len(engines) == 0 {
+		return nil, nil
+	}
+	return engines, nil
+}
+
+// engineTallyError is the refusal for a count that disagrees with the lines, shared by
+// the in-loop and post-loop checks so the two cannot describe it differently. Numbers
+// only, so it needs no bounding.
+func engineTallyError(want, got int) error {
+	return fmt.Errorf("%s payload says %s%d and describes %d engine(s), so the set it names is not the set it lists", EventEngineSet, upstreamCountPrefix, want, got)
+}
+
+// engineLookup keys engines by the host that resolves to them, which is the container
+// name lowercased — DNS is case-insensitive and validUpstreamURL refuses an uppercase
+// host, so a recorded URL always arrives lowercase.
+//
+// A name two engines share once lowercased is dropped rather than resolved by last-wins,
+// for the reason composeServiceLookup drops one: the output is a statement about which
+// container sees the plaintext, and picking between two candidates would make it up.
+func engineLookup(engines []Engine) map[string]Engine {
+	lookup := make(map[string]Engine, len(engines))
+	ambiguous := make(map[string]bool)
+	for _, e := range engines {
+		host := strings.ToLower(e.Name)
+		if _, dup := lookup[host]; dup {
+			ambiguous[host] = true
+			continue
+		}
+		lookup[host] = e
+	}
+	for host := range ambiguous {
+		delete(lookup, host)
+	}
+	return lookup
+}

@@ -485,11 +485,16 @@ func upstreamChanges(prev, next []Upstream) []string {
 // compose says nothing about, which is exactly the answer.
 //
 // services is PinnedImages' output: service name to image reference.
-func classifyUpstreams(members []Upstream, services map[string]string) []Upstream {
+func classifyUpstreams(members []Upstream, services map[string]string, engines []Engine) []Upstream {
 	if len(members) == 0 {
 		return members
 	}
 	lookup := composeServiceLookup(services)
+	// Consulted only where the compose said nothing, so compose wins on a name that is in
+	// both. That order is the whole point of having two sources: a destination with a
+	// hardware-bound answer must not be reported with the weaker one, and a CVM that
+	// recorded an engine shadowing a compose service must not thereby get to describe it.
+	recorded := engineLookup(engines)
 	out := make([]Upstream, len(members))
 	copy(out, members)
 	for i := range out {
@@ -501,11 +506,16 @@ func classifyUpstreams(members []Upstream, services map[string]string) []Upstrea
 			// member the compose cannot speak about is the honest answer for one.
 			continue
 		}
-		service, ok := lookup[u.Hostname()]
-		if !ok {
+		host := u.Hostname()
+		if service, ok := lookup[host]; ok {
+			out[i].ComposeService, out[i].PinnedImage, out[i].ImageSource = service.name, service.image, ImageSourceCompose
 			continue
 		}
-		out[i].ComposeService, out[i].PinnedImage = service.name, service.image
+		if engine, ok := recorded[host]; ok {
+			// parseEngineSet already refused an entry without a pinned digest, so both fields
+			// are set together here the way the compose branch sets them.
+			out[i].ComposeService, out[i].PinnedImage, out[i].ImageSource = engine.Name, engine.Image, ImageSourceRecord
+		}
 	}
 	return out
 }

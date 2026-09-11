@@ -48,6 +48,28 @@ const (
 	// travel in the same payload as the members it counts.
 	EventUpstreamSet = "zg-upstream-set"
 
+	// EventEngineSet carries the WHOLE set of containers the controller created after
+	// launch: a header line naming how many follow, then one tab-separated line each.
+	//
+	//	count=1
+	//	dsv4flash\tlmsysorg/sglang@sha256:…\t7\t--model-path deepseek-ai/… --tp 1
+	//
+	// It exists because compose_hash cannot cover these. compose_hash is computed at launch
+	// from the submitted manifest, so a container created afterwards is outside it — and
+	// without a record, a destination pointing at one is indistinguishable from an external
+	// vendor, which is the fail-closed but useless answer.
+	//
+	// What the record is worth rests on a chain, not on itself: compose_hash pins the
+	// controller's image AND pins that only the controller holds the docker socket, and that
+	// controller records before it creates. A reader who has reviewed the manifest can
+	// therefore treat the set as complete; one who has not should treat it as unverified.
+	// That is strictly weaker than a compose service, which is why Upstream.ImageSource
+	// exists to tell the two apart.
+	//
+	// A snapshot, last-record-wins, exactly like the upstream set — see parseUpstreamSet for
+	// why an incremental encoding invents a state the source never has.
+	EventEngineSet = "zg-engine-set"
+
 	// EventNamespace prefixes every event this project writes. dstack already
 	// writes app-id, compose-hash and system-ready into RTMR3, and other
 	// components may add their own; an unprefixed "image-update" could collide
@@ -71,6 +93,14 @@ const (
 const (
 	DigestSourceCompose = "compose" // no upgrade recorded; the digest the deployment booted on
 	DigestSourceEvent   = "event"   // the last recorded upgrade
+)
+
+// Where an Upstream's PinnedImage came from. Named after DigestSource and unequal in the
+// same way: the compose is bound to the quote by its own hash, a record is the ledger's
+// claim.
+const (
+	ImageSourceCompose = "compose" // a compose service; app_compose hashes to the quote's compose hash
+	ImageSourceRecord  = "record"  // an EventEngineSet entry; the CVM's own claim
 )
 
 // digestPattern is the digest shape an image reference must carry. Lowercase hex
@@ -269,6 +299,25 @@ type RunningState struct {
 	// A caller treating a non-empty value as suspicious is making a judgement this
 	// package does not make: a legitimate reconfiguration produces one too.
 	UpstreamChanges []string
+	// Engines is the set of containers the controller says it created after launch, in the
+	// order the last EventEngineSet record listed them. Meaningful only when EnginesState
+	// is EnginesKnown.
+	//
+	// It is the CVM's own claim and nothing here checks it — see EventEngineSet for the
+	// chain that makes it worth anything, and Upstream.ImageSource for how a caller tells
+	// a destination backed by one of these from a destination backed by the compose.
+	Engines []Engine
+	// EnginesState is EnginesUnrecorded, EnginesKnown or EnginesUnknown, and is the single
+	// source of truth for which of the three this answer is.
+	//
+	// A string and not a bool pair, for the reason UpstreamsState is: this type is
+	// transported, and an error field marshals to {} under encoding/json — so a consumer on
+	// the far side would render an unreadable record as "recorded, zero containers", which
+	// is the fail-open direction.
+	EnginesState string
+	// EnginesErr says why the set is unknown, and is empty in the other two states. A
+	// string for the reason UpstreamsErr is one.
+	EnginesErr string
 	// Events is the full runtime event sequence whose replay matched the quote.
 	Events []RuntimeEvent
 }
@@ -309,7 +358,25 @@ type Upstream struct {
 	// outward: an extra_hosts entry or a custom dns: could point a service name
 	// somewhere else. Both live in the compose, so a caller reviewing the manifest sees
 	// them; this field says only that the name is declared as a service.
+	// It holds a compose service name when ImageSource is ImageSourceCompose, and a
+	// recorded container name when it is ImageSourceRecord. The two are not equally
+	// strong — see ImageSource — so a caller that treats a non-empty value as "inside the
+	// measured boundary" without reading ImageSource is trusting the CVM's own claim.
 	ComposeService string
+	// ImageSource says where PinnedImage came from, and it is the field that keeps a
+	// compose service from being confused with a container the CVM says it created.
+	//
+	//   ""                   no match; the destination is external, or a host the compose
+	//                        and the engine record both say nothing about
+	//   ImageSourceCompose   a compose service. app_compose hashes to the compose hash in
+	//                        the signed report body, so this is hardware-bound
+	//   ImageSourceRecord    an EventEngineSet entry. The CVM's own claim, worth what the
+	//                        chain in that event's doc is worth
+	//
+	// Compose wins when a name is in both, because it is the stronger of the two and a
+	// reader must not be told the weaker thing about a destination that has the stronger
+	// one available.
+	ImageSource string
 	// PinnedImage is the image reference the compose pins for ComposeService. It is set
 	// exactly when ComposeService is, never one without the other.
 	//
@@ -464,6 +531,17 @@ func ResolveRunningState(v VerifiedQuote, tcbInfoJSON []byte, brokerService stri
 			}
 			lastSet, haveSet = next, true
 			state.Upstreams, state.UpstreamsState, state.UpstreamsErr = next, UpstreamsKnown, ""
+		case EventEngineSet:
+			// Reported rather than returned, and the set cleared on an unreadable record, for
+			// the reasons the upstream case gives: the answers that do not depend on it still
+			// hold, a later good record is a complete repair, and reporting engines the log has
+			// moved past would be a claim about what is running now.
+			next, err := parseEngineSet(string(event.Payload))
+			if err != nil {
+				state.Engines, state.EnginesState, state.EnginesErr = nil, EnginesUnknown, err.Error()
+				break
+			}
+			state.Engines, state.EnginesState, state.EnginesErr = next, EnginesKnown, ""
 		default:
 			return nil, fmt.Errorf("unrecognised %s event %q: this reader is older than the CVM that wrote the log, so it cannot say what is running", EventNamespace, event.Event)
 		}
@@ -509,7 +587,10 @@ func ResolveRunningState(v VerifiedQuote, tcbInfoJSON []byte, brokerService stri
 		if err != nil {
 			return nil, fmt.Errorf("the ledger records upstreams, so the compose has to say which of them are containers it declares: %w", err)
 		}
-		state.Upstreams = classifyUpstreams(state.Upstreams, images)
+		// The engines are passed even when the record was unreadable, in which case the slice
+		// is nil and only the compose can match — the fail-closed direction: a destination
+		// whose container this process cannot name reads as external rather than as internal.
+		state.Upstreams = classifyUpstreams(state.Upstreams, images, state.Engines)
 	}
 
 	// A record wins over the compose pin, and the two are mutually exclusive.
