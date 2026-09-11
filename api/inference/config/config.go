@@ -1376,6 +1376,40 @@ type ControllerConfig struct {
 	// it on is a per-deployment decision to be made once every consumer of that
 	// deployment's quote can read the record, and there is no way for this process to
 	// check that for itself.
+	//
+	// # Turning it on is service-affecting on a deployment that signs through the controller
+	//
+	// Reading the field name, this looks like a switch that only starts writing a record.
+	// It is not. The set hash enters the signing key's derivation path, so going from off
+	// to on moves the signer from the unbound path to a bound one: a DIFFERENT signer
+	// address and a different encryption key. What follows, traced through the code:
+	//
+	//  1. ApplyCoreConfig records the set, binds the new keys, and restarts the broker.
+	//  2. The broker reads its signer address from the controller at startup, finds it
+	//     differs from the on-chain one (contract.identicalServiceExceptPrice compares
+	//     TeeSignerAddress), and pushes the new one itself — one provider-paid transaction,
+	//     no operator action.
+	//  3. Service.teeSignerAcknowledged is keyed on that address, so it is now unset and
+	//     the CONTRACT OWNER has to acknowledge before the provider is trusted again.
+	//
+	// Step 3 is the one nothing here can do. It is one on-chain acknowledgement to ENABLE
+	// the switch, before any destination has changed — the same cost every later
+	// destination change carries, paid once up front. A request sealed to the old
+	// encryption key just before the restart cannot be opened after it.
+	//
+	// See ctrl.bindKeysToUpstreamSet for the mechanism and for what the binding buys.
+	//
+	// It costs nothing on a deployment without the attestation proxy (ATTEST_PROXY_SOCKET
+	// unset): the broker derives its own keys there, nothing is bound, and the set is
+	// recorded unbound with a warning. 11 of the 13 non-deprecated deployments are in that
+	// state today.
+	//
+	// # And check the config can be expressed as a set before flipping it
+	//
+	// Every live config can today. A config whose targetUrl has no providerIdentity and
+	// whose host is a dotted FQDN cannot — see ctrl.upstreamsFromConfig — and turning this
+	// on with one of those records the set as unreadable for the whole boot, since RTMR3
+	// only appends. The fix is one config line and the error message names it.
 	RecordUpstreamSet bool `yaml:"recordUpstreamSet"`
 
 	// Engines is the allowlist of images POST /v1/engines may run, and at the same time
