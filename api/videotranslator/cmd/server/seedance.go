@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -18,8 +19,11 @@ import (
 // falls through to 2.5, the same default as before this env var existed,
 // rather than guessing. Getting this wrong in either direction is a real
 // mispricing (2.0's [4,15]/no-4k rules vs 2.5's [4,30]/4k-less-but-1080p
-// rules are not interchangeable), so an operator who fat-fingers the value
-// gets a working 2.5 deployment, not a silently-misconfigured 2.0 one.
+// rules are not interchangeable): a fat-fingered non-empty value silently
+// produces a working 2.5 deployment that is still a misconfiguration
+// relative to what the operator actually asked for. SeedanceMain logs a
+// warning for exactly that case (see seedanceVersionWarning) — it does not
+// distinguish itself from a correctly-empty value.
 func isSeedance20(modelVersion string) bool {
 	switch strings.ToLower(strings.TrimSpace(modelVersion)) {
 	case "2.0", "2", "v2", "v2.0":
@@ -27,6 +31,24 @@ func isSeedance20(modelVersion string) bool {
 	default:
 		return false
 	}
+}
+
+// seedanceVersionWarning returns a non-empty message when modelVersion is
+// set to something isSeedance20 does not recognize as either 2.0 or the
+// empty-string default — i.e. the likely-typo case ("2.0.0",
+// "seedance-2.0", stray whitespace-only junk from a template, etc.). It
+// returns "" for a recognized 2.0 spelling and for a genuinely empty value,
+// so the caller can log a warning only when there's actually something to
+// flag, distinguishing "operator didn't set it, 2.5 is correct" from
+// "operator set it to something SeedanceMain silently couldn't use."
+func seedanceVersionWarning(modelVersion string) string {
+	if isSeedance20(modelVersion) {
+		return ""
+	}
+	if strings.TrimSpace(modelVersion) == "" {
+		return ""
+	}
+	return fmt.Sprintf("SEEDANCE_MODEL_VERSION=%q was set but not recognized as a Seedance 2.0 spelling — falling back to Seedance 2.5. If 2.0 was intended, check the value against isSeedance20's accepted spellings (\"2.0\", \"2\", \"v2\", \"v2.0\").", modelVersion)
 }
 
 // seedanceWriteTimeout mirrors writeTimeout/miniMaxWriteTimeout (see main.go)
@@ -68,6 +90,9 @@ func SeedanceMain() {
 		logger.Infof("seedance video translator: serving Seedance 2.0 (SEEDANCE_MODEL_VERSION=%q)", cfg.SeedanceModelVersion)
 		videoHandler = handler.NewSeedance20VideoHandler(client, logger)
 	} else {
+		if msg := seedanceVersionWarning(cfg.SeedanceModelVersion); msg != "" {
+			logger.Warnf("seedance video translator: %s", msg)
+		}
 		videoHandler = handler.NewSeedanceVideoHandler(client, logger)
 	}
 

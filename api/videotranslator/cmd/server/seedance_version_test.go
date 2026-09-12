@@ -27,3 +27,33 @@ func TestIsSeedance20(t *testing.T) {
 		}
 	}
 }
+
+// TestSeedanceVersionWarning confirms seedanceVersionWarning -- the source
+// of SeedanceMain's else-branch warning log -- distinguishes "correctly
+// empty, default to 2.5" (no warning) from "set but not a recognized 2.0
+// spelling, silently falling back to 2.5" (warning), and stays silent for
+// values isSeedance20 already accepts as 2.0.
+func TestSeedanceVersionWarning(t *testing.T) {
+	tests := []struct {
+		version   string
+		wantEmpty bool
+	}{
+		{"", true},      // correct default: nothing to warn about
+		{"2.0", true},   // recognized 2.0 spelling: isSeedance20 handles it, no warning
+		{"2", true},
+		{"v2", true},
+		{"v2.0", true},
+		{" 2.0 ", true},
+		{"2.5", false},          // non-empty and not a 2.0 spelling: likely-typo case
+		{"2.0.0", false},        // the exact typo this finding was about
+		{"seedance-2.0", false}, // another plausible fat-finger
+		{"garbage", false},
+		{"   ", true}, // whitespace-only trims to empty: treated as unset, not a typo
+	}
+	for _, tt := range tests {
+		got := seedanceVersionWarning(tt.version)
+		if gotEmpty := got == ""; gotEmpty != tt.wantEmpty {
+			t.Errorf("seedanceVersionWarning(%q) = %q, want empty=%v", tt.version, got, tt.wantEmpty)
+		}
+	}
+}
