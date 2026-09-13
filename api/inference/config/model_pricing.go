@@ -230,6 +230,23 @@ const (
 	// input-length tiering, not resolution/media-type — the wrong axis for a
 	// video model.
 	BillingModePerVideoToken BillingMode = "per_video_token"
+	// BillingModePerAudioSecond is audio-generation billing: the fee is the
+	// generated audio's duration in whole seconds times the entry's OutputPrice.
+	//
+	// It carries no tier axis, and that is a decision rather than an omission.
+	// Seed Audio — the vendor this mode exists for — publishes ONE flat
+	// per-second rate; sample rate and output format do not move it, and there
+	// is no resolution analogue. Per VideoTokenPriceTier's doc, a configurable
+	// price for a cell nothing can reach gets published in GET /v1/models and
+	// never charged, so a consumer quoting it quotes a price this broker does
+	// not honour. If a real tiered rate card appears, the axis is added then —
+	// here, in audiospec, and in the router's variant resolver together.
+	//
+	// Distinct from BillingModePerVideoSecond despite the identical arithmetic:
+	// that mode scales its count by a resolution multiplier, and sharing it would
+	// put a knob on an audio model that reads, validates, and then silently does
+	// nothing.
+	BillingModePerAudioSecond BillingMode = "per_audio_second"
 )
 
 // BillingUnitTier maps a (resolution, duration) combination to a fixed billable
@@ -342,6 +359,17 @@ type BillingObservables struct {
 	// BillingModePerVideoToken (ByteDance Seedance's usage.completion_tokens).
 	// Unused by every other mode.
 	CompletionTokens int64
+	// AudioSeconds is the generated audio's duration in whole seconds, for
+	// BillingModePerAudioSecond. Unused by every other mode.
+	//
+	// A SEPARATE field from Seconds, not a reuse of it, even though both are
+	// durations. Seconds is a video clip's length and is read by three modes that
+	// also consult Resolution; AudioSeconds is read by one mode that has no
+	// resolution at all. Sharing the field would mean a caller populating the
+	// wrong one still produced a plausible fee — the failure mode this struct's
+	// per-mode separation exists to prevent — and would make "which modes read
+	// Seconds" a question with a caveat instead of an answer.
+	AudioSeconds int64
 }
 
 // normalizeResolution canonicalizes a resolution token for case- and
@@ -477,6 +505,25 @@ func (b *BillingConfig) OutputUnits(obs BillingObservables) (int64, error) {
 			units = 1
 		}
 		return units, nil
+	case BillingModePerAudioSecond:
+		// No multiplier, so no scaledUnits: there is no tier axis for this mode
+		// (see the const's doc), and routing through scaledUnits would imply one.
+		// The overflow guard scaledUnits provides is not lost — the count is
+		// bounded on the way in, by audiospec's per-vendor ceiling and by the
+		// reservation that ceiling sized.
+		if obs.AudioSeconds < 0 {
+			return 0, fmt.Errorf("negative audio duration")
+		}
+		if obs.AudioSeconds > maxBillableUnits {
+			return 0, fmt.Errorf("billable audio seconds out of range (seconds=%d)", obs.AudioSeconds)
+		}
+		// Floored at 1, matching per_video_second: a completed generation that
+		// rounds to zero seconds still consumed the vendor's capacity and was
+		// billed to us, so charging nothing for it is a loss, not a courtesy.
+		if obs.AudioSeconds < 1 {
+			return 1, nil
+		}
+		return obs.AudioSeconds, nil
 	case BillingModePerUnitTable:
 		obsRes := normalizeResolution(obs.Resolution)
 		for _, t := range b.Table {
