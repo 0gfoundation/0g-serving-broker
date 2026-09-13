@@ -95,6 +95,9 @@ var (
 	// reason=unpredictable_units is the exception that is not fixable at all — see
 	// VideoReserveSkipUnpredictableUnits.
 	VideoReserveSkippedTotal *prometheus.CounterVec
+	// AudioReserveSkippedTotal is AudioReserveSkipped's counter. Single-reason by
+	// construction — see AudioReserveSkipUnknownVendor.
+	AudioReserveSkippedTotal *prometheus.CounterVec
 
 	// VideoPollTimedOutTotal counts video-generation poll jobs (see
 	// docs/design/video-generation-async-billing.md) that hit their
@@ -442,6 +445,15 @@ func PrometheusInit(serverName, providerAddress string) {
 		[]string{"reason"},
 	)
 
+	AudioReserveSkippedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name:        "broker_audio_reserve_skipped_total",
+			Help:        "Audio-generation creates forwarded without a pre-flight reserve. Only one reason exists (unknown_vendor = no rules recorded in common/audiospec for the configured vendor), because an audio reserve cannot fail for any request-shaped reason: the vendor's output ceiling bounds every request, so audiospec.ReserveSeconds always returns a usable number. That makes ANY value here a deployment misconfiguration with a one-line fix, unlike its video sibling where two of three reasons are properties of the request. Non-zero means those requests are gated only by the minimum locked balance.",
+			ConstLabels: constLabels,
+		},
+		[]string{"reason"},
+	)
+
 	VideoGenerationFailedTotal = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Name:        "broker_video_generation_failed_total",
@@ -486,6 +498,7 @@ func PrometheusInit(serverName, providerAddress string) {
 	prometheus.MustRegister(VideoGenerationFailedTotal)
 	prometheus.MustRegister(VideoTableMissTotal)
 	prometheus.MustRegister(VideoReserveSkippedTotal)
+	prometheus.MustRegister(AudioReserveSkippedTotal)
 	prometheus.MustRegister(RoutingProofSkippedTotal)
 	prometheus.MustRegister(RequestRejectedTotal)
 	prometheus.MustRegister(FailureCount)
@@ -927,6 +940,34 @@ func RecordVideoReserveSkipped(reason string) {
 		return
 	}
 	VideoReserveSkippedTotal.WithLabelValues(reason).Inc()
+}
+
+// The one reason an audio create can go out unreserved.
+//
+// There is deliberately no audio counterpart to VideoReserveSkipUndeterminedDuration
+// or VideoReserveSkipUnpredictableUnits, and the absence is the point rather than an
+// omission: both of those are properties of a REQUEST the broker cannot price, and
+// an audio request always can be. audiospec.ReserveSeconds is contractually total —
+// the vendor's output ceiling bounds every request, so an absent, unreadable or
+// absurd max_duration resolves to the ceiling instead of to "unknowable".
+//
+// So this series carries one meaning only: a deployment named a vendor nobody
+// recorded rules for. That makes it actionable without triage — any non-zero value
+// has the same one-line fix — where its video sibling needs the label read first to
+// know whether an operator can do anything at all.
+const (
+	// AudioReserveSkipUnknownVendor: the deployment names a vendor common/audiospec
+	// has no rules for, so nothing here can say what that upstream will produce.
+	// Fixed by recording that vendor's output ceiling.
+	AudioReserveSkipUnknownVendor = "unknown_vendor"
+)
+
+// RecordAudioReserveSkipped increments the un-reserved audio-create counter.
+func RecordAudioReserveSkipped(reason string) {
+	if AudioReserveSkippedTotal == nil {
+		return
+	}
+	AudioReserveSkippedTotal.WithLabelValues(reason).Inc()
 }
 
 // RecordVideoTableMiss increments the per_unit_table miss counter.
