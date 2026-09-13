@@ -95,8 +95,8 @@ POST /v1/audio/generations
   // a request that omits all of them is a plain OpenAI TTS request.
   "max_duration": 120,          // seconds, vendor ceiling 120
   "sample_rate": 24000,         // 8000..48000
-  "reference_audio": ["…"],     // up to 3 clips, each < 30s
-  "reference_image": "…",       // 1 image; mutually exclusive with reference_audio
+  "reference_audio": [ … ],     // up to 3 clips, each < 30s — see below
+  "reference_image": …,         // 1 image; mutually exclusive with reference_audio
   "pitch": 1.0,
   "loudness": 1.0
 }
@@ -107,6 +107,62 @@ rejects a request carrying both **before** calling the vendor, mirroring
 `translate.ValidateSeedanceCreateRequest`'s pre-flight rejection of an unsupported
 `input_reference` — a local, named failure costs nothing, and a vendor 400 arrives only after
 the request has been routed and a slot reserved.
+
+### How reference media reaches us
+
+This needs its own contract rather than "a URL", because **OpenAI has no reference-audio
+concept to conform to**: `/v1/audio/speech` takes `voice` as a preset name string and has no
+voice-cloning input at all. Whatever we accept is an extension, so the question is which
+extension is closest to how OpenAI hands audio around elsewhere.
+
+It does that two ways, and neither is a URL:
+
+- `/v1/audio/transcriptions` takes a multipart **file**.
+- chat completions takes inline base64 — `{"type":"input_audio","input_audio":{"data":"…","format":"wav"}}` —
+  with an explicit `format` and, unlike `image_url`, **no URL variant**. OpenAI never accepts
+  audio by URL anywhere in its API.
+
+So a bare URL is the *least* OpenAI-shaped option here, which is the opposite of the
+conclusion an analogy with Seedance's `image_url` would suggest.
+
+The design is therefore structurally what `parseCreateVideoRequest` already does for video —
+an OpenAI-native multipart path plus a JSON convenience path — with audio's own shapes:
+
+| Transport | Shape | Standard |
+|---|---|---|
+| `multipart/form-data` | `reference_audio` file parts | yes — matches `/v1/audio/transcriptions` and the Video API's `input_reference` |
+| JSON | `input_audio: {data, format}` objects | yes — OpenAI's own inline-audio shape |
+| JSON | a plain `https://…` string | **extension**, documented as such |
+
+The multipart path is what a client with a 2 MB voice sample uses, and is what OpenAI clients
+already do for audio; the URL path exists for a client that already hosts the file and wants
+to keep the body small. Internally the adaptor normalizes all three into whatever the vendor
+takes, exactly as the video handler converts a multipart file part into a `data:` URI so the
+vendor mapping stays transport-agnostic.
+
+Two rules carry over from the existing vendors, and one deliberately does not.
+
+**Carried over — the scheme allowlist.** Both Seedance and MiniMax accept only `https://`,
+`http://` and a matching `data:` prefix, verbatim. Audio uses the same list with `data:audio/`.
+
+**Carried over — a vendor file handle is never client-addressable.** MiniMax rejects
+`mm_file://` appearing in the `image_url` field because "that account is single-tenant
+upstream but multi-tenant for us — accepting a client-chosen `mm_file` id in `image_url`
+would let one user reference another's uploaded frame." If Seed Audio has an upload-a-sample
+endpoint, the same rule applies without modification: a handle may only arrive through a
+dedicated field we prefix ourselves, never through a free-form reference string.
+
+**NOT carried over — silent degradation.** Seedance drops an unusable reference and falls back
+to text-to-video; MiniMax does the same. That is safe there because the result is visibly
+different and the prompt still drove it. It is not safe here: dropping one of three
+`@AudioN` references yields a full-length, fully-billed generation **in the wrong voice** —
+which is precisely the harm Seedance's own `asset://` / `file_id` 400 path exists to prevent
+("so a client doesn't get silently billed for a different video than they asked for"). Every
+unusable `reference_audio` entry is therefore a 400, not a degrade.
+
+The remaining shape difference is that `reference_audio` is a **list of at most 3**, where
+both existing vendors take a scalar `input_reference`. Validation is list-shaped: length,
+per-entry scheme, and the `reference_audio` XOR `reference_image` rule.
 
 ### Response
 
@@ -244,12 +300,27 @@ This matters beyond correctness of a single request. Because the hold is a true 
 concurrent creates from one wallet see each other exactly, rather than approximately — which is
 the property the minimum-locked-balance floor exists to paper over when it does not hold.
 
-### Where the billable duration comes from
+### Where the billable quantity comes from
+
+Note the framing: the **vendor's own reported billable quantity**, not "the duration we
+measured". This follows Seedance, whose `usage.completion_tokens` is authoritative precisely
+because it already bakes in both the output and any billable *input* reference media (a
+reference video, there). If Seed Audio likewise charges for the reference clips a cloning
+request supplies, its reported quantity includes them and passing it through keeps our charge
+equal to the invoice. Deriving our own output-only number would silently under-bill exactly
+the requests that use the feature the modality exists for.
+
+That also bounds how wrong the reservation can be. The reserve is output-only, so a vendor
+that bills reference input can exceed it — see [Open questions](#open-questions). Billing on
+the vendor's number means the *charge* is still right; it is only the *hold* that would need
+widening.
 
 Resolution order, and every step is a real possibility rather than defensive padding:
 
-1. **The vendor's reported duration.** Expected to be the normal path: the vendor bills itself
-   per second of output, so it knows the number and has reason to report it.
+1. **The vendor's reported billable quantity** (seconds, or whatever unit it reports).
+   Expected to be the normal path: the vendor bills per second of output itself, so it knows
+   the number and has reason to report it. Authoritative when present, even if it exceeds the
+   output duration we would have measured.
 2. **Derived from the returned container.** For `wav` and `pcm` this is exact arithmetic from
    byte count, sample rate, channel count and sample width — no decoder. For `mp3` and `opus` it
    needs a small header walk (frame count; granule position) — still not a decoder, but real
@@ -407,11 +478,33 @@ opposite dimensions — input consumed vs output produced — and summing them i
   first request with the id named. This was flagged at all only because Seed Audio is on
   openspeech rather than Ark, so its ids are issued by a different service than Seedance's and
   cannot simply be assumed to match. It is a one-line check on the first live call, not a gate.
+- **Whether the reserve needs to cover reference-media INPUT.** The hold is output-only
+  (`min(max_duration, 120) × price`). Seedance's vendor charges for a reference video, and Seed
+  Audio may likewise charge for the up-to-three reference clips a cloning request supplies — in
+  which case the vendor's billable quantity exceeds the hold. Note this does NOT make the charge
+  wrong: billing is on the vendor's reported quantity (see above), so only the gate under-holds.
+  Confirmed against the real rate card, this is either nothing or a `+ 3 × 30s` term in the
+  reserve.
 - **Whether `speed`, `pitch` and `loudness` change the billed duration.** If the vendor applies
-  `speed` before generating, the reserved ceiling still bounds the bill and nothing changes. If it
-  applies it as post-processing, a `speed < 1` request could exceed a ceiling computed from
-  `max_duration`. Needs one confirmation against the real API before the reserve is trusted as a
-  bound.
+  `speed` before generating, the ceiling still bounds the output and nothing changes. If it
+  applies it as post-processing, a `speed < 1` request stretches output past a ceiling computed
+  from `max_duration`. Same shape as the question above and the same consequence — the charge
+  stays correct, the hold does not.
+
+### Settled, recorded so they are not reopened
+
+- **Voice-cloning consent.** Raised and explicitly set aside for now. There is no consent,
+  attestation or provenance mechanism for a voice reference anywhere in the broker or router, and
+  this design adds none.
+- **Asset expiry.** Vendor asset URLs are time-limited (~24h) and `/content` re-fetches from the
+  vendor, so a client that comes back after expiry gets nothing. Accepted as-is — same property
+  video already has. A broker-side asset store and cache is a later optimization, not a
+  prerequisite.
+- **E2EE.** `sealable=false`, inherited from the video/async precedent, accepted deliberately.
+- **The over-hold on short scripts.** A request with no `max_duration` holds the full 120s even
+  when it generates four seconds of speech. Accepted: Seed Audio's ceiling is the analogue of
+  Seedance's [4, 30] clamp, and a script-length heuristic is not safe for a model that also
+  generates music and ambience, where a three-word prompt can produce two minutes of output.
 - **Whether a second audio vendor is coming.** `audiospec` is built as a registry from the start
   because `videospec` had to become one, but the per-vendor split only pays off with a second
   vendor. It costs little to keep.
