@@ -188,6 +188,23 @@ introduced: whisper STT and video generation already record seconds, and audio's
 the same thing to a reconciliation query. `DefaultBillingUnitForService` gains an
 `audio-generation` case returning it.
 
+### No published unit vocabulary either
+
+An earlier draft of this design gave the router a `UnitAudioSecond = "audio_second"`
+alongside its `video_second` / `video_clip` / `video_token`. It does not get one, and the
+reason follows directly from the section below: that vocabulary types `ModelPriceVariant.Unit`,
+i.e. rows in a `variants` table, and a modality with no tier axis publishes no variants. The
+constant would be read by nothing. Billing computes `pricing.audio × seconds` directly, the
+same way the router's no-variants fallback already prices a flat video model.
+
+The broker likewise publishes no `audio_unit` beside `pricing.audio`, unlike `video_unit`.
+`video_unit` exists because video's flat scalar is genuinely ambiguous — it can price a second,
+a table unit, or a completion token — and `videoPriceUnit`'s own doc argues against naming a
+unit the consumer already assumes correctly. Audio has one mode and one unit.
+
+Both become wrong the moment a second audio billing shape appears. That, not a future vendor,
+is the trigger to revisit.
+
 ### No tier axis, deliberately
 
 Seed Audio publishes one flat per-second rate (~$0.0025/second direct; $0.002–$0.00325 across
@@ -307,7 +324,7 @@ exactly the uncertainty that machinery exists to absorb.
     internal/handler/models.go       publish the audio price + variants
 
 0g-router/backend/
-  pkg/response/types.go              UnitAudioSecond
+  pkg/contract/provider_lister.go    ModelInfoPricing.Audio (ingestion), fanOutPrices arm
   pkg/inference/handler.go           ServiceTypeAudioGeneration
   pkg/inference/audio_handler.go     NEW
   pkg/inference/async.go             audio branch in the async biller
@@ -355,7 +372,7 @@ opposite dimensions — input consumed vs output produced — and summing them i
 ## Phasing
 
 1. **Pricing primitives.** `common/audiospec`, `BillingModePerAudioSecond`, config validation,
-   `GET /v1/models` publishing, router `UnitAudioSecond` + `fanOutPrices` arm. Pure, unit-testable,
+   `GET /v1/models` publishing, router ingestion + `fanOutPrices` arm. Pure, unit-testable,
    wired to nothing — the same "engine first, request paths later" order the multimodal billing
    work already used.
 2. **The adaptor**, against a recorded test double.
