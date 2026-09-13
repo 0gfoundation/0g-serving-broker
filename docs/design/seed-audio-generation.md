@@ -456,11 +456,26 @@ opposite dimensions — input consumed vs output produced — and summing them i
    `GET /v1/models` publishing, router ingestion + `fanOutPrices` arm. Pure, unit-testable,
    wired to nothing — the same "engine first, request paths later" order the multimodal billing
    work already used.
-2. **The adaptor**, against a recorded test double.
+2. **The adaptor**, against a recorded test double. **The only phase that needs the vendor
+   reference**, and therefore the only one blocked on it.
 3. **Broker request path**: route, reserve, create-time terminal/non-terminal branch,
    `AudioPollJob` + scheduler.
 4. **Router request path**: submit / poll / content, async billing, usage recording.
 5. **Frontend and metrics.**
+
+**These are numbered, not sequential: 3 does not depend on 2.** An earlier draft implied it did,
+which was wrong and worth correcting because it stalls the schedule for no reason.
+
+The broker never speaks the vendor's protocol. `VideoCreateReserve` — the model for its audio
+counterpart — reads the CLIENT's request body and asks `videospec` what will be rendered; it
+never touches a vendor wire type. The poller likewise calls the same OpenAI-shaped
+`GET /videos/{id}` a client would, through the translator. Every vendor specific is sealed
+inside the adaptor by construction, which is the whole point of the translator being a pure
+protocol translator.
+
+So phases 3, 4 and 5 depend on the CLIENT-facing contract — defined above — not on the vendor's.
+They can be built and tested against a stub adaptor while phase 2 waits for the reference. Only
+end-to-end validation needs all of them.
 
 ## Open questions
 
