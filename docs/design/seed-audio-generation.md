@@ -325,6 +325,16 @@ Resolution order, and every step is a real possibility rather than defensive pad
    byte count, sample rate, channel count and sample width — no decoder. For `mp3` and `opus` it
    needs a small header walk (frame count; granule position) — still not a decoder, but real
    code with real edge cases.
+   **`pcm` is the exception to step 2 and must not take it.** Raw PCM has no container at
+   all — the bytes are the samples — so the same 480,000 bytes is 10.0s at 24kHz/16-bit/mono,
+   5.0s at 24kHz/16-bit/stereo, or 6.7s at 24kHz/24-bit/mono. The request carries
+   `sample_rate`, but nothing carries bit depth or channel count, so deriving a duration means
+   assuming vendor defaults. That makes `pcm` the ONLY format where this fallback can be
+   confidently WRONG rather than failing: a malformed mp3 fails to parse and is noticed, while
+   a wrong channel assumption bills exactly 2x with no error and a perfectly plausible number
+   — on a money path, and by enough to exceed the hold. So `pcm` with no vendor-reported
+   duration skips step 2 entirely and goes straight to step 3.
+
 3. **The reserved ceiling.** Over-bills by construction, so it is a last resort and must be
    loudly metered rather than logged at `Warn`, in the same spirit as
    `broker_video_billing_skipped_total`.
@@ -492,6 +502,17 @@ opposite dimensions — input consumed vs output produced — and summing them i
   stays correct, the hold does not.
 
 ### Settled, recorded so they are not reopened
+- **`supported_parameters` extends to cover audio.** `GET /v1/models` advertises a
+  parameter vocabulary built for chat, which has no `voice`, `reference_audio`, `sample_rate`
+  or `loudness`. Audio models must not advertise an empty or chat-shaped set — a client
+  discovers what it can send from this field. Extending the vocabulary is Phase 4 work, but
+  the decision is made: extend it, do not leave audio models under-describing themselves.
+- **No streaming, accepted for now.** OpenAI TTS offers `stream_format: "sse"` so a client can
+  start playing before generation finishes; this design is async-only, so a caller waits the
+  full 10-30s before hearing anything. Fine for voiceover and batch work, wrong for anything
+  interactive. Accepted as a known limitation rather than designed around — a synchronous
+  streaming path would live at `/v1/audio/speech`, which this design deliberately left free
+  for exactly that.
 
 - **Voice-cloning consent.** Raised and explicitly set aside for now. There is no consent,
   attestation or provenance mechanism for a voice reference anywhere in the broker or router, and
