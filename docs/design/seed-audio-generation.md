@@ -383,11 +383,30 @@ opposite dimensions — input consumed vs output produced — and summing them i
 
 ## Open questions
 
-- **The vendor wire schema is not yet confirmed.** Field names, the task-status enum, and whether
-  the status response reports output duration are taken from BytePlus platform conventions and
-  third-party listings, not the official reference — the model is enterprise-gated. Phase 1
-  depends on none of it; Phase 2 cannot start without it. The duration-source chain above is
-  written so that the answer changes which branch runs, not the design.
+- **The vendor wire schema is not yet confirmed.** Field names and the task-status enum are taken
+  from BytePlus platform conventions and third-party listings, not the official reference — the
+  model is enterprise-gated. Phase 1 depends on none of it. Phase 2 needs it to write the client,
+  but it is ordinary integration work once the reference is in hand, not a design question.
+
+  Two things it is worth being precise about, because an earlier draft of this section overstated
+  both as blockers:
+
+  **Duration is never actually missing.** The adaptor is ours and defines the response envelope,
+  so it can always emit `usage.output_audio_seconds` — if the vendor does not report a duration,
+  the adaptor measures one. The open question is only how cheaply. A vendor-reported duration is
+  free; otherwise the adaptor must fetch the asset on the TERMINAL status call and read it from
+  the container, which is exact arithmetic for `wav`/`pcm` from a 44-byte header, a Xing/Info
+  frame or frame walk for `mp3`, and — the awkward one — a range request to the **tail** for
+  `ogg`/`opus`, whose granule position lives on the last page. So the answer decides whether the
+  adaptor needs an asset fetch in the status path at all, not whether billing can work.
+
+  **The task-id shape is very unlikely to be a problem.** `EncodeJobID` already absorbs a vendor
+  id that is ≤33 characters of `[A-Za-z0-9_-]` (passthrough), a canonical UUID (hyphens dropped),
+  or anything else up to 24 bytes (base64url). Only an id that is simultaneously longer than 24
+  bytes, not a UUID, and outside the contract charset fails — and it fails loudly at that vendor's
+  first request with the id named. This was flagged at all only because Seed Audio is on
+  openspeech rather than Ark, so its ids are issued by a different service than Seedance's and
+  cannot simply be assumed to match. It is a one-line check on the first live call, not a gate.
 - **Whether `speed`, `pitch` and `loudness` change the billed duration.** If the vendor applies
   `speed` before generating, the reserved ceiling still bounds the bill and nothing changes. If it
   applies it as post-processing, a `speed < 1` request could exceed a ceiling computed from
