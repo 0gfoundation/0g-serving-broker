@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/0glabs/0g-serving-broker/common/audiospec"
 	"github.com/0glabs/0g-serving-broker/common/videospec"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 )
@@ -629,6 +630,8 @@ func validBillingModeForType(mode BillingMode, serviceType string) bool {
 		return true
 	case BillingModePerImage:
 		return serviceType == constant.ServiceTypeTextToImage || serviceType == constant.ServiceTypeImageEditing
+	case BillingModePerAudioSecond:
+		return serviceType == constant.ServiceTypeAudioGeneration
 	default:
 		return false
 	}
@@ -672,7 +675,7 @@ func isVideoBillingMode(mode BillingMode) bool {
 // type. prefix labels errors (e.g. "service.modelPricing[0].billing").
 func validateBillingConfig(prefix string, b *BillingConfig, serviceType string) error {
 	switch b.Mode {
-	case "", BillingModePerToken, BillingModePerImage, BillingModePerVideoSecond, BillingModePerUnitTable, BillingModePerVideoToken:
+	case "", BillingModePerToken, BillingModePerImage, BillingModePerVideoSecond, BillingModePerUnitTable, BillingModePerVideoToken, BillingModePerAudioSecond:
 	default:
 		return fmt.Errorf("invalid config: %s.mode %q is not a known billing mode", prefix, b.Mode)
 	}
@@ -705,6 +708,14 @@ func validateBillingConfig(prefix string, b *BillingConfig, serviceType string) 
 	if b.Mode == BillingModePerVideoToken && len(b.ResolutionMultipliers) > 0 {
 		return fmt.Errorf("invalid config: %s.resolutionMultipliers is ignored by mode %q (the vendor reports the billable token count, so resolution does not scale it) — set per-resolution pricing in %s.tokenPriceTiers instead", prefix, BillingModePerVideoToken, prefix)
 	}
+	// Same rule, different reason: audio has no resolution at all, so a multiplier
+	// here is not merely ignored but meaningless. Refused rather than dropped for
+	// the reason stated one block up — a knob that appears to work is worse than
+	// one that is absent — and there is deliberately no audio equivalent to point
+	// the operator at, because this mode has no tier axis (see the const's doc).
+	if b.Mode == BillingModePerAudioSecond && len(b.ResolutionMultipliers) > 0 {
+		return fmt.Errorf("invalid config: %s.resolutionMultipliers is not valid for mode %q (audio output has no resolution, and this mode has no tier axis — the entry's outputPrice is the whole per-second rate)", prefix, BillingModePerAudioSecond)
+	}
 	if b.Mode == BillingModePerUnitTable {
 		if len(b.Table) == 0 {
 			return fmt.Errorf("invalid config: %s.table must not be empty for mode %q", prefix, BillingModePerUnitTable)
@@ -736,12 +747,39 @@ func validateBillingConfig(prefix string, b *BillingConfig, serviceType string) 
 	} else if len(b.TokenPriceTiers) > 0 {
 		return fmt.Errorf("invalid config: %s.tokenPriceTiers is only valid for mode %q", prefix, BillingModePerVideoToken)
 	}
-	if isVideoBillingMode(b.Mode) {
+	switch {
+	case isVideoBillingMode(b.Mode):
 		validateVideoVendor(prefix, b)
-	} else if b.Vendor != "" {
-		return fmt.Errorf("invalid config: %s.vendor is only valid for the video billing modes", prefix)
+	case b.Mode == BillingModePerAudioSecond:
+		validateAudioVendor(prefix, b)
+	case b.Vendor != "":
+		return fmt.Errorf("invalid config: %s.vendor is only valid for the video and audio billing modes", prefix)
 	}
 	return nil
+}
+
+// validateAudioVendor is validateVideoVendor's counterpart: it WARNS rather than
+// failing, for the same reason, and the consequence it names is the same one.
+//
+// An unset or unrecorded vendor means audiospec cannot supply an output ceiling,
+// so every create is forwarded without a pre-flight reserve and is gated only by
+// the minimum locked balance. That is a degraded state, not a broken one — the
+// broker still serves and still bills — so refusing to boot over it would take a
+// working provider offline to fix a reservation.
+//
+// It is louder for audio than the equivalent gap is for video, though, and the
+// message says so: audio's reserve is a true upper bound rather than an estimate,
+// so it is the one thing that makes concurrent creates from a single wallet see
+// each other exactly. Losing it does not degrade the gate's precision; it removes
+// the gate.
+func validateAudioVendor(prefix string, b *BillingConfig) {
+	if b.Vendor == "" {
+		log.Printf("[CONFIG] %s.vendor is unset: the broker cannot look up this upstream's output ceiling, so every create is forwarded WITHOUT a pre-flight reserve and is gated only by the minimum locked balance. Set it to the vendor behind targetUrl (see common/audiospec for the recorded ones).", prefix)
+		return
+	}
+	if _, ok := audiospec.Get(audiospec.Vendor(b.Vendor)); !ok {
+		log.Printf("[CONFIG] %s.vendor %q has no rules recorded in common/audiospec, so every create is forwarded WITHOUT a pre-flight reserve. Record that vendor's output ceiling there.", prefix, b.Vendor)
+	}
 }
 
 // validateTokenPriceTiers validates a per_video_token model's price table.
@@ -1624,11 +1662,16 @@ func validateModelPricingEntry(i int, entry *ModelPricingEntry, serviceType stri
 		return fmt.Errorf("invalid config: service.modelPricing[%d].type %q must equal service.type %q (per-model modality is not yet supported)", i, entry.Type, serviceType)
 	}
 
-	if serviceType == constant.ServiceTypeVideoGeneration {
+	switch serviceType {
+	case constant.ServiceTypeVideoGeneration:
 		if err := validateVideoModelEntry(i, entry, isUSD); err != nil {
 			return err
 		}
-	} else {
+	case constant.ServiceTypeAudioGeneration:
+		if err := validateAudioModelEntry(i, entry, isUSD); err != nil {
+			return err
+		}
+	default:
 		if err := validateTokenModelEntry(i, entry, serviceType, isUSD); err != nil {
 			return err
 		}
@@ -1846,11 +1889,65 @@ func validateVideoModelEntry(i int, entry *ModelPricingEntry, isUSD bool) error 
 	return nil
 }
 
+// validateAudioModelEntry validates an audio-generation entry, whose price is per
+// second of GENERATED audio.
+//
+// It reuses OutputPriceUSDPerSecond rather than adding a field, and for audio the
+// name is finally literal: that field's own doc notes the "PerSecond" spelling is
+// historical and that the unit is whatever OutputUnits decides (a completion token
+// for per_video_token). Here the unit really is a second, so the same USD pipeline
+// — normalize x1e6, price feed, on-chain ceiling, /1e6 at billing — carries it with
+// no special case.
+func validateAudioModelEntry(i int, entry *ModelPricingEntry, isUSD bool) error {
+	if entry.InputPriceUSDPerMillionTokens != "" || entry.OutputPriceUSDPerMillionTokens != "" {
+		return fmt.Errorf("invalid config: service.modelPricing[%d]: audio-generation uses outputPrice (NATIVE) or outputPriceUSDPerSecond (USD), not the per-1M-tokens USD fields (model '%s')", i, entry.Model)
+	}
+	if isUSD {
+		if entry.OutputPrice != "" || entry.InputPrice != "" {
+			return fmt.Errorf("invalid config: service.modelPricing[%d] must use outputPriceUSDPerSecond (priceDenomination is '%s') for audio model '%s'", i, constant.PriceDenominationUSD, entry.Model)
+		}
+		if entry.OutputPriceUSDPerSecond == "" {
+			return fmt.Errorf("invalid config: service.modelPricing[%d].outputPriceUSDPerSecond is required for USD audio model '%s'", i, entry.Model)
+		}
+		normalized, err := normalizeUSDPerUnitPrice(fmt.Sprintf("service.modelPricing[%d].outputPriceUSDPerSecond", i), entry.OutputPriceUSDPerSecond)
+		if err != nil {
+			return fmt.Errorf("%w for model '%s'", err, entry.Model)
+		}
+		entry.OutputPriceUSDPerMillionTokens = normalized
+		entry.InputPriceUSDPerMillionTokens = "0"
+	} else {
+		if entry.OutputPriceUSDPerSecond != "" {
+			return fmt.Errorf("invalid config: service.modelPricing[%d].outputPriceUSDPerSecond is only valid under USD denomination (model '%s')", i, entry.Model)
+		}
+		if entry.OutputPrice == "" {
+			return fmt.Errorf("invalid config: service.modelPricing[%d].outputPrice (per generated second) is required for audio model '%s'", i, entry.Model)
+		}
+		if _, ok := new(big.Int).SetString(entry.OutputPrice, 10); !ok {
+			return fmt.Errorf("invalid config: service.modelPricing[%d].outputPrice must be a valid integer for audio model '%s'", i, entry.Model)
+		}
+		if entry.InputPrice != "" {
+			if _, ok := new(big.Int).SetString(entry.InputPrice, 10); !ok {
+				return fmt.Errorf("invalid config: service.modelPricing[%d].inputPrice must be a valid integer for audio model '%s'", i, entry.Model)
+			}
+		}
+	}
+	if entry.Billing == nil || entry.Billing.Mode != BillingModePerAudioSecond {
+		return fmt.Errorf("invalid config: service.modelPricing[%d].billing.mode must be '%s' for audio model '%s'", i, BillingModePerAudioSecond, entry.Model)
+	}
+	// Input-length tiers price a prompt, and audio's fee does not depend on the
+	// script's length at all — only on how much audio came back. A tier list here
+	// would load, validate, and never once change a fee.
+	if len(entry.Tiers) > 0 {
+		return fmt.Errorf("invalid config: service.modelPricing[%d].tiers is not supported for audio-generation (the fee is generated seconds x outputPrice, independent of input length) for model '%s'", i, entry.Model)
+	}
+	return nil
+}
+
 // validateTokenModelEntry validates a chatbot / speech-to-text entry, whose price
 // is per token in the service denomination (NATIVE neuron or USD-per-1M-tokens).
 func validateTokenModelEntry(i int, entry *ModelPricingEntry, serviceType string, isUSD bool) error {
 	if entry.OutputPriceUSDPerSecond != "" {
-		return fmt.Errorf("invalid config: service.modelPricing[%d].outputPriceUSDPerSecond is only valid for video-generation (model '%s')", i, entry.Model)
+		return fmt.Errorf("invalid config: service.modelPricing[%d].outputPriceUSDPerSecond is only valid for video-generation and audio-generation (model '%s')", i, entry.Model)
 	}
 	if isUSD {
 		if entry.InputPrice != "" || entry.OutputPrice != "" {
