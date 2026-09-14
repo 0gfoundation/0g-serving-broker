@@ -253,16 +253,30 @@ const (
 // guest agent is wedged — the same failure that most plausibly caused the upgrade to need
 // restoring in the first place.
 type fakeDeriver struct {
-	log   *opLog
-	err   error
-	block bool
-	seen  []string
+	log            *opLog
+	err            error
+	block          bool
+	seen           []string
+	seenIdentities []attestproxy.KeyIdentity
 }
 
-func (d *fakeDeriver) ImageKeys(ctx context.Context, digest string) (string, string, error) {
-	d.seen = append(d.seen, digest)
+// derivedSetHashSuffix keeps the op log's "derive <digest>" lines byte-identical while a
+// deployment records no set, so every existing ordering assertion still matches, and makes
+// the bound visible the moment there is one.
+func derivedSetHashSuffix(id attestproxy.KeyIdentity) string {
+	if id.UpstreamSetHash == "" {
+		return ""
+	}
+	return " for-set " + id.UpstreamSetHash
+}
+
+func (d *fakeDeriver) ImageKeys(ctx context.Context, id attestproxy.KeyIdentity) (string, string, error) {
+	// The digest alone, so the existing assertions about WHICH image was derived for read
+	// unchanged; seenIdentities keeps the whole thing for tests about the set hash.
+	d.seen = append(d.seen, id.Digest)
+	d.seenIdentities = append(d.seenIdentities, id)
 	if d.log != nil {
-		d.log.add("derive " + digest)
+		d.log.add("derive " + id.Digest + derivedSetHashSuffix(id))
 	}
 	if d.block {
 		<-ctx.Done()

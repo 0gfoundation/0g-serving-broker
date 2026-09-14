@@ -88,9 +88,10 @@ func Main() {
 		// ordinary SIGTERM.
 		proxyCtx, stopProxy := context.WithCancel(context.Background())
 
-		// The digest source is the controller's own view of the broker container, so a
-		// key is only ever derived for the image that is actually running.
-		proxy := attestproxy.New(socket, tee.DefaultDstackSocket, controller.RunningBrokerDigest, logger)
+		// The identity source is the controller's own view of the deployment, so a key is
+		// only ever derived for the image that is actually running — and, once a set is
+		// recorded, for the destinations that deployment permits.
+		proxy := attestproxy.New(socket, tee.DefaultDstackSocket, controller.CurrentKeyIdentity, logger)
 		defer func() { _ = proxy.Close() }()
 		defer stopProxy()
 
