@@ -452,7 +452,24 @@ func (d *DB) Migrate() error {
 					ExpiresAt    time.Time `gorm:"type:datetime;not null;index"`
 					ErrorMessage string    `gorm:"type:text"`
 				}
-				return tx.AutoMigrate(&AudioPollJob{})
+				if err := tx.AutoMigrate(&AudioPollJob{}); err != nil {
+					return err
+				}
+				// Binary collation on provider_job_id, set at creation rather than
+				// inherited.
+				//
+				// The published job id's payload is case-SIGNIFICANT: translate.EncodeJobID
+				// emits hex for a UUID and base64url otherwise, so `v2_qujd` and `v2_QUJD`
+				// are two different jobs. Under the inherited utf8mb4_0900_ai_ci they are
+				// ONE row to both the unique index and every lookup here — which for the
+				// video tables meant a user authorized for their own job could reach one
+				// they never created by flipping case, and a legitimate creator could be
+				// denied by a pre-existing near-collision.
+				//
+				// Video needed a separate migration (video-job-owner-binary-collation) to
+				// close that after the fact. Doing it in the create avoids ever shipping
+				// the window.
+				return tx.Exec("ALTER TABLE `audio_poll_job` MODIFY `provider_job_id` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL;").Error
 			},
 		},
 		{
