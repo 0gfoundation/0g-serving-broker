@@ -1,15 +1,16 @@
 # Seed Audio Generation Design
 
-This document describes how the broker should serve and bill **audio generation** — a new
-modality whose first vendor is ByteDance **Seed Audio 1.0** (BytePlus Voice). It covers the
-client-facing contract, the translator sidecar, the billing shape, the pre-forward reservation,
-and the poll-to-completion lifecycle.
+How the broker serves and bills **audio generation** — a modality whose first vendor
+is ByteDance **Seed Audio 1.0** (BytePlus Voice).
 
-It is the audio counterpart of [video-generation-async-billing.md](video-generation-async-billing.md),
-and deliberately reuses that design's machinery rather than inventing a parallel one. Read that
-document first: everything here about polling, lease-based crash recovery, the `ZG-Res-Key`
-signature lifecycle and the job-id contract is *the same mechanism*, and this document only
-records where audio differs.
+Wire shapes live in [audio-request-response.md](audio-request-response.md); this
+document covers the design decisions and why they were made.
+
+> **Read the CORRECTION section first.** An earlier draft of this document designed
+> an ASYNCHRONOUS integration, before BytePlus's own reference could be read. The
+> vendor API is synchronous. The async material below is retained only as a record
+> of what was considered and why it was wrong — **it does not describe the
+> implementation**, and none of it was built.
 
 ## CORRECTION: the vendor API is SYNCHRONOUS
 
@@ -111,6 +112,15 @@ async design in the first place: OpenAI's `/v1/audio/speech` returns RAW BYTES, 
 every billing path in this broker reads a parsed JSON body. The adaptor therefore
 reports the duration in a response HEADER alongside the bytes, which is the only
 shape that keeps both the client contract and the billing path intact.
+
+---
+
+# Superseded material below
+
+Everything from here on was written against the async assumption. It is kept
+because the reasoning about MODALITY, VENDOR PLATFORM, BILLING UNIT and the
+RESERVATION all survived the correction unchanged — only the transport did. Where a
+section describes polling, job ids or a scheduler, none of that was implemented.
 
 ## Why a new modality rather than an existing one
 
