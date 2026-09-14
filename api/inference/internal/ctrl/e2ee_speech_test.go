@@ -12,9 +12,11 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/0gfoundation/0g-pc-e2ee/protocol/wire"
 	"github.com/gin-gonic/gin"
+	"github.com/patrickmn/go-cache"
 
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
@@ -824,5 +826,51 @@ func TestUnsealedStreamingSpeechStillStreams(t *testing.T) {
 				t.Errorf("flushed = %v, want %v (flushed means the streaming branch ran)", rec.Flushed, tt.wantFlushed)
 			}
 		})
+	}
+}
+
+// When the frame CANNOT be sealed, the transcript must not be forwarded anyway.
+//
+// This is reachable, not hypothetical: `response_format=text` (and srt/vtt) makes
+// the upstream answer with a bare transcript rather than a JSON object, and
+// maybeSealNonStreamResponse refuses a non-object body fail-closed. Erroring the
+// request is the right answer — a sealed client that asked for a plaintext format
+// asked for two incompatible things — but only if the handler honours the refusal.
+// A mutation that dropped the `sealErr != nil` arm and fell through with the
+// plaintext `body` survived every other test here.
+func TestSealedSpeechFailsClosedWhenTheFrameCannotBeSealed(t *testing.T) {
+	f := speechFixture(t)
+	f.c.Service.TargetSeparated = true
+	f.c.reconciliationDB = &mockReconciliationDB{}
+	// Seeded because the mutant this test exists to kill runs ON past the seal into
+	// the plaintext-billing fallback, and an unseeded cache makes that path panic on
+	// a nil cache instead of reaching the assertion below. A panic and a failed
+	// assertion are not the same result: the second proves the transcript was
+	// forwarded, the first only proves the fixture is thin.
+	f.c.serviceCache = cache.New(5*time.Minute, 10*time.Minute)
+	f.c.serviceCache.Set("current_service", model.Service{InputPrice: "1", OutputPrice: "1"}, cache.DefaultExpiration)
+
+	rec := httptest.NewRecorder()
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest("POST", "/v1/audio/transcriptions", nil)
+	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEProfile, wire.ProfileSpeech)
+	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
+
+	const transcript = "the transcript nobody else may read"
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/plain"}},
+		Body:       io.NopCloser(strings.NewReader(transcript)),
+	}
+
+	err := f.c.handleNonStreamingSpeechToText(ctx, resp, nil, model.Request{IsWhitelisted: true, RequestHash: "req-1"})
+	if err == nil {
+		t.Error("a seal failure on a sealed turn must fail the request")
+	}
+	if bytes.Contains(rec.Body.Bytes(), []byte(transcript)) {
+		t.Fatalf("the plaintext transcript reached the client after the seal failed: %s", rec.Body.Bytes())
 	}
 }
