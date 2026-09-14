@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	teeutil "github.com/0glabs/0g-serving-broker/common/tee"
+	"github.com/0glabs/0g-serving-broker/common/translatorhttp"
 	"github.com/0glabs/0g-serving-broker/videotranslator/internal/minimax"
 )
 
@@ -27,7 +28,7 @@ func TestUpstreamTLSReport_ReportsVendorCert(t *testing.T) {
 
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
-	engine.Use(UpstreamTLSReport())
+	engine.Use(translatorhttp.UpstreamTLSReport())
 	engine.GET("/videos/:id", h.GetVideo)
 
 	rec := httptest.NewRecorder()
@@ -64,7 +65,7 @@ func TestUpstreamTLSReport_NoHeaderWithoutTLS(t *testing.T) {
 
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
-	engine.Use(UpstreamTLSReport())
+	engine.Use(translatorhttp.UpstreamTLSReport())
 	engine.GET("/videos/:id", h.GetVideo)
 
 	rec := httptest.NewRecorder()
