@@ -411,6 +411,51 @@ func (d *DB) Migrate() error {
 			},
 		},
 		{
+			ID: "create-audio-poll-job",
+			Migrate: func(tx *gorm.DB) error {
+				// Tracks an audio-generation create that returned a non-terminal status,
+				// polled to completion by a background scheduler so the fee reflects what
+				// the vendor actually reports rather than what was reserved. See
+				// model.AudioPollJob and docs/design/seed-audio-generation.md.
+				//
+				// A separate table from video_poll_job, not a modality column on it: the
+				// claim is an atomic UPDATE on (status, next_poll_at) and is the hot path,
+				// so sharing puts two modalities in contention over one index range for no
+				// benefit — and their poll cadences differ by an order of magnitude
+				// (video 10s/20min, audio 3s/5min).
+				type AudioPollJob struct {
+					model.Model
+					ID                 uint64 `gorm:"primaryKey;autoIncrement"`
+					ProviderJobID      string `gorm:"type:varchar(255);not null;index"`
+					RequestHash        string `gorm:"type:varchar(255);not null;uniqueIndex"`
+					PollURL            string `gorm:"type:text;not null"`
+					RequestBody        []byte `gorm:"type:mediumblob"`
+					RequestContentType string `gorm:"type:varchar(255)"`
+					OutputPrice        string `gorm:"type:varchar(255);not null"`
+					// ReservedSeconds has no video counterpart: it is the bound the gate
+					// actually held, stored so the last-resort charge (no vendor-reported
+					// quantity and an unmeasurable `pcm` body) equals the hold by
+					// construction rather than by re-deriving it minutes later. See
+					// model.AudioPollJob.
+					ReservedSeconds int64  `gorm:"type:bigint;not null;default:0"`
+					ChatKey         string `gorm:"type:varchar(64)"`
+					ResolvedModel   string `gorm:"type:varchar(255)"`
+					MetricModel     string `gorm:"type:varchar(255)"`
+					IsWhitelisted   bool   `gorm:"type:tinyint(1);not null;default:0"`
+					// Status/NextPollAt share a composite index for the same reason the video
+					// table does: the claim query filters on both and sorts on NextPollAt,
+					// which only a composite serves. Named distinctly from video's so the two
+					// tables stay independently readable in EXPLAIN output.
+					Status       string    `gorm:"type:varchar(16);not null;default:'pending';index:idx_audio_status_next_poll_at,priority:1"`
+					Attempts     int       `gorm:"type:int;not null;default:0"`
+					NextPollAt   time.Time `gorm:"type:datetime;not null;index:idx_audio_status_next_poll_at,priority:2"`
+					ExpiresAt    time.Time `gorm:"type:datetime;not null;index"`
+					ErrorMessage string    `gorm:"type:text"`
+				}
+				return tx.AutoMigrate(&AudioPollJob{})
+			},
+		},
+		{
 			ID: "adapter-key-tee-signer-address",
 			Migrate: func(tx *gorm.DB) error {
 				// The fine-tuning broker signs Keccak256(chunk-tag stream) into the head of
