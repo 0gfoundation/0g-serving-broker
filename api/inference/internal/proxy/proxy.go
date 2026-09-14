@@ -948,6 +948,31 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		// Staged for deferVideoBillingToPoll, which stamps it onto the requests row
 		// once the poll job exists — see ctrl.reserveInFlightVideoFee.
 		ctx.Set(ctrl.CtxKeyVideoReserveFee, reserveFee)
+	case "audio-generation":
+		// Same shape as video one case up — an audio create is asynchronous, so the
+		// final fee comes from what the vendor reports at completion and only the
+		// RESERVE is decided here. The model must be resolved first for the same
+		// reason: both the vendor rules and the price are per-model.
+		//
+		// The difference is what the reserve means. common/audiospec returns a true
+		// upper bound (the vendor's hard output ceiling), not an estimate, so unlike
+		// VideoCreateReserve this cannot fail for any request-shaped reason and has no
+		// client-error sentinel to distinguish — every error reaching here is
+		// broker-side and belongs to the broker-fault alert.
+		if p.ctrl.Service.HasMultiModelPricing() && len(reqBody) > 0 {
+			if err := p.ctrl.ResolveModelForBilling(ctx, reqBody, ctx.Request.Header.Get("Content-Type"), userAddress); err != nil {
+				ctx.Set("ignoreError", true)
+				p.handleBrokerError(ctx, err, "resolve model for audio billing")
+				return
+			}
+		}
+		audioReserveFee, err := p.ctrl.AudioCreateReserve(ctx, reqBody)
+		if err != nil {
+			p.handleBrokerError(ctx, err, "compute audio reserve")
+			return
+		}
+		expectedInputFee = audioReserveFee
+		ctx.Set(ctrl.CtxKeyAudioReserveFee, audioReserveFee)
 	default:
 		p.handleBrokerError(ctx, errors.New("unknown service type"), "prepare request extractor")
 		return

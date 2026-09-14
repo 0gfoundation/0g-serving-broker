@@ -514,6 +514,8 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 		return c.handleEmbeddingResponse(ctx, resp, account, outputPrice, body, reqModel)
 	case "video-generation":
 		return c.handleVideoGenerationResponse(ctx, resp, account, outputPrice, body, reqModel)
+	case "audio-generation":
+		return c.handleAudioGenerationResponse(ctx, resp, account, outputPrice, body, reqModel)
 	default:
 		err = errors.New("unknown service type")
 		c.handleBrokerError(ctx, err, "prepare request extractor")

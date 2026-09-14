@@ -2,7 +2,18 @@ package ctrl
 
 import (
 	"encoding/json"
+	"io"
 	"math"
+	"net/http"
+	"time"
+
+	"github.com/gin-gonic/gin"
+
+	"github.com/0glabs/0g-serving-broker/common/audiospec"
+	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/common/util"
+	"github.com/0glabs/0g-serving-broker/inference/model"
+	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
 
 // OpenAI-shaped job status values for an audio-generation create or poll response.
@@ -188,4 +199,210 @@ func ceilPositiveAudioSeconds(n json.Number) (int64, bool) {
 		return 0, false
 	}
 	return int64(math.Ceil(f)), true
+}
+
+// handleAudioGenerationResponse handles the create response for an
+// audio-generation request.
+//
+// It branches on what the adaptor returned:
+//
+//   - TERMINAL (completed, or an absent/unrecognized status — how an adaptor that
+//     blocks until completion looks): bill immediately from the response. No poll
+//     job is created.
+//   - NON-TERMINAL (queued/in_progress): register an AudioPollJob and let the
+//     scheduler bill once the vendor reaches a terminal state.
+//   - FAILED: bill nothing and release the reserve.
+//
+// # No ZG-Res-Key is advertised for this modality yet
+//
+// Deliberate, and it is the safe direction. The design's rule is that a response is
+// only advertised as signed if it will actually be signed, and audio's signature
+// lifecycle — sign the queued envelope at create, RE-sign the final body from the
+// poller, evict whenever a client-obtainable final body was never signed — is not
+// built. Advertising the header now would hand clients a handle that can only 404,
+// which is strictly worse than not offering verification at all: a client that
+// checks would read the 404 as a failed attestation rather than as an absent one.
+//
+// Billing does not depend on it, so the modality is complete and correct without it;
+// verification is the follow-up.
+func (c *Ctrl) handleAudioGenerationResponse(ctx *gin.Context, resp *http.Response, _ model.User, outputPrice string, reqBody []byte, reqModel model.Request) error {
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		c.handleBrokerError(ctx, err, "read audio generation response body")
+		return err
+	}
+
+	// Written to the client BEFORE any billing decision, matching every other
+	// modality here: content delivery has never been gated on billing completing.
+	if _, err := ctx.Writer.Write(body); err != nil {
+		c.logger.Errorf("audio generation: write response to client: %v", err)
+	}
+
+	fields := parseAudioResponseFields(body)
+
+	switch classifyAudioStatus(fields.Status) {
+	case audioActionSkipFailed:
+		c.logger.Infof("audio generation: adaptor reported failed at create for request %s; nothing billed", reqModel.RequestHash)
+		monitor.RecordAudioGenerationFailed()
+		return nil
+
+	case audioActionDeferToPoll:
+		return c.deferAudioBillingToPoll(ctx, fields.ID, outputPrice, ctx.Request.Header.Get("Content-Type"), reqBody, reqModel)
+
+	default:
+		// Terminal at create. The reserve is whatever the gate held; resolveAudioBilling
+		// falls back to it when the adaptor reported no usable duration.
+		reserved := c.audioReservedSeconds(ctx, reqBody, ctx.Request.Header.Get("Content-Type"))
+		seconds, source := resolveAudioBilling(fields, reserved)
+		if source == audioQuantityReserve {
+			c.logger.Errorf("audio generation: request %s completed synchronously but reported no usable duration; billing the reserved ceiling of %ds. This OVER-bills — check the adaptor is reporting usage.output_audio_seconds",
+				reqModel.RequestHash, seconds)
+		}
+		monitor.RecordAudioBillingSource(string(source))
+
+		if reqModel.IsWhitelisted {
+			c.recordWhitelistedUsage(reqModel, 0, seconds, 0, 0, "")
+			return nil
+		}
+
+		fee, err := util.Multiply(outputPrice, seconds)
+		if err != nil {
+			c.handleBrokerError(ctx, err, "calculate audio generation fee")
+			return err
+		}
+		if err := c.db.UpdateRequestFeesAndCount(reqModel.RequestHash, fee.String(), fee.String(), seconds); err != nil {
+			c.logger.Errorf("audio generation: update fees for request %s: %v", reqModel.RequestHash, err)
+			return err
+		}
+		c.logger.Infof("audio generation: request %s billed %ds from %s at %s/s", reqModel.RequestHash, seconds, source, outputPrice)
+		return nil
+	}
+}
+
+// audioReservedSeconds re-reads the request's max_duration through the SAME parser
+// and spec the gate used, so the number recorded here is the bound that was actually
+// held.
+//
+// It RE-DERIVES rather than threading the value out of the gate, and that is
+// deliberate. The gate's output is a FEE; recovering seconds from a fee needs the
+// price, which is a second place for the two to disagree. Re-running the pure parse
+// cannot drift: audiospec.ReserveSeconds is total and deterministic, so the same
+// bytes always yield the same bound.
+//
+// Returns 0 when no vendor rules are recorded — the same condition under which the
+// gate forwarded the create unreserved and metered it. resolveAudioBilling floors a
+// zero at 1, which is the honest answer there: something was produced, and billing
+// zero would read as a free request.
+func (c *Ctrl) audioReservedSeconds(ctx *gin.Context, reqBody []byte, contentType string) int64 {
+	var vendorName string
+	if c.Service.HasMultiModelPricing() {
+		if e := c.resolveModelPricing(ctx); e != nil && e.Billing != nil {
+			vendorName = e.Billing.Vendor
+		}
+	}
+	spec, ok := audiospec.Get(audiospec.Vendor(vendorName))
+	if !ok {
+		return 0
+	}
+	return spec.ReserveSeconds(rawAudioMaxDuration(reqBody, contentType))
+}
+
+// deferAudioBillingToPoll registers an AudioPollJob so the scheduler can bill this
+// create once the vendor reaches a terminal state.
+func (c *Ctrl) deferAudioBillingToPoll(ctx *gin.Context, providerJobID, outputPrice, contentType string, reqBody []byte, reqModel model.Request) error {
+	if providerJobID == "" {
+		// Nothing to poll. Guessing a fee is no safer than giving up — either way the
+		// operator must fix their adaptor — and this codebase's precedent is to serve
+		// free and log loudly rather than bill blind.
+		c.logger.Errorf("audio generation is non-terminal but the response carries no id to poll; cannot track this job, NOT billing request %s (free output)", reqModel.RequestHash)
+		monitor.RecordAudioBillingSource(string(audioQuantityReserve))
+		if reqModel.IsWhitelisted {
+			c.recordWhitelistedUsage(reqModel, 0, 0, 0, 0, "")
+		}
+		return nil
+	}
+	if !c.audioPollEnabled.Load() {
+		// Register the job anyway (best effort, in case the scheduler is enabled
+		// later) but make the misconfiguration loud rather than silently never
+		// billing. The row IS written below, so this is recoverable: enabling the
+		// scheduler lets the job poll and settle.
+		c.logger.Errorf("audio generation for request %s is non-terminal but the AudioPoll scheduler is disabled (audioPoll.enabled=false); this request will never be billed until it is enabled", reqModel.RequestHash)
+	}
+
+	var resolvedModel string
+	if v, exists := ctx.Get(CtxKeyResolvedModel); exists {
+		if s, ok := v.(string); ok {
+			resolvedModel = s
+		}
+	}
+
+	// audioPollCfg always carries real values — InitAudioPollScheduler records cfg
+	// unconditionally and only gates STARTING GOROUTINES on Enabled — so these are
+	// never the Go zero value even in the disabled case above.
+	now := time.Now()
+	job := model.AudioPollJob{
+		ProviderJobID: providerJobID,
+		RequestHash:   reqModel.RequestHash,
+		// Escaped for the same reason video's is: providerJobID is upstream-supplied,
+		// and a bare "." or ".." stays a live path segment that walks the adaptor's URL
+		// rather than naming a task under it.
+		PollURL:            c.Service.TargetURL + "/audio/generations/" + escapeVendorJobID(providerJobID),
+		RequestBody:        reqBody,
+		RequestContentType: contentType,
+		OutputPrice:        outputPrice,
+		ReservedSeconds:    c.audioReservedSeconds(ctx, reqBody, contentType),
+		ResolvedModel:      resolvedModel,
+		MetricModel:        c.metricModel(ctx),
+		IsWhitelisted:      reqModel.IsWhitelisted,
+		Status:             model.AudioPollStatusPending,
+		NextPollAt:         now.Add(c.audioPollCfg.PollInterval),
+		ExpiresAt:          now.Add(c.audioPollCfg.MaxPollDuration),
+	}
+	if err := c.audioPollDB.CreateAudioPollJob(job); err != nil {
+		// Loud and metered, not silent: a transient DB error here means this request
+		// is unbilled with nothing else capturing it.
+		monitor.RecordAudioBillingSource(string(audioQuantityReserve))
+		if reqModel.IsWhitelisted {
+			c.recordWhitelistedUsage(reqModel, 0, 0, 0, 0, "")
+		}
+		return errors.Wrap(err, "create audio poll job")
+	}
+	c.reserveInFlightAudioFee(ctx, reqModel)
+	return nil
+}
+
+// reserveInFlightAudioFee stamps the pre-flight reserve onto this request's row so
+// the job counts against the wallet's balance while it is in flight.
+//
+// Without it the row carries fee="0" until the poller settles minutes later, and
+// CalculateUnsettledFee sums exactly that column — so N concurrent creates from one
+// wallet all read the same balance and all pass. The gate would then guarantee only
+// "this wallet can afford ONE generation", not what it has in flight.
+//
+// ONE write site, deliberately, and it is here: after CreateAudioPollJob succeeded.
+// That makes the reserve's lifetime identical to the poll job's, which is the
+// invariant that keeps it releasable —
+//
+//	a non-zero reserve exists on a requests row IFF an unresolved poll job exists
+//
+// — and it is why no path that skips billing needs a release call: a path that never
+// created a poll job never wrote a reserve.
+//
+// Best-effort: a failure loses only this job's in-flight reserve. The pre-flight gate
+// already ran and the poller still bills the real fee, so it must not fail a request
+// whose upstream work is already underway.
+func (c *Ctrl) reserveInFlightAudioFee(ctx *gin.Context, reqModel model.Request) {
+	if reqModel.IsWhitelisted {
+		return
+	}
+	fee := ctx.GetString(CtxKeyAudioReserveFee)
+	if fee == "" || fee == "0" {
+		return
+	}
+	if err := c.db.ReserveRequestFee(reqModel.RequestHash, fee); err != nil {
+		c.logger.Errorf("audio generation: failed to record the in-flight reserve %s for request %s; concurrent creates from this wallet will not see it: %v",
+			fee, reqModel.RequestHash, err)
+	}
 }

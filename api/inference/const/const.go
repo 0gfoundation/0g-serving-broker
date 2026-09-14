@@ -132,6 +132,11 @@ var (
 		"/audio/transcriptions": {},
 		"/videos":               {}, // Video generation (OpenAI Video API)
 		"/embeddings":           {}, // Text embeddings (OpenAI Embeddings API)
+		// Audio generation. NOT "/audio/speech": OpenAI's speech endpoint promises raw
+		// audio bytes synchronously, so returning a job envelope there does not fail
+		// loudly — it hands the client a corrupt audio file. See
+		// docs/design/seed-audio-generation.md.
+		"/audio/generations": {},
 	}
 
 	// FreePrefixes defines path prefixes that can be accessed without charging
@@ -148,6 +153,9 @@ var (
 	// Note: Paths here should NOT include /v1/proxy prefix (it's already stripped)
 	AuthRequiredPrefixes = []string{
 		"/videos/", // Video status and content retrieval (e.g., /videos/{id}, /videos/{id}/content)
+		// Audio status and content. Authenticated but UNBILLED: the create is the only
+		// billable call, and a client polling its own job must not be charged per poll.
+		"/audio/generations/",
 	}
 
 	// Keep this as to remove duplicate headers from incoming request
