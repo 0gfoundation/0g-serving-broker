@@ -240,8 +240,22 @@ type SpeechToTextStreamChunk struct {
 
 // handleSpeechToTextResponse handles speech-to-text transcription response
 func (c *Ctrl) handleSpeechToTextResponse(ctx *gin.Context, resp *http.Response, _ model.User, _ string, reqBody []byte, reqModel model.Request) error {
-	// Check if request is for streaming by parsing the request body
-	isStream := c.isSpeechToTextStream(reqBody)
+	// A SEALED request is non-streaming by protocol — SPEC §5.3.3 defines no
+	// streaming frames for this profile and the sealer refuses `stream` — so it
+	// must take the sealing handler, decided from the protocol rather than from
+	// the body.
+	//
+	// That distinction is the whole fix. handleStreamingSpeechToText is
+	// E2EE-unaware and forwards the transcript line by line in the clear, and the
+	// branch was chosen by a substring scan over the MATERIALIZED multipart: a
+	// sealed `prompt` whose text merely contained `name="stream"` and a line
+	// reading `true` flipped it, publishing the plaintext transcript. Measured,
+	// on a payload a user could plausibly dictate. Routing sealed traffic here is
+	// fail-closed rather than a guess: if the upstream really did stream, the
+	// non-streaming handler cannot parse the body as a frame and
+	// maybeSealNonStreamResponse fails the request instead of forwarding it.
+	_, e2eeSealed := e2eeSealedRequest(ctx)
+	isStream := !e2eeSealed && c.isSpeechToTextStream(ctx, reqBody)
 
 	if !isStream {
 		return c.handleNonStreamingSpeechToText(ctx, resp, reqBody, reqModel)
@@ -256,8 +270,15 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 
 	chatKey := uuid.NewString()
 
-	if !c.Service.TargetSeparated {
-		c.logger.Debug("LLM server in the same network, setting ZG-Res-Key header")
+	// ZG-Res-Key is emitted when the broker is the one that signs: in-network,
+	// centralized, OR sealed. The sealed arm is not a special case — it is the
+	// same rule chat and image already carry: on a sealed turn the broker's TEE
+	// signs the §8 ciphertext binding, so the client must be able to fetch that
+	// signature even from a TargetSeparated provider. Without it, an E2EE client
+	// on such a provider has a sealed response it cannot verify.
+	_, e2eeSealed := e2eeSealedRequest(ctx)
+	if !c.Service.TargetSeparated || c.Service.IsCentralized() || e2eeSealed {
+		c.logger.Debug("Setting ZG-Res-Key header for broker-signed response")
 		ctx.Writer.Header().Set("ZG-Res-Key", chatKey)
 	}
 
@@ -381,9 +402,11 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 	// absent or unbillable.
 	transcriptionResp.Usage = effectiveUsage(&transcriptionResp)
 
-	// Sign response if needed
-	if !c.Service.TargetSeparated {
-		c.logger.Debug("LLM server in the same network, signing speech-to-text response")
+	// Sign response if needed. Same three-way condition as the ZG-Res-Key header
+	// above, and for the same reason: emitting the key without producing the
+	// signature would hand the client a handle that resolves to nothing.
+	if !c.Service.TargetSeparated || c.Service.IsCentralized() || e2eeSealed {
+		c.logger.Debug("Signing speech-to-text response")
 		// Logged rather than discarded, for the reason in image_editing: signing is an RPC
 		// to the controller now and refuses when the running image cannot be pinned.
 		// Through signChatResponse, not signChatWithKey: on a sealed turn the §8
@@ -1019,15 +1042,24 @@ func isSubtitleComponent(p string, allowFraction bool) bool {
 }
 
 // isSpeechToTextStream checks if the request body contains stream parameter
-func (c *Ctrl) isSpeechToTextStream(reqBody []byte) bool {
-	// Parse multipart body to find stream parameter
-	bodyStr := string(reqBody)
-
-	// Look for stream parameter in multipart data
-	// Pattern: name="stream"\r\n\r\ntrue
-	isStream := contains(bodyStr, `name="stream"`) &&
-		(contains(bodyStr, "\r\n\r\ntrue") || contains(bodyStr, "\ntrue"))
-
+func (c *Ctrl) isSpeechToTextStream(ctx *gin.Context, reqBody []byte) bool {
+	// Through the parser, not a substring scan. The scan this replaces tested for
+	// `name="stream"` and for a line reading `true` INDEPENDENTLY, anywhere in the
+	// body — so any field whose VALUE contained both flipped the answer. Measured:
+	// a `prompt` of `the form field is written name="stream" and the value is\ntrue`
+	// reads as a streaming request on an ordinary multipart client, and did the
+	// same on a sealed one (see handleSpeechToTextResponse).
+	//
+	// ParseBool's set is what a form's `stream` is written as by any client that
+	// sends one. A value outside it reads as non-streaming, which is the same
+	// answer the scan gave for an absent field; getting it wrong here is a
+	// mis-parsed billing path, not a leak, because a sealed request never reaches
+	// this function.
+	value := multipartFormField(reqBody, ctx.Request.Header.Get("Content-Type"), speechStreamField)
+	isStream, err := strconv.ParseBool(value)
+	if err != nil {
+		isStream = false
+	}
 	c.logger.Debugf("Is streaming request: %t", isStream)
 	return isStream
 }

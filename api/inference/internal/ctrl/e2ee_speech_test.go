@@ -633,3 +633,196 @@ func TestSpeechHandlerWritesTheSealedFrame(t *testing.T) {
 		t.Errorf("opened transcript = %q, want %q", got, transcript)
 	}
 }
+
+// The §8 signature must reach the client on a sealed turn WHATEVER the provider
+// topology. chat and image already relax the ZG-Res-Key / signing gate to
+// `... || e2eeSealed`; speech kept a bare `!TargetSeparated`, so on a
+// TargetSeparated or centralized provider a sealed transcription got no
+// signature at all and an E2EE client had a sealed response it could not verify.
+//
+// The PR's own note — "no test for the signed text, because the fixture runs
+// TargetSeparated" — was the symptom: that is exactly the configuration where
+// signing did not run.
+func TestSealedSpeechIsSignedOnEveryProviderTopology(t *testing.T) {
+	for _, tt := range []struct {
+		name            string
+		targetSeparated bool
+	}{
+		{"in-network", false},
+		{"TargetSeparated", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f := speechFixture(t)
+			f.c.Service.TargetSeparated = tt.targetSeparated
+			f.c.reconciliationDB = &mockReconciliationDB{}
+
+			rec := httptest.NewRecorder()
+			gin.SetMode(gin.TestMode)
+			ctx, _ := gin.CreateTestContext(rec)
+			ctx.Request = httptest.NewRequest("POST", "/v1/audio/transcriptions", nil)
+			ctx.Set(CtxKeyE2EESealed, true)
+			ctx.Set(CtxKeyE2EEProfile, wire.ProfileSpeech)
+			ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+			ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
+
+			upstream := `{"model":"whisper-large-v3","usage":{"type":"duration","seconds":3.5},"text":"secret"}`
+			resp := &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{},
+				Body:       io.NopCloser(strings.NewReader(upstream)),
+			}
+			if err := f.c.handleNonStreamingSpeechToText(ctx, resp, nil, model.Request{IsWhitelisted: true, RequestHash: "req-1"}); err != nil {
+				t.Fatalf("handleNonStreamingSpeechToText: %v", err)
+			}
+
+			// The client needs the handle...
+			chatKey := rec.Header().Get("ZG-Res-Key")
+			if chatKey == "" {
+				t.Fatal("no ZG-Res-Key on a sealed turn: the client cannot fetch the §8 signature")
+			}
+			// ...and the handle must resolve to a signature, or it is a promise of
+			// nothing.
+			cached, ok := f.c.svcCache.Get(f.c.chatCacheKey(chatKey))
+			if !ok {
+				t.Fatal("ZG-Res-Key was emitted but no signature was cached for it")
+			}
+			sig, ok := cached.(ChatSignature)
+			if !ok {
+				t.Fatalf("cached value is %T, want ChatSignature", cached)
+			}
+			// §8 binds the ON-WIRE ciphertext, so the signed text must not be a
+			// digest of the plaintext transcript.
+			if sig.Text == "" {
+				t.Error("the signed text is empty")
+			}
+			if strings.Contains(sig.Text, "secret") {
+				t.Error("the signed text carries the plaintext transcript")
+			}
+		})
+	}
+}
+
+// A sealed request must never take the streaming branch, and the reason it could
+// is that the branch was chosen by a substring scan over the materialized
+// multipart rather than by the protocol. handleStreamingSpeechToText is
+// E2EE-unaware and forwards the transcript line by line in the clear.
+func TestSealedSpeechNeverTakesTheStreamingBranch(t *testing.T) {
+	f := speechFixture(t)
+	f.c.Service.TargetSeparated = true
+	f.c.reconciliationDB = &mockReconciliationDB{}
+
+	// A prompt a user could plausibly dictate, carrying both substrings the old
+	// detector scanned for. Sealed, so it is the enclave that materializes it.
+	const decoy = "the form field is written name=\"stream\" and the value is\ntrue"
+	sealedBody := sealSpeech(t, f, wire.Request{
+		"model":           mustRaw(t, "whisper-large-v3"),
+		"response_format": mustRaw(t, "json"),
+		"file_base64":     mustRaw(t, base64.StdEncoding.EncodeToString([]byte(speechAudio))),
+		"prompt":          mustRaw(t, decoy),
+	})
+
+	unsealCtx := speechCtx()
+	materialized, err := f.c.MaybeUnsealRequest(unsealCtx, sealedBody)
+	if err != nil {
+		t.Fatalf("MaybeUnsealRequest: %v", err)
+	}
+	// The premise: the decoy really is in the body the handler will inspect.
+	if !bytes.Contains(materialized, []byte(`name="stream"`)) {
+		t.Fatal("fixture no longer carries the decoy, so it proves nothing")
+	}
+
+	rec := httptest.NewRecorder()
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = unsealCtx.Request
+	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEProfile, wire.ProfileSpeech)
+	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
+
+	const transcript = "the transcript nobody else may read"
+	upstream := `{"model":"whisper-large-v3","usage":{"type":"duration","seconds":3.5},"text":"` + transcript + `"}`
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{},
+		Body:       io.NopCloser(strings.NewReader(upstream)),
+	}
+
+	// Through the DISPATCH, not the non-streaming handler directly — the choice of
+	// branch is what is under test.
+	if err := f.c.handleSpeechToTextResponse(ctx, resp, model.User{}, "", materialized, model.Request{IsWhitelisted: true, RequestHash: "req-1"}); err != nil {
+		t.Fatalf("handleSpeechToTextResponse: %v", err)
+	}
+
+	written := rec.Body.Bytes()
+	if bytes.Contains(written, []byte(transcript)) {
+		t.Fatal("the plaintext transcript reached the client: the streaming branch was taken on a sealed turn")
+	}
+	var frame map[string]json.RawMessage
+	if err := json.Unmarshal(written, &frame); err != nil {
+		t.Fatalf("what was written is not a sealed JSON frame: %v", err)
+	}
+	if _, ok := frame[e2eeBodyMarker]; !ok {
+		t.Fatalf("what was written carries no %q envelope: %s", e2eeBodyMarker, written)
+	}
+}
+
+// The other side of the dispatch: an UNSEALED streaming request must still
+// stream. Failing closed for sealed traffic must not cost real streaming STT
+// clients their branch — and nothing covered that until a mutation inverting the
+// condition (`e2eeSealed && ...`) survived every test in this file.
+//
+// The branches are told apart by whether the response was FLUSHED: the streaming
+// handler goes through ctx.Stream, which flushes per line; the non-streaming one
+// does a single plain Write.
+func TestUnsealedStreamingSpeechStillStreams(t *testing.T) {
+	body, contentType := transcriptionBody(t, func(w *multipart.Writer) {
+		if err := w.WriteField("stream", "true"); err != nil {
+			t.Fatalf("WriteField: %v", err)
+		}
+	})
+
+	for _, tt := range []struct {
+		name        string
+		sealed      bool
+		wantFlushed bool
+	}{
+		{"unsealed stream=true streams", false, true},
+		// And the sealed case does not, however the body reads.
+		{"sealed never streams", true, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f := speechFixture(t)
+			f.c.reconciliationDB = &mockReconciliationDB{}
+
+			// ctx.Stream needs a CloseNotifier, which the bare recorder is not —
+			// and the streaming branch reaching that requirement is itself part of
+			// what distinguishes the two paths.
+			rec := httptest.NewRecorder()
+			w := &closeNotifyRecorder{ResponseRecorder: rec, closed: make(chan bool, 1)}
+			gin.SetMode(gin.TestMode)
+			ctx, _ := gin.CreateTestContext(w)
+			ctx.Request = httptest.NewRequest("POST", "/v1/audio/transcriptions", nil)
+			ctx.Request.Header.Set("Content-Type", contentType)
+			if tt.sealed {
+				ctx.Set(CtxKeyE2EESealed, true)
+				ctx.Set(CtxKeyE2EEProfile, wire.ProfileSpeech)
+				ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+				ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
+			}
+
+			upstream := `{"model":"whisper-large-v3","usage":{"type":"duration","seconds":3.5},"text":"hi"}`
+			resp := &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{},
+				Body:       io.NopCloser(strings.NewReader(upstream)),
+			}
+			// Errors are not the subject here — which branch ran is.
+			_ = f.c.handleSpeechToTextResponse(ctx, resp, model.User{}, "", body, model.Request{IsWhitelisted: true, RequestHash: "req-1"})
+
+			if rec.Flushed != tt.wantFlushed {
+				t.Errorf("flushed = %v, want %v (flushed means the streaming branch ran)", rec.Flushed, tt.wantFlushed)
+			}
+		})
+	}
+}
