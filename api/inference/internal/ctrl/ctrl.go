@@ -35,24 +35,6 @@ type asyncDB interface {
 	CompleteAsyncJobWithBilling(jobID string, responseBody []byte, responseHeaders []byte, expiresAt *time.Time, requestHash string, outputFee string, totalFee string, outputCount int64) error
 }
 
-// audioPollDB is the interface for database operations used by the audio-generation
-// poll-to-completion scheduler. The real *db.DB satisfies it; tests inject a mock.
-// See docs/design/seed-audio-generation.md.
-type audioPollDB interface {
-	CreateAudioPollJob(job model.AudioPollJob) error
-	GetAudioPollJobChatKey(providerJobID string) (string, error)
-	ClaimDueAudioPollJobs(limit int, leaseWindow time.Duration) ([]model.AudioPollJob, error)
-	// claimAttempts fences every write below against a stale worker whose lease expired
-	// and was reclaimed: it must be the Attempts value observed on the claim this caller
-	// is acting on, never one re-read from the row.
-	RescheduleAudioPollJob(id uint64, claimAttempts int, nextPollAt time.Time) error
-	CompleteAudioPollJobWithBilling(id uint64, claimAttempts int, requestHash, outputFee, fee string, seconds int64, unit, rateClass string) error
-	CompleteAudioPollJobWhitelisted(id uint64, claimAttempts int) error
-	FailAudioPollJob(id uint64, claimAttempts int, requestHash, errMsg string) error
-	TimeOutAudioPollJob(id uint64, claimAttempts int, requestHash, errMsg string) error
-	DeleteExpiredAudioPollJobs(retention time.Duration) error
-}
-
 // videoPollDB is the interface for database operations used by the video-generation
 // poll-to-completion scheduler. The real *db.DB satisfies this interface. Tests can inject a
 // mock implementation. See docs/design/video-generation-async-billing.md.
@@ -113,7 +95,6 @@ type Ctrl struct {
 	db               *db.DB
 	asyncDB          asyncDB
 	videoPollDB      videoPollDB
-	audioPollDB      audioPollDB
 	reconciliationDB reconciliationDB
 	videoJobOwnerDB  videoJobOwnerDB
 	contract         *providercontract.ProviderContract
@@ -232,14 +213,7 @@ type Ctrl struct {
 	videoPollCfg    config.VideoPollConfig
 	videoPollCtx    context.Context
 	videoPollCancel context.CancelFunc
-
-	// Audio scheduler state, mirroring the video fields above field for field.
-	audioPollEnabled atomic.Bool
-	audioPollCfg     config.AudioPollConfig
-	audioPollCtx     context.Context
-	audioPollCancel  context.CancelFunc
-	audioPollWg      sync.WaitGroup
-	videoPollWg      sync.WaitGroup
+	videoPollWg     sync.WaitGroup
 
 	// LoRA manager for fine-tuned model serving (nil if LoRA not enabled)
 	loraManager *lora.Manager
@@ -333,7 +307,6 @@ func New(
 		db:                   db,
 		asyncDB:              db,
 		videoPollDB:          db,
-		audioPollDB:          db,
 		reconciliationDB:     db,
 		videoJobOwnerDB:      db,
 		contract:             contract,

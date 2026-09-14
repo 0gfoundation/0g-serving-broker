@@ -515,10 +515,9 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 	case "video-generation":
 		return c.handleVideoGenerationResponse(ctx, resp, account, outputPrice, body, reqModel)
 	case "audio-generation":
-		// The SYNCHRONOUS handler: Seed Audio answers one POST with the audio itself.
-		// handleAudioGenerationResponse (the create/poll branch) is retained for a
-		// vendor that is genuinely async and is not reachable today — see the
-		// CORRECTION section of docs/design/seed-audio-generation.md.
+		// Synchronous: Seed Audio answers one POST with the audio itself, so there is
+		// no job to poll. The response body is the audio; the billable duration and
+		// the fee ride in headers, because a JSON envelope would corrupt it.
 		return c.handleAudioSpeechResponse(ctx, resp, account, outputPrice, body, reqModel)
 	default:
 		err = errors.New("unknown service type")
@@ -785,7 +784,11 @@ func (c *Ctrl) addNoCacheHeaders(ctx *gin.Context) {
 
 func (c *Ctrl) addExposeHeaders(ctx *gin.Context) {
 	// Set 'Access-Control-Expose-Headers' for CORS
-	exposeHeaders := []string{"Provider", "content-encoding", "ZG-Res-Key"}
+	// AudioDurationHeader/AudioFeeHeader are exposed because for audio generation
+	// they are the ONLY place the billed quantity and cost appear — the body is raw
+	// audio, so there is no x_0g_trace to read them from. Without exposure a browser
+	// client can receive them and still not see them.
+	exposeHeaders := []string{"Provider", "content-encoding", "ZG-Res-Key", AudioDurationHeader, AudioFeeHeader}
 	existing := ctx.Writer.Header().Get("Access-Control-Expose-Headers")
 	var newHeaders string
 	if existing != "" {

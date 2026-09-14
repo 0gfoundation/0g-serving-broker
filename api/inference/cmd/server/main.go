@@ -166,13 +166,6 @@ func Main() {
 		logger.Errorf("Failed to initialize video poll scheduler: %v", err)
 	}
 
-	// The audio-generation counterpart, called unconditionally for the same reason: a
-	// create accepted while the scheduler is disabled still schedules its AudioPollJob
-	// against the operator's real configured values rather than a hardcoded fallback.
-	if err := ctrl.InitAudioPollScheduler(config.AudioPoll); err != nil {
-		logger.Errorf("Failed to initialize audio poll scheduler: %v", err)
-	}
-
 	if err := ctrl.SyncUserAccounts(ctx); err != nil {
 		panic(err)
 	}
@@ -434,7 +427,6 @@ func Main() {
 
 	// Shutdown the video poll scheduler (wait for any in-flight poll to finish)
 	ctrl.ShutdownVideoPollScheduler()
-	ctrl.ShutdownAudioPollScheduler()
 
 	// Price processor teardown is handled by the defer registered at
 	// goroutine startup — this guarantees it joins before contract.Close()

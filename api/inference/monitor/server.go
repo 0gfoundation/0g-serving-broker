@@ -98,15 +98,6 @@ var (
 	// AudioReserveSkippedTotal is AudioReserveSkipped's counter. Single-reason by
 	// construction — see AudioReserveSkipUnknownVendor.
 	AudioReserveSkippedTotal *prometheus.CounterVec
-	// AudioPollTimedOutTotal counts audio poll jobs that hit MaxPollDuration without the
-	// vendor ever reaching a terminal state. A genuine reconciliation gap candidate: the
-	// vendor may have produced audio it charged us for that the broker never billed.
-	AudioPollTimedOutTotal prometheus.Counter
-	// AudioGenerationFailedTotal counts audio creates the vendor itself reported as
-	// terminally failed — a clean, expected-shape failure, kept separate from the
-	// fallback counter so a spike in vendor-side failures is independently alertable
-	// from a broker-side reporting gap.
-	AudioGenerationFailedTotal prometheus.Counter
 	// AudioBillingSourceTotal counts completed audio jobs by WHERE their billable
 	// quantity came from. See AudioBillingSource* for what each label means and which
 	// one to alert on.
@@ -467,26 +458,10 @@ func PrometheusInit(serverName, providerAddress string) {
 		[]string{"reason"},
 	)
 
-	AudioPollTimedOutTotal = prometheus.NewCounter(
-		prometheus.CounterOpts{
-			Name:        "broker_audio_poll_timed_out_total",
-			Help:        "Audio-generation poll jobs that hit MaxPollDuration without reaching a terminal state. The vendor may have produced audio it charged us for that the broker never billed, so any sustained rate is a reconciliation gap, not routine. Audio renders in 10-30s against a 5-minute ceiling, so this should be flat.",
-			ConstLabels: constLabels,
-		},
-	)
-
-	AudioGenerationFailedTotal = prometheus.NewCounter(
-		prometheus.CounterOpts{
-			Name:        "broker_audio_generation_failed_total",
-			Help:        "Audio-generation jobs the vendor reported as terminally failed. An expected-shape failure (nothing generated, nothing billed, reserve released) — kept separate from broker_audio_billing_fallback_total so a vendor-side outage is alertable independently of a broker-side reporting gap.",
-			ConstLabels: constLabels,
-		},
-	)
-
 	AudioBillingSourceTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_audio_billing_fallback_total",
-			Help:        "Completed audio-generation jobs by where the billable quantity came from: usage = the vendor's own reported figure (the expected path); duration = the produced length, correct only while the vendor bills output alone and blind to any reference-media charge; reserve = neither was usable and the held CEILING was charged, which OVER-bills by construction. Alert on reserve: it means the adaptor stopped reporting usage.output_audio_seconds, and every affected caller is being charged the maximum rather than what they used.",
+			Help:        "Completed audio-generation jobs by where the billable quantity came from: usage = the duration the adaptor reported from the vendor's own billing figure (the expected path); reserve = neither was usable and the held CEILING was charged, which OVER-bills by construction. Alert on reserve: it means the adaptor stopped reporting usage.output_audio_seconds, and every affected caller is being charged the maximum rather than what they used.",
 			ConstLabels: constLabels,
 		},
 		[]string{"source"},
@@ -537,8 +512,6 @@ func PrometheusInit(serverName, providerAddress string) {
 	prometheus.MustRegister(VideoTableMissTotal)
 	prometheus.MustRegister(VideoReserveSkippedTotal)
 	prometheus.MustRegister(AudioReserveSkippedTotal)
-	prometheus.MustRegister(AudioPollTimedOutTotal)
-	prometheus.MustRegister(AudioGenerationFailedTotal)
 	prometheus.MustRegister(AudioBillingSourceTotal)
 	prometheus.MustRegister(RoutingProofSkippedTotal)
 	prometheus.MustRegister(RequestRejectedTotal)
@@ -1014,26 +987,9 @@ func RecordAudioReserveSkipped(reason string) {
 // Billing-source labels for RecordAudioBillingSource. "reserve" is the one to alert
 // on — see AudioBillingSourceTotal's help text.
 const (
-	AudioBillingSourceUsage    = "usage"
-	AudioBillingSourceDuration = "duration"
-	AudioBillingSourceReserve  = "reserve"
+	AudioBillingSourceUsage   = "usage"
+	AudioBillingSourceReserve = "reserve"
 )
-
-// RecordAudioPollTimedOut increments the timed-out audio poll counter.
-func RecordAudioPollTimedOut() {
-	if AudioPollTimedOutTotal == nil {
-		return
-	}
-	AudioPollTimedOutTotal.Inc()
-}
-
-// RecordAudioGenerationFailed increments the vendor-reported-failure counter.
-func RecordAudioGenerationFailed() {
-	if AudioGenerationFailedTotal == nil {
-		return
-	}
-	AudioGenerationFailedTotal.Inc()
-}
 
 // RecordAudioBillingSource increments the billing-source counter. The label comes
 // from the bounded AudioBillingSource* set, never from a free string, so cardinality

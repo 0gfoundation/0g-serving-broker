@@ -1154,7 +1154,6 @@ type Config struct {
 	Whitelist           WhitelistConfig         `yaml:"whitelist"`
 	Async               AsyncConfig             `yaml:"async"`
 	VideoPoll           VideoPollConfig         `yaml:"videoPoll"`
-	AudioPoll           AudioPollConfig         `yaml:"audioPoll"`
 	ProviderHttp        ProviderHttpConfig      `yaml:"providerHttp"`
 	ConcurrencyLimit    ConcurrencyLimitConfig  `yaml:"concurrencyLimit"`
 	UserUsageStats      UserUsageStatsConfig    `yaml:"userUsageStats"`
@@ -1331,63 +1330,6 @@ type VideoPollConfig struct {
 	// CleanupInterval: how often the retention sweep (DeleteExpiredVideoPollJobs) runs. Feeds
 	// time.NewTicker directly (video_poll.go's runVideoPollCleanup); boot-validated positive
 	// below — see ScanInterval's doc comment for why.
-	CleanupInterval time.Duration `yaml:"cleanupInterval"`
-}
-
-// AudioPollConfig is VideoPollConfig's counterpart for audio-generation. The
-// fields mean exactly what the video ones mean — see VideoPollConfig for each —
-// and this exists as a separate block for ONE reason: the defaults must not be
-// shared.
-//
-// Audio renders in roughly 10-30 seconds where a video clip takes 1-5 minutes,
-// so video's cadence applied here would poll about three times for a job usually
-// finished on the first check, and — the expensive half — hold a caller's reserve
-// for FORTY TIMES the job's real lifetime whenever one times out. A reserve is
-// the thing gating concurrent creates from one wallet, so an over-long ceiling is
-// not merely untidy: it is the difference between a user being able to run their
-// next request and not.
-//
-// Everything else about the scheduler is deliberately identical, including the
-// claim-by-lease crash recovery, so the two remain readable side by side.
-type AudioPollConfig struct {
-	Enabled bool `yaml:"enabled"` // Enable the poll-to-completion scheduler (default: true)
-
-	// MaxConcurrentPolls: worker pool size (default: 10). Same as video — the pool
-	// bounds in-flight HTTP, which does not vary with render time.
-	MaxConcurrentPolls int `yaml:"maxConcurrentPolls"`
-
-	// PollInterval: fixed delay between attempts for one job (default: 3s, vs
-	// video's 10s). Sized so a typical generation is observed terminal within a
-	// poll or two of finishing rather than up to 10 seconds after.
-	PollInterval time.Duration `yaml:"pollInterval"`
-
-	// MaxPollDuration: ceiling from create to forced timed_out (default: 5 minutes,
-	// vs video's 20). Ten times the expected render, which is slack enough for a
-	// slow vendor day without parking a reserve for a third of an hour.
-	MaxPollDuration time.Duration `yaml:"maxPollDuration"`
-
-	// ScanInterval: how often the scheduler queries for due rows (default: 2s).
-	// Feeds time.NewTicker directly; boot-validated positive — a non-positive
-	// duration panics the ticker in an unrecovered background goroutine.
-	ScanInterval time.Duration `yaml:"scanInterval"`
-
-	// LeaseWindow: how far into the future a claimed row's NextPollAt is pushed
-	// while a poll is in flight (default: 90s). Must stay comfortably above
-	// PollRequestTimeout plus the time to parse/bill/write, or an ordinary slow
-	// response lets a second worker reclaim and re-poll the same job. NOT scaled
-	// down with the rest: it is sized by the HTTP round trip, not by how long the
-	// vendor takes to render, and those are independent.
-	LeaseWindow time.Duration `yaml:"leaseWindow"`
-
-	// PollRequestTimeout: per-attempt HTTP timeout (default: 30s). Boot-validated
-	// against LeaseWindow.
-	PollRequestTimeout time.Duration `yaml:"pollRequestTimeout"`
-
-	// RetentionTTL: how long terminal rows are kept before the cleanup pass deletes
-	// them (default: 24h).
-	RetentionTTL time.Duration `yaml:"retentionTTL"`
-
-	// CleanupInterval: how often the retention sweep runs (default: 10m).
 	CleanupInterval time.Duration `yaml:"cleanupInterval"`
 }
 
@@ -2361,64 +2303,6 @@ func loadConfig(cfg *Config) error {
 	}
 	if cfg.VideoPoll.CleanupInterval <= 0 {
 		return fmt.Errorf("invalid config: videoPoll.cleanupInterval (%v) must be positive", cfg.VideoPoll.CleanupInterval)
-	}
-
-	// AudioPollConfig defaults. Applied unconditionally for the same reason the video
-	// block above is, and NOT copied from it — see AudioPollConfig's doc comment for
-	// why the cadence differs by an order of magnitude. The two that are deliberately
-	// identical (LeaseWindow, PollRequestTimeout) are sized by the HTTP round trip,
-	// which does not vary with how long the vendor takes to render.
-	if cfg.AudioPoll.MaxPollDuration == 0 {
-		cfg.AudioPoll.MaxPollDuration = 5 * time.Minute
-	}
-	if cfg.AudioPoll.LeaseWindow == 0 {
-		cfg.AudioPoll.LeaseWindow = 90 * time.Second
-	}
-	if cfg.AudioPoll.PollRequestTimeout == 0 {
-		cfg.AudioPoll.PollRequestTimeout = 30 * time.Second
-	}
-	if cfg.AudioPoll.MaxConcurrentPolls == 0 {
-		cfg.AudioPoll.MaxConcurrentPolls = 10
-	}
-	if cfg.AudioPoll.PollInterval == 0 {
-		cfg.AudioPoll.PollInterval = 3 * time.Second
-	}
-	if cfg.AudioPoll.ScanInterval == 0 {
-		cfg.AudioPoll.ScanInterval = 2 * time.Second
-	}
-	if cfg.AudioPoll.CleanupInterval == 0 {
-		cfg.AudioPoll.CleanupInterval = 10 * time.Minute
-	}
-	if cfg.AudioPoll.RetentionTTL == 0 {
-		cfg.AudioPoll.RetentionTTL = 24 * time.Hour
-	}
-
-	// Same invariants as the video block, enforced unconditionally rather than gated on
-	// Enabled: a scheduler that is off today is turned on by a config flip, and finding
-	// out then that the intervals panic a ticker is the worst possible moment.
-	if cfg.AudioPoll.MaxPollDuration <= 0 {
-		return fmt.Errorf("invalid config: audioPoll.maxPollDuration (%v) must be positive", cfg.AudioPoll.MaxPollDuration)
-	}
-	if cfg.AudioPoll.LeaseWindow <= cfg.AudioPoll.PollRequestTimeout {
-		return fmt.Errorf(
-			"invalid config: audioPoll.leaseWindow (%v) must be greater than audioPoll.pollRequestTimeout (%v) — "+
-				"otherwise an ordinary slow provider response lets a second worker reclaim and re-poll a job the first is still finishing",
-			cfg.AudioPoll.LeaseWindow, cfg.AudioPoll.PollRequestTimeout)
-	}
-	if cfg.AudioPoll.MaxConcurrentPolls <= 0 {
-		return fmt.Errorf("invalid config: audioPoll.maxConcurrentPolls (%d) must be positive", cfg.AudioPoll.MaxConcurrentPolls)
-	}
-	if cfg.AudioPoll.PollInterval <= 0 {
-		return fmt.Errorf("invalid config: audioPoll.pollInterval (%v) must be positive", cfg.AudioPoll.PollInterval)
-	}
-	if cfg.AudioPoll.ScanInterval <= 0 {
-		return fmt.Errorf("invalid config: audioPoll.scanInterval (%v) must be positive", cfg.AudioPoll.ScanInterval)
-	}
-	if cfg.AudioPoll.CleanupInterval <= 0 {
-		return fmt.Errorf("invalid config: audioPoll.cleanupInterval (%v) must be positive", cfg.AudioPoll.CleanupInterval)
-	}
-	if cfg.AudioPoll.RetentionTTL <= 0 {
-		return fmt.Errorf("invalid config: audioPoll.retentionTTL (%v) must be positive", cfg.AudioPoll.RetentionTTL)
 	}
 
 	// Token-billed STT startup gate. Until #530 lands a per-row billing-unit

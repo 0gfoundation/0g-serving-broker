@@ -13,13 +13,8 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/audiospec"
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/util"
-	"github.com/0glabs/0g-serving-broker/inference/config"
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
-
-// CtxKeyAudioReserveFee carries the amount held for an audio create from the
-// gate to whatever writes it down, mirroring CtxKeyVideoReserveFee.
-const CtxKeyAudioReserveFee = "audioReserveFee"
 
 // maxRawAudioFieldBytes caps a raw request field this file will read. Same
 // purpose as its video counterpart: a create body is attacker-controlled, and
@@ -79,33 +74,23 @@ func (c *Ctrl) AudioCreateReserve(ctx *gin.Context, reqBody []byte) (string, err
 		return "0", nil
 	}
 
-	var billing *config.BillingConfig
-	if c.Service.HasMultiModelPricing() {
-		if e := c.resolveModelPricing(ctx); e != nil {
-			billing = e.Billing
-		}
-	}
-	var vendorName string
-	if billing != nil {
-		vendorName = billing.Vendor
-	}
-
-	spec, ok := audiospec.Get(audiospec.Vendor(vendorName))
-	if !ok {
-		c.skipAudioReserve(monitor.AudioReserveSkipUnknownVendor, vendorName,
+	seconds := c.audioReservedSeconds(ctx, reqBody, ctx.Request.Header.Get("Content-Type"))
+	if seconds < 1 {
+		// audioReservedSeconds returns 0 only when no vendor rules are recorded, which
+		// is the one case this function cannot price. Reported and metered rather than
+		// guessed at.
+		c.skipAudioReserve(monitor.AudioReserveSkipUnknownVendor, c.audioVendorName(ctx),
 			"audio create forwarded WITHOUT a reserve: no rules recorded for vendor %q, so the broker cannot tell how much audio this upstream can produce. This request is gated only by the minimum locked balance — record that vendor's output ceiling in common/audiospec",
-			vendorName)
+			c.audioVendorName(ctx))
 		return "0", nil
 	}
-
-	seconds := spec.ReserveSeconds(rawAudioMaxDuration(reqBody, ctx.Request.Header.Get("Content-Type")))
 
 	prices, err := c.GetBillingPrices(ctx)
 	if err != nil {
 		return "", errors.Wrap(err, "get billing prices for audio reserve")
 	}
-	// The entry's OutputPrice unscaled, because per_audio_second has no tier axis
-	// — there is no audio counterpart to videoTokenUnitPrice to route through, and
+	// The entry's OutputPrice unscaled, because per_audio_second has no tier axis —
+	// there is no audio counterpart to videoTokenUnitPrice to route through, and
 	// adding one would imply a per-tier price the config cannot express. See
 	// config.BillingModePerAudioSecond.
 	fee, err := util.Multiply(prices.OutputPrice, seconds)
@@ -113,8 +98,40 @@ func (c *Ctrl) AudioCreateReserve(ctx *gin.Context, reqBody []byte) (string, err
 		return "", errors.Wrap(err, "calculate audio reserve fee")
 	}
 
-	c.logger.Debugf("audio reserve: vendor=%s seconds=%d fee=%s", vendorName, seconds, fee.String())
+	c.logger.Debugf("audio reserve: seconds=%d fee=%s", seconds, fee.String())
 	return fee.String(), nil
+}
+
+// audioVendorName is the configured vendor for the request's resolved model, or ""
+// when none is set. Shared by the reserve and its skip reporting so the name in the
+// log is the one the lookup actually used.
+func (c *Ctrl) audioVendorName(ctx *gin.Context) string {
+	if !c.Service.HasMultiModelPricing() {
+		return ""
+	}
+	if e := c.resolveModelPricing(ctx); e != nil && e.Billing != nil {
+		return e.Billing.Vendor
+	}
+	return ""
+}
+
+// audioReservedSeconds reports the most output audio the configured vendor can bill
+// for this request — the bound the balance gate holds, and the fallback the response
+// path charges when the adaptor reports no duration.
+//
+// ONE definition, called from both. An earlier version computed the same thing
+// twice: once inside AudioCreateReserve and once here. Two readings of one request
+// is exactly what common/audiospec exists to prevent, and having them inside a
+// single package made the duplication easier to miss, not harder.
+//
+// Returns 0 when no vendor rules are recorded. Callers decide what that means:
+// the gate forwards unreserved and meters it, the response path floors at 1.
+func (c *Ctrl) audioReservedSeconds(ctx *gin.Context, reqBody []byte, contentType string) int64 {
+	spec, ok := audiospec.Get(audiospec.Vendor(c.audioVendorName(ctx)))
+	if !ok {
+		return 0
+	}
+	return spec.ReserveSeconds(rawAudioMaxDuration(reqBody, contentType))
 }
 
 // skipAudioReserve meters and reports a create going out unreserved. Throttled

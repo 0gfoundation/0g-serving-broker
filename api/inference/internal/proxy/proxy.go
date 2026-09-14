@@ -971,8 +971,10 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 			p.handleBrokerError(ctx, err, "compute audio reserve")
 			return
 		}
+		// Feeds the balance gate only. Unlike video there is nothing to stage for a
+		// later poll: the response path bills synchronously, so no in-flight reserve
+		// is ever written to the row.
 		expectedInputFee = audioReserveFee
-		ctx.Set(ctrl.CtxKeyAudioReserveFee, audioReserveFee)
 	default:
 		p.handleBrokerError(ctx, errors.New("unknown service type"), "prepare request extractor")
 		return

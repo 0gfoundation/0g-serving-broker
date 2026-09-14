@@ -22,10 +22,10 @@ const (
 	// in, generated audio out — dialogue, music, ambience and sound effects, not only
 	// speech. Billed per second of OUTPUT audio.
 	//
-	// SYNCHRONOUS for its first vendor. Seed Audio answers one POST with the audio
-	// itself, so there is no job to poll. The modality keeps its async machinery
-	// (model.AudioPollJob and the scheduler) for a vendor that IS async — audiospec
-	// is a registry precisely to admit one — but nothing routes there today.
+	// SYNCHRONOUS. Seed Audio answers one POST with the audio itself, so there is no
+	// job to poll and no async machinery for this modality. A vendor that IS async
+	// would need that built — audiospec is a registry precisely so a second vendor
+	// can be admitted — but nothing speculative is carried for it today.
 	//
 	// It is NOT the inverse of ServiceTypeSpeechToText and must not be folded into
 	// it. STT consumes audio and bills the INPUT dimension; this produces audio and

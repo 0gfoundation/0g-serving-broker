@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -12,6 +13,21 @@ import (
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 )
+
+// fakeReconciliationDB captures the whitelisted-usage rollup rows. Whitelisted
+// traffic has no Request row, so this rollup is the ONLY record such a request
+// leaves — if it is not written, the usage is invisible to reconciliation.
+type fakeReconciliationDB struct {
+	mu   sync.Mutex
+	rows []model.HourlyUsageStat
+}
+
+func (f *fakeReconciliationDB) AccumulateHourlyUsage(row model.HourlyUsageStat) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.rows = append(f.rows, row)
+	return nil
+}
 
 // newAudioSpeechCtrl builds a Ctrl with the real collaborators the synchronous
 // handler touches. The reconciliation sink is a fake because it is an interface;
