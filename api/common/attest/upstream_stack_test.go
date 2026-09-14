@@ -50,7 +50,7 @@ func TestTheWholeStackAgreesOnOneSet(t *testing.T) {
 				"vllm":       "vllm/vllm-openai:v0.6",
 				"0gm-sglang": "lmsysorg/sglang:latest",
 			}
-			classified := classifyUpstreams(set, services)
+			classified := classifyUpstreams(set, services, nil)
 
 			bare := &RunningState{Upstreams: set, UpstreamsState: UpstreamsKnown}
 			marked := &RunningState{Upstreams: classified, UpstreamsState: UpstreamsKnown}

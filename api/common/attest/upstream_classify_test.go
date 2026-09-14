@@ -53,7 +53,7 @@ func TestNoExternalDestinationPassesForADeclaredContainer(t *testing.T) {
 			if perr != nil {
 				t.Fatalf("validUpstreamURL accepted a URL that does not parse: %v", perr)
 			}
-			got := classifyUpstreams([]Upstream{{Name: "m", URL: raw}}, services)
+			got := classifyUpstreams([]Upstream{{Name: "m", URL: raw}}, services, nil)
 			// A member classified as an in-CVM service must have a host that IS the service
 			// name, byte for byte. Anything else means the lookup matched something the
 			// host is not, which is a destination reported as inside the boundary.
@@ -106,7 +106,7 @@ func TestEveryRealInCVMTargetClassifiesAndNoVendorDoes(t *testing.T) {
 			if err := validUpstreamURL(tc.url); err != nil {
 				t.Fatalf("a deployed targetUrl is refused: %v", err)
 			}
-			got := classifyUpstreams([]Upstream{{Name: "m", URL: tc.url}}, services)
+			got := classifyUpstreams([]Upstream{{Name: "m", URL: tc.url}}, services, nil)
 			if got[0].ComposeService != tc.want {
 				t.Errorf("ComposeService = %q, want %q", got[0].ComposeService, tc.want)
 			}
@@ -123,6 +123,7 @@ func TestAmbiguousServiceNamesClassifyNothing(t *testing.T) {
 	got := classifyUpstreams(
 		[]Upstream{{Name: "m", URL: "http://api:9999/v1"}},
 		map[string]string{"api": "one:1", "API": "two:2"},
+		nil,
 	)
 	if got[0].ComposeService != "" || got[0].PinnedImage != "" {
 		t.Errorf("an ambiguous service name classified as %q/%q", got[0].ComposeService, got[0].PinnedImage)
@@ -146,7 +147,7 @@ func TestBothClassificationFieldsOrNeither(t *testing.T) {
 		{},
 		nil,
 	} {
-		got := classifyUpstreams([]Upstream{{Name: "m", URL: "http://api:9999/v1"}}, services)
+		got := classifyUpstreams([]Upstream{{Name: "m", URL: "http://api:9999/v1"}}, services, nil)
 		if (got[0].ComposeService == "") != (got[0].PinnedImage == "") {
 			t.Errorf("services=%v gave ComposeService=%q PinnedImage=%q: one without the other", services, got[0].ComposeService, got[0].PinnedImage)
 		}
@@ -158,7 +159,7 @@ func TestBothClassificationFieldsOrNeither(t *testing.T) {
 // compose-derived fields into a comparison that is supposed to be about the record.
 func TestClassifyLeavesTheCallersSliceAlone(t *testing.T) {
 	members := []Upstream{{Name: "m", URL: "http://api:9999/v1"}}
-	got := classifyUpstreams(members, map[string]string{"api": "d:1"})
+	got := classifyUpstreams(members, map[string]string{"api": "d:1"}, nil)
 	if members[0].ComposeService != "" || members[0].PinnedImage != "" {
 		t.Errorf("the caller's member was classified in place: %+v", members[0])
 	}
