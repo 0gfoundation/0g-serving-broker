@@ -265,11 +265,21 @@ func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, reqBody []byte) ([]byte, err
 	// The other half of the same rule (SPEC §5.3.1), on the endpoints that now
 	// accept two content types: a JSON body there MUST be a valid sealed envelope
 	// or be REFUSED. It must not be forwarded as an unsealed JSON request "just in
-	// case" — this endpoint has no unsealed JSON contract, so falling through is
-	// how "is this sealed?" stops being a question anyone answers.
+	// case" — falling through is how "is this sealed?" stops being a question
+	// anyone answers.
 	//
 	// Scoped to the service types that have a JSON-ified profile. Elsewhere a JSON
 	// body is simply an ordinary request on a JSON endpoint.
+	//
+	// This DOES refuse an unsealed `file_base64` JSON body, which the router's
+	// OpenAPI spec documents on this endpoint — deliberately, and checked rather
+	// than assumed. The broker has never implemented that shape (it forwarded the
+	// JSON to an upstream that speaks only multipart), and the customer-facing
+	// docs state the opposite: "this endpoint uses multipart/form-data instead of
+	// a JSON body". So the refusal matches what is actually promoted and replaces
+	// a silent upstream failure with a clear 400. Supporting it is small —
+	// materializeSpeechRequest is profile-independent — but it is a product
+	// decision, not a protocol one. See docs/design/e2ee.md.
 	if isJSONMediaType(contentType) && jsonIfiedServiceType(c.Service.Type) && !isSealedJSON(reqBody) {
 		return nil, fmt.Errorf("this endpoint takes multipart/form-data, or a sealed JSON envelope carrying a top-level %q object (SPEC §5.3.1). A JSON body that is not an envelope is refused rather than forwarded", e2eeBodyMarker)
 	}

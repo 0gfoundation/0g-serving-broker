@@ -124,6 +124,77 @@ routing/billing:
 The reconstructed plaintext (pre-upstream-rewrite) is stashed on the context for
 the §8 signature.
 
+### The speech profile: a JSON-ified request (SPEC §5.3)
+
+`/v1/audio/transcriptions` carries its payload as `multipart/form-data`, which
+has no top-level JSON object — so §5.2's AAD has nothing to canonicalize and
+§8's binding has no defined input. That is why the endpoint was excluded from
+sealing rather than merely unimplemented.
+
+§5.3's answer is a **conversion, not a crypto change**: the client seals a
+JSON-ified request (form fields as JSON, the audio as base64 in `file_base64`)
+and the enclave materializes multipart back for the upstream.
+
+```
+caller ──multipart──▶ sidecar ──JSON envelope──▶ router ──▶ enclave ──multipart──▶ upstream
+                      seals here                 opaque      opens, re-materializes
+```
+
+From §5.2's point of view it is an ordinary request, so nothing in the crypto or
+the envelope is multipart-aware. Two properties make this the cheap direction:
+the router never sees multipart on a sealed request, and `filename` — a part
+header readable by every intermediary today — becomes an ordinary field the
+profile seals.
+
+**Request side.** `profileForRequest` resolves speech to `wire.ProfileSpeech`.
+The protocol package then enforces §5.3.2's sealed set (`file_base64` always,
+plus `filename` / `language` / `prompt` whenever present) and §5.3.3's
+conditionally pinned `stream`, compared by *materialized rendering* so the
+boolean `false` and the string `"false"` are one value.
+`materializeSpeechRequest` converts the opened request back:
+
+- it generates its **own boundary** — none crosses the sealed channel;
+- it **forwards the sealed `filename`**, because some backends sniff the audio
+  container from the extension, and by then we are inside the TEE;
+- it **drops `stream`** rather than rendering it. `OpenRequestFor` has already
+  established the only permitted value is the endpoint's own default, and the
+  protocol package's renderer is unexported — so "must be `false`" and "how
+  `false` is written" cannot be the same code. A field that is not written cannot
+  be misread, and the values a form parser reads as true are an open set;
+- an array becomes repeated `name[]` (the OpenAI multipart spelling); an
+  **object is refused**, because bracket paths, JSON-in-a-field and dotted keys
+  are all in use and guessing one would forward a different request than the
+  client sealed.
+
+The **`Content-Type` and `Content-Length` move with the body**. Everything
+downstream reads the boundary out of the header, so a multipart body still
+labelled `application/json` reaches the upstream unparseable.
+
+**Response side (§7.3).** The sealed set is not a constant: `text` always, plus
+each of `segments` / `words` / `language` the frame carries — a profile-wide
+constant would reject a plain `json` transcription or leak a `verbose_json` one.
+That resolution lives in the wire package and the speech handler reaches it
+through the same `prepareFrameForSealing` the chat and image paths use. The
+billable quantity stays **cleartext**, as either `usage.seconds` or the top-level
+`duration`, so billing and the router both still read it. The §8 signature routes
+through `signChatResponse` rather than `signChatWithKey`, because on a sealed turn
+it must bind the on-wire aad‖ciphertext rather than a plaintext the client never
+received.
+
+**An unsealed `file_base64` JSON body is refused, deliberately.** The router's
+OpenAPI spec documents such a shape on this endpoint; the broker has never
+implemented it, and the customer-facing docs say the opposite ("this endpoint
+uses `multipart/form-data` **instead of a JSON body**"). Refusing it is therefore
+consistent with what is actually promoted, and replaces a silent failure at the
+upstream with a clear 400 here. Supporting it later is small — the
+materialization is profile-independent — but it is a product decision, not a
+protocol one.
+
+**Not covered:** streaming (§5.3.3 — the profile defines no streaming frames),
+and `response_format` outside `{json, verbose_json}` (§5.3.2 — `text`/`srt`/`vtt`
+return a body with nowhere to put `_e2ee`, so they are inexpressible under
+sealing rather than merely leaky).
+
 ### An envelope smuggled into a multipart body (SPEC §5.3.1)
 
 Step 1 detects an envelope in a JSON body. A client can also put one in a
@@ -136,6 +207,13 @@ declaring one named `_e2ee`, on both entry points (`MaybeUnsealRequest` for the
 sync proxy, `RefuseAsync` for the async submit routes, which never reach the
 proxy and were the same hole one request shape over).
 
+Both halves of §5.3.1 now hold, and they are separate rules: a **multipart** body
+must not contain an `_e2ee` part (above), and on an endpoint with a JSON-ified
+profile a **JSON** body must be a valid envelope or be refused — never forwarded
+as an unsealed JSON request "just in case". The second half is scoped to the
+service types that have such a profile; image-editing is the other multipart
+endpoint and §5.3 does not cover it yet.
+
 The rule is on part **names**, never on the raw bytes: `prompt` carries arbitrary
 caller text, so a substring rule would 400 a legitimate transcription for
 mentioning the protocol.
@@ -143,14 +221,17 @@ mentioning the protocol.
 **Scope, deliberately.** It reads what Go's `mime/multipart` reads and nothing
 more. A malformed body, an unreadable boundary, a nested part, or a name spelled
 in an encoding Go declines to decode is **forwarded**. That is not an oversight:
-no endpoint accepting multipart has a sealed request profile, so a client
-evading the check has forwarded its own ciphertext upstream and gets garbage
-back — there is no adversary with a motive here, only an honest client with a
-bug, and `_e2ee` is plain ASCII that such a client has no reason to encode. The
-forwarded shapes are asserted by `TestMalformedAndExoticBodiesAreForwarded` so
-the limit is a decision on record. When speech-to-text gains a sealed request
-profile this rule inverts — multipart will legitimately carry sealed data — so
-the check is written to be replaced, not extended.
+a client evading the check has forwarded its own ciphertext upstream and gets
+garbage back — there is no adversary with a motive here, only an honest client
+with a bug, and `_e2ee` is plain ASCII that such a client has no reason to
+encode. The forwarded shapes are asserted by
+`TestMalformedAndExoticBodiesAreForwarded` so the limit is a decision on record.
+
+Note this rule and the speech profile above are about **opposite** directions and
+both apply: a sealed speech request arrives as JSON and is opened; a multipart
+body carrying an `_e2ee` part is a client error and is refused. Sealed data
+legitimately reaching a multipart endpoint does so as an envelope, never as a
+form part.
 
 ### Stale enc key self-heal (409)
 
