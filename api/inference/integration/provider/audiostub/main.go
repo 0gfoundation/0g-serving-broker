@@ -81,8 +81,20 @@ func main() {
 		}
 		w.WriteHeader(http.StatusOK)
 
-		// Filler shaped like an MP3 only at the head, so `file` and most players
-		// identify it and a truncated read is obvious.
+		// An ID3v2 header followed by zero filler. The header is a SENTINEL at a
+		// known offset, not an attempt to produce playable audio — there are no
+		// MPEG frames behind it, so a player will reject this.
+		//
+		// What it buys is a check the broker path actually needs: a caller can
+		// assert the first bytes arrived unchanged, which proves the body was
+		// passed through rather than wrapped, re-encoded, or injected into.
+		// Injecting x_0g_trace into an audio body is the specific hazard the
+		// router has to avoid, and it is silent — 200 status, plausible length,
+		// a file that will not play. A recognisable prefix is how a test catches
+		// it.
+		//
+		// It does NOT help spot truncation: zeros look alike at any length, so
+		// compare the byte count for that.
 		body := make([]byte, size)
 		copy(body, []byte("ID3\x04\x00\x00\x00\x00\x00\x00"))
 		if _, err := w.Write(body); err != nil {
