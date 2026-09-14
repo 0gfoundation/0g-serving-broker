@@ -433,12 +433,14 @@ only chain that makes the record worth anything.
 
 **But that boundary is not one a verifier can read**, and an earlier version of this
 section said it was ("all inside `app_compose`, so a user who reviewed the manifest
-reviewed them"). The config file's *content* is not measured: Phala takes a compose file
-and encrypted environment variables and nothing else, so the config travels as one
-base64 variable and `app_compose` carries only the reference,
-`BROKER_CONFIG=${BROKER_CONFIG:-}` — the same point §D3 makes about `DATABASE_DSN`. And
-`zg-config-update` is emitted only by `PUT /v1/config/core`, so a CVM whose config has
-never been changed through the API has no record of its content at all.
+reviewed them"). The config file's *content* is not measured: `app_compose`'s
+`docker_compose_file` field is the compose text **as submitted**, so an interpolation is
+covered as a reference and its value is not — and this project's compose passes the whole
+config as one such interpolation, `BROKER_CONFIG=${BROKER_CONFIG:-}`, materialised into a
+named volume on first boot. Same point §D3 makes about `DATABASE_DSN`. And
+`zg-config-update` is emitted only by `PUT /v1/config/core` (two emit sites, both in
+`ApplyCoreConfig`), so a CVM whose config has never been changed through the API has no
+record of its content at all.
 
 What a third party *can* read about engines is `zg-engine-set`: the containers that were
 **created**, digests pinned. That is why the security story does not rest on the
@@ -532,10 +534,17 @@ the controller cannot read means no claim about routing, never a kept container.
 restarts it.** `controller.engines`, `engineGPUIgnore`, `engineVolumes`, `engineEnv` and
 `engineNetwork` are read from the controller's own startup snapshot, like
 `adminAddresses` (§4.4). A `PUT /v1/config/core` write lands in the file the controller
-loads at its next start — and no API path provides that start: `ApplyCoreConfig` restarts
-the broker and the event container, `UpdateImages` recreates those same two, and the
-controller cannot upgrade itself (§4.4). So a change to the allowlist waits for a CVM
-reboot, or an out-of-band restart of the controller container.
+loads at its next start — and no API path provides that start.
+
+Note *why*, because the obvious reason is the wrong one. It is not that no route
+restarts containers: `POST /v1/containers/:name/restart` takes an arbitrary name. It is
+that `docker.RestartContainer` resolves through the guarded lookup, which refuses the
+controller's own container (§3.1a) — stopping ourselves mid-operation would abort it with
+the containers already torn down. `ApplyCoreConfig` and `UpdateImages` touch only the
+broker and the event container on top of that.
+
+So a change to the allowlist waits for a CVM reboot, or an out-of-band restart of the
+controller container.
 
 The upside of the same fact: **the allowlist does not have to be settled before the first
 deployment.** Configure the images you intend to run; adding another later is a config

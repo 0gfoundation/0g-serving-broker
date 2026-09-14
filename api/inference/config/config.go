@@ -1428,10 +1428,19 @@ type ControllerConfig struct {
 	// An earlier version of this comment said the list "lives in the config file, which
 	// is inside app_compose and therefore inside compose_hash", so which images a CVM may
 	// ever run would be a launch-time claim a verifier could check. That is wrong, and the
-	// same file says so 900 lines down: Phala takes a compose file and encrypted
-	// environment variables and nothing else, so the config travels as one base64
-	// variable and app_compose carries only the REFERENCE, `BROKER_CONFIG=${BROKER_CONFIG:-}`.
-	// A verifier reading app_compose sees that reference and learns nothing about this list.
+	// same file says so 900 lines down: app_compose's docker_compose_file field is the
+	// compose text AS SUBMITTED, so an interpolation is covered as a reference and its
+	// value is not. This project's own compose passes the whole config as one such
+	// interpolation, `BROKER_CONFIG=${BROKER_CONFIG:-}`, materialised into a named volume
+	// on first boot — so a verifier reading app_compose sees the reference and learns
+	// nothing about this list.
+	//
+	// Stated that way, from the compose text and applyTargetURLEnv's reasoning, rather
+	// than as "the deploy platform accepts nothing but a compose file and environment
+	// variables". That sentence is in our own compose's comments, which makes it an
+	// operator claim about a vendor rather than something a reader here can check — and
+	// nothing above needs it: the interpolation is what leaves the value unmeasured,
+	// whatever else the platform would have accepted.
 	//
 	// Nor is it recorded at boot: attest.EventConfigUpdate is emitted only by
 	// ApplyCoreConfig, so on a CVM whose config has never been changed through the API
