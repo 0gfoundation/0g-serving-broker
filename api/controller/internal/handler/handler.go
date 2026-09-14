@@ -58,6 +58,23 @@ func (h *Handler) RegisterRoutes(v1 *gin.RouterGroup) {
 	}
 
 	// Image management
+	// Engine containers this controller creates after launch, for models the compose
+	// manifest did not ship. Every one of them is recorded in RTMR3 before it exists —
+	// see ctrl.CreateEngine for why that order is the whole design.
+	//
+	// DELETE takes the name in the path and the other two take none, so no method's route
+	// tree mixes a static segment with a parameter. GPU placement is reported under
+	// /gpus rather than here: it describes the machine, and the compose's own engines
+	// hold cards without being engines this created.
+	engines := v1.Group("/engines")
+	{
+		engines.GET("", h.ListEngines)
+		engines.POST("", h.CreateEngine)
+		engines.DELETE("/:name", h.DeleteEngine)
+	}
+
+	v1.GET("/gpus", h.GetGPUAllocation)
+
 	images := v1.Group("/images")
 	{
 		images.GET("/info", h.GetImageInfo)
@@ -318,4 +335,88 @@ func (h *Handler) UpdatePrometheusConfig(ctx *gin.Context) {
 	}
 
 	ctx.JSON(http.StatusOK, gin.H{"message": "prometheus config updated and applied"})
+}
+
+// ListEngines reports the engine containers this controller created.
+func (h *Handler) ListEngines(ctx *gin.Context) {
+	engines, err := h.ctrl.ListEngines(ctx)
+	if err != nil {
+		ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	// [] and not null for the empty case. A nil slice marshals to null, and "no engines"
+	// then arrives as a value a client has to special-case before it can iterate — on the
+	// endpoint whose ordinary answer, on a deployment that has created none, is empty.
+	if engines == nil {
+		engines = []ctrl.EngineStatus{}
+	}
+	ctx.JSON(http.StatusOK, gin.H{"engines": engines})
+}
+
+// CreateEngine records an engine container and then creates it.
+//
+// The request carries the whole argument list, and the controller's allowlist decides
+// only what it may NOT say — see config.EngineImage. A spec the allowlist refuses is a
+// 400, not a 403: there is no privilege that would make it acceptable, because an image
+// with no rule is one whose record could not describe what it runs.
+func (h *Handler) CreateEngine(ctx *gin.Context) {
+	var spec ctrl.EngineSpec
+	if err := ctx.ShouldBindJSON(&spec); err != nil {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := h.ctrl.CreateEngine(ctx, spec); err != nil {
+		h.writeEngineError(ctx, err)
+		return
+	}
+	ctx.JSON(http.StatusOK, gin.H{"name": spec.Name, "status": "created"})
+}
+
+// DeleteEngine removes an engine container and records the set without it.
+//
+// The response carries the upstreams a config on disk still points at the container, so
+// a caller who took a serving model offline is told rather than finding out from the
+// model's own errors. Absent when there are none.
+func (h *Handler) DeleteEngine(ctx *gin.Context) {
+	routed, err := h.ctrl.RemoveEngine(ctx, ctx.Param("name"))
+	if err != nil {
+		h.writeEngineError(ctx, err)
+		return
+	}
+	body := gin.H{"name": ctx.Param("name"), "status": "removed"}
+	if len(routed) > 0 {
+		body["stillRoutedBy"] = routed
+	}
+	ctx.JSON(http.StatusOK, body)
+}
+
+// GetGPUAllocation reports which cards are held and by which container.
+func (h *Handler) GetGPUAllocation(ctx *gin.Context) {
+	alloc, err := h.ctrl.GPUAllocation(ctx)
+	if err != nil {
+		ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	ctx.JSON(http.StatusOK, gin.H{"gpus": alloc})
+}
+
+// writeEngineError maps the two engine paths' errors onto status codes.
+//
+// Three outcomes, and the split is about whether retrying could ever work:
+//
+//   - 409 another change holds the lock. Retrying after it finishes is right.
+//   - 400 a refusal. The spec, or the deployment — recordUpstreamSet off, no attestation
+//     proxy. Both are permanent until something outside this process changes, so a 500
+//     here would invite a retry into the same answer.
+//   - 500 everything else: docker unreachable, a pull that failed, an emit that failed.
+//     Retrying may well work, which is exactly what a 400 would discourage.
+func (h *Handler) writeEngineError(ctx *gin.Context, err error) {
+	switch {
+	case errors.Is(err, ctrl.ErrChangeInProgress):
+		ctx.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+	case errors.Is(err, ctrl.ErrEngineRefused):
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	default:
+		ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	}
 }
