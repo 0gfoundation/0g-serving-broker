@@ -180,14 +180,23 @@ func (c *Client) ListContainers(ctx context.Context) ([]Container, error) {
 //
 // Everything security-relevant is absent by design: no mounts the caller names, no
 // capabilities, no privileged flag, no host namespaces beyond the IPC one the engine
-// needs for multi-process tensor parallelism. Those come from config, which lives inside
-// app_compose — so a user who reviewed the manifest reviewed them.
+// needs for multi-process tensor parallelism. Those come from the controller's config,
+// which no REQUEST can reach.
 //
-// "Reviewed the manifest" and not "is guaranteed by compose_hash", which is the stronger
-// claim the surrounding documents sometimes make in shorthand. compose_hash is computed
-// at launch from the SUBMITTED app_compose; editing the compose inside a running CVM and
-// bringing it back up does not change it. So the manifest is what a reader can check, and
-// what makes the running controller match it is the boot chain, not this hash.
+// What that is worth to a verifier, stated exactly, because two earlier versions of this
+// comment overstated it in two different ways:
+//
+//   - the config file's CONTENT is not measured. It reaches the CVM as one encrypted
+//     environment variable, and app_compose carries only the reference
+//     `BROKER_CONFIG=${BROKER_CONFIG:-}` (config.ControllerConfig.Engines has the detail).
+//     So "a user who reviewed the manifest reviewed these mounts" is false.
+//   - compose_hash does not pin the running controller either. It is computed at launch
+//     from the SUBMITTED app_compose, and editing the compose inside a running CVM and
+//     bringing it back up does not change it.
+//
+// So this boundary is worth what the operator's own review of their config is worth, plus
+// the boot chain. It is not something a third party can check — and the thing a third
+// party CAN check, EventEngineSet, describes what ran rather than what was permitted.
 //
 // A caller that could name a mount could reach the host filesystem, and a caller that
 // could mount the docker socket could create containers this controller never records —

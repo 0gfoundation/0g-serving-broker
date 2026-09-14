@@ -1423,9 +1423,26 @@ type ControllerConfig struct {
 	// what runs. Configuring an image is therefore the same act as permitting it, and
 	// there is no way to permit one without saying how it works.
 	//
-	// The list lives in the config file, which is inside app_compose and therefore inside
-	// compose_hash: which images a CVM may ever run is a launch-time claim a verifier can
-	// check, not something a request decides.
+	// # This list is an operator-side guard rail, NOT something a verifier can read
+	//
+	// An earlier version of this comment said the list "lives in the config file, which
+	// is inside app_compose and therefore inside compose_hash", so which images a CVM may
+	// ever run would be a launch-time claim a verifier could check. That is wrong, and the
+	// same file says so 900 lines down: Phala takes a compose file and encrypted
+	// environment variables and nothing else, so the config travels as one base64
+	// variable and app_compose carries only the REFERENCE, `BROKER_CONFIG=${BROKER_CONFIG:-}`.
+	// A verifier reading app_compose sees that reference and learns nothing about this list.
+	//
+	// Nor is it recorded at boot: attest.EventConfigUpdate is emitted only by
+	// ApplyCoreConfig, so on a CVM whose config has never been changed through the API
+	// there is no record of the config's content at all.
+	//
+	// What a verifier actually reads about engines is attest.EventEngineSet — the
+	// containers that were CREATED, with their digests pinned. That record does not depend
+	// on this list being visible, which is why the security story does not rest on it. This
+	// list keeps the controller from running an image nobody configured and gives it the
+	// flag table it needs; it is not an attestation input, and a comment that dressed it up
+	// as one overstated what a reader can check.
 	Engines []EngineImage `yaml:"engines"`
 
 	// EngineNetwork is the docker network a created engine joins, which is how the broker
@@ -1471,16 +1488,26 @@ type ControllerConfig struct {
 	// Exact container names, not substrings, for the reason RemoveEngine resolves exactly:
 	// a prefix that matched an engine would silently exempt a container that does occupy.
 	//
-	// It is a claim the OPERATOR makes, and it lives in the config file — inside
-	// app_compose — so a verifier reads which containers were declared non-occupying and
-	// can judge it. An entry naming a model server would be visible as exactly that.
-	// Nothing here can check it: docker says which cards a container may see, never
-	// whether it allocated on them.
+	// It is a claim the OPERATOR makes, and nothing here can check it: docker says which
+	// cards a container may see, never whether it allocated on them.
+	//
+	// Nor can a verifier check it. An earlier version of this said the list is "inside
+	// app_compose, so a verifier reads which containers were declared non-occupying" — see
+	// Engines above for why that is wrong. This affects only placement: an entry naming a
+	// model server would let a second engine onto an occupied card, which the engine
+	// itself then fails loudly about when it cannot allocate. It reaches nothing a record
+	// describes.
 	EngineGPUIgnore []string `yaml:"engineGPUIgnore"`
 
 	// EngineEnv is the environment every created engine gets. Cache directories mostly —
-	// they have to agree with EngineVolumes. Secrets do not belong here: this file is part
-	// of app_compose. HF_TOKEN is taken from the controller's OWN environment instead.
+	// they have to agree with EngineVolumes.
+	//
+	// Secrets do not belong here, and an earlier version of this gave the wrong reason
+	// ("this file is part of app_compose" — it is not; see Engines above). The right one:
+	// GET /v1/config/core serves this file's contents to any admin caller, and
+	// PUT /v1/config/core round-trips it, so a secret here is readable by every admin
+	// wallet and lands in a response body. HF_TOKEN is taken from the controller's OWN
+	// environment instead.
 	EngineEnv map[string]string `yaml:"engineEnv"`
 
 	// Deprecated: the managed container names are compile-time constants in

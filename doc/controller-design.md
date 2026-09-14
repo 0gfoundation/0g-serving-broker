@@ -70,7 +70,7 @@ controller:
     - "hfcache:/root/.cache/huggingface"
   engineGPUIgnore:               # containers that SEE cards without allocating on them (§4.5)
     - "dcgm-exporter"
-  engineEnv:                     # no secrets: this file is inside app_compose
+  engineEnv:                     # no secrets: GET /v1/config/core serves this file
     HF_HOME: "/root/.cache/huggingface"
   engines:                       # the allowlist, and the per-image flag table (§4.5)
     - imageRepo: "lmsysorg/sglang"
@@ -426,11 +426,24 @@ flag and two different strings.
 
 **What the request may not decide.** Mounts, capabilities, host namespaces,
 published ports and the environment are the controller's, from
-`controller.engineVolumes` / `engineEnv` / `engineNetwork` (§3.1) — all inside
-`app_compose`, so a user who reviewed the manifest reviewed them. A request that
+`controller.engineVolumes` / `engineEnv` / `engineNetwork` (§3.1). A request that
 could name a mount could reach the host filesystem; one that could mount the docker
 socket could create containers this controller never records, which would break the
-only chain that makes the record worth anything. `HF_TOKEN` comes from the
+only chain that makes the record worth anything.
+
+**But that boundary is not one a verifier can read**, and an earlier version of this
+section said it was ("all inside `app_compose`, so a user who reviewed the manifest
+reviewed them"). The config file's *content* is not measured: Phala takes a compose file
+and encrypted environment variables and nothing else, so the config travels as one
+base64 variable and `app_compose` carries only the reference,
+`BROKER_CONFIG=${BROKER_CONFIG:-}` — the same point §D3 makes about `DATABASE_DSN`. And
+`zg-config-update` is emitted only by `PUT /v1/config/core`, so a CVM whose config has
+never been changed through the API has no record of its content at all.
+
+What a third party *can* read about engines is `zg-engine-set`: the containers that were
+**created**, digests pinned. That is why the security story does not rest on the
+allowlist being visible — the allowlist keeps the controller from running an image nobody
+configured, and the record describes what actually ran. `HF_TOKEN` comes from the
 controller's own environment for the same reason in reverse: the spec is published
 in the record, so a request field carrying it would publish it.
 
@@ -473,13 +486,14 @@ without this list the engine API refuses every request on every deployment it ex
 for. Exact container names; a prefix that matched would silently exempt a container
 that does occupy.
 
-It is a claim the **operator** makes, and nothing here can check it: docker says which
-cards a container may see, never whether it allocated on them. It lives in the config
-file, inside `app_compose`, so a verifier reads which containers were declared
-non-occupying and can judge the claim — an entry naming a model server is visible as
-exactly that. `GET /v1/gpus` still reports such a claim, flagged `"monitoring": true`,
-because the report answers "which cards can this container see" (docker's answer) while
-only the placement *decision* uses the operator's.
+It is a claim the **operator** makes and nothing here can check it: docker says which
+cards a container may see, never whether it allocated on them. A verifier cannot check it
+either, for the reason above. It reaches only placement, though: an entry naming a model
+server would let a second engine onto an occupied card, which that engine then fails
+loudly about when it cannot allocate — it reaches nothing a record describes.
+`GET /v1/gpus` still reports such a claim, flagged `"monitoring": true`, because the
+report answers "which cards can this container see" (docker's answer) while only the
+placement *decision* uses the operator's.
 
 **A deployment requirement no request can work around:** the engine services in this
 project's own compose also run with `NVIDIA_VISIBLE_DEVICES=all`, so every card on such
@@ -514,11 +528,18 @@ name — is a flow where the config pointing at that name is exactly correct, an
 would block the main reason this endpoint exists. It is also advisory in failure: a config
 the controller cannot read means no claim about routing, never a kept container.
 
-**Changing the engine configuration needs a controller restart.** `controller.engines`,
-`engineGPUIgnore`, `engineVolumes`, `engineEnv` and `engineNetwork` are read from the
-controller's own startup snapshot, like `adminAddresses` (§4.4). A `PUT /v1/config/core`
-write lands in the file the controller loads at its next start; it does not take effect
-on the running one.
+**Changing the engine configuration needs a controller restart, and nothing here
+restarts it.** `controller.engines`, `engineGPUIgnore`, `engineVolumes`, `engineEnv` and
+`engineNetwork` are read from the controller's own startup snapshot, like
+`adminAddresses` (§4.4). A `PUT /v1/config/core` write lands in the file the controller
+loads at its next start — and no API path provides that start: `ApplyCoreConfig` restarts
+the broker and the event container, `UpdateImages` recreates those same two, and the
+controller cannot upgrade itself (§4.4). So a change to the allowlist waits for a CVM
+reboot, or an out-of-band restart of the controller container.
+
+The upside of the same fact: **the allowlist does not have to be settled before the first
+deployment.** Configure the images you intend to run; adding another later is a config
+change plus a controller restart, not a redeploy.
 
 **No boot recovery.** Containers this controller created do not come back after a
 reboot — the compose brings up its own services and nothing brings up these — and
