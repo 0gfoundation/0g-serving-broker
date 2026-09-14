@@ -166,6 +166,55 @@ as `broker_audio_billing_fallback_total{source="reserve"}`. That **over-bills by
 construction**, so any rate on that series means the adaptor stopped populating the
 header — not a tuning problem.
 
+## Why one endpoint, and when to add a second
+
+Raw bytes on `/v1/audio/speech` is a CHOICE, not something the synchronous vendor
+API forced. The alternative was a JSON envelope on our own path:
+
+```jsonc
+{ "audio": "<base64>", "format": "mp3",
+  "usage": { "output_audio_seconds": 48 },
+  "x_0g_trace": { "billing": { … } } }
+```
+
+That is strictly more consistent with every other modality — `usage` in the body,
+`x_0g_trace` injected unchanged, no router special case — and it is closer to what
+the vendor already returns, since BytePlus answers with base64 plus the duration.
+The adaptor would rename fields rather than decode anything.
+
+It loses one thing: `client.audio.speech.create()` from an OpenAI SDK. That client
+reads the body as a file, and JSON there is a corrupt download. Since the broker's
+stated value proposition is a drop-in OpenAI replacement, and TTS is the most
+common audio call, that loss outweighs the consistency gain.
+
+**One endpoint for now.** The headers carry the quantity and the cost, so the JSON
+envelope would serve no consumer that exists today — and building surface for a
+hypothetical one is the same speculative cost that got the async path deleted.
+
+**The trigger for adding `/v1/audio/generations` as a JSON sibling** is a client
+that needs the full `x_0g_trace` OBJECT — TEE verification, the per-request billing
+breakdown — rather than the two scalars headers can carry. A nested object does not
+go in a header cleanly, and at that point a second fixed contract is the right
+answer.
+
+Note what is NOT the right answer: `Accept`-header content negotiation on one
+endpoint. It would make `x_0g_trace` present or absent depending on what the caller
+sent, so a consumer would branch on the shape of its own request to know the shape
+of the reply. Two endpoints with fixed contracts beat one that varies — which is
+also the existing precedent here: `/videos` returns JSON and `/videos/{id}/content`
+returns bytes, as two endpoints, with no negotiation between them.
+
+## The router must not inject a trace into audio
+
+`x_0g_trace` is injected by the ROUTER into the response body. Every other modality
+returns JSON, so the injector assumes one. Audio returns a media file.
+
+**Injecting into an audio body corrupts the download**, and nothing downstream would
+notice: the status is 200, the length is plausible, and the failure surfaces as a
+file that will not play. The router's synchronous audio path must skip injection and
+read `X-0G-Audio-Duration-Seconds` / `X-0G-Fee` from the broker's response headers
+instead. See 0gfoundation/0g-router#844.
+
 ## What is deliberately absent
 
 | | Why |
