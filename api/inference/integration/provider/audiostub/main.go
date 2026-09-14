@@ -24,15 +24,56 @@
 //	?duration=       omit the header entirely  -> exercises the reserve fallback
 //	?bytes=100000    size of the returned body
 //	?status=500      return an error instead   -> broker must not bill
+//	?format=wav      override the Content-Type (else read from response_format)
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 )
+
+// BodyMarker is written at offset 0 of every response body. Exported so a test
+// can assert the bytes it received start with it — see the write site.
+const BodyMarker = "0G-AUDIOSTUB\x00"
+
+// contentTypeFor maps a response_format onto the media type the real adaptor
+// would return. Unknown formats fall back to application/octet-stream rather than
+// guessing: a stub silently claiming audio/mpeg for a format it does not know
+// would mask exactly the mismatch a test is looking for.
+func contentTypeFor(format string) string {
+	switch strings.ToLower(strings.TrimSpace(format)) {
+	case "", "mp3":
+		return "audio/mpeg"
+	case "wav":
+		return "audio/wav"
+	case "pcm":
+		return "audio/L16"
+	case "opus", "ogg_opus":
+		return "audio/ogg"
+	default:
+		return "application/octet-stream"
+	}
+}
+
+// requestedFormat reads response_format out of a JSON body, tolerating anything
+// unparseable — this is a stub, and a malformed body is the caller's business.
+func requestedFormat(r *http.Request) string {
+	var body struct {
+		ResponseFormat string `json:"response_format"`
+	}
+	raw, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		return ""
+	}
+	_ = json.Unmarshal(raw, &body)
+	return body.ResponseFormat
+}
 
 func main() {
 	port := os.Getenv("PORT")
@@ -75,28 +116,37 @@ func main() {
 			}
 		}
 
-		w.Header().Set("Content-Type", "audio/mpeg")
+		// Echo the format the caller asked for, because the real adaptor does and
+		// the broker copies this header straight through to the client. Getting it
+		// wrong here would hide a broker bug rather than expose one.
+		format := q.Get("format")
+		if format == "" {
+			format = requestedFormat(r)
+		}
+		w.Header().Set("Content-Type", contentTypeFor(format))
 		if duration != "" {
 			w.Header().Set("X-0G-Audio-Duration-Seconds", duration)
 		}
 		w.WriteHeader(http.StatusOK)
 
-		// An ID3v2 header followed by zero filler. The header is a SENTINEL at a
-		// known offset, not an attempt to produce playable audio — there are no
-		// MPEG frames behind it, so a player will reject this.
+		// A fixed marker at offset 0, then filler.
 		//
-		// What it buys is a check the broker path actually needs: a caller can
-		// assert the first bytes arrived unchanged, which proves the body was
+		// It is deliberately NOT a valid header for any audio format. The earlier
+		// version wrote an ID3v2 tag, which implied an MP3-ness that was not real
+		// (no MPEG frames follow it) and had to be special-cased per format for no
+		// gain. The marker's only job is to be RECOGNISABLE at a known offset, so a
+		// caller can assert the first bytes arrived unchanged and prove the body was
 		// passed through rather than wrapped, re-encoded, or injected into.
-		// Injecting x_0g_trace into an audio body is the specific hazard the
-		// router has to avoid, and it is silent — 200 status, plausible length,
-		// a file that will not play. A recognisable prefix is how a test catches
-		// it.
 		//
-		// It does NOT help spot truncation: zeros look alike at any length, so
+		// That check is the point: injecting x_0g_trace into an audio body is the
+		// hazard the router must avoid, and it fails silently — 200 status,
+		// plausible length, a file that will not play. A format-shaped header would
+		// test nothing extra, since this stub never produces decodable audio anyway.
+		//
+		// It does NOT help spot truncation: filler looks alike at any length, so
 		// compare the byte count for that.
 		body := make([]byte, size)
-		copy(body, []byte("ID3\x04\x00\x00\x00\x00\x00\x00"))
+		copy(body, []byte(BodyMarker))
 		if _, err := w.Write(body); err != nil {
 			log.Printf("audiostub: write body: %v", err)
 		}
