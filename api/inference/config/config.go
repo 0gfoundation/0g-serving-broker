@@ -1563,6 +1563,21 @@ type EngineImage struct {
 	// config, which is the property the digest exists to remove.
 	ImageRepo string `yaml:"imageRepo"`
 
+	// Entrypoint replaces the image's own, when the image's own does not accept a flag
+	// list. Optional; empty leaves the image's entrypoint alone.
+	//
+	// Measured, and the reason this field exists: lmsysorg/sglang's entrypoint is
+	// nvidia_entrypoint.sh, which does `exec "$@"` — so a flag list with no program in
+	// front of it fails with `exec: --: invalid option` before the engine starts. This
+	// project's own compose already knows that and sets
+	// `entrypoint: [python, -m, sglang.launch_server]`; the controller has to do the same.
+	//
+	// Per image and never per request. The image digest pins the code that COULD run;
+	// this chooses which of it does, so a caller who could set it could run anything in
+	// the image and the recorded flag list would describe nothing. It is recorded as part
+	// of the engine's command for exactly that reason — see attest.Engine.Args.
+	Entrypoint []string `yaml:"entrypoint"`
+
 	// ModelFlag carries the model repository, e.g. "--model-path" (sglang) or "--model"
 	// (vLLM). Required: without it there is nowhere to put the model.
 	ModelFlag string `yaml:"modelFlag"`

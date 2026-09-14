@@ -62,8 +62,11 @@ type Container struct {
 	// is one more reason only labelled engines are ever recorded.
 	Image string
 
-	// Args is the container's command, which for an engine is its whole flag list.
-	Args []string
+	// Entrypoint and Args are the container's command, split the way docker splits it.
+	// For an engine both halves matter: the flags mean nothing without the program in
+	// front of them, and the same image can be launched several different ways.
+	Entrypoint []string
+	Args       []string
 
 	// GPUs is the GPUEnvVar value, verbatim, and meaningful only when HasGPU is true.
 	GPUs string
@@ -80,6 +83,21 @@ type Container struct {
 
 	// Engine is true when this controller created the container.
 	Engine bool
+
+	// Running distinguishes a container that holds its cards now from one that would
+	// reclaim them if something started it. Both count as holding them — see
+	// ListContainers — but an operator told a card is occupied needs to know which of the
+	// two they are looking at, because the fix differs: stop or narrow the running one,
+	// remove the exited one.
+	Running bool
+}
+
+// Command is the container's whole command, entrypoint first.
+//
+// What the engine record describes: a flag list on its own says nothing, because the
+// program consuming it is a separate choice the image does not fix.
+func (c Container) Command() []string {
+	return append(append([]string(nil), c.Entrypoint...), c.Args...)
 }
 
 // HeldGPUs reports the cards this container occupies.
@@ -159,6 +177,7 @@ func (c *Client) ListContainers(ctx context.Context) ([]Container, error) {
 		item := Container{Name: name}
 		if inspect.Config != nil {
 			item.Image = inspect.Config.Image
+			item.Entrypoint = inspect.Config.Entrypoint
 			item.Args = inspect.Config.Cmd
 			for _, kv := range inspect.Config.Env {
 				if k, v, ok := strings.Cut(kv, "="); ok && k == GPUEnvVar {
@@ -169,6 +188,9 @@ func (c *Client) ListContainers(ctx context.Context) ([]Container, error) {
 		}
 		if inspect.HostConfig != nil {
 			item.HasGPU = len(inspect.HostConfig.DeviceRequests) > 0 || inspect.HostConfig.Runtime == nvidiaRuntime
+		}
+		if inspect.State != nil {
+			item.Running = inspect.State.Running
 		}
 		out = append(out, item)
 	}
@@ -203,14 +225,17 @@ func (c *Client) ListContainers(ctx context.Context) ([]Container, error) {
 // which would break the only chain that makes the engine record worth anything, since
 // unlike zg-image-update there is no second source to compare it against.
 type CreateEngineSpec struct {
-	Name    string
-	Image   string // must already be pulled; CreateEngine does not pull
-	GPUs    string
-	Port    int
-	Args    []string
-	IPCHost bool
-	ShmSize string
-	Network string // the compose network to join, so the broker can resolve Name
+	Name  string
+	Image string // must already be pulled; CreateEngine does not pull
+	GPUs  string
+	Port  int
+	// Entrypoint replaces the image's own when set; empty leaves it alone. Needed for an
+	// image whose entrypoint does not take a flag list — see config.EngineImage.Entrypoint.
+	Entrypoint []string
+	Args       []string
+	IPCHost    bool
+	ShmSize    string
+	Network    string // the compose network to join, so the broker can resolve Name
 	// Volumes the controller decides on, as "source:target" pairs. Named volumes only —
 	// CreateEngine refuses a source that looks like a host path.
 	Volumes []string
@@ -260,6 +285,7 @@ func (c *Client) CreateEngine(ctx context.Context, spec CreateEngineSpec) error 
 	port := nat.Port(fmt.Sprintf("%d/tcp", spec.Port))
 	cfg := &container.Config{
 		Image:        spec.Image,
+		Entrypoint:   spec.Entrypoint,
 		Cmd:          spec.Args,
 		Env:          env,
 		Labels:       map[string]string{EngineLabel: "true"},

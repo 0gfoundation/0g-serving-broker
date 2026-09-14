@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v2"
@@ -30,6 +31,7 @@ controller:
     HF_HOME: "/root/.cache/huggingface"
   engines:
     - imageRepo: "lmsysorg/sglang"
+      entrypoint: ["python", "-m", "sglang.launch_server"]
       modelFlag: "--model-path"
       revisionFlag: "--revision"
       portFlag: "--port"
@@ -73,6 +75,12 @@ controller:
 	// controller would silently not set — and three of the four are flags a request is
 	// then no longer refused for passing.
 	sglang := c.Engines[0]
+	// The entrypoint especially: an image whose own entrypoint does not take a flag list
+	// fails before the engine starts, and a wrong yaml tag here would silently leave it
+	// empty — which is exactly how that failure reaches a deployment.
+	if strings.Join(sglang.Entrypoint, " ") != "python -m sglang.launch_server" {
+		t.Errorf("sglang entrypoint = %v", sglang.Entrypoint)
+	}
 	if sglang.ImageRepo != "lmsysorg/sglang" || sglang.ModelFlag != "--model-path" ||
 		sglang.RevisionFlag != "--revision" || sglang.PortFlag != "--port" ||
 		sglang.HostFlag != "--host" || !sglang.IPCHost || sglang.ShmSize != "32gb" {

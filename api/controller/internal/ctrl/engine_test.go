@@ -42,10 +42,11 @@ type fakeContainer struct {
 	name    string
 	image   string
 	args    []string
-	gpus    string // the NVIDIA_VISIBLE_DEVICES value; "" means the variable is unset
-	hasGPU  bool   // gets a device request, the modern compose spelling
-	runtime string // "nvidia", the older compose spelling; an alternative to hasGPU
-	engine  bool   // carries docker.EngineLabel
+	gpus    string   // the NVIDIA_VISIBLE_DEVICES value; "" means the variable is unset
+	hasGPU  bool     // gets a device request, the modern compose spelling
+	runtime string   // "nvidia", the older compose spelling; an alternative to hasGPU
+	entry   []string // the container's entrypoint, which decides what consumes args
+	engine  bool     // carries docker.EngineLabel
 	// stopped models a container the daemon lists only when asked for all of them,
 	// which is what makes the All:true in the listing observable.
 	stopped bool
@@ -160,14 +161,15 @@ func (m *fakeMachine) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var body struct {
-			Image  string
-			Cmd    []string
-			Env    []string
-			Labels map[string]string
+			Image      string
+			Entrypoint []string
+			Cmd        []string
+			Env        []string
+			Labels     map[string]string
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		name := r.URL.Query().Get("name")
-		m.log.add("create " + name + " cmd=" + strings.Join(body.Cmd, " "))
+		m.log.add("create " + name + " cmd=" + strings.Join(append(append([]string(nil), body.Entrypoint...), body.Cmd...), " "))
 		id := fmt.Sprintf("%s%058d", "dddd", len(m.containers))
 		gpus := ""
 		for _, kv := range body.Env {
@@ -179,7 +181,7 @@ func (m *fakeMachine) serve(w http.ResponseWriter, r *http.Request) {
 		m.mu.Lock()
 		m.createdEnv = body.Env
 		m.containers = append(m.containers, fakeContainer{
-			id: id, name: name, image: body.Image, args: body.Cmd,
+			id: id, name: name, image: body.Image, entry: body.Entrypoint, args: body.Cmd,
 			gpus: gpus, hasGPU: true, engine: isEngine,
 		})
 		m.mu.Unlock()
@@ -249,16 +251,17 @@ func (m *fakeMachine) serve(w http.ResponseWriter, r *http.Request) {
 			"Id":   c.id,
 			"Name": "/" + c.name,
 			"Config": map[string]any{
-				"Image":  c.image,
-				"Cmd":    c.args,
-				"Env":    env,
-				"Labels": labels,
+				"Image":      c.image,
+				"Entrypoint": c.entry,
+				"Cmd":        c.args,
+				"Env":        env,
+				"Labels":     labels,
 			},
 			"HostConfig": map[string]any{
 				"DeviceRequests": devices,
 				"Runtime":        c.runtime,
 			},
-			"State": map[string]any{"Status": "running"},
+			"State": map[string]any{"Status": "running", "Running": !c.stopped},
 			"NetworkSettings": map[string]any{
 				"Networks": map[string]any{"default": map[string]any{}},
 			},
@@ -290,6 +293,7 @@ func engineCtrl(t *testing.T, containers ...fakeContainer) (*Ctrl, *fakeMachine,
 			EngineNetwork:     "zg",
 			Engines: []config.EngineImage{{
 				ImageRepo:    engineRepo,
+				Entrypoint:   []string{"python", "-m", "sglang.launch_server"},
 				ModelFlag:    "--model-path",
 				RevisionFlag: "--revision",
 				PortFlag:     "--port",
@@ -394,7 +398,7 @@ func TestCreateEngineRecordsTheForcedFlags(t *testing.T) {
 
 	// And the container got the same list the record describes, which is the only thing
 	// that makes the record worth reading.
-	cmd := l.indexOf("create dsv4flash cmd=--model-path deepseek-ai/DeepSeek-V4-Flash --revision " + testRevision + " --port 8000 --host 0.0.0.0 --tp 2 --mem-fraction-static 0.85")
+	cmd := l.indexOf("create dsv4flash cmd=python -m sglang.launch_server --model-path deepseek-ai/DeepSeek-V4-Flash --revision " + testRevision + " --port 8000 --host 0.0.0.0 --tp 2 --mem-fraction-static 0.85")
 	if cmd == -1 {
 		t.Errorf("ops = %v, want the container created with exactly the recorded arguments", l.all())
 	}
@@ -535,8 +539,15 @@ func TestCreateEngineRefusesAnOccupiedCard(t *testing.T) {
 	})
 
 	err := c.CreateEngine(context.Background(), okSpec())
-	if err == nil || !strings.Contains(err.Error(), "already occupied") {
+	if err == nil || !strings.Contains(err.Error(), "occupied by") {
 		t.Fatalf("CreateEngine() = %v, want a refusal naming the held card", err)
+	}
+	// Naming the holder is the difference between a message an operator can act on and
+	// one they cannot. Measured on a dev CVM: ten containers left over from
+	// `docker run --gpus all`, all exited for months, every one occupying every card —
+	// and the refusal said only "narrow it in the compose", on a machine with no compose.
+	if !strings.Contains(err.Error(), "glm53 (running, holds 6)") {
+		t.Errorf("CreateEngine() = %v, want it to name the holder and its state", err)
 	}
 	if ops := l.all(); len(ops) != 0 {
 		t.Errorf("ops = %v, want the card checked before anything is pulled or recorded", ops)
@@ -552,7 +563,7 @@ func TestCreateEngineRefusesACardHeldByAWholeMachineEngine(t *testing.T) {
 	})
 
 	err := c.CreateEngine(context.Background(), okSpec())
-	if err == nil || !strings.Contains(err.Error(), "already occupied") {
+	if err == nil || !strings.Contains(err.Error(), "occupied by") {
 		t.Fatalf("CreateEngine() = %v, want a refusal: an engine that can use every card holds every card", err)
 	}
 }
@@ -583,7 +594,7 @@ func TestCreateEngineCountsTheOlderNvidiaRuntimeSpelling(t *testing.T) {
 	})
 
 	err := c.CreateEngine(context.Background(), okSpec())
-	if err == nil || !strings.Contains(err.Error(), "already occupied") {
+	if err == nil || !strings.Contains(err.Error(), "occupied by") {
 		t.Fatalf("CreateEngine() = %v, want a refusal: `runtime: nvidia` gives a container cards too", err)
 	}
 }
@@ -872,8 +883,13 @@ func TestCreateEngineRefusesACardHeldByAStoppedEngine(t *testing.T) {
 	})
 
 	err := c.CreateEngine(context.Background(), okSpec())
-	if err == nil || !strings.Contains(err.Error(), "already occupied") {
+	if err == nil || !strings.Contains(err.Error(), "occupied by") {
 		t.Fatalf("CreateEngine() = %v, want a refusal: a stopped engine still holds its cards", err)
+	}
+	// Reported as exited, because the fix differs: stop or narrow a running holder,
+	// remove an exited one.
+	if !strings.Contains(err.Error(), "whisper (exited, holds 6)") {
+		t.Errorf("CreateEngine() = %v, want the holder reported as exited", err)
 	}
 	if ops := l.all(); len(ops) != 0 {
 		t.Errorf("ops = %v, want nothing done", ops)
@@ -1185,7 +1201,7 @@ func TestCreateEngineIgnoresAMonitoringContainersClaim(t *testing.T) {
 	// Without the declaration the refusal stands, which is the fail-closed default: a
 	// container that can use every card is treated as using them.
 	err := c.CreateEngine(context.Background(), okSpec())
-	if err == nil || !strings.Contains(err.Error(), "already occupied") {
+	if err == nil || !strings.Contains(err.Error(), "occupied by") {
 		t.Fatalf("CreateEngine() = %v, want a refusal before the exporter is declared", err)
 	}
 	if !strings.Contains(err.Error(), "engineGPUIgnore") {
@@ -1224,7 +1240,7 @@ func TestEngineGPUIgnoreDoesNotExemptARealEngine(t *testing.T) {
 	c.config.EngineGPUIgnore = []string{"dcgm-exporter"}
 
 	err := c.CreateEngine(context.Background(), okSpec())
-	if err == nil || !strings.Contains(err.Error(), "already occupied") {
+	if err == nil || !strings.Contains(err.Error(), "occupied by") {
 		t.Fatalf("CreateEngine() = %v, want the real engine still to occupy cards 6 and 7", err)
 	}
 }
@@ -1323,5 +1339,64 @@ func TestRemoveEngineStillRemovesWhenTheConfigCannotBeRead(t *testing.T) {
 	}
 	if payload := emittedEngineSet(t, l); !strings.Contains(payload, "count=0") {
 		t.Errorf("payload = %q, want the correction recorded regardless", payload)
+	}
+}
+
+// The bug a real machine found and no unit test could have: lmsysorg/sglang's own
+// entrypoint is nvidia_entrypoint.sh, which does `exec "$@"`, so a flag list with no
+// program in front of it dies with `exec: --: invalid option` before the engine starts.
+// The image digest pins what COULD run; the entrypoint chooses which of it does.
+func TestCreateEngineRunsTheConfiguredEntrypoint(t *testing.T) {
+	c, _, l := engineCtrl(t)
+
+	if err := c.CreateEngine(context.Background(), okSpec()); err != nil {
+		t.Fatalf("CreateEngine() = %v, want nil", err)
+	}
+
+	// The container gets the program first, then the flags.
+	want := "create dsv4flash cmd=python -m sglang.launch_server --model-path deepseek-ai/DeepSeek-V4-Flash --revision " + testRevision + " --port 8000 --host 0.0.0.0 --tp 2 --mem-fraction-static 0.85"
+	if l.indexOf(want) == -1 {
+		t.Errorf("ops = %v,\nwant %q", l.all(), want)
+	}
+
+	// And so does the record, for the same reason: a reader holding only the flags cannot
+	// tell which program consumed them, and the same image can be launched several ways.
+	payload := emittedEngineSet(t, l)
+	if !strings.Contains(payload, "\tpython -m sglang.launch_server --model-path") {
+		t.Errorf("payload = %q, want the entrypoint recorded ahead of the flags", payload)
+	}
+}
+
+func TestCreateEngineLeavesTheImagesEntrypointAloneWhenNoneIsConfigured(t *testing.T) {
+	// An image whose own entrypoint already takes a flag list — vllm/vllm-openai is one.
+	// Forcing an entrypoint on it would be the controller inventing a launcher.
+	c, _, l := engineCtrl(t)
+	c.config.Engines[0].Entrypoint = nil
+
+	if err := c.CreateEngine(context.Background(), okSpec()); err != nil {
+		t.Fatalf("CreateEngine() = %v, want nil", err)
+	}
+	if l.indexOf("create dsv4flash cmd=--model-path") == -1 {
+		t.Errorf("ops = %v, want the flags alone", l.all())
+	}
+}
+
+func TestRecordedSetCarriesAnExistingEnginesEntrypoint(t *testing.T) {
+	// Read back off the container, not remembered: the snapshot has to describe an engine
+	// this process did not create, and dropping its entrypoint would record a flag list
+	// belonging to an unknown program.
+	c, _, l := engineCtrl(t, fakeContainer{
+		id: "eeee" + strings.Repeat("1", 60), name: "glm53", image: engineRef,
+		entry: []string{"python", "-m", "sglang.launch_server"},
+		args:  []string{"--model-path", "zai-org/GLM-5.3", "--tp", "8"},
+		gpus:  "0,1", hasGPU: true, engine: true,
+	})
+
+	if err := c.CreateEngine(context.Background(), okSpec()); err != nil {
+		t.Fatalf("CreateEngine() = %v, want nil", err)
+	}
+	payload := emittedEngineSet(t, l)
+	if !strings.Contains(payload, "glm53\t"+engineRef+"\t0,1\tpython -m sglang.launch_server --model-path zai-org/GLM-5.3 --tp 8") {
+		t.Errorf("payload = %q, want the existing engine's whole command", payload)
 	}
 }
