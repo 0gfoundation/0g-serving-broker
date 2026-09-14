@@ -18,10 +18,14 @@ const (
 	// response's `usage` carries no completion_tokens.
 	ServiceTypeEmbedding       = "embedding"
 	ServiceTypeVideoGeneration = "video-generation"
-	// ServiceTypeAudioGeneration is asynchronous audio generation (POST
-	// /audio/generations, then status and content): a script in, generated audio
-	// out — dialogue, music, ambience and sound effects, not only speech. Billed
-	// per second of OUTPUT audio.
+	// ServiceTypeAudioGeneration is audio generation (POST /audio/speech): a script
+	// in, generated audio out — dialogue, music, ambience and sound effects, not only
+	// speech. Billed per second of OUTPUT audio.
+	//
+	// SYNCHRONOUS for its first vendor. Seed Audio answers one POST with the audio
+	// itself, so there is no job to poll. The modality keeps its async machinery
+	// (model.AudioPollJob and the scheduler) for a vendor that IS async — audiospec
+	// is a registry precisely to admit one — but nothing routes there today.
 	//
 	// It is NOT the inverse of ServiceTypeSpeechToText and must not be folded into
 	// it. STT consumes audio and bills the INPUT dimension; this produces audio and
@@ -132,11 +136,18 @@ var (
 		"/audio/transcriptions": {},
 		"/videos":               {}, // Video generation (OpenAI Video API)
 		"/embeddings":           {}, // Text embeddings (OpenAI Embeddings API)
-		// Audio generation. NOT "/audio/speech": OpenAI's speech endpoint promises raw
-		// audio bytes synchronously, so returning a job envelope there does not fail
-		// loudly — it hands the client a corrupt audio file. See
+		// Audio generation (OpenAI Audio Speech API). Synchronous: one request, one
+		// response carrying the audio bytes, with the billable duration in a response
+		// header (see ctrl.AudioDurationHeader).
+		//
+		// This WAS "/audio/generations", chosen when the vendor API was believed to be
+		// an async submit-poll job. BytePlus's own reference says otherwise — Seed
+		// Audio is a single synchronous POST — so the async shape had nothing to model
+		// and "/audio/speech" is honourable: it is OpenAI's real TTS path, and an
+		// adaptor that base64-decodes the vendor's audio returns exactly what that
+		// contract promises. See the CORRECTION section of
 		// docs/design/seed-audio-generation.md.
-		"/audio/generations": {},
+		"/audio/speech": {},
 	}
 
 	// FreePrefixes defines path prefixes that can be accessed without charging
@@ -153,9 +164,6 @@ var (
 	// Note: Paths here should NOT include /v1/proxy prefix (it's already stripped)
 	AuthRequiredPrefixes = []string{
 		"/videos/", // Video status and content retrieval (e.g., /videos/{id}, /videos/{id}/content)
-		// Audio status and content. Authenticated but UNBILLED: the create is the only
-		// billable call, and a client polling its own job must not be charged per poll.
-		"/audio/generations/",
 	}
 
 	// Keep this as to remove duplicate headers from incoming request

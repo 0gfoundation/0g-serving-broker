@@ -5,6 +5,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -199,6 +200,89 @@ func ceilPositiveAudioSeconds(n json.Number) (int64, bool) {
 		return 0, false
 	}
 	return int64(math.Ceil(f)), true
+}
+
+// AudioDurationHeader carries the billable output duration, in seconds, on a
+// synchronous audio-generation response.
+//
+// It exists because the two contracts this modality has to satisfy disagree about
+// the response body. OpenAI's /v1/audio/speech returns RAW AUDIO BYTES — that is
+// what its SDKs read — while every billing path in this broker reads a parsed JSON
+// body. A header is the only place a quantity can live without breaking one of
+// them.
+//
+// The adaptor populates it from the vendor's own billing figure. For Seed Audio
+// that is `original_duration`, which its reference names twice as the number that
+// bills, and which deliberately differs from `duration` when speech_rate or
+// post-processing applies. Reading the wrong one would bill a sped-up request for
+// the clip the listener hears rather than the audio the model produced.
+const AudioDurationHeader = "X-0G-Audio-Duration-Seconds"
+
+// handleAudioSpeechResponse handles the SYNCHRONOUS audio-generation response: the
+// body is the audio itself, and the billable duration arrives in AudioDurationHeader.
+//
+// The body is streamed rather than buffered. A 120-second wav at 48kHz/16-bit
+// stereo is ~23MB, and holding that per concurrent request to re-read a number
+// already present in the headers would be a memory cost with nothing bought. It is
+// also why this does not sign the response — see handleAudioGenerationResponse on
+// why no ZG-Res-Key is advertised for this modality yet.
+//
+// Billing runs AFTER the copy, matching every other modality here: content delivery
+// has never been gated on billing completing.
+func (c *Ctrl) handleAudioSpeechResponse(ctx *gin.Context, resp *http.Response, _ model.User, outputPrice string, reqBody []byte, reqModel model.Request) error {
+	defer resp.Body.Close()
+
+	// Read before the copy: the header is available as soon as the response head
+	// arrives, and reading it first means a client write failure cannot cost us the
+	// billing quantity.
+	seconds, source := c.resolveAudioSpeechSeconds(ctx, resp.Header, reqBody)
+
+	if _, err := io.Copy(ctx.Writer, resp.Body); err != nil {
+		// The audio is already partially on the wire and the vendor has charged us, so
+		// this is not a reason to skip billing — the client got what it paid for, or
+		// lost it to its own connection.
+		c.logger.Warnf("audio speech: stream response to client for request %s: %v", reqModel.RequestHash, err)
+	}
+
+	monitor.RecordAudioBillingSource(string(source))
+
+	if reqModel.IsWhitelisted {
+		c.recordWhitelistedUsage(reqModel, 0, seconds, 0, 0, "")
+		return nil
+	}
+
+	fee, err := util.Multiply(outputPrice, seconds)
+	if err != nil {
+		c.logger.Errorf("audio speech: calculate fee from price %q x %ds for request %s: %v", outputPrice, seconds, reqModel.RequestHash, err)
+		return err
+	}
+	if err := c.db.UpdateRequestFeesAndCount(reqModel.RequestHash, fee.String(), fee.String(), seconds); err != nil {
+		c.logger.Errorf("audio speech: update fees for request %s: %v", reqModel.RequestHash, err)
+		return err
+	}
+	c.logger.Infof("audio speech: request %s billed %ds from %s at %s/s", reqModel.RequestHash, seconds, source, outputPrice)
+	return nil
+}
+
+// resolveAudioSpeechSeconds reads the billable duration from the response header,
+// falling back to the reserved ceiling when the adaptor did not report one.
+//
+// The fallback OVER-bills by construction, so it is metered rather than merely
+// logged: broker_audio_billing_fallback_total{source="reserve"} is how an operator
+// learns the adaptor stopped populating the header, which is the real defect behind
+// it. It should never fire against Seed Audio — that vendor always reports a
+// duration — so any rate at all is a signal, not noise.
+func (c *Ctrl) resolveAudioSpeechSeconds(ctx *gin.Context, header http.Header, reqBody []byte) (int64, audioQuantitySource) {
+	if secs, ok := ceilPositiveAudioSeconds(json.Number(strings.TrimSpace(header.Get(AudioDurationHeader)))); ok {
+		return secs, audioQuantityUsage
+	}
+	reserved := c.audioReservedSeconds(ctx, reqBody, ctx.Request.Header.Get("Content-Type"))
+	if reserved < 1 {
+		reserved = 1
+	}
+	c.logger.Errorf("audio speech: response carried no usable %s; billing the reserved ceiling of %ds instead. This OVER-bills — check the adaptor is setting the header from the vendor's billing duration",
+		AudioDurationHeader, reserved)
+	return reserved, audioQuantityReserve
 }
 
 // handleAudioGenerationResponse handles the create response for an

@@ -163,12 +163,13 @@ func TestEveryChatRouteHasARecognizedSurface(t *testing.T) {
 		"/audio/transcriptions": {},
 		"/videos":               {},
 		"/embeddings":           {}, // OpenAI Embeddings API — no choices/messages, not chat-shaped; E2EE sealing not wired for it, same as images/audio/video above
-		// Audio generation — a create/poll job envelope, not chat-shaped. E2EE is
-		// unavailable for it deliberately: profileForRequest returns sealable=false,
-		// for the reason its comment already names ("video-generation, and whatever
-		// service type is added next") — a default arm guessing ProfileChat would
-		// apply chat's sealing rules to a request shape nobody analyzed.
-		"/audio/generations": {},
+		// Audio generation — a synchronous request whose RESPONSE is raw audio bytes,
+		// about as far from chat-shaped as this list gets. E2EE is unavailable for it
+		// deliberately: profileForRequest returns sealable=false, for the reason its
+		// comment already names ("video-generation, and whatever service type is added
+		// next") — a default arm guessing ProfileChat would apply chat's sealing rules
+		// to a request shape nobody analyzed.
+		"/audio/speech": {},
 	}
 	for route := range constant.TargetRoute {
 		if _, nonChat := nonChatRoutes[route]; nonChat {

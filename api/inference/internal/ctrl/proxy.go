@@ -515,7 +515,11 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 	case "video-generation":
 		return c.handleVideoGenerationResponse(ctx, resp, account, outputPrice, body, reqModel)
 	case "audio-generation":
-		return c.handleAudioGenerationResponse(ctx, resp, account, outputPrice, body, reqModel)
+		// The SYNCHRONOUS handler: Seed Audio answers one POST with the audio itself.
+		// handleAudioGenerationResponse (the create/poll branch) is retained for a
+		// vendor that is genuinely async and is not reachable today — see the
+		// CORRECTION section of docs/design/seed-audio-generation.md.
+		return c.handleAudioSpeechResponse(ctx, resp, account, outputPrice, body, reqModel)
 	default:
 		err = errors.New("unknown service type")
 		c.handleBrokerError(ctx, err, "prepare request extractor")
