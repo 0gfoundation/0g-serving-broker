@@ -181,6 +181,56 @@ through `signChatResponse` rather than `signChatWithKey`, because on a sealed tu
 it must bind the on-wire aad‖ciphertext rather than a plaintext the client never
 received.
 
+**Sealing demands more of the upstream than proxying does, and that is the
+profile's sharpest operational edge.** §7.3 requires the billable duration as a
+**JSON number** at `usage.seconds` or top-level `duration`. Measured against the
+pinned protocol package, three shapes the broker bills happily when proxying are
+refused when sealing:
+
+| upstream body | who sends it |
+|---|---|
+| `{"text":"…"}` | `whisper-1` and most self-hosted faster-whisper / vLLM builds, on `response_format=json` |
+| `{"text":"…","usage":{"type":"tokens",…}}` | `gpt-4o-transcribe`, which bills in tokens rather than seconds |
+| `{"text":"…","duration":"3.2"}` | a whisper backend observed in the wild — `flexFloat64` exists for it |
+
+`null` in either locator is refused too: the protocol package draws "null is the
+absence of a number, not a zero", while a genuine `0` is accepted.
+
+The transcription has already been produced when this is discovered, so the
+request fails **after** the compute was spent. That is the right trade rather
+than a defect: synthesizing the number would have the §8 signature attest a
+duration the model never produced, which is precisely what
+`updateSpeechToTextFallback`'s word-count estimate is. The same answer the image
+profile already gives a provider that returns a 200 with no verifiable image
+count.
+
+Two consequences are wired deliberately:
+
+- **Attributed upstream**, not to the broker. The provider's response *shape* is
+  what makes the result unusable, and a provider must not be able to move a
+  degradation into the broker's alert bucket by emitting an unbillable 200. The
+  wasted compute lands on the provider, which is also who can fix it. Unlike the
+  image path this is **not** marked `ignoreError`, so it stays logged — an
+  operator wants to see it, and the attribution override already keeps it out of
+  the client bucket.
+- **Named**, with its own error text rather than a generic seal failure, so the
+  log and the response distinguish it from a real broker fault.
+
+The check is in the handler rather than left to the sealer only because the
+sealer's refusal carries no distinguishable error type. The sealer remains the
+only **gate** — if the two ever disagree it still fails closed behind the check.
+
+Not pre-rejected at admission: `response_format` cannot predict this. The
+profile permits both `json` and `verbose_json`, only `verbose_json` reliably
+carries `duration`, and refusing `json` up front would reject every upstream that
+*does* report seconds on it. The condition is a property of the response, so it
+can only be discovered from the response.
+
+The quoted-number case is the one worth fixing rather than documenting, and it
+belongs **upstream in `0g-pc-e2ee`**: `flexFloat64`'s existence is evidence the
+shape is real, and a broker-side normalization would be working around the
+protocol package instead of correcting it.
+
 **An unsealed `file_base64` JSON body is refused, deliberately.** The router's
 OpenAPI spec documents such a shape on this endpoint; the broker has never
 implemented it, and the customer-facing docs say the opposite ("this endpoint
@@ -190,10 +240,12 @@ upstream with a clear 400 here. Supporting it later is small — the
 materialization is profile-independent — but it is a product decision, not a
 protocol one.
 
-**Not covered:** streaming (§5.3.3 — the profile defines no streaming frames),
-and `response_format` outside `{json, verbose_json}` (§5.3.2 — `text`/`srt`/`vtt`
+**Not covered:** streaming (§5.3.3 — the profile defines no streaming frames);
+`response_format` outside `{json, verbose_json}` (§5.3.2 — `text`/`srt`/`vtt`
 return a body with nowhere to put `_e2ee`, so they are inexpressible under
-sealing rather than merely leaky).
+sealing rather than merely leaky); and upstreams that report no numeric duration,
+per the section above — sealed traffic to them fails rather than being billed on
+an estimate.
 
 ### An envelope smuggled into a multipart body (SPEC §5.3.1)
 

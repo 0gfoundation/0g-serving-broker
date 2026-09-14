@@ -21,6 +21,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/model"
+	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
 
 // The speech profile is the first JSON-ified one (SPEC §5.3): the client seals a
@@ -872,5 +873,173 @@ func TestSealedSpeechFailsClosedWhenTheFrameCannotBeSealed(t *testing.T) {
 	}
 	if bytes.Contains(rec.Body.Bytes(), []byte(transcript)) {
 		t.Fatalf("the plaintext transcript reached the client after the seal failed: %s", rec.Body.Bytes())
+	}
+}
+
+// §7.3 requires a numeric cleartext duration, and real upstreams often send
+// none. The shapes below are what whisper-1, self-hosted faster-whisper and
+// gpt-4o-transcribe actually return, measured against the pinned protocol
+// package — so sealing demands MORE of an upstream than proxying does, and
+// this file's own updateSpeechToTextFallback exists because upstreams so often
+// report no usage.
+//
+// Fail-closed is right (a synthesized duration would have §8 sign a number the
+// model never produced), so what is under test is that the refusal is NAMED and
+// attributed UPSTREAM — the transcript was produced and the provider's shape is
+// what makes it unusable, so it must not land in the broker's alert bucket.
+func TestSealedSpeechRefusesAnUnbillableUpstreamShape(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		body string
+		// refused: does the request fail, and with the duration-specific error
+		// attributed upstream?
+		refused bool
+	}{
+		{"no usage at all (whisper-1, response_format=json)", `{"text":"hello"}`, true},
+		{"token usage, no seconds (gpt-4o-transcribe)", `{"text":"hello","usage":{"type":"tokens","input_tokens":14,"output_tokens":4,"total_tokens":18}}`, true},
+		// flexFloat64 exists because a whisper backend was observed emitting this;
+		// the profile takes a JSON number only, so it is refused too. Recorded here
+		// rather than worked around: making the protocol accept a quoted number is
+		// the protocol package's call, not the broker's.
+		{"duration as a quoted number", `{"text":"hello","duration":"3.2"}`, true},
+		// And the shapes that DO satisfy §7.3 must still go through, or the guard
+		// would be a blanket refusal rather than a shape check.
+		{"numeric usage.seconds", `{"text":"hello","usage":{"type":"duration","seconds":3.2}}`, false},
+		{"numeric top-level duration", `{"text":"hello","duration":3.2}`, false},
+		// A genuine ZERO is a value §7.3 accepts, even though hasBillableUsage
+		// will not bill it — a billing question, not a sealing one.
+		{"a genuine zero duration", `{"text":"hello","duration":0}`, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f := speechFixture(t)
+			f.c.Service.TargetSeparated = true
+			f.c.reconciliationDB = &mockReconciliationDB{}
+			f.c.serviceCache = cache.New(5*time.Minute, 10*time.Minute)
+			f.c.serviceCache.Set("current_service", model.Service{InputPrice: "1", OutputPrice: "1"}, cache.DefaultExpiration)
+
+			rec := httptest.NewRecorder()
+			gin.SetMode(gin.TestMode)
+			ctx, _ := gin.CreateTestContext(rec)
+			ctx.Request = httptest.NewRequest("POST", "/v1/audio/transcriptions", nil)
+			ctx.Set(CtxKeyE2EESealed, true)
+			ctx.Set(CtxKeyE2EEProfile, wire.ProfileSpeech)
+			ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+			ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
+
+			resp := &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(tt.body)),
+			}
+			err := f.c.handleNonStreamingSpeechToText(ctx, resp, nil, model.Request{IsWhitelisted: true, RequestHash: "req-1"})
+
+			if !tt.refused {
+				if err != nil {
+					t.Fatalf("a §7.3-conforming shape must be served, got: %v", err)
+				}
+				// Served means sealed, not passed through in the clear.
+				if bytes.Contains(rec.Body.Bytes(), []byte("hello")) {
+					t.Errorf("the plaintext transcript reached the client: %s", rec.Body.Bytes())
+				}
+				return
+			}
+
+			if err == nil {
+				t.Fatal("an upstream shape with no cleartext duration must be refused")
+			}
+			if bytes.Contains(rec.Body.Bytes(), []byte("hello")) {
+				t.Errorf("the plaintext transcript reached the client: %s", rec.Body.Bytes())
+			}
+			// Named, so an operator reading the log or the response knows this is a
+			// provider shape problem and not a broker fault.
+			if !strings.Contains(err.Error(), "no cleartext audio duration") {
+				t.Errorf("the refusal is not the duration-specific one: %v", err)
+			}
+			// Attributed upstream. Without the override resolveFailureSource returns
+			// "broker" for an un-flagged 4xx, which would fire the broker alert for a
+			// provider degradation.
+			src, _ := ctx.Get(monitor.CtxKeyFailureSource)
+			if src != monitor.FailureSourceUpstream {
+				t.Errorf("failure source = %v, want %q", src, monitor.FailureSourceUpstream)
+			}
+		})
+	}
+}
+
+// The other direction, and it is the common case rather than an edge: an
+// UNSEALED transcription with no duration must still be SERVED. `{"text":…}` is
+// what whisper-1 and most self-hosted builds answer `response_format=json`
+// with, and updateSpeechToTextFallback exists for exactly that — so a guard that
+// forgot to scope itself to sealed traffic would refuse ordinary non-E2EE
+// requests wholesale.
+//
+// Nothing covered this until a mutation widening the guard to
+// `!isSealed || …` survived every other test in this file — the same shape as
+// the inverted-dispatch survivor one round earlier, in the same `!sealed`
+// direction.
+func TestUnsealedTranscriptionWithNoDurationIsStillServed(t *testing.T) {
+	f := speechFixture(t)
+	f.c.Service.TargetSeparated = true
+	f.c.reconciliationDB = &mockReconciliationDB{}
+	f.c.serviceCache = cache.New(5*time.Minute, 10*time.Minute)
+	f.c.serviceCache.Set("current_service", model.Service{InputPrice: "1", OutputPrice: "1"}, cache.DefaultExpiration)
+
+	rec := httptest.NewRecorder()
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest("POST", "/v1/audio/transcriptions", nil)
+	// No CtxKeyE2EESealed: an ordinary client.
+
+	const upstream = `{"text":"hello"}`
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(upstream)),
+	}
+	if err := f.c.handleNonStreamingSpeechToText(ctx, resp, nil, model.Request{IsWhitelisted: true, RequestHash: "req-1"}); err != nil {
+		t.Fatalf("an unsealed transcription with no duration must still be served: %v", err)
+	}
+	if got := rec.Body.String(); got != upstream {
+		t.Errorf("body forwarded = %q, want the upstream body %q", got, upstream)
+	}
+	if src, ok := ctx.Get(monitor.CtxKeyFailureSource); ok {
+		t.Errorf("a served request must not be attributed as a failure, got %v", src)
+	}
+}
+
+// The predicate itself, on the shapes the handler test cannot reach: a non-JSON
+// body must stay on the sealer's own "not a JSON object" refusal, which is
+// already accurate, rather than being reported as a missing duration.
+func TestSpeechLacksCleartextDuration(t *testing.T) {
+	for _, tt := range []struct {
+		body string
+		want bool
+	}{
+		{`{"text":"hello"}`, true},
+		{`{"text":"hello","usage":{"type":"tokens","input_tokens":14}}`, true},
+		{`{"text":"hello","duration":"3.2"}`, true},
+		{`{"text":"hello","usage":{"seconds":"3.2"}}`, true},
+		// The protocol package refuses all three null shapes by name, measured:
+		// "null is the absence of one, not a zero". A plain float64 decode would
+		// accept null silently and read it as a genuine 0.
+		{`{"text":"hello","usage":null}`, true},
+		{`{"text":"hello","duration":null}`, true},
+		{`{"text":"hello","usage":{"seconds":null}}`, true},
+		{`{"text":"hello","duration":3.2}`, false},
+		{`{"text":"hello","duration":0}`, false},
+		{`{"text":"hello","usage":{"seconds":3.2}}`, false},
+		{`{"text":"hello","usage":{"seconds":0}}`, false},
+		// Not JSON objects: the sealer's refusal is the accurate one.
+		{`a bare transcript`, false},
+		{`null`, false},
+		{`[]`, false},
+		{`"hello"`, false},
+		{``, false},
+	} {
+		t.Run(tt.body, func(t *testing.T) {
+			if got := speechLacksCleartextDuration([]byte(tt.body)); got != tt.want {
+				t.Errorf("speechLacksCleartextDuration(%s) = %v, want %v", tt.body, got, tt.want)
+			}
+		})
 	}
 }
