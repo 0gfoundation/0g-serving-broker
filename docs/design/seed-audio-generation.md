@@ -11,6 +11,107 @@ document first: everything here about polling, lease-based crash recovery, the `
 signature lifecycle and the job-id contract is *the same mechanism*, and this document only
 records where audio differs.
 
+## CORRECTION: the vendor API is SYNCHRONOUS
+
+Everything below was written before BytePlus's own reference could be read. It
+assumed Seed Audio was an asynchronous submit-then-poll API. **It is not.** The
+native documentation has been retrieved and the shape is:
+
+```
+POST https://voice.ap-southeast-1.bytepluses.com/api/v3/tts/create
+X-Api-Key:        <from the BytePlus console>
+X-Api-Request-Id: <client-generated UUID>
+```
+
+One request, one response carrying the audio. There is no task id, no status enum,
+no poll endpoint — the words "task", "poll", "query" and "async" do not appear in
+the reference at all.
+
+### Where the error came from, so it is not repeated
+
+Three inputs, two of them bad:
+
+- BytePlus's announcement calls it "a pioneering **non-streaming** TTS model". That
+  was read as asynchronous. It means what it says: the output is not incremental.
+  **Non-streaming does not imply async**, and conflating the two is the root error.
+- A third-party integration guide stated "the async pattern is non-negotiable — you
+  submit, you poll, you download." That described a RESELLER'S WRAPPER, not BytePlus.
+  Reseller shapes are not the vendor's and must not be treated as evidence about it.
+- Seedance is async, and Seed Audio is its sibling. But Seedance is on Ark and Seed
+  Audio is on BytePlus Voice — a difference this very document establishes in the
+  section below. The sibling intuition was allowed to override the document's own
+  finding.
+
+### The verified request shape
+
+| Field | |
+|---|---|
+| `model` | `seed-audio-1.0` |
+| `text_prompt` | prompt or text to synthesize, ≤ 3000 characters |
+| `references` | array; mode is inferred from what is passed |
+| `audio_config` | `format` (wav/mp3/pcm/ogg_opus, default wav), `sample_rate` (8000–48000; default 40000 for wav/pcm, 44100 for mp3), `speech_rate` [-50,100], `loudness_rate` [-50,100], `pitch_rate` [-12,12], `enable_subtitle` |
+| `aigc_watermark`, `aigc_metadata` | explicit and implicit watermarking |
+
+A `references` entry carries exactly one of `audio_url`, `audio_data` (base64) or
+`speaker` (a TTS 2.0 or cloned voice id); an image reference carries `image_url` or
+`image_data`. Up to **three** audio clips (≤30s, ≤10MB each) referenced from the
+prompt as `@Audio1`..`@Audio3`, **or** one image (≤10MB) — never both.
+
+Note `speaker` is a REFERENCE entry, not a top-level field. OpenAI's `voice`
+therefore maps into the references array, not alongside `input`.
+
+### The verified response shape, and the field that bills
+
+```jsonc
+{ "code": 0, "message": "...",
+  "audio": "<base64>",              // the synthesized audio itself
+  "url": "https://...",             // same audio, expires after 2 hours
+  "duration": 47.2,                 // POST-PROCESSED duration
+  "original_duration": 48.0,        // the model's original output — THE BILLING FIGURE
+  "subtitle": { "sentences": [...], "words": [...] } }   // only with enable_subtitle
+```
+
+The reference is explicit about which duration bills, and it settles two of this
+document's open questions outright:
+
+> `original_duration` — "Duration of the model's original output audio. **This is
+> also the duration used for billing**, with a maximum of 120s."
+>
+> `duration` — "It may differ from `original_duration` when speed adjustment or
+> post-processing is applied; **billing is based on `original_duration`**."
+
+So:
+
+- **`speech_rate` does not move the bill.** The open question about whether speed is
+  applied before or after generation is answered: billing reads the pre-processing
+  figure either way.
+- **Billing is output-only, capped at 120s.** No charge for reference media, so the
+  reserve as a true output-only upper bound is confirmed correct.
+- **There is no `usage` block, but there is an authoritative quantity.** The
+  adaptor maps `original_duration` onto `usage.output_audio_seconds`.
+- **The `pcm` duration guard is unnecessary.** A duration is always reported, so the
+  container never has to be measured. That guard can stay as defence but will not fire.
+
+### What this changes
+
+The async machinery in the sections below — `AudioPollJob`, the scheduler, the
+job-id contract, the poll cadence config — **is not the path Seed Audio takes**. It
+remains correct infrastructure for an audio vendor that IS asynchronous, and
+`audiospec` was built as a registry precisely to admit one. It is simply dormant.
+
+What Seed Audio needs instead is the synchronous path, and the endpoint choice
+inverts with it: `/v1/audio/generations` was chosen BECAUSE the API was believed
+async. Synchronously, `/v1/audio/speech` is honourable — it is OpenAI's real TTS
+path, and an adaptor that base64-decodes `audio` returns exactly what that contract
+promises. Streaming stays out of scope: it is opt-in on that endpoint, Seed Audio
+does not support it, and a request for it should be refused rather than faked.
+
+The one thing the synchronous shape reintroduces is the problem that motivated the
+async design in the first place: OpenAI's `/v1/audio/speech` returns RAW BYTES, and
+every billing path in this broker reads a parsed JSON body. The adaptor therefore
+reports the duration in a response HEADER alongside the bytes, which is the only
+shape that keeps both the client contract and the billing path intact.
+
 ## Why a new modality rather than an existing one
 
 The broker already serves `speech-to-text`. That is the opposite direction and shares nothing
