@@ -292,8 +292,11 @@ type ModelInfo struct {
 
 // Validate checks that all required ModelInfo fields are set.
 // serviceType is the service type (e.g., "chatbot", "video-generation") and controls
-// which fields are required. For video-generation, contextLength is optional since
-// video models don't have a token context window.
+// which fields are required. For video-generation and audio-generation, contextLength
+// is optional: neither has a token context window. Audio's input bound is a character
+// limit on the script (3000 for Seed Audio) and its OUTPUT bound is a duration
+// ceiling — neither is a context window, and reporting one would advertise a
+// capability the model does not have.
 func (m *ModelInfo) Validate(serviceType string) error {
 	if m.Name == "" {
 		return fmt.Errorf("service.modelInfo.name is required")
@@ -301,7 +304,7 @@ func (m *ModelInfo) Validate(serviceType string) error {
 	if m.Description == "" {
 		return fmt.Errorf("service.modelInfo.description is required")
 	}
-	if serviceType != "video-generation" && m.ContextLength <= 0 {
+	if serviceType != constant.ServiceTypeVideoGeneration && serviceType != constant.ServiceTypeAudioGeneration && m.ContextLength <= 0 {
 		return fmt.Errorf("service.modelInfo.contextLength is required and must be positive")
 	}
 	if m.Architecture == nil {

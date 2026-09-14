@@ -1460,13 +1460,21 @@ func validateModelPricing(cfg *Config) error {
 	}
 	// Per-model billing is wired only for the modalities whose request path
 	// resolves the request model before billing: chatbot + speech-to-text (token
-	// billing) and video-generation (per-effective-second billing). On other
-	// modalities the allowlist would never run and every request would silently
-	// fall back to the on-chain max price, so reject at load time.
+	// billing), video-generation (per-effective-second) and audio-generation
+	// (per-generated-second). On other modalities the allowlist would never run
+	// and every request would silently fall back to the on-chain max price, so
+	// reject at load time.
+	//
+	// audio-generation qualifies because proxy.go resolves the model before the
+	// balance gate — AudioCreateReserve needs it, since both the vendor rules and
+	// the price are per-model.
 	switch svc.Type {
-	case constant.ServiceTypeChatbot, constant.ServiceTypeSpeechToText, constant.ServiceTypeVideoGeneration:
+	case constant.ServiceTypeChatbot, constant.ServiceTypeSpeechToText,
+		constant.ServiceTypeVideoGeneration, constant.ServiceTypeAudioGeneration:
 	default:
-		return fmt.Errorf("invalid config: service.modelPricing is only supported for service type '%s', '%s', or '%s', got '%s'", constant.ServiceTypeChatbot, constant.ServiceTypeSpeechToText, constant.ServiceTypeVideoGeneration, svc.Type)
+		return fmt.Errorf("invalid config: service.modelPricing is only supported for service type '%s', '%s', '%s', or '%s', got '%s'",
+			constant.ServiceTypeChatbot, constant.ServiceTypeSpeechToText,
+			constant.ServiceTypeVideoGeneration, constant.ServiceTypeAudioGeneration, svc.Type)
 	}
 	// service.model is the default billed (and forwarded-upstream) model for
 	// requests that omit the model field; it must be set.
