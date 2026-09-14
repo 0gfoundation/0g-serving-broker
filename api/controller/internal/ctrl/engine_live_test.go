@@ -262,3 +262,98 @@ func truncate(s string, n int) string {
 	}
 	return s[:n] + "…"
 }
+
+// Step 6: let the READER decide, on real records, instead of taking the writer's word.
+//
+// The whole feature is one join: zg-upstream-set says plaintext may reach
+// http://<name>:<port>, and zg-engine-set says <name> is a container this CVM created
+// from a pinned digest. Without the second record, classifyUpstreams finds no compose
+// service for that host and reports an EXTERNAL vendor — fail-closed and useless. This
+// runs the real resolver over the real ledger and prints what it concludes.
+//
+// # What this does and does not establish
+//
+// VerifiedQuote is constructed by hand here, and its own doc says passing an unanchored
+// log is "a lie this package cannot detect". Two of the three inputs are anchored and one
+// is not:
+//
+//   - EventLogJSON: anchored. TestLiveReadRTMR3 checks ReplayRTMRs against the quote, which
+//     is what a verifier's event_log_verified means.
+//   - ReportData: the quote's own, so whatever the CVM put there.
+//   - ComposeHash: taken from the guest agent's Info, NOT checked against the quote's
+//     signed report body. A third party must get it from a verify response.
+//
+// So this exercises the resolver's logic on genuine records. It is not a verification, and
+// nothing here should be read as one.
+func TestLiveResolveClassifiesTheEngine(t *testing.T) {
+	client := dstack.NewDstackClient()
+
+	info, err := client.Info(context.Background())
+	if err != nil {
+		t.Fatalf("Info: %v", err)
+	}
+	quote, err := client.GetQuote(context.Background(), make([]byte, 64))
+	if err != nil {
+		t.Fatalf("GetQuote: %v", err)
+	}
+
+	state, err := attest.ResolveRunningState(attest.VerifiedQuote{
+		ComposeHash:  info.ComposeHash,
+		ReportData:   quote.ReportData,
+		EventLogJSON: []byte(quote.EventLog),
+		// The compose service the resolver identifies as the broker. A dev CVM is not a
+		// broker deployment — this one defines a single service called "app" — and
+		// ResolveRunningState hard-fails on a name its compose does not define, which is
+		// correct: it cannot report a broker digest it cannot find.
+	}, []byte(info.TcbInfo), brokerService())
+	if err != nil {
+		// Skipped, not failed: the resolver is all-or-nothing on purpose — it refuses to
+		// answer ANY question about a CVM whose broker image it cannot pin, rather than
+		// answer some of them. A dev CVM is not a broker deployment, so it usually cannot
+		// satisfy that: this one's single compose service runs
+		// leechael/phala-cloud-nextjs-starter:latest, a tag. Exercising the classification
+		// therefore needs a real broker deployment, and the refusal below is the resolver
+		// working, not failing.
+		t.Skipf("this CVM cannot satisfy the resolver's preconditions, so the classification cannot be exercised here: %v", err)
+	}
+
+	t.Logf("upstreams state=%q err=%v", state.UpstreamsState, state.UpstreamsErr)
+	for _, u := range state.Upstreams {
+		t.Logf("  upstream name=%s url=%s identity=%s composeService=%q pinnedImage=%q imageSource=%q",
+			u.Name, u.URL, u.Identity, u.ComposeService, u.PinnedImage, u.ImageSource)
+	}
+	t.Logf("engines state=%q err=%v", state.EnginesState, state.EnginesErr)
+	for _, e := range state.Engines {
+		t.Logf("  engine name=%s image=%s gpus=%s", e.Name, e.Image, e.GPUs)
+	}
+	for _, ch := range state.EngineChanges {
+		t.Logf("  engine change: %s", ch)
+	}
+	hash, err := state.UpstreamSetHash()
+	t.Logf("upstream set hash=%s err=%v", hash, err)
+
+	// The claim this whole PR exists for: the destination is not an external vendor.
+	if len(state.Upstreams) == 0 {
+		t.Fatal("no upstream in the ledger; nothing to classify")
+	}
+	for _, u := range state.Upstreams {
+		if u.Name != liveName {
+			continue
+		}
+		if u.ImageSource != attest.ImageSourceRecord {
+			t.Errorf("upstream %s classified as %q, want %q — without it a reader cannot tell this destination from an external vendor",
+				u.Name, u.ImageSource, attest.ImageSourceRecord)
+		}
+		if u.PinnedImage != liveImage {
+			t.Errorf("upstream %s reports image %q, want the pinned %q", u.Name, u.PinnedImage, liveImage)
+		}
+	}
+}
+
+// brokerService names the compose service the resolver should treat as the broker.
+func brokerService() string {
+	if v := os.Getenv("ZG_LIVE_BROKER_SERVICE"); v != "" {
+		return v
+	}
+	return "0g-serving-provider-broker"
+}
