@@ -232,6 +232,47 @@ type Ctrl struct {
 	// its own snapshot of the config slice.
 	adminAddresses map[string]bool
 	allowedIPs     map[string]bool
+
+	// The hash of the upstream set the ledger currently records, and the lock over it.
+	//
+	// Written by the two recording paths and read by CurrentKeyIdentity, which the
+	// attestation proxy calls from its own goroutines — so this needs a lock rather than
+	// being a plain field. RWMutex rather than atomic because the write side also has to
+	// clear it, and "clear then write" must not be observable as two steps.
+	//
+	// EMPTY means keys are derived unbound, and it is the honest answer in three different
+	// situations: the deployment does not record its set at all, it recorded one that
+	// cannot be read, or it has no attestation proxy so nothing the controller derives
+	// reaches the broker. See boundUpstreamSetHash.
+	setHashMu       sync.RWMutex
+	boundSetHashVal string
+}
+
+// boundUpstreamSetHash reports the set hash keys are currently derived for, or "" for
+// unbound.
+//
+// The three ways it is empty are worth separating, because only one of them is a problem:
+//
+//   - controller.recordUpstreamSet is off. Nothing is recorded, nothing is bound, and the
+//     derivation paths are exactly what they have always been. The ordinary case.
+//   - a set was recorded and could not be stated (the invalidation). Then it MUST be
+//     empty: deriving the unbound key would be right, and deriving for a hash of a set
+//     nobody can read would be a key no record names.
+//   - no attestation proxy. The broker derives its own keys at fixed paths, so a hash
+//     stored here would only make the controller's recorded signer disagree with the one
+//     the broker publishes — permanently, since no later record can fix it. That is the
+//     case UpdateImages already refuses outright for the digest.
+func (c *Ctrl) boundUpstreamSetHash() string {
+	c.setHashMu.RLock()
+	defer c.setHashMu.RUnlock()
+	return c.boundSetHashVal
+}
+
+// bindUpstreamSetHash records what keys are derived for from now on. "" unbinds.
+func (c *Ctrl) bindUpstreamSetHash(hash string) {
+	c.setHashMu.Lock()
+	defer c.setHashMu.Unlock()
+	c.boundSetHashVal = hash
 }
 
 // NewCtrl creates a new controller
@@ -1242,16 +1283,28 @@ func (c *Ctrl) GetPrometheusConfig(ctx context.Context) (string, error) {
 // It is the attestation proxy's single source for both, so the two cannot be read from
 // different moments. See attestproxy.KeyIdentity for why that matters.
 //
-// The set hash is EMPTY here, and this change leaves it so on purpose: every derivation
-// path stays byte for byte what it was, so nothing in the fleet rotates a key. Filling it
-// in is the follow-up, and it is the part that changes signer addresses and resets on-chain
-// acknowledgements.
+// The set hash is empty until a set has been recorded AND bound, which is what
+// boundUpstreamSetHash reports. It is empty for every deployment that does not record its
+// set, and those keep the paths they have always had.
+//
+// # Why the ordering this depends on already holds
+//
+// A broker must never obtain an unbound key and then be described by a record naming a
+// bound one — that mismatch is unrecoverable for the boot, because RTMR3 only appends and
+// no later record can name the address a sealed quote already published.
+//
+// It cannot happen. main.go records the set BEFORE it starts the attestation proxy, so the
+// proxy's socket does not exist while the hash is still pending, and the broker's only
+// route to a controller-derived key is that socket. The broker then fetches its signer
+// address and enc key once at start and caches both for its lifetime (tee.TeeService), so
+// a later change to this value cannot reach a running broker either — the restart in
+// ApplyCoreConfig is what publishes it.
 func (c *Ctrl) CurrentKeyIdentity(ctx context.Context) (attestproxy.KeyIdentity, error) {
 	digest, err := c.RunningBrokerDigest(ctx)
 	if err != nil {
 		return attestproxy.KeyIdentity{}, err
 	}
-	return attestproxy.KeyIdentity{Digest: digest}, nil
+	return attestproxy.KeyIdentity{Digest: digest, UpstreamSetHash: c.boundUpstreamSetHash()}, nil
 }
 
 // RunningBrokerDigest reports the digest of the image the broker container runs.
