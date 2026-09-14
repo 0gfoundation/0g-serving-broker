@@ -38,6 +38,10 @@ type invoiceRequest struct {
 	Provider string        `json:"provider"`
 	Invoices []invoiceItem `json:"invoices"`
 	Cut      *string       `json:"cut,omitempty"`
+	// CutBps is the rate the node shares above were computed with, so the
+	// assay can recompute each share from its own token counts. It is
+	// bounded by the on-chain cut cap on the assay's side.
+	CutBps int64 `json:"cut_bps"`
 }
 
 type invoiceResult struct {
@@ -80,6 +84,19 @@ func payableFee(req *model.Request) (*big.Int, string) {
 	return fee, ""
 }
 
+// splitFee divides one settled fee between the serving node and the assay's
+// cut. Per request, in integer basis points, so the assay can recompute the
+// node's share exactly from its own token counts and the on-chain price. The
+// two parts always sum to the fee: the pool holds exactly the fee, so a cut
+// added on top of a full node share could never be funded (seen live
+// 2026-09-11: 110% invoiced, refused by the assay's deposited check).
+func splitFee(fee *big.Int, cutBps int64) (node, cut *big.Int) {
+	cut = new(big.Int).Mul(fee, big.NewInt(cutBps))
+	cut.Div(cut, big.NewInt(10000))
+	node = new(big.Int).Sub(fee, cut)
+	return node, cut
+}
+
 // settleAssayPayout runs after settlement outcomes are known and before the
 // settled request rows are deleted. Never fails the settlement — payout
 // problems are logged and retried next cycle.
@@ -88,10 +105,10 @@ func (c *Ctrl) settleAssayPayout(ctx context.Context, outcomes []*SettlementOutc
 		return
 	}
 
-	// 1. Per-node sums of the newly settled fees.
+	// 1. Per-node sums of the newly settled fees, net of the assay's cut.
 	sums := map[string]*big.Int{}
 	covered := map[string][]string{}
-	totalSettled := big.NewInt(0)
+	cutTotal := big.NewInt(0)
 	for _, outcome := range outcomes {
 		if outcome.Status != SettlementSuccess && outcome.Status != SettlementPartial {
 			continue
@@ -102,12 +119,13 @@ func (c *Ctrl) settleAssayPayout(ctx context.Context, outcomes []*SettlementOutc
 				c.logger.Warnf("Payout: settled request %s not invoiced: %s", req.RequestHash, why)
 				continue
 			}
+			share, cut := splitFee(fee, c.assayVerifierCutBps)
 			if sums[req.Node] == nil {
 				sums[req.Node] = big.NewInt(0)
 			}
-			sums[req.Node].Add(sums[req.Node], fee)
+			sums[req.Node].Add(sums[req.Node], share)
 			covered[req.Node] = append(covered[req.Node], req.RequestHash)
-			totalSettled.Add(totalSettled, fee)
+			cutTotal.Add(cutTotal, cut)
 		}
 	}
 
@@ -139,17 +157,16 @@ func (c *Ctrl) settleAssayPayout(ctx context.Context, outcomes []*SettlementOutc
 		}
 	}
 
-	// The verifier's cut, computed here because pricing is the broker's
-	// authority; the contract's cut cap bounds it independently.
-	if c.assayVerifierCutBps > 0 && totalSettled.Sign() > 0 {
-		cutDelta := new(big.Int).Mul(totalSettled, big.NewInt(c.assayVerifierCutBps))
-		cutDelta.Div(cutDelta, big.NewInt(10000))
+	// The verifier's cut: what splitFee took out of the node shares above.
+	// Computed here because pricing is the broker's authority; the contract's
+	// cut cap bounds it independently.
+	if cutTotal.Sign() > 0 {
 		st := states[model.VerifierCutNode]
 		cum, _ := new(big.Int).SetString(st.Cumulative, 10)
 		if cum == nil {
 			cum = big.NewInt(0)
 		}
-		cum.Add(cum, cutDelta)
+		cum.Add(cum, cutTotal)
 		st.Node = model.VerifierCutNode
 		st.Cumulative = cum.String()
 		st.Epoch = epoch
@@ -181,7 +198,7 @@ func (c *Ctrl) invoiceAssay(ctx context.Context, states map[string]model.AssayPa
 		}
 	}
 
-	req := invoiceRequest{Provider: c.ProviderAddress()}
+	req := invoiceRequest{Provider: c.ProviderAddress(), CutBps: c.assayVerifierCutBps}
 	var cutState model.AssayPayout
 	for node, st := range states {
 		if st.Invoiced {

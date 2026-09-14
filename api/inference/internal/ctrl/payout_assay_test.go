@@ -2,6 +2,7 @@ package ctrl
 
 import (
 	"encoding/json"
+	"math/big"
 	"strings"
 	"testing"
 
@@ -38,7 +39,8 @@ func TestInvoiceRequestShape(t *testing.T) {
 			Cumulative: "1000",
 			Covered:    []string{"0xh1", "0xh2"},
 		}},
-		Cut: &cut,
+		Cut:    &cut,
+		CutBps: 1000,
 	}
 	raw, err := json.Marshal(req)
 	if err != nil {
@@ -48,7 +50,7 @@ func TestInvoiceRequestShape(t *testing.T) {
 	if err := json.Unmarshal(raw, &decoded); err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"epoch", "provider", "invoices", "cut"} {
+	for _, key := range []string{"epoch", "provider", "invoices", "cut", "cut_bps"} {
 		if _, ok := decoded[key]; !ok {
 			t.Fatalf("invoice JSON missing %q: %s", key, raw)
 		}
@@ -148,5 +150,24 @@ func TestPayableFeeSkipsRejectAndUnattributed(t *testing.T) {
 				t.Fatalf("reason %q lacks %q", why, tc.reason)
 			}
 		})
+	}
+}
+
+// The node share and the cut must always sum to the fee: the pool holds
+// exactly the fee. 10% of 1000 is 100/900; 10% of 7 rounds down to 0/7.
+func TestSplitFeeSumsToFee(t *testing.T) {
+	for _, tc := range []struct{ fee, bps, node, cut int64 }{
+		{1000, 1000, 900, 100},
+		{7, 1000, 7, 0},
+		{45000, 0, 45000, 0},
+		{1000, 10000, 0, 1000},
+	} {
+		node, cut := splitFee(big.NewInt(tc.fee), tc.bps)
+		if node.Int64() != tc.node || cut.Int64() != tc.cut {
+			t.Fatalf("splitFee(%d, %d) = %s/%s, want %d/%d", tc.fee, tc.bps, node, cut, tc.node, tc.cut)
+		}
+		if new(big.Int).Add(node, cut).Int64() != tc.fee {
+			t.Fatalf("splitFee(%d, %d) does not sum to the fee", tc.fee, tc.bps)
+		}
 	}
 }
