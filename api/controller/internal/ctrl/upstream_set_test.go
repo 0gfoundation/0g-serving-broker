@@ -488,10 +488,15 @@ func TestConfigChangeRecordsUnknownWhenTheNewContentCannotBeRead(t *testing.T) {
 		name    string
 		content string
 	}{
-		// Valid YAML, and a key the Service struct does not have — which is exactly what
-		// the broker's own strict loader will refuse when it restarts onto this file.
-		{"a key the loader does not know", "service:\n  name: whatever\n"},
-		{"a value of the wrong type", "service:\n  targetUrl:\n    nested: yes\n"},
+		// Content that LOADS and whose upstreams cannot be expressed as a record. This is
+		// the situation the invalidation exists for, and the only one left in this test.
+		//
+		// A dotted vendor FQDN with no providerIdentity: upstreamsFromConfig refuses it
+		// because the host cannot be a record name. Measured on five deprecated
+		// deployments, so it is a real config shape and not an invented one.
+		{"a vendor host with no identity", "service:\n  model: m\n  targetUrl: https://api.red-pill.ai/v1\n"},
+		// Two distinct URLs deriving one name — the writer cannot say which is which.
+		{"two upstreams deriving one name", "service:\n  model: m\n  type: chatbot\n  providerType: standard\n  targetUrl: https://a.example/v1\n  providerIdentity: vendor\n  modelPricing:\n    - model: m\n      targetUrl: https://b.example/v1\n      providerIdentity: vendor\n      inputPrice: \"1\"\n      outputPrice: \"1\"\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -557,7 +562,7 @@ func (e *fileWatchingEmitter) EmitEvent(ctx context.Context, event string, paylo
 func TestConfigChangeEmitsNoUpstreamRecordWhenOff(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
-	if err := os.WriteFile(path, []byte("service:\n  name: before\n"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte("service:\n  model: before\n"), 0o644); err != nil {
 		t.Fatalf("seeding the config file: %v", err)
 	}
 
@@ -565,7 +570,7 @@ func TestConfigChangeEmitsNoUpstreamRecordWhenOff(t *testing.T) {
 	c := newChangeCtrl(t, l, nil, path, okPull)
 	c.fullConfig = &config.Config{Service: config.Service{TargetURL: "http://vllm:8000/v1"}}
 
-	if err := c.ApplyCoreConfig(context.Background(), "service:\n  name: after\n"); err != nil {
+	if err := c.ApplyCoreConfig(context.Background(), "service:\n  model: after\n"); err != nil {
 		t.Fatalf("ApplyCoreConfig() = %v", err)
 	}
 	for _, op := range l.all() {
