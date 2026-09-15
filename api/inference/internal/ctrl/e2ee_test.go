@@ -228,16 +228,13 @@ func TestMaybeUnsealRequest_RoundTrip(t *testing.T) {
 		t.Errorf("model = %s, want \"gpt-4o\"", got["model"])
 	}
 
-	// Context must be marked sealed with the client ephemeral key + plaintext.
+	// Context must be marked sealed with the client ephemeral key.
 	ephPub, sealed := e2eeSealedRequest(ctx)
 	if !sealed {
 		t.Fatal("context not marked sealed")
 	}
 	if len(ephPub) == 0 {
 		t.Error("client eph pub not stored")
-	}
-	if _, ok := e2eePlaintextRequest(ctx); !ok {
-		t.Error("plaintext request not stored")
 	}
 }
 

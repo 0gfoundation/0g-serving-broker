@@ -91,12 +91,6 @@ const (
 	// CtxKeyE2EEClientEphPub holds the client's response ephemeral X25519 public
 	// key (pccrypto.PublicKey) extracted from the request envelope (SPEC §7).
 	CtxKeyE2EEClientEphPub = "e2eeClientEphPub"
-	// CtxKeyE2EEPlaintextReq holds the reconstructed plaintext request bytes
-	// ([]byte) captured immediately after unsealing, BEFORE the proxy's upstream
-	// rewrites (model enforcement, stream_options injection, …). Retained for
-	// observability/audit; the §8 signature no longer binds plaintext (see
-	// CtxKeyE2EEReqBindHash).
-	CtxKeyE2EEPlaintextReq = "e2eePlaintextReq"
 	// CtxKeyE2EEReqBindHash holds the §8 request binding hash ([32]byte =
 	// proof.FrameBindingHash of the sealed request: sha256(sha256(aad)‖sha256(ct)))
 	// captured at unseal time. The response signature binds the on-wire
@@ -178,12 +172,18 @@ func multipartNamesE2EEPart(contentType string, reqBody []byte) bool {
 	}
 }
 
-// isJSONMediaType reports whether a Content-Type declares a JSON body. The
-// parameters (`charset`) are ignored, and an unparseable header is not JSON —
-// the multipart check above has already had its say on those bytes.
-func isJSONMediaType(contentType string) bool {
-	mediatype, _, err := mime.ParseMediaType(contentType)
-	return err == nil && mediatype == "application/json"
+// isJSONObjectBody reports whether these bytes ARE a JSON object, which is what
+// §5.3.1's second half turns on — not whether a header says they are.
+//
+// Replaced a Content-Type check: a client that mislabels a JSON body as
+// text/plain, or sends no Content-Type, must get the same answer, or the rule
+// holds for a body labelled JSON rather than for a JSON body. Only an object
+// counts: a bare array, string or number is not a request shape this endpoint
+// has ever accepted, sealed or not, and the upstream's own refusal is the
+// clearer error for it.
+func isJSONObjectBody(body []byte) bool {
+	var obj map[string]json.RawMessage
+	return json.Unmarshal(body, &obj) == nil && obj != nil
 }
 
 // jsonIfiedServiceType reports whether this service type's endpoint carries its
@@ -313,6 +313,18 @@ func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, reqBody []byte) ([]byte, err
 	// Scoped to the service types that have a JSON-ified profile. Elsewhere a JSON
 	// body is simply an ordinary request on a JSON endpoint.
 	//
+	// Keyed on the BODY's shape, not on the declared media type. Leading with
+	// isJSONMediaType made the rule hold for a body LABELLED JSON rather than for
+	// a JSON body: the same `{"model":…,"file_base64":…}` reached the
+	// multipart-only upstream verbatim under `text/plain` or no Content-Type at
+	// all, which is the fall-through the paragraph above says must not happen.
+	// isSealedJSON already parses the body, so asking whether it is a JSON object
+	// costs a failed unmarshal on the first byte of a multipart body (`-`).
+	//
+	// The asymmetry with the multipart half above is deliberate and stays: that
+	// one MUST read the header, because the boundary lives there and there is no
+	// other way to find the parts.
+	//
 	// This DOES refuse an unsealed `file_base64` JSON body, which the router's
 	// OpenAPI spec documents on this endpoint — deliberately, and checked rather
 	// than assumed. The broker has never implemented that shape (it forwarded the
@@ -322,7 +334,7 @@ func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, reqBody []byte) ([]byte, err
 	// a silent upstream failure with a clear 400. Supporting it is small —
 	// materializeSpeechRequest is profile-independent — but it is a product
 	// decision, not a protocol one. See docs/design/e2ee.md.
-	if isJSONMediaType(contentType) && jsonIfiedServiceType(c.Service.Type) && isJSONIfiedRoute(ctx.Request) && !isSealedJSON(reqBody) {
+	if isJSONObjectBody(reqBody) && jsonIfiedServiceType(c.Service.Type) && isJSONIfiedRoute(ctx.Request) && !isSealedJSON(reqBody) {
 		return nil, fmt.Errorf("this endpoint takes multipart/form-data, or a sealed JSON envelope carrying a top-level %q object (SPEC §5.3.1). A JSON body that is not an envelope is refused rather than forwarded", e2eeBodyMarker)
 	}
 	if !hasE2EEMarker(reqBody) {
@@ -444,11 +456,6 @@ func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, reqBody []byte) ([]byte, err
 	ctx.Set(CtxKeyE2EESealed, true)
 	ctx.Set(CtxKeyE2EEProfile, profile)
 	ctx.Set(CtxKeyE2EEClientEphPub, pccrypto.PublicKey(clientEphPub))
-	// The JSON form, deliberately, even where the forwarded body is multipart:
-	// this is the request the AAD covered and the §8 binding was taken over, so it
-	// is the one an audit of the sealed exchange needs. The materialized body is a
-	// rendering for the upstream, not the protocol's request.
-	ctx.Set(CtxKeyE2EEPlaintextReq, plaintext)
 	ctx.Set(CtxKeyE2EEReqBindHash, reqBindHash)
 	c.logger.Debugf("E2EE: unsealed request (sealed_fields=%v, key_id=%s)", e2ee.SealedFields, e2ee.KeyID)
 	return forward, nil
@@ -544,17 +551,6 @@ func e2eeSealedRequest(ctx *gin.Context) (pccrypto.PublicKey, bool) {
 		return nil, false
 	}
 	return pub, true
-}
-
-// e2eePlaintextRequest returns the reconstructed plaintext request captured at
-// unseal time, used as the request side of the §8 content binding.
-func e2eePlaintextRequest(ctx *gin.Context) ([]byte, bool) {
-	v, ok := ctx.Get(CtxKeyE2EEPlaintextReq)
-	if !ok {
-		return nil, false
-	}
-	b, ok := v.([]byte)
-	return b, ok && len(b) > 0
 }
 
 // e2eeReqBindHash returns the §8 request binding hash (sha256 of the sealed

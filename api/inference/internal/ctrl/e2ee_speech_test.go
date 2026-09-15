@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"maps"
 	"mime"
@@ -225,15 +226,42 @@ func TestJSONBodyOnTheSpeechEndpointMustBeAnEnvelope(t *testing.T) {
 	for _, tt := range []struct {
 		name string
 		body string
+		// The rule is keyed on the body being a JSON OBJECT, so what it refuses is
+		// "a request shape this endpoint could plausibly have meant as a request".
+		refused bool
 	}{
-		{"an ordinary JSON request", `{"model":"whisper-large-v3","file_base64":"AA=="}`},
-		{"a body that merely mentions the marker", `{"model":"m","prompt":"what is _e2ee?"}`},
-		{"not an object at all", `[1,2,3]`},
-		{"empty", ``},
+		{"an ordinary JSON request", `{"model":"whisper-large-v3","file_base64":"AA=="}`, true},
+		{"a body that merely mentions the marker", `{"model":"m","prompt":"what is _e2ee?"}`, true},
+		// Not object shapes, so not this rule's business: no request on this
+		// endpoint has ever been a bare array or an empty body, sealed or not, and
+		// the upstream's own refusal is the clearer error. Refusing them was a
+		// side effect of keying on the Content-Type header, and it was the same
+		// over-reach that took out GET /v1/proxy/signature/{chatID}.
+		{"not an object at all", `[1,2,3]`, false},
+		{"empty", ``, false},
+		{"a bare string", `"hello"`, false},
+		{"JSON null", `null`, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := f.c.MaybeUnsealRequest(speechCtx(), []byte(tt.body)); err == nil {
-				t.Error("a JSON body here must be refused rather than forwarded (SPEC §5.3.1)")
+			_, err := f.c.MaybeUnsealRequest(speechCtx(), []byte(tt.body))
+			if tt.refused != (err != nil) {
+				t.Errorf("refused = %v, want %v (err: %v)", err != nil, tt.refused, err)
+			}
+		})
+	}
+
+	// The rule follows the BODY, not the label. A client that mislabels a JSON
+	// object as text/plain, or sends no Content-Type at all, gets the same answer
+	// — otherwise the rule holds for a body labelled JSON rather than for a JSON
+	// body, and the very shape it exists to refuse reaches the multipart-only
+	// upstream verbatim.
+	for _, contentType := range []string{"text/plain", "application/octet-stream", ""} {
+		t.Run("mislabelled as "+contentType, func(t *testing.T) {
+			ctx := speechCtx()
+			ctx.Request.Header.Set("Content-Type", contentType)
+			body := []byte(`{"model":"whisper-large-v3","file_base64":"AA=="}`)
+			if _, err := f.c.MaybeUnsealRequest(ctx, body); err == nil {
+				t.Error("a JSON object here must be refused whatever the Content-Type claims")
 			}
 		})
 	}
@@ -300,7 +328,9 @@ func TestTheJSONRuleFiresOnlyOnTheTranscriptionRoute(t *testing.T) {
 				ctx.Request = httptest.NewRequest(method, tt.path, nil)
 				ctx.Request.Header.Set("Content-Type", "application/json")
 
-				_, err := f.c.MaybeUnsealRequest(ctx, nil)
+				// A real non-envelope JSON object: the rule is keyed on the body, so a
+				// nil one would make every row pass for the wrong reason.
+				_, err := f.c.MaybeUnsealRequest(ctx, []byte(`{"model":"whisper-large-v3","file_base64":"AA=="}`))
 				if tt.refused != (err != nil) {
 					t.Fatalf("refused = %v, want %v (err: %v)", err != nil, tt.refused, err)
 				}
@@ -358,9 +388,43 @@ func TestSealedSpeechRefusesHeaderInjectionInNamesAndFilename(t *testing.T) {
 	}
 }
 
-// A backslash is deliberately NOT refused: escaped, it yields a literal
-// backslash in the value rather than a parameter break, and refusing it would
-// reject an ordinary Windows-style filename for no gain.
+// A filename is a NAME, not a path. Go's ReadForm never uses the client
+// filename as a disk path, but a backend that joins it onto an upload directory
+// (Werkzeug without secure_filename, several faster-whisper wrappers) does — and
+// on the sealed path the broker is the one writing the part header, so it owns
+// what goes in it. Refused rather than reduced to a base name, which is this
+// file's standing rule: a rewritten name is not the name the client sealed.
+func TestSealedSpeechRefusesAPathAsTheFilename(t *testing.T) {
+	for _, name := range []string{
+		"../../etc/cron.d/x",
+		"/etc/passwd",
+		"a/b.mp3",
+		"..",
+		".",
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := speechFixture(t)
+			req := wire.Request{
+				"model":           mustRaw(t, "cheap-model"),
+				"response_format": mustRaw(t, "json"),
+				"file_base64":     mustRaw(t, base64.StdEncoding.EncodeToString([]byte(speechAudio))),
+				"filename":        mustRaw(t, name),
+			}
+			out, err := f.c.MaybeUnsealRequest(speechCtx(), sealSpeech(t, f, req))
+			if err == nil {
+				t.Fatalf("a path must be refused as a filename; body was:\n%s", out)
+			}
+			if !strings.Contains(err.Error(), "is a path, not a filename") {
+				t.Errorf("refused for the wrong reason: %v", err)
+			}
+		})
+	}
+}
+
+// A backslash is deliberately NOT refused, and that now covers the path question
+// too: on the POSIX upstreams this runs against a backslash is an ordinary
+// filename character rather than a separator, so `C:\recordings\a.mp3` is one
+// name and is forwarded. Only the forward slash makes it a path.
 func TestSealedSpeechAcceptsABackslashInAFilename(t *testing.T) {
 	f := speechFixture(t)
 	req := wire.Request{
@@ -498,6 +562,12 @@ func TestSpeechFormValues(t *testing.T) {
 		// `12.0` where the client wrote `12`.
 		{name: "integral number", field: "n", json: `12`, wantField: "n", wantValues: []string{"12"}},
 		{name: "fractional number", field: "temperature", json: `0.25`, wantField: "temperature", wantValues: []string{"0.25"}},
+		// 'f' rather than 'g': both round-trip, but 'g' switches to an exponent at
+		// the extremes and a form parser reading a numeric field may not take
+		// "1e+06". No ProfileSpeech field reaches these ranges today — this pins
+		// the rendering for whatever the profile gains next.
+		{name: "a large integral number renders without an exponent", field: "n", json: `1000000`, wantField: "n", wantValues: []string{"1000000"}},
+		{name: "a small fractional number renders without an exponent", field: "n", json: `0.00001`, wantField: "n", wantValues: []string{"0.00001"}},
 		// The OpenAI surface's multipart spelling for a repeated field.
 		{
 			name: "array", field: "timestamp_granularities", json: `["word","segment"]`,
@@ -1104,6 +1174,162 @@ func TestSealedSpeechRefusesAnUnbillableUpstreamShape(t *testing.T) {
 				t.Errorf("failure source = %v, want %q", src, monitor.FailureSourceUpstream)
 			}
 		})
+	}
+}
+
+// signatureProbeWriter runs a probe at the moment of the FIRST Write, which is
+// the only place an ordering property like "signed before flushed" can be
+// asserted. Reading the cache after the handler returns cannot see it: the
+// signature is there either way by then, which is exactly why the ordering bug
+// survived the test that checks it.
+type signatureProbeWriter struct {
+	gin.ResponseWriter
+	probe func()
+	fired bool
+}
+
+func (w *signatureProbeWriter) Write(b []byte) (int, error) {
+	if !w.fired {
+		w.fired = true
+		w.probe()
+	}
+	return w.ResponseWriter.Write(b)
+}
+
+// warnCapturingLogger records Warn calls and discards everything else, so a test
+// can assert on a log line that is the only observable difference between two
+// otherwise equivalent behaviours.
+type warnCapturingLogger struct {
+	*testAsyncLoggerImpl
+	warns []string
+}
+
+func (l *warnCapturingLogger) Warn(args ...interface{}) {
+	l.warns = append(l.warns, fmt.Sprint(args...))
+}
+
+// A sealed turn must have its §8 signature cached BEFORE the frame is flushed.
+//
+// The client learns the chatID from ZG-Res-Key, which goes out with the flushed
+// headers, so a sealed client that immediately fetches
+// GET /v1/proxy/signature/{chatID} would otherwise race a cache write ~70 lines
+// later and get a 404 on the signature it cannot proceed without (issue #619).
+// Chat and image both already sign before the write and say so; speech signed
+// after it.
+func TestSealedSpeechSignsBeforeFlushingTheFrame(t *testing.T) {
+	// Both topologies: the ordering must hold on each, and the `!signedEarly`
+	// guard is only OBSERVABLE on the in-network one — where TargetSeparated is
+	// false the unsealed gate would also be true, so a missing guard runs the
+	// second signing call. On a TargetSeparated provider that gate is false
+	// anyway and the guard makes no difference, which is exactly how a
+	// single-topology version of this test let the mutation survive.
+	for _, targetSeparated := range []bool{false, true} {
+		name := "in-network"
+		if targetSeparated {
+			name = "TargetSeparated"
+		}
+		t.Run(name, func(t *testing.T) {
+			runSealedSpeechFlushOrderCase(t, targetSeparated)
+		})
+	}
+}
+
+func runSealedSpeechFlushOrderCase(t *testing.T, targetSeparated bool) {
+	t.Helper()
+	f := speechFixture(t)
+	logger := &warnCapturingLogger{testAsyncLoggerImpl: &testAsyncLoggerImpl{}}
+	f.c.logger = logger
+	f.c.Service.TargetSeparated = targetSeparated
+	f.c.reconciliationDB = &mockReconciliationDB{}
+	f.c.serviceCache = cache.New(5*time.Minute, 10*time.Minute)
+	f.c.serviceCache.Set("current_service", model.Service{InputPrice: "1", OutputPrice: "1"}, cache.DefaultExpiration)
+
+	rec := httptest.NewRecorder()
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest("POST", "/v1/proxy/audio/transcriptions", nil)
+	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEProfile, wire.ProfileSpeech)
+	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
+
+	var keyAtFlush string
+	var resolvedAtFlush bool
+	ctx.Writer = &signatureProbeWriter{ResponseWriter: ctx.Writer, probe: func() {
+		keyAtFlush = ctx.Writer.Header().Get("ZG-Res-Key")
+		if keyAtFlush != "" {
+			_, resolvedAtFlush = f.c.svcCache.Get(f.c.chatCacheKey(keyAtFlush))
+		}
+	}}
+
+	upstream := `{"model":"whisper-large-v3","usage":{"type":"duration","seconds":3.5},"text":"hi"}`
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{},
+		Body:       io.NopCloser(strings.NewReader(upstream)),
+	}
+	if err := f.c.handleNonStreamingSpeechToText(ctx, resp, nil, model.Request{IsWhitelisted: true, RequestHash: "req-1"}); err != nil {
+		t.Fatalf("handleNonStreamingSpeechToText: %v", err)
+	}
+
+	if keyAtFlush == "" {
+		t.Fatal("no ZG-Res-Key on the flushed headers")
+	}
+	if !resolvedAtFlush {
+		t.Error("the §8 signature was not cached when the sealed frame was flushed: a client reading ZG-Res-Key and fetching it immediately races the cache write")
+	}
+	// And the unsealed branch must not run a SECOND time for this turn. That
+	// second call passes an empty e2eeSignedText, which signChatResponse's sealed
+	// arm answers by warning "no signable content" and returning without touching
+	// the cache — so the damage is not a wrong signature but a warning that flatly
+	// contradicts what happened, on every sealed transcription. It is the only
+	// observable difference the `!signedEarly` guard makes, which is why it is
+	// asserted on the log rather than on the cache.
+	for _, w := range logger.warns {
+		if strings.Contains(w, "no signable content") {
+			t.Errorf("the unsealed signing branch ran for a sealed turn: %q", w)
+		}
+	}
+}
+
+// And a signing failure on a sealed turn must fail the request, not be logged
+// past. Signed after the write it could only ever be logged — the frame is
+// already on the wire and the client holds a response it can never verify.
+func TestSealedSpeechFailsClosedWhenSigningFails(t *testing.T) {
+	f := speechFixture(t)
+	f.c.Service.TargetSeparated = true
+	f.c.reconciliationDB = &mockReconciliationDB{}
+	f.c.serviceCache = cache.New(5*time.Minute, 10*time.Minute)
+	f.c.serviceCache.Set("current_service", model.Service{InputPrice: "1", OutputPrice: "1"}, cache.DefaultExpiration)
+	// No signer: SignHash refuses, which is the deployment fault this guards.
+	f.c.teeService.ProviderSigner = nil
+
+	rec := httptest.NewRecorder()
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest("POST", "/v1/proxy/audio/transcriptions", nil)
+	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEProfile, wire.ProfileSpeech)
+	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
+
+	const transcript = "the transcript nobody else may read"
+	upstream := `{"model":"whisper-large-v3","usage":{"type":"duration","seconds":3.5},"text":"` + transcript + `"}`
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{},
+		Body:       io.NopCloser(strings.NewReader(upstream)),
+	}
+	err := f.c.handleNonStreamingSpeechToText(ctx, resp, nil, model.Request{IsWhitelisted: true, RequestHash: "req-1"})
+	if err == nil {
+		t.Error("a signing failure on a sealed turn must fail the request")
+	}
+	// The whole point of signing first: nothing verifiable-less went out.
+	if body := rec.Body.Bytes(); bytes.Contains(body, []byte(e2eeBodyMarker)) {
+		t.Errorf("a sealed frame was flushed although signing failed: %s", body)
+	}
+	if bytes.Contains(rec.Body.Bytes(), []byte(transcript)) {
+		t.Errorf("the plaintext transcript was flushed: %s", rec.Body.Bytes())
 	}
 }
 

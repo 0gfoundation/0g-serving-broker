@@ -172,6 +172,16 @@ The **`Content-Type` and `Content-Length` move with the body**. Everything
 downstream reads the boundary out of the header, so a multipart body still
 labelled `application/json` reaches the upstream unparseable.
 
+**Sealed audio tops out well below what an unsealed upload gets.** `file_base64`
+inflates the payload ~4/3 before it is sealed, and the 32MB body cap applies to
+the *envelope*, so the largest audio that fits a sealed request is around 23MB
+against 32MB unsealed. At the peak of such a request several copies are live —
+the envelope, the opened request, the decoded audio and the materialized
+multipart — which is why the reconstructed plaintext is **no longer stashed on
+the request context**: nothing in production ever read it back (the §8 binding
+travels as a 32-byte hash), so it was a retained copy proportional to the audio
+with no reader. The accessor went with it.
+
 **Names go into part headers, and `multipart.Writer` does not validate them.**
 Its escaper handles `\` and `"` and writes everything else — CR and LF
 included — verbatim, and both the field names and the `filename` come straight
@@ -197,6 +207,18 @@ that does not process backslash escapes reads a second `name` out of it. A
 in the value rather than a parameter break, and refusing it would reject an
 ordinary Windows-style filename for no gain.
 
+**A `filename` is a name, not a path.** One containing `/`, or equal to `.` or
+`..`, is refused. Go's `ReadForm` never uses the client filename as a disk path,
+but a backend that joins it onto an upload directory (Werkzeug without
+`secure_filename`, several faster-whisper wrappers) does, and on the sealed path
+the broker is the one writing the part header — so it owns what goes in it.
+Refused rather than reduced to a base name, per this file's standing rule: a
+rewritten name is not the name the client sealed. Only the forward slash: on the
+POSIX upstreams this runs against a backslash is an ordinary filename character,
+which is why `C:\recordings\a.mp3` is accepted and pinned by a test. This is
+stricter than the unsealed multipart path, which relays whatever filename the
+client sends — deliberately, because there the broker did not write the header.
+
 **`file` is reserved.** It is the name the audio part is written under, so a
 sealed field of the same name materializes two parts called `file`. Measured:
 Go's `ReadForm` keeps both, sorting them by kind, while a backend reading
@@ -213,6 +235,17 @@ That resolution lives in the wire package and the speech handler reaches it
 through the same `prepareFrameForSealing` the chat and image paths use. The
 billable quantity stays **cleartext**, as either `usage.seconds` or the top-level
 `duration`, so billing and the router both still read it.
+
+**A sealed response is signed BEFORE the frame is flushed**, as on the chat and
+image paths (issue #619). The client learns the chatID from `ZG-Res-Key`, which
+goes out with the flushed headers, so signing afterwards let a sealed client that
+immediately fetched `GET /v1/proxy/signature/{chatID}` race the cache write — and,
+worse, made a signing failure unrecoverable: the frame was already on the wire, so
+the failure could only be logged while the client held a response it could never
+verify. Signing first lets it **fail closed**. Only the sealed path is reordered;
+the plaintext path keeps its existing sign-after-write order, and a signing
+failure there is still non-fatal, because an unsealed client can read its
+transcript without a signature and a sealed one cannot.
 
 **The signing gate is now the same three-way condition chat and image carry** —
 `!TargetSeparated || IsCentralized() || e2eeSealed` — on *both* the streaming and
@@ -310,7 +343,20 @@ proxy and were the same hole one request shape over).
 Both halves of §5.3.1 now hold, and they are separate rules: a **multipart** body
 must not contain an `_e2ee` part (above), and on an endpoint with a JSON-ified
 profile a **JSON** body must be a valid envelope or be refused — never forwarded
-as an unsealed JSON request "just in case". Image-editing is the other multipart
+as an unsealed JSON request "just in case".
+
+That second half is keyed on the **body's shape**, not on the declared media
+type. Leading with a `Content-Type` check made the rule hold for a body
+*labelled* JSON rather than for a JSON body: the same
+`{"model":…,"file_base64":…}` reached the multipart-only upstream verbatim under
+`text/plain` or no `Content-Type` at all, which is the fall-through the rule
+exists to prevent. Only a JSON **object** counts — a bare array, string, number
+or empty body is not a request shape this endpoint has ever accepted, sealed or
+not, and the upstream's own refusal is the clearer error for it. The asymmetry
+with the multipart half is deliberate and stays: that one *must* read the header,
+because the boundary lives there and there is no other way to find the parts.
+
+Image-editing is the other multipart
 endpoint and §5.3 does not cover it yet, so it has no profile and the rule is not
 applied to it.
 

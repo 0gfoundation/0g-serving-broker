@@ -213,6 +213,26 @@ func speechFilename(req wire.Request) (string, error) {
 	if name == "" {
 		return speechFallbackFilename, nil
 	}
+	// A filename is a NAME, not a path, and on the sealed path the broker is the
+	// one writing the part header — so it owns what goes in it. Go's ReadForm
+	// never uses the client filename as a disk path, but a backend that joins it
+	// onto an upload directory (Werkzeug without secure_filename, several
+	// faster-whisper HTTP wrappers) does, and "../../etc/cron.d/x" would be
+	// forwarded verbatim.
+	//
+	// Refused rather than reduced to a base name, which is this file's standing
+	// rule: a rewritten name is not the name the client sealed. A client that
+	// wants a path in the extension-sniffing hint can send its last segment.
+	//
+	// Only the forward slash: on the POSIX upstreams this runs against a
+	// backslash is an ordinary filename character, not a separator, which is why
+	// speechHeaderSafe deliberately accepts `C:\recordings\a.mp3` and this does
+	// too. This is stricter than the UNSEALED multipart path, which forwards
+	// whatever filename the client sends — deliberately, because there the broker
+	// is relaying a header it did not write.
+	if strings.Contains(name, "/") || name == "." || name == ".." {
+		return "", fmt.Errorf("%q is a path, not a filename (SPEC §5.3): a form filename carries no directory separator", speechFilenameField)
+	}
 	return name, nil
 }
 
@@ -267,7 +287,13 @@ func speechScalarToken(v any) (string, bool) {
 	case bool:
 		return strconv.FormatBool(t), true
 	case float64:
-		return strconv.FormatFloat(t, 'g', -1, 64), true
+		// 'f', not 'g': both give the shortest representation that round-trips,
+		// but 'g' switches to an exponent at the extremes — 1000000 renders as
+		// "1e+06" and 0.00001 as "1e-05", which a form parser reading a numeric
+		// field may not accept. No field of ProfileSpeech can reach either range
+		// today, so this is about the stated goal holding for whatever the profile
+		// gains next rather than about a live bug.
+		return strconv.FormatFloat(t, 'f', -1, 64), true
 	default:
 		return "", false
 	}

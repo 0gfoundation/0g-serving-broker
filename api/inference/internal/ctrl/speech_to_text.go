@@ -416,7 +416,7 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 	}
 
 	outBody := body
-	var e2eeSignedText string
+	signedEarly := false
 	if sealed, isSealed, respBindHash, sealErr := c.maybeSealNonStreamResponse(ctx, body); isSealed {
 		if sealErr != nil {
 			// Fail-closed: never forward a plaintext transcript for a sealed request.
@@ -430,7 +430,33 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 			c.handleBrokerError(ctx, err, "sign transcription response")
 			return err
 		}
-		e2eeSignedText = proof.SignedTextE2EEFromHashes(reqBindHash, respBindHash)
+		e2eeSignedText := proof.SignedTextE2EEFromHashes(reqBindHash, respBindHash)
+
+		// Cache the signature BEFORE flushing, the same ordering chat and image
+		// already use for a sealed turn (issue #619), and for two reasons that are
+		// not the same weight.
+		//
+		// The race: the client learns the chatID from ZG-Res-Key, which goes out
+		// with the flushed headers, so a sealed client fetching
+		// GET /v1/proxy/signature/{chatID} straight away could 404 on a signature
+		// cached ~70 lines later. Measured, through a writer that probes the cache
+		// from inside Write: the key was present at flush and the signature was not.
+		//
+		// The one that matters more: signing here can FAIL CLOSED. Signed after the
+		// write, a failure can only be logged — the sealed frame is already on the
+		// wire and the client holds a response it can never verify, with no way for
+		// the broker to take it back. An E2EE client refuses a response without §8,
+		// so that is a dead transcript the user still paid for.
+		//
+		// Only the sealed path is reordered; the plaintext path below keeps its
+		// existing sign-after-write order, as on the image path.
+		if err := c.signChatResponse(ctx, reqBody, body, chatKey, e2eeSignedText, reqModel.Upstream); err != nil {
+			// A broker fault (signChatE2EE fails when crypto.Sign does, i.e. a bad
+			// ProviderSigner), so 500 rather than errors.Response's 400 default.
+			c.handleBrokerError(ctx, errors.Internal(err), "sign transcription response")
+			return err
+		}
+		signedEarly = true
 	}
 
 	// Attempt to write raw response to client. If client disconnected, continue to billing.
@@ -492,19 +518,23 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 	// absent or unbillable.
 	transcriptionResp.Usage = effectiveUsage(&transcriptionResp)
 
-	// Sign response if needed. Same three-way condition as the ZG-Res-Key header
-	// above, and for the same reason: emitting the key without producing the
-	// signature would hand the client a handle that resolves to nothing.
-	if !c.Service.TargetSeparated || c.Service.IsCentralized() || e2eeSealed {
+	// Sign the UNSEALED response. A sealed one was signed before the flush above,
+	// which is what signedEarly records — so this is the same three-way condition
+	// as the ZG-Res-Key header (emitting the key without producing the signature
+	// would hand the client a handle that resolves to nothing) with the sealed arm
+	// already discharged rather than dropped.
+	//
+	// The empty e2eeSignedText is not a placeholder: reaching here means the
+	// request was not sealed, so there is no on-wire binding to pass and
+	// signChatResponse takes the plaintext branch it always did.
+	if !signedEarly && (!c.Service.TargetSeparated || c.Service.IsCentralized()) {
 		c.logger.Debug("Signing speech-to-text response")
 		// Logged rather than discarded, for the reason in image_editing: signing is an RPC
 		// to the controller now and refuses when the running image cannot be pinned.
-		// Through signChatResponse, not signChatWithKey: on a sealed turn the §8
-		// signature must bind the on-wire aad‖ciphertext of the sealed frame
-		// rather than a plaintext the client never received, and that is the
-		// branch e2eeSignedText selects. Unsealed turns take the same path they
-		// always did.
-		if err := c.signChatResponse(ctx, reqBody, body, chatKey, e2eeSignedText, reqModel.Upstream); err != nil {
+		// Non-fatal here and fatal on the sealed path above, deliberately: an
+		// unsealed client can read its transcript without a signature, a sealed one
+		// cannot.
+		if err := c.signChatResponse(ctx, reqBody, body, chatKey, "", reqModel.Upstream); err != nil {
 			c.logger.Errorf("could not sign the transcription for %s: %v", chatKey, err)
 		}
 	}
