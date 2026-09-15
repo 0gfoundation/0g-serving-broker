@@ -280,8 +280,19 @@ func speechFilename(req wire.Request) (string, error) {
 // object today; a future one needs a rendering chosen deliberately, not inferred
 // here.
 func speechFormValues(name string, raw json.RawMessage) (string, []string, error) {
+	// UseNumber, so a JSON number arrives as the LITERAL the client sealed rather
+	// than as a float64. Plain Unmarshal put every number through float64 and this
+	// file then re-rendered it, which is both a rewrite of what the client sealed
+	// and lossy above 2^53: 12345678901234567890 came back out as
+	// 12345678901234567168. No ProfileSpeech field can reach that range today, but
+	// the fix removes the question instead of bounding it — and it removes the
+	// 'f'-versus-'g' formatting question with it, because nothing is formatted.
+	// An unsealed multipart request relays the client's literal too, so this is
+	// also what makes the sealed and unsealed paths agree.
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
 	var v any
-	if err := json.Unmarshal(raw, &v); err != nil {
+	if err := dec.Decode(&v); err != nil {
 		return "", nil, fmt.Errorf("field %q is not valid JSON: %w", name, err)
 	}
 	switch t := v.(type) {
@@ -315,14 +326,11 @@ func speechScalarToken(v any) (string, bool) {
 		return t, true
 	case bool:
 		return strconv.FormatBool(t), true
-	case float64:
-		// 'f', not 'g': both give the shortest representation that round-trips,
-		// but 'g' switches to an exponent at the extremes — 1000000 renders as
-		// "1e+06" and 0.00001 as "1e-05", which a form parser reading a numeric
-		// field may not accept. No field of ProfileSpeech can reach either range
-		// today, so this is about the stated goal holding for whatever the profile
-		// gains next rather than about a live bug.
-		return strconv.FormatFloat(t, 'f', -1, 64), true
+	case json.Number:
+		// The literal, verbatim. speechFormValues decodes with UseNumber precisely
+		// so this case exists: there is no float64 round trip to lose precision in
+		// and no formatting choice to get wrong.
+		return t.String(), true
 	default:
 		return "", false
 	}

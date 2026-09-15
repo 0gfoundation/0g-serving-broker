@@ -166,7 +166,28 @@ boolean `false` and the string `"false"` are one value.
   are all in use and guessing one would forward a different request than the
   client sealed;
 - a field name or `filename` containing **CR, LF, `"` or `;` is refused**, and a
-  field named **`file` is refused** — see below.
+  field named **`file` is refused** — see below;
+- a **number is relayed as the literal the client sealed**. The body is decoded
+  with `UseNumber`, so nothing goes through `float64` and nothing is re-rendered:
+  `1e3` stays `1e3`, and an integer past 2^53 is not silently rounded (measured:
+  `12345678901234567890` used to arrive as `12345678901234567168`). No
+  `ProfileSpeech` field reaches that range today; the point is that "the upstream
+  gets what the client sealed" applies to values as much as to names, and an
+  unsealed multipart request relays the client's literal too.
+
+**The transcription is decompressed once, before anything reads it.** The sync
+path asks the upstream for `identity`, but an upstream that ignores it sends
+compressed bytes, and three readers want plaintext: the #184 leak sanitizer, the
+§7.3 seal, and the billing parse. Decoding per-reader broke two of the three —
+the seal ran on gzip and returned a 400 after the GPU time was spent, and the
+billing parse re-decoded an already-decoded body, where the failure is not clean
+(`gzip.NewReader` consumes its 10-byte header probe before erroring, and the
+fallback reader is that same drained one, so 81 of 91 bytes survived and the
+request billed by word-count estimate). One decode at the top, with
+`Content-Encoding` cleared on both the response and the upstream header, is
+therefore a correctness property and not a tidy-up. It is wire-visible for
+non-E2EE traffic: such a body now reaches the client decompressed, which also
+makes the §8 signature bind the bytes the client actually receives.
 
 **Every cleartext field is materialized, including ones the client did not
 write.** The request's cleartext half is rewritable in transit *by design* —
@@ -188,6 +209,15 @@ cannot act on and the provider cannot fix**, so it is a constraint on the
 must not inject an object-valued field into a sealed speech request.** A scalar
 is fine. Coordinate with `0g-router` before adding a structured request-side
 trace field.
+
+**The sidecar must strip `[]` when JSON-ifying a repeated form field.** An array
+materializes as repeated `name[]`, which is the OpenAI multipart spelling — so a
+sidecar that JSON-ifies the field under the name it saw *on the wire*
+(`timestamp_granularities[]`, which is how the SDKs spell it) produces
+`timestamp_granularities[][]` upstream. There is no error: `verbose_json` simply
+comes back without word timestamps. The materializer cannot tell the two apart —
+a client is entitled to seal a field whose name ends in `[]` — so this is the
+sidecar's half of the convention, and the only place it is written down.
 
 **A sealed client should always seal a `filename`.** When it seals none the
 materializer writes `audio`, which the part needs to read as a file upload at

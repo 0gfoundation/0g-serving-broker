@@ -273,9 +273,19 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 	// ZG-Res-Key is emitted when the broker is the one that signs: in-network,
 	// centralized, OR sealed. The sealed arm is not a special case — it is the
 	// same rule chat and image already carry: on a sealed turn the broker's TEE
-	// signs the §8 ciphertext binding, so the client must be able to fetch that
-	// signature even from a TargetSeparated provider. Without it, an E2EE client
-	// on such a provider has a sealed response it cannot verify.
+	// signs the §8 ciphertext binding, so the client needs the handle to that
+	// signature even from a TargetSeparated provider.
+	//
+	// Emitting it is necessary but NOT today sufficient, and this comment used to
+	// claim otherwise ("so the client must be able to fetch that signature"). On a
+	// TargetSeparated NON-FORWARDER provider — the decentralized topology that
+	// sentence was about — handleSignatureRoute declines to serve from the cache
+	// and proxies GET /signature/{chatID} upstream, which has never heard of a
+	// broker-minted chatKey. So the signature is signed and cached and the handle
+	// is advertised, and the fetch still does not resolve. Shared identically with
+	// chat and image, so this PR is the third caller of an inaccurate claim rather
+	// than its cause; tracked as #735, whose fix (a cache probe before the
+	// forward) changes chat and image too and belongs with them.
 	_, e2eeSealed := e2eeSealedRequest(ctx)
 	if !c.Service.TargetSeparated || c.Service.IsCentralized() || e2eeSealed {
 		c.logger.Debug("Setting ZG-Res-Key header for broker-signed response")
@@ -289,24 +299,58 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 		return err
 	}
 
+	// DECODE ONCE, HERE, ABOVE EVERYTHING THAT READS THE BODY. The sync path forces
+	// `Accept-Encoding: identity` upstream, but an upstream that ignores it delivers
+	// compressed bytes, and three separate readers below want plaintext: the #184
+	// sanitizer, the §7.3 seal, and the billing parse. This used to be decoded for
+	// forwarders only, in the block below, which broke the other two:
+	//
+	//   - the SEAL ran on gzip bytes on any non-forwarder upstream that compresses.
+	//     Measured end to end: `seal response: body is not a JSON object` → a 400
+	//     attributed `upstream`, AFTER the transcription was produced and paid for
+	//     in GPU time, on a shape the billing path two screens down handles fine.
+	//   - the BILLING parse re-decoded a body the forwarder branch had already
+	//     decoded, because that branch cleared Content-Encoding on ctx.Writer but
+	//     not on resp.Header. The mechanism is worse than a failed read:
+	//     initializeSpeechReader calls gzip.NewReader, which CONSUMES the 10-byte
+	//     header probe before returning an error, and then falls back to that same
+	//     now-drained reader. Measured on a 91-byte JSON body: 81 bytes survive, the
+	//     JSON parse fails on the truncation, and the request bills by WORD-COUNT
+	//     ESTIMATE. Silent, and wrong in the provider's favour or the user's
+	//     depending on the transcript.
+	//
+	// Both are one bug — the decode was in the wrong place — so this is one hoist
+	// rather than two guards, and resp.Header is cleared alongside ctx.Writer so
+	// the reader below is a no-op rather than a second decode attempt.
+	//
+	// WIRE-VISIBLE for non-E2EE traffic, deliberately: a compressed transcription
+	// from a non-forwarder upstream now reaches the client decompressed, where
+	// before it was relayed still compressed. The broker already did this for
+	// forwarders, and it already asks for identity, so this narrows a divergence
+	// rather than opening one — and it makes the §8 signature bind the bytes the
+	// client actually receives, which it did not when the body was signed
+	// compressed and no other path agreed on what "the body" was.
+	if enc := resp.Header.Get("Content-Encoding"); isCompressedEncoding(enc) {
+		if decoded, derr := decodeBody(body, enc); derr == nil {
+			body = decoded
+			ctx.Writer.Header().Del("Content-Encoding")
+			resp.Header.Del("Content-Encoding")
+		} else {
+			// Fail-open for the unsealed path, as before: an undecodable body is
+			// relayed and billed as best it can be. The sealed path cannot relay it
+			// and fails closed below on its own terms.
+			c.logger.Warnf("could not decode %s transcription; forwarding the upstream body as-is (leak sanitization skipped, billing may estimate): %v", enc, derr)
+		}
+	}
+
 	// For forwarder providers, strip #184 upstream identity/cost leak fields from a
 	// JSON transcription body before forwarding (and, for in-network signing,
 	// before signing — sanitize-before-sign keeps the signature bound to what the
-	// client receives). Decode a compressed body first: the sync path forces
-	// identity upstream, so an upstream that ignores it delivers compressed bytes
-	// that would otherwise never match the JSON-object check below. STT also returns
-	// non-JSON formats (text/srt/vtt) that carry no such fields; skip them (and
-	// sanitizeResponseBody's fail-open warning) by only sanitizing a JSON object
-	// body. Usage fields are not leak keys, so downstream billing is unaffected.
+	// client receives). STT also returns non-JSON formats (text/srt/vtt) that carry
+	// no such fields; skip them (and sanitizeResponseBody's fail-open warning) by
+	// only sanitizing a JSON object body. Usage fields are not leak keys, so
+	// downstream billing is unaffected.
 	if c.Service.IsForwarder() {
-		if enc := resp.Header.Get("Content-Encoding"); isCompressedEncoding(enc) {
-			if decoded, derr := decodeBody(body, enc); derr == nil {
-				body = decoded
-				ctx.Writer.Header().Del("Content-Encoding")
-			} else {
-				c.logger.Warnf("#184 leak sanitization SKIPPED: could not decode %s transcription; forwarding upstream body unsanitized (potential identity/cost leak): %v", enc, derr)
-			}
-		}
 		if bytes.HasPrefix(bytes.TrimSpace(body), []byte("{")) {
 			if sanitized, changed := c.sanitizeResponseBody(body, ""); changed {
 				body = sanitized
@@ -350,6 +394,13 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 			// wasted compute lands on the provider, which is also who can fix it —
 			// the incentive the image path states in the same words. Not marked
 			// ignoreError, so it stays logged.
+			// Drop the handle before answering. ZG-Res-Key went into the header map
+			// above, before the body was read, so a fail-closed arm would otherwise
+			// hand a sealed client a chatID that resolves to nothing — the same
+			// mistake the sign-before-flush ordering below exists to prevent, one
+			// error path over. The headers have not been flushed yet on this arm
+			// (nothing has been written), so deleting it is enough.
+			ctx.Writer.Header().Del("ZG-Res-Key")
 			if _, ok := e2eeProfile(ctx); ok {
 				ctx.Set(monitor.CtxKeyFailureSource, monitor.FailureSourceUpstream)
 			}
@@ -386,6 +437,8 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 		if err := c.signChatResponse(ctx, reqBody, body, chatKey, e2eeSignedText, reqModel.Upstream); err != nil {
 			// A broker fault (signChatE2EE fails when crypto.Sign does, i.e. a bad
 			// ProviderSigner), so 500 rather than errors.Response's 400 default.
+			// The handle goes with it, for the reason given on the seal arm above.
+			ctx.Writer.Header().Del("ZG-Res-Key")
 			c.handleBrokerError(ctx, errors.Internal(err), "sign transcription response")
 			return err
 		}
@@ -403,15 +456,13 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 		}
 	}
 
-	// Decompress body if needed for parsing
-	contentEncoding := resp.Header.Get("Content-Encoding")
-	decompressedReader := initializeSpeechReader(bytes.NewReader(body), contentEncoding)
-	decompressedBody, err := io.ReadAll(decompressedReader)
-	if err != nil {
-		c.logger.Warnf("Failed to decompress speech-to-text response: %v", err)
-		// Fallback to estimated billing if decompression fails
-		return c.updateSpeechToTextFallback(ctx, reqModel, string(decompressedBody))
-	}
+	// Already plaintext: the decode above is the only one on this path, and it
+	// cleared Content-Encoding, so a second reader here would either be a no-op or
+	// — when the decode failed — re-attempt it and truncate the body on the
+	// fallback (see the hoist's comment). An undecodable body still reaches
+	// estimated billing, via the JSON parse below failing on it, which is where it
+	// ended up anyway.
+	decompressedBody := body
 
 	// Debug: log response content
 	c.logger.Debugf("Decompressed response length: %d", len(decompressedBody))

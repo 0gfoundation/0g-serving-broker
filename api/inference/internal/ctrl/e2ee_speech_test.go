@@ -2,6 +2,7 @@ package ctrl
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -838,12 +839,22 @@ func TestSpeechFormValues(t *testing.T) {
 		// `12.0` where the client wrote `12`.
 		{name: "integral number", field: "n", json: `12`, wantField: "n", wantValues: []string{"12"}},
 		{name: "fractional number", field: "temperature", json: `0.25`, wantField: "temperature", wantValues: []string{"0.25"}},
-		// 'f' rather than 'g': both round-trip, but 'g' switches to an exponent at
-		// the extremes and a form parser reading a numeric field may not take
-		// "1e+06". No ProfileSpeech field reaches these ranges today — this pins
-		// the rendering for whatever the profile gains next.
-		{name: "a large integral number renders without an exponent", field: "n", json: `1000000`, wantField: "n", wantValues: []string{"1000000"}},
-		{name: "a small fractional number renders without an exponent", field: "n", json: `0.00001`, wantField: "n", wantValues: []string{"0.00001"}},
+		// A number is relayed as the LITERAL the client sealed — decoded with
+		// UseNumber, never through float64 — so there is no formatting choice to
+		// pin and no precision to lose. These two used to be about 'f' rather than
+		// 'g' (which renders 1000000 as "1e+06"); they now hold because nothing is
+		// re-rendered at all.
+		{name: "a large integral number keeps its literal", field: "n", json: `1000000`, wantField: "n", wantValues: []string{"1000000"}},
+		{name: "a small fractional number keeps its literal", field: "n", json: `0.00001`, wantField: "n", wantValues: []string{"0.00001"}},
+		// Beyond 2^53, which a float64 round trip silently changes: this value came
+		// out as 12345678901234567168. No ProfileSpeech field reaches this range
+		// today; the row exists because "the upstream gets what the client sealed"
+		// is the profile's whole claim, and a rewritten number breaks it as surely
+		// as a rewritten name would.
+		{name: "an integer beyond float64 precision is not rounded", field: "n", json: `12345678901234567890`, wantField: "n", wantValues: []string{"12345678901234567890"}},
+		// And an exponent the client chose is kept rather than expanded, for the
+		// same reason — an unsealed multipart request would relay it verbatim too.
+		{name: "an exponent the client wrote is preserved", field: "n", json: `1e3`, wantField: "n", wantValues: []string{"1e3"}},
 		// The OpenAI surface's multipart spelling for a repeated field.
 		{
 			name: "array", field: "timestamp_granularities", json: `["word","segment"]`,
@@ -1361,6 +1372,13 @@ func TestSealedSpeechFailsClosedWhenTheFrameCannotBeSealed(t *testing.T) {
 	if bytes.Contains(rec.Body.Bytes(), []byte(transcript)) {
 		t.Fatalf("the plaintext transcript reached the client after the seal failed: %s", rec.Body.Bytes())
 	}
+	// And no dangling handle. ZG-Res-Key is set before the body is read, so a
+	// fail-closed arm that leaves it in place hands the client a chatID that will
+	// never resolve — the same "do not publish a handle that resolves to nothing"
+	// rule the sign-before-flush ordering enforces, one error path over.
+	if got := rec.Header().Get("ZG-Res-Key"); got != "" {
+		t.Errorf("ZG-Res-Key = %q on a failed sealed turn; the signature it names will never exist", got)
+	}
 }
 
 // §7.3 requires a numeric cleartext duration, and real upstreams often send
@@ -1496,6 +1514,10 @@ func (l *warnCapturingLogger) Warn(args ...interface{}) {
 	l.warns = append(l.warns, fmt.Sprint(args...))
 }
 
+func (l *warnCapturingLogger) Warnf(format string, args ...interface{}) {
+	l.warns = append(l.warns, fmt.Sprintf(format, args...))
+}
+
 // A sealed turn must have its §8 signature cached BEFORE the frame is flushed.
 //
 // The client learns the chatID from ZG-Res-Key, which goes out with the flushed
@@ -1619,6 +1641,9 @@ func TestSealedSpeechFailsClosedWhenSigningFails(t *testing.T) {
 	if bytes.Contains(rec.Body.Bytes(), []byte(transcript)) {
 		t.Errorf("the plaintext transcript was flushed: %s", rec.Body.Bytes())
 	}
+	if got := rec.Header().Get("ZG-Res-Key"); got != "" {
+		t.Errorf("ZG-Res-Key = %q although signing failed, so the signature it names will never exist", got)
+	}
 }
 
 // The other direction, and it is the common case rather than an edge: an
@@ -1741,6 +1766,157 @@ func TestUnsealedCentralizedSpeechIsSignedOnBothBranches(t *testing.T) {
 			// binding — ProviderType is set only by the centralized path.
 			if sig.ProviderType == "" {
 				t.Error("a centralized provider must cache a routing proof, not a plain request/response binding")
+			}
+		})
+	}
+}
+
+// gzipped is a transcription as an upstream that ignores `Accept-Encoding:
+// identity` delivers it.
+func gzipped(t *testing.T, s string) []byte {
+	t.Helper()
+	var b bytes.Buffer
+	w := gzip.NewWriter(&b)
+	if _, err := w.Write([]byte(s)); err != nil {
+		t.Fatalf("gzip write: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("gzip close: %v", err)
+	}
+	return b.Bytes()
+}
+
+// The seal must run on PLAINTEXT. The sync path asks for identity, but an
+// upstream that ignores it delivers compressed bytes — and the decode used to
+// live below the seal, and only for forwarders, so on any other provider the
+// sealer got gzip. Measured before the hoist: `seal response: body is not a JSON
+// object` → a 400 attributed `upstream`, after the GPU time was already spent, on
+// a shape the billing parse two screens down handled fine.
+//
+// Asserted through the client rather than on the status: the frame must OPEN with
+// the client's key and carry the transcript, which is the property a 200 alone
+// does not establish.
+func TestSealedSpeechSealsACompressedTranscription(t *testing.T) {
+	f := speechFixture(t)
+	f.c.reconciliationDB = &mockReconciliationDB{}
+
+	sealedBody := sealSpeech(t, f, wire.Request{
+		"model":           mustRaw(t, "whisper-large-v3"),
+		"response_format": mustRaw(t, "json"),
+		"file_base64":     mustRaw(t, base64.StdEncoding.EncodeToString([]byte(speechAudio))),
+	})
+	unsealCtx := speechCtx()
+	materialized, err := unsealOn(f.c, unsealCtx, sealedBody)
+	if err != nil {
+		t.Fatalf("MaybeUnsealRequest: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = unsealCtx.Request
+	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEProfile, wire.ProfileSpeech)
+	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
+
+	const transcript = "the transcript nobody else may read"
+	upstream := `{"model":"whisper-large-v3","usage":{"type":"duration","seconds":3.5},"text":"` + transcript + `"}`
+	h := http.Header{}
+	h.Set("Content-Encoding", "gzip")
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     h,
+		Body:       io.NopCloser(bytes.NewReader(gzipped(t, upstream))),
+	}
+
+	if err := f.c.handleSpeechToTextResponse(ctx, resp, model.User{}, "", materialized,
+		model.Request{IsWhitelisted: true, RequestHash: "req-1"}); err != nil {
+		t.Fatalf("a compressed transcription must still be sealed, not refused: %v", err)
+	}
+
+	written := rec.Body.Bytes()
+	if bytes.Contains(written, []byte(transcript)) {
+		t.Fatal("the plaintext transcript reached the client")
+	}
+	var frame wire.Response
+	if err := json.Unmarshal(written, &frame); err != nil {
+		t.Fatalf("the response is not a sealed frame: %v\n%s", err, written)
+	}
+	opened, err := wire.OpenResponseFor(wire.ProfileSpeech, f.clientEphSk, frame)
+	if err != nil {
+		t.Fatalf("the client cannot open the frame: %v", err)
+	}
+	var got string
+	if err := json.Unmarshal(opened["text"], &got); err != nil {
+		t.Fatalf("no text in the opened frame: %v", err)
+	}
+	if got != transcript {
+		t.Errorf("transcript = %q, want %q", got, transcript)
+	}
+	// And the Content-Encoding the client was going to be told about is gone, so
+	// it does not try to gunzip an identity-encoded frame.
+	if enc := rec.Header().Get("Content-Encoding"); enc != "" {
+		t.Errorf("Content-Encoding = %q on a sealed identity frame, want empty", enc)
+	}
+}
+
+// And the unsealed path bills a compressed transcription from its USAGE BLOCK,
+// not from a word-count estimate.
+//
+// The forwarder branch decoded the body but cleared Content-Encoding only on
+// ctx.Writer, never on resp.Header, so the billing reader below it decoded a
+// second time. That failure is not a clean error: gzip.NewReader consumes its
+// 10-byte header probe before returning one, and initializeSpeechReader fell back
+// to that same drained reader — measured, 81 of 91 bytes survived, the JSON parse
+// failed on the truncation, and the request billed by estimate. Silent, and wrong
+// by an amount that depends on the transcript.
+//
+// The discriminator is the fallback's own warning, because the estimate and the
+// real charge can coincide: a test asserting only the fee would pass on a
+// transcript whose word count happens to match.
+func TestCompressedTranscriptionIsBilledFromItsUsageBlock(t *testing.T) {
+	for _, providerType := range []string{constant.ProviderTypeCentralized, ""} {
+		name := providerType
+		if name == "" {
+			name = "in-network"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := speechFixture(t)
+			f.c.reconciliationDB = &mockReconciliationDB{}
+			f.c.Service.ProviderType = providerType
+			logger := &warnCapturingLogger{testAsyncLoggerImpl: &testAsyncLoggerImpl{}}
+			f.c.logger = logger
+
+			rec := httptest.NewRecorder()
+			gin.SetMode(gin.TestMode)
+			ctx, _ := gin.CreateTestContext(rec)
+			ctx.Request = httptest.NewRequest("POST", "/v1/proxy/audio/transcriptions", nil)
+
+			const upstream = `{"model":"whisper-large-v3","usage":{"type":"duration","seconds":3.5},"text":"one two three four five"}`
+			h := http.Header{}
+			h.Set("Content-Encoding", "gzip")
+			resp := &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     h,
+				Body:       io.NopCloser(bytes.NewReader(gzipped(t, upstream))),
+			}
+			if err := f.c.handleSpeechToTextResponse(ctx, resp, model.User{}, "", []byte("ignored"),
+				model.Request{IsWhitelisted: true, RequestHash: "req-1"}); err != nil {
+				t.Fatalf("handleSpeechToTextResponse: %v", err)
+			}
+
+			for _, w := range logger.warns {
+				if strings.Contains(w, "Failed to parse speech-to-text response") ||
+					strings.Contains(w, "Failed to decompress") {
+					t.Errorf("billed by estimate instead of from the usage block: %s", w)
+				}
+			}
+			if !strings.Contains(rec.Body.String(), "one two three four five") {
+				t.Errorf("the client did not receive the decoded transcription:\n%s", rec.Body.String())
+			}
+			if enc := rec.Header().Get("Content-Encoding"); enc != "" {
+				t.Errorf("Content-Encoding = %q after the broker decoded the body, want empty", enc)
 			}
 		})
 	}
