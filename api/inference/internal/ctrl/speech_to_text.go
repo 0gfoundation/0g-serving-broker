@@ -558,8 +558,17 @@ func (c *Ctrl) handleStreamingSpeechToText(ctx *gin.Context, resp *http.Response
 
 	chatKey := uuid.NewString()
 
-	if !c.Service.TargetSeparated {
-		c.logger.Debug("LLM server in the same network, setting ZG-Res-Key header for streaming response")
+	// Same three-way gate as the non-streaming path above and as chat's own
+	// streaming path (chatbot.go). A sealed request never reaches this handler —
+	// the dispatch fails closed — so `e2eeSealed` is false here by construction
+	// and the arm that matters is IsCentralized(): without it an unsealed
+	// centralized STT provider emitted ZG-Res-Key on a non-streaming
+	// transcription and nothing at all on a streaming one, which is a difference
+	// in the client's evidence chain that the streaming flag has no business
+	// making.
+	_, e2eeSealed := e2eeSealedRequest(ctx)
+	if !c.Service.TargetSeparated || c.Service.IsCentralized() || e2eeSealed {
+		c.logger.Debug("Setting ZG-Res-Key header for broker-signed streaming response")
 		ctx.Writer.Header().Set("ZG-Res-Key", chatKey)
 	}
 
@@ -639,10 +648,18 @@ func (c *Ctrl) handleStreamingSpeechToText(ctx *gin.Context, resp *http.Response
 		}
 	})
 
-	// Sign response if needed
-	if !c.Service.TargetSeparated {
-		c.logger.Debug("LLM server in the same network, signing streaming speech-to-text response")
-		if err := c.signChatWithKey(reqBody, rawBody.Bytes(), chatKey); err != nil {
+	// Sign response if needed. Same condition as the header above, or the key
+	// would resolve to nothing.
+	//
+	// Through signChatResponse rather than signChatWithKey, matching chat's
+	// streaming path: for an in-network provider it reaches the same
+	// signChatWithKey it always did, and for a centralized one it produces the
+	// routing proof that was previously dropped on this path. The empty
+	// e2eeSignedText is not a placeholder — a sealed request cannot arrive here,
+	// so there is no on-wire binding to pass.
+	if !c.Service.TargetSeparated || c.Service.IsCentralized() || e2eeSealed {
+		c.logger.Debug("Signing streaming speech-to-text response")
+		if err := c.signChatResponse(ctx, reqBody, rawBody.Bytes(), chatKey, "", reqModel.Upstream); err != nil {
 			c.logger.Errorf("could not sign the transcription for %s: %v", chatKey, err)
 		}
 	}

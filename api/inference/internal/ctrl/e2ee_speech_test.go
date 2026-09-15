@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"maps"
 	"mime"
 	"mime/multipart"
 	"net/http"
@@ -262,6 +263,146 @@ func TestTheJSONRuleIsScopedToJSONIfiedEndpoints(t *testing.T) {
 	}
 	if !bytes.Equal(got, plain) {
 		t.Error("forwarded unchanged")
+	}
+}
+
+// The §5.3.1 rule is about ONE ENDPOINT, and scoping it by service type alone
+// was a live break rather than a loose edge: MaybeUnsealRequest runs before the
+// route is classified, and `serviceGroup.Any("*any", …)` puts every method and
+// path under /v1/proxy through it. So on a speech provider every one of these
+// was a 400 — measured — including the endpoint a sealed client must call to
+// fetch the §8 signature this very profile emits. Clients that set a JSON
+// content type on every request (the OpenAI SDKs among them) would have lost the
+// signature fetch to the change that started producing signatures.
+func TestTheJSONRuleFiresOnlyOnTheTranscriptionRoute(t *testing.T) {
+	for _, tt := range []struct {
+		path    string
+		refused bool
+	}{
+		{"/v1/proxy/audio/transcriptions", true},
+		// The proxy collapses a redundant /v1, so SDKs reach the same endpoint
+		// through either spelling and both must be covered.
+		{"/v1/proxy/v1/audio/transcriptions", true},
+		{"/v1/proxy/audio/transcriptions/", true},
+		{"/v1/proxy/audio/transcriptions?foo=bar", true},
+		// Everything else on the same provider must pass through untouched.
+		{"/v1/proxy/signature/some-chat-id", false},
+		{"/v1/proxy/attestation/report", false},
+		{"/v1/proxy/models", false},
+		{"/v1/proxy/chat/completions", false},
+		{"/v1/proxy/", false},
+	} {
+		for _, method := range []string{"GET", "POST"} {
+			t.Run(method+" "+tt.path, func(t *testing.T) {
+				f := speechFixture(t)
+				gin.SetMode(gin.TestMode)
+				ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+				ctx.Request = httptest.NewRequest(method, tt.path, nil)
+				ctx.Request.Header.Set("Content-Type", "application/json")
+
+				_, err := f.c.MaybeUnsealRequest(ctx, nil)
+				if tt.refused != (err != nil) {
+					t.Fatalf("refused = %v, want %v (err: %v)", err != nil, tt.refused, err)
+				}
+			})
+		}
+	}
+}
+
+// A form field name and a filename reach the multipart writer straight from the
+// opened envelope, and multipart.Writer writes header values verbatim — it
+// escapes `\` and `"` and does nothing at all about CR/LF. So a sealed field
+// name could inject header lines into the body the BROKER builds.
+//
+// The boundary never leaves this process, so a whole extra part cannot be
+// injected; the reachable damage is a parser differential on a duplicated
+// Content-Disposition, which is the broker and the upstream disagreeing about
+// which model was requested. That is what the profile exists to prevent.
+func TestSealedSpeechRefusesHeaderInjectionInNamesAndFilename(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		req  wire.Request
+	}{
+		{
+			"a field name carrying CRLF and a second Content-Disposition",
+			wire.Request{"zz\r\nContent-Disposition: form-data; name=model\r\n\r\nexpensive-model\r\nX": mustRaw(t, "v")},
+		},
+		{"a field name carrying a bare LF", wire.Request{"a\nb": mustRaw(t, "v")}},
+		{"a field name carrying a bare CR", wire.Request{"a\rb": mustRaw(t, "v")}},
+		// Escaped by Go as \" and resolved correctly by Go's own ParseMediaType,
+		// but a parser that does not process backslash escapes reads a second
+		// `name` parameter out of it. Measured both halves.
+		{"a field name carrying a quote", wire.Request{`a"; name="model`: mustRaw(t, "v")}},
+		{"a filename carrying CRLF", wire.Request{"filename": mustRaw(t, "a.mp3\r\nX-Injected-Header: yes")}},
+		{"a filename carrying a quote", wire.Request{"filename": mustRaw(t, `a.mp3"; name="model`)}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f := speechFixture(t)
+			req := wire.Request{
+				"model":           mustRaw(t, "cheap-model"),
+				"response_format": mustRaw(t, "json"),
+				"file_base64":     mustRaw(t, base64.StdEncoding.EncodeToString([]byte(speechAudio))),
+			}
+			maps.Copy(req, tt.req)
+
+			ctx := speechCtx()
+			out, err := f.c.MaybeUnsealRequest(ctx, sealSpeech(t, f, req))
+			if err == nil {
+				t.Fatalf("a name that cannot appear in a multipart header must be refused; body was:\n%s", out)
+			}
+			// And refused for THIS reason, not incidentally by some other rule.
+			if !strings.Contains(err.Error(), "cannot appear in a multipart part header") {
+				t.Errorf("refused for the wrong reason: %v", err)
+			}
+		})
+	}
+}
+
+// A backslash is deliberately NOT refused: escaped, it yields a literal
+// backslash in the value rather than a parameter break, and refusing it would
+// reject an ordinary Windows-style filename for no gain.
+func TestSealedSpeechAcceptsABackslashInAFilename(t *testing.T) {
+	f := speechFixture(t)
+	req := wire.Request{
+		"model":           mustRaw(t, "cheap-model"),
+		"response_format": mustRaw(t, "json"),
+		"file_base64":     mustRaw(t, base64.StdEncoding.EncodeToString([]byte(speechAudio))),
+		"filename":        mustRaw(t, `C:\recordings\a.mp3`),
+	}
+	ctx := speechCtx()
+	out, err := f.c.MaybeUnsealRequest(ctx, sealSpeech(t, f, req))
+	if err != nil {
+		t.Fatalf("an ordinary Windows-style filename must be forwarded: %v", err)
+	}
+	_, filename, _ := readForm(t, ctx.Request.Header.Get("Content-Type"), out)
+	if filename != `C:\recordings\a.mp3` {
+		t.Errorf("filename reached the upstream as %q", filename)
+	}
+}
+
+// `file` is the name the audio part is written under, so a sealed field of the
+// same name materializes TWO parts called `file`. Measured: Go's ReadForm keeps
+// both, sorting them by kind, while a backend reading `form["file"]` or taking
+// the last match gets the decoy text and transcribes nothing.
+//
+// Refused rather than skipped: nothing in the profile legitimately seals `file`,
+// and silently dropping a field the client sealed is the one outcome a profile
+// whose whole claim is "the upstream gets what the client sealed" must not have.
+func TestSealedSpeechRefusesAFieldNamedFile(t *testing.T) {
+	f := speechFixture(t)
+	req := wire.Request{
+		"model":           mustRaw(t, "cheap-model"),
+		"response_format": mustRaw(t, "json"),
+		"file_base64":     mustRaw(t, base64.StdEncoding.EncodeToString([]byte(speechAudio))),
+		"file":            mustRaw(t, "decoy"),
+	}
+	ctx := speechCtx()
+	out, err := f.c.MaybeUnsealRequest(ctx, sealSpeech(t, f, req))
+	if err == nil {
+		t.Fatalf("a sealed %q field must be refused; body was:\n%s", speechUpstreamFileField, out)
+	}
+	if !strings.Contains(err.Error(), "reserved for the materialized audio part") {
+		t.Errorf("refused for the wrong reason: %v", err)
 	}
 }
 
@@ -1004,6 +1145,90 @@ func TestUnsealedTranscriptionWithNoDurationIsStillServed(t *testing.T) {
 	}
 	if src, ok := ctx.Get(monitor.CtxKeyFailureSource); ok {
 		t.Errorf("a served request must not be attributed as a failure, got %v", src)
+	}
+}
+
+// The gate change is wire-visible for UNSEALED traffic too, and that half had no
+// test. Relaxing the gate to `… || IsCentralized()` and routing through
+// signChatResponse means a centralized STT provider now emits ZG-Res-Key and
+// caches a ROUTING PROOF where before it emitted nothing — the same evidence
+// chat and image already give, but a real behaviour change for non-E2EE clients.
+//
+// Both branches, because the streaming half kept the old `!TargetSeparated` gate
+// and signChatWithKey after the non-streaming half was fixed: an unsealed
+// centralized provider got the proof on a non-streaming transcription and
+// nothing on a streaming one, a difference in the client's evidence that the
+// streaming flag has no business making.
+func TestUnsealedCentralizedSpeechIsSignedOnBothBranches(t *testing.T) {
+	for _, streaming := range []bool{false, true} {
+		name := "non-streaming"
+		if streaming {
+			name = "streaming"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := speechFixture(t)
+			f.c.Service.TargetSeparated = true
+			f.c.Service.ProviderType = constant.ProviderTypeCentralized
+			f.c.reconciliationDB = &mockReconciliationDB{}
+			f.c.serviceCache = cache.New(5*time.Minute, 10*time.Minute)
+			f.c.serviceCache.Set("current_service", model.Service{InputPrice: "1", OutputPrice: "1"}, cache.DefaultExpiration)
+
+			body, contentType := transcriptionBody(t, func(w *multipart.Writer) {
+				if streaming {
+					if err := w.WriteField("stream", "true"); err != nil {
+						t.Fatalf("WriteField: %v", err)
+					}
+				}
+			})
+
+			rec := httptest.NewRecorder()
+			w := &closeNotifyRecorder{ResponseRecorder: rec, closed: make(chan bool, 1)}
+			gin.SetMode(gin.TestMode)
+			ctx, _ := gin.CreateTestContext(w)
+			ctx.Request = httptest.NewRequest("POST", "/v1/proxy/audio/transcriptions", nil)
+			ctx.Request.Header.Set("Content-Type", contentType)
+			// No E2EE keys set: an ordinary, unsealed client.
+			//
+			// The upstream TLS fingerprint the proxy captures for a centralized 200.
+			// Without it routingProofOverHashes refuses to sign — deliberately, since
+			// a proof with no TLS evidence gives verifiers false confidence — so a
+			// fixture that omitted it would show "no signature" for a reason that has
+			// nothing to do with the gate under test.
+			ctx.Set(CtxKeyUpstreamCertFingerprint, strings.Repeat("ab", 32))
+
+			upstream := `{"model":"whisper-large-v3","usage":{"type":"duration","seconds":3.5},"text":"hi"}`
+			if streaming {
+				upstream = "data: " + `{"type":"transcript.text.done","text":"hi","usage":{"type":"duration","seconds":3.5}}` + "\n\n"
+			}
+			resp := &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{},
+				Body:       io.NopCloser(strings.NewReader(upstream)),
+			}
+			_ = f.c.handleSpeechToTextResponse(ctx, resp, model.User{}, "", body, model.Request{IsWhitelisted: true, RequestHash: "req-1"})
+
+			// The branch under test actually ran.
+			if rec.Flushed != streaming {
+				t.Fatalf("flushed = %v, want %v — the wrong branch ran", rec.Flushed, streaming)
+			}
+			chatKey := rec.Header().Get("ZG-Res-Key")
+			if chatKey == "" {
+				t.Fatal("a centralized provider must emit ZG-Res-Key: it is the broker that signs")
+			}
+			cached, ok := f.c.svcCache.Get(f.c.chatCacheKey(chatKey))
+			if !ok {
+				t.Fatal("ZG-Res-Key was emitted but nothing was cached for it")
+			}
+			sig, ok := cached.(ChatSignature)
+			if !ok {
+				t.Fatalf("cached value is %T, want ChatSignature", cached)
+			}
+			// A routing proof, not signChatWithKey's plain sha256(req):sha256(resp)
+			// binding — ProviderType is set only by the centralized path.
+			if sig.ProviderType == "" {
+				t.Error("a centralized provider must cache a routing proof, not a plain request/response binding")
+			}
+		})
 	}
 }
 

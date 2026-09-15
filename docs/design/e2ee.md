@@ -164,11 +164,47 @@ boolean `false` and the string `"false"` are one value.
 - an array becomes repeated `name[]` (the OpenAI multipart spelling); an
   **object is refused**, because bracket paths, JSON-in-a-field and dotted keys
   are all in use and guessing one would forward a different request than the
-  client sealed.
+  client sealed;
+- a field name or `filename` containing **CR, LF or `"` is refused**, and a field
+  named **`file` is refused** — see below.
 
 The **`Content-Type` and `Content-Length` move with the body**. Everything
 downstream reads the boundary out of the header, so a multipart body still
 labelled `application/json` reaches the upstream unparseable.
+
+**Names go into part headers, and `multipart.Writer` does not validate them.**
+Its escaper handles `\` and `"` and writes everything else — CR and LF
+included — verbatim, and both the field names and the `filename` come straight
+out of the opened envelope, i.e. from the client. Reproduced end to end: a sealed
+field named `zz\r\nContent-Disposition: form-data; name=model\r\n\r\nexpensive-model\r\nX`
+materializes a part whose header block carries a **second**
+`Content-Disposition … name=model`, and a filename of `a.mp3\r\nX-Injected: yes`
+adds a header line inside the audio part.
+
+The boundary is generated here and never leaves, so a whole extra part cannot be
+injected. The reachable damage is a **parser differential**: Go's reader is
+first-header-wins and reads the broker's `model`, while a reader that takes the
+last `Content-Disposition` reads the injected one — the broker and the upstream
+disagreeing about which model was requested, on a body the broker itself built.
+That is exactly what this profile exists to prevent, so such a name is **refused,
+not escaped**: a rewritten name is not the name the client sealed.
+
+The quote is in the refused set for the same differential, measured rather than
+assumed: Go writes `a.mp3"; name="model` as `filename="a.mp3\"; name=\"model"`,
+which Go's own `ParseMediaType` resolves back to one parameter — but a parser
+that does not process backslash escapes reads a second `name` out of it. A
+**backslash is deliberately not refused**: escaped, it yields a literal backslash
+in the value rather than a parameter break, and refusing it would reject an
+ordinary Windows-style filename for no gain.
+
+**`file` is reserved.** It is the name the audio part is written under, so a
+sealed field of the same name materializes two parts called `file`. Measured:
+Go's `ReadForm` keeps both, sorting them by kind, while a backend reading
+`form["file"]` or taking the last match gets the decoy and transcribes nothing.
+Refused rather than skipped — nothing in the profile legitimately seals `file`
+(the audio travels in `file_base64`), and silently dropping a field the client
+sealed is the one outcome a profile whose whole claim is "the upstream gets what
+the client sealed" must not produce.
 
 **Response side (§7.3).** The sealed set is not a constant: `text` always, plus
 each of `segments` / `words` / `language` the frame carries — a profile-wide
@@ -176,7 +212,19 @@ constant would reject a plain `json` transcription or leak a `verbose_json` one.
 That resolution lives in the wire package and the speech handler reaches it
 through the same `prepareFrameForSealing` the chat and image paths use. The
 billable quantity stays **cleartext**, as either `usage.seconds` or the top-level
-`duration`, so billing and the router both still read it. The §8 signature routes
+`duration`, so billing and the router both still read it.
+
+**The signing gate is now the same three-way condition chat and image carry** —
+`!TargetSeparated || IsCentralized() || e2eeSealed` — on *both* the streaming and
+the non-streaming branch, and both route through `signChatResponse`. That is a
+**wire-visible change for unsealed traffic too**, and worth stating plainly
+rather than leaving to be discovered: a centralized STT provider now emits
+`ZG-Res-Key` and caches a **routing proof** where before it emitted nothing, and
+an in-network one reaches the same `signChatWithKey` it always did. Holding the
+two branches to one condition is the point — before, an unsealed centralized
+provider got the proof on a non-streaming transcription and nothing on a
+streaming one, a difference in the client's evidence chain that the streaming
+flag has no business making. The §8 signature routes
 through `signChatResponse` rather than `signChatWithKey`, because on a sealed turn
 it must bind the on-wire aad‖ciphertext rather than a plaintext the client never
 received.
@@ -262,9 +310,35 @@ proxy and were the same hole one request shape over).
 Both halves of §5.3.1 now hold, and they are separate rules: a **multipart** body
 must not contain an `_e2ee` part (above), and on an endpoint with a JSON-ified
 profile a **JSON** body must be a valid envelope or be refused — never forwarded
-as an unsealed JSON request "just in case". The second half is scoped to the
-service types that have such a profile; image-editing is the other multipart
-endpoint and §5.3 does not cover it yet.
+as an unsealed JSON request "just in case". Image-editing is the other multipart
+endpoint and §5.3 does not cover it yet, so it has no profile and the rule is not
+applied to it.
+
+**The second half is scoped to the ENDPOINT, not just the service type**, and
+getting that wrong was a live break rather than a loose edge. `MaybeUnsealRequest`
+runs in `proxyHTTPRequest` *before* the route is classified, and
+`serviceGroup.Any("*any", …)` puts every method and path under `/v1/proxy`
+through it. A service-type-only predicate therefore refused a JSON content type
+on every path a speech provider serves — measured, on both GET and POST:
+
+| path | consequence |
+|---|---|
+| `GET /v1/proxy/signature/{chatID}` | the endpoint a sealed client **must** call to fetch the §8 signature this profile emits |
+| `GET /v1/proxy/attestation/report` | no attestation |
+| `GET /v1/proxy/models` | no model list |
+
+Clients that set `Content-Type: application/json` on every request — the OpenAI
+SDKs among them — would have lost the signature fetch to the very change that
+started producing signatures.
+
+The route is matched as a path **suffix** rather than by re-deriving the proxy's
+normalization (which strips the service prefix, collapses a redundant `/v1`, and
+is the input to billing-key matching — a second copy of that is a drift risk
+pointed at billing). Every spelling that reaches the endpoint ends with
+`/audio/transcriptions`, and nothing else in `TargetRoute` or `FreePrefixes`
+does. A spelling this misses loses only the diagnostic refusal, never a
+protection: the rule turns a confusing upstream failure into a clear 400, and an
+unsealed JSON body is cleartext either way.
 
 The rule is on part **names**, never on the raw bytes: `prompt` carries arbitrary
 caller text, so a substring rule would 400 a legitimate transcription for

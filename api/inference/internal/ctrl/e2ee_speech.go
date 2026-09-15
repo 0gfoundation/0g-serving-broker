@@ -19,6 +19,7 @@ import (
 	"mime/multipart"
 	"slices"
 	"strconv"
+	"strings"
 
 	"github.com/0gfoundation/0g-pc-e2ee/protocol/wire"
 )
@@ -40,6 +41,11 @@ const (
 	// speechFallbackFilename is used when the request sealed no filename. The part
 	// needs some filename to read as a file upload rather than a text field.
 	speechFallbackFilename = "audio"
+
+	// speechTranscriptionRoute is the endpoint the JSON-ified profile applies to,
+	// as it appears in constant.TargetRoute (the proxy strips the service prefix
+	// before matching there, so it carries no /v1/proxy).
+	speechTranscriptionRoute = "/audio/transcriptions"
 )
 
 // materializeSpeechRequest converts an unsealed JSON-ified speech request back
@@ -68,6 +74,9 @@ func materializeSpeechRequest(req wire.Request) (body []byte, contentType string
 	if err != nil {
 		return nil, "", err
 	}
+	if err := speechHeaderSafe("filename", filename); err != nil {
+		return nil, "", err
+	}
 
 	var buf bytes.Buffer
 	w := multipart.NewWriter(&buf)
@@ -91,9 +100,24 @@ func materializeSpeechRequest(req wire.Request) (body []byte, contentType string
 		switch name {
 		case speechFileField, speechFilenameField, speechStreamField:
 			continue
+		case speechUpstreamFileField:
+			// The audio part is already written under this name. A second part with
+			// the same name makes the two readers disagree about which one is the
+			// audio — Go's ReadForm sorts them by kind and keeps both, while a
+			// backend reading `form["file"]` or taking the last match gets the decoy
+			// and transcribes nothing. Measured.
+			//
+			// Refused rather than skipped: nothing in the JSON-ified profile
+			// legitimately seals `file` (the audio travels in `file_base64`), so a
+			// request that carries one is malformed, and silently dropping a field
+			// the client sealed is the one outcome the profile must not produce.
+			return nil, "", fmt.Errorf("field %q is reserved for the materialized audio part; the JSON-ified request carries audio in %q (SPEC §5.3.2)", speechUpstreamFileField, speechFileField)
 		}
 		field, values, err := speechFormValues(name, req[name])
 		if err != nil {
+			return nil, "", err
+		}
+		if err := speechHeaderSafe("field name", field); err != nil {
 			return nil, "", err
 		}
 		for _, v := range values {
@@ -106,6 +130,44 @@ func materializeSpeechRequest(req wire.Request) (body []byte, contentType string
 		return nil, "", fmt.Errorf("close the multipart body: %w", err)
 	}
 	return buf.Bytes(), w.FormDataContentType(), nil
+}
+
+// speechHeaderSafe refuses a form field name or filename that cannot appear in a
+// multipart part header without changing its meaning (RFC 7578 §5.1).
+//
+// multipart.Writer does NOT do this. Its escaper handles `\` and `"` and writes
+// everything else verbatim — CR and LF included — and both of these strings come
+// straight out of the opened envelope, i.e. from the client. Reproduced
+// end to end through the real sealer: a sealed field named
+// "zz\r\nContent-Disposition: form-data; name=model\r\n\r\nexpensive-model\r\nX"
+// materializes a part whose header block carries a SECOND
+// `Content-Disposition: … name=model`, and a filename of "a.mp3\r\nX-Injected: yes"
+// materializes an extra header line inside the audio part.
+//
+// The boundary is generated here and never leaves, so a whole extra part cannot
+// be injected — the reachable damage is a parser differential: Go's reader is
+// first-header-wins and reads the broker's `model`, while a reader that takes
+// the last `Content-Disposition` reads the injected one. The broker and the
+// upstream then disagree about which model was requested, on a body the broker
+// itself built. That is the divergence the profile exists to prevent, so it is
+// refused rather than escaped.
+//
+// The quote is in the set for the same differential, measured rather than
+// assumed: Go writes `a.mp3"; name="model` as `filename="a.mp3\"; name=\"model"`,
+// which Go's own ParseMediaType resolves correctly back to one parameter — but a
+// parser that does not process backslash escapes reads a second `name`
+// parameter out of it. A backslash is NOT in the set: escaped, it yields a
+// literal backslash in the value rather than a parameter break, and rejecting it
+// would refuse an ordinary Windows-style filename for no gain.
+//
+// Refused, not sanitized, and for the reason an object-valued field is refused
+// above: a rewritten name is not the name the client sealed, and the client's
+// signature covers what it sealed.
+func speechHeaderSafe(kind, s string) error {
+	if i := strings.IndexAny(s, "\r\n\""); i >= 0 {
+		return fmt.Errorf("%s %q contains %q at offset %d, which cannot appear in a multipart part header (RFC 7578 §5.1, SPEC §5.3)", kind, s, s[i], i)
+	}
+	return nil
 }
 
 // speechAudioBytes decodes the payload field.

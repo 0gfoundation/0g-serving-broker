@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"mime"
 	"mime/multipart"
+	"net/http"
 	"slices"
 	"strconv"
 	"strings"
@@ -197,6 +198,47 @@ func jsonIfiedServiceType(svcType string) bool {
 	return svcType == constant.ServiceTypeSpeechToText
 }
 
+// isJSONIfiedRoute reports whether this request is addressed to the endpoint the
+// §5.3.1 JSON rule is about.
+//
+// The service type alone is not enough, and treating it as enough was a live
+// break rather than a loose edge. MaybeUnsealRequest runs in proxyHTTPRequest
+// BEFORE the route is classified, and `serviceGroup.Any("*any", …)` puts every
+// method and path under /v1/proxy through it — so on a speech provider a
+// service-type-only rule refused a JSON content type on, measured:
+//
+//	GET /v1/proxy/signature/{chatID}    the endpoint a sealed client MUST call to
+//	                                    fetch the §8 signature this profile emits
+//	GET /v1/proxy/attestation/report
+//	GET /v1/proxy/models
+//
+// Clients that set `Content-Type: application/json` on every request — the
+// OpenAI SDKs among them — would have lost the signature fetch to the very
+// change that started producing signatures.
+//
+// Matched as a path SUFFIX rather than by re-deriving the proxy's normalization,
+// which strips the service prefix and collapses a redundant /v1 and is the input
+// to billing-key matching: a second copy of that is a drift risk pointed at
+// billing. Every spelling that reaches this endpoint ends with the route
+// (/v1/proxy/audio/transcriptions and /v1/proxy/v1/audio/transcriptions both
+// do), and nothing else in TargetRoute or FreePrefixes does. A spelling this
+// misses loses only the diagnostic refusal, never a protection — the rule turns a
+// confusing upstream failure into a clear 400; it does not guard anything, since
+// an unsealed JSON body is cleartext either way.
+func isJSONIfiedRoute(req *http.Request) bool {
+	if req == nil {
+		return false
+	}
+	path := req.URL.Path
+	if i := strings.IndexByte(path, '?'); i >= 0 {
+		path = path[:i]
+	}
+	if path != "/" {
+		path = strings.TrimRight(path, "/")
+	}
+	return strings.HasSuffix(path, speechTranscriptionRoute)
+}
+
 // isSealedJSON reports whether reqBody is a sealed envelope (SPEC §5): a JSON
 // object with a top-level "_e2ee" key. It is the same test MaybeUnsealRequest
 // makes before committing to fail-closed.
@@ -280,7 +322,7 @@ func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, reqBody []byte) ([]byte, err
 	// a silent upstream failure with a clear 400. Supporting it is small —
 	// materializeSpeechRequest is profile-independent — but it is a product
 	// decision, not a protocol one. See docs/design/e2ee.md.
-	if isJSONMediaType(contentType) && jsonIfiedServiceType(c.Service.Type) && !isSealedJSON(reqBody) {
+	if isJSONMediaType(contentType) && jsonIfiedServiceType(c.Service.Type) && isJSONIfiedRoute(ctx.Request) && !isSealedJSON(reqBody) {
 		return nil, fmt.Errorf("this endpoint takes multipart/form-data, or a sealed JSON envelope carrying a top-level %q object (SPEC §5.3.1). A JSON body that is not an envelope is refused rather than forwarded", e2eeBodyMarker)
 	}
 	if !hasE2EEMarker(reqBody) {
