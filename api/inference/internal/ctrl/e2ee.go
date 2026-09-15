@@ -17,6 +17,7 @@ import (
 	"mime"
 	"mime/multipart"
 	"slices"
+	"strconv"
 	"strings"
 
 	pccrypto "github.com/0gfoundation/0g-pc-e2ee/protocol/crypto"
@@ -89,12 +90,6 @@ const (
 	// CtxKeyE2EEClientEphPub holds the client's response ephemeral X25519 public
 	// key (pccrypto.PublicKey) extracted from the request envelope (SPEC §7).
 	CtxKeyE2EEClientEphPub = "e2eeClientEphPub"
-	// CtxKeyE2EEPlaintextReq holds the reconstructed plaintext request bytes
-	// ([]byte) captured immediately after unsealing, BEFORE the proxy's upstream
-	// rewrites (model enforcement, stream_options injection, …). Retained for
-	// observability/audit; the §8 signature no longer binds plaintext (see
-	// CtxKeyE2EEReqBindHash).
-	CtxKeyE2EEPlaintextReq = "e2eePlaintextReq"
 	// CtxKeyE2EEReqBindHash holds the §8 request binding hash ([32]byte =
 	// proof.FrameBindingHash of the sealed request: sha256(sha256(aad)‖sha256(ct)))
 	// captured at unseal time. The response signature binds the on-wire
@@ -176,6 +171,99 @@ func multipartNamesE2EEPart(contentType string, reqBody []byte) bool {
 	}
 }
 
+// jsonObjectBody parses these bytes as a JSON object, ONCE, returning the object
+// and whether they were one — which is what §5.3.1's second half turns on, not
+// whether a header says so.
+//
+// It keys on the body rather than the Content-Type because a client that
+// mislabels a JSON body as text/plain, or sends none, must get the same answer.
+// Only an object counts: a bare array, string or number is not a request shape
+// this endpoint has ever accepted, sealed or not, and the upstream's own refusal
+// is the clearer error for it.
+//
+// Returning the object rather than a bool is the point. Asking "is it an object"
+// and then "is it an envelope" as two predicates unmarshals the same bytes into
+// the same type twice — wire.Request IS map[string]json.RawMessage — and
+// json.RawMessage copies, so it is two full passes and two full copies where one
+// answers both questions. Measured on a 1 MiB marker-carrying body, the rule's
+// own cost doubles: 1× the body against 2×.
+func jsonObjectBody(body []byte) (map[string]json.RawMessage, bool) {
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(body, &obj) != nil || obj == nil {
+		return nil, false
+	}
+	return obj, true
+}
+
+// jsonIfiedServiceType reports whether this service type's endpoint carries its
+// payload as multipart and therefore reaches the protocol JSON-ified (SPEC §5.3),
+// which is what makes a JSON body there a sealed envelope or nothing.
+//
+// image-editing is the other multipart endpoint and is deliberately NOT here: it
+// has no profile yet (SPEC §5.3 covers speech first), so a JSON body on it is
+// neither an envelope this broker can open nor a request it can refuse on the
+// strength of a rule that does not yet apply.
+func jsonIfiedServiceType(svcType string) bool {
+	return svcType == constant.ServiceTypeSpeechToText
+}
+
+// isJSONIfiedRoute reports whether this request is addressed to the endpoint the
+// §5.3.1 JSON rule is about.
+//
+// The service type alone is not enough, and treating it as enough was a live
+// break rather than a loose edge. MaybeUnsealRequest runs in proxyHTTPRequest
+// BEFORE the route is classified, and `serviceGroup.Any("*any", …)` puts every
+// method and path under /v1/proxy through it — so on a speech provider a
+// service-type-only rule refused a JSON content type on, measured:
+//
+//	GET /v1/proxy/signature/{chatID}    the endpoint a sealed client MUST call to
+//	                                    fetch the §8 signature this profile emits
+//	GET /v1/proxy/attestation/report
+//	GET /v1/proxy/models
+//
+// Clients that set `Content-Type: application/json` on every request — the
+// OpenAI SDKs among them — would have lost the signature fetch to the very
+// change that started producing signatures.
+//
+// Answered from the DISPATCHER'S OWN normalized path, handed in by the caller,
+// and compared for equality. Not from ctx.Request, and not as a suffix — that
+// was a bypass, measured:
+//
+//	POST /v1/proxy/signature/some-chat-id            refused   (the control)
+//	POST /v1/proxy/signature/audio/transcriptions    OPENED, materialized, sealed
+//	POST /v1/proxy/attestation/audio/transcriptions  OPENED
+//	POST /v1/proxy/models/audio/transcriptions       OPENED
+//
+// Any path at all, with the route appended, ends with the route. Traced to the
+// end on a TargetSeparated non-forwarder provider: handleSignatureRoute declines,
+// FreePrefixes matches `/signature`, and the request goes to the plain
+// passthrough with charging=false — so the envelope was opened, the audio decoded
+// out of it, and the plaintext forwarded to a caller-chosen upstream path,
+// unbilled, with the reply answered in the clear. That is verbatim the fail-open
+// the route guard was added to close.
+//
+// The earlier version's own argument for the suffix is why this happened, and it
+// is worth keeping: "a spelling this misses loses only the diagnostic refusal,
+// never a protection", since an unsealed JSON body is cleartext either way. That
+// was TRUE while the §5.3.1 diagnostic was the only caller — a suffix that is too
+// GENEROUS was harmless there, because firing on a non-endpoint only produces a
+// 400 on a request that had nowhere to go. Then the profile route guard was added
+// and made the same predicate load-bearing for a protection, where generosity is
+// the whole bug. The invariant was not re-derived for the new caller. A predicate
+// whose safety argument names its callers has to be re-read when one is added.
+//
+// So the two strings are now one. The proxy already computes this path (strip the
+// service prefix, collapse a redundant /v1, cut the query, trim the trailing
+// slash) and matches billing keys against it; taking it as an argument means
+// there is no second copy to drift, the compiler requires the caller to supply
+// it, and the guard and the dispatcher cannot disagree about what route a request
+// is on. Both legitimate spellings normalize to the constant exactly
+// (/v1/proxy/audio/transcriptions and /v1/proxy/v1/audio/transcriptions), and
+// nothing else does.
+func isJSONIfiedRoute(targetPath string) bool {
+	return targetPath == speechTranscriptionRoute
+}
+
 // isSealedJSON reports whether reqBody is a sealed envelope (SPEC §5): a JSON
 // object with a top-level "_e2ee" key. It is the same test MaybeUnsealRequest
 // makes before committing to fail-closed.
@@ -233,12 +321,62 @@ func (c *Ctrl) RefuseAsync(contentType string, reqBody []byte) string {
 // is returned as an error and MUST be treated as fail-closed by the caller (no
 // plaintext fallback, SPEC §6) — a sealed request that cannot be opened, whose
 // signer_addr is not this enclave, or whose key_id is unknown is rejected.
-func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, reqBody []byte) ([]byte, error) {
+func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, targetPath string, reqBody []byte) ([]byte, error) {
 	// Asked FIRST, and of the Content-Type rather than the body: a multipart body
 	// never parses as JSON, so every test below it would call an envelope in a
 	// form part "not sealed" and forward it. See multipartNamesE2EEPart.
-	if multipartNamesE2EEPart(ctx.Request.Header.Get("Content-Type"), reqBody) {
+	contentType := ctx.Request.Header.Get("Content-Type")
+	if multipartNamesE2EEPart(contentType, reqBody) {
 		return nil, fmt.Errorf("multipart request must not carry a sealed envelope: a part is named %q. A sealed request is sent as JSON", e2eeBodyMarker)
+	}
+	// The other half of the same rule (SPEC §5.3.1), on the endpoints that now
+	// accept two content types: a JSON body there MUST be a valid sealed envelope
+	// or be REFUSED. It must not be forwarded as an unsealed JSON request "just in
+	// case" — falling through is how "is this sealed?" stops being a question
+	// anyone answers.
+	//
+	// Scoped to the service types that have a JSON-ified profile. Elsewhere a JSON
+	// body is simply an ordinary request on a JSON endpoint.
+	//
+	// Keyed on the BODY's shape, not on the declared media type. Leading with
+	// isJSONMediaType made the rule hold for a body LABELLED JSON rather than for
+	// a JSON body: the same `{"model":…,"file_base64":…}` reached the
+	// multipart-only upstream verbatim under `text/plain` or no Content-Type at
+	// all, which is the fall-through the paragraph above says must not happen.
+	// isSealedJSON already parses the body, so asking whether it is a JSON object
+	// costs a failed unmarshal on the first byte of a multipart body (`-`).
+	//
+	// The asymmetry with the multipart half above is deliberate and stays: that
+	// one MUST read the header, because the boundary lives there and there is no
+	// other way to find the parts.
+	//
+	// This DOES refuse an unsealed `file_base64` JSON body, which the router's
+	// OpenAPI spec documents on this endpoint — deliberately, and checked rather
+	// than assumed. The broker has never implemented that shape (it forwarded the
+	// JSON to an upstream that speaks only multipart), and the customer-facing
+	// docs state the opposite: "this endpoint uses multipart/form-data instead of
+	// a JSON body". So the refusal matches what is actually promoted and replaces
+	// a silent upstream failure with a clear 400. Supporting it is small —
+	// materializeSpeechRequest is profile-independent — but it is a product
+	// decision, not a protocol one. See docs/design/e2ee-speech.md.
+	// ORDER MATTERS, and it is not style. All four operands are pure, so `&&`
+	// short-circuits left to right and the cheap ones lead: a string compare, then
+	// a path suffix, and only then anything that touches the body. Put
+	// isJSONObjectBody first — as this rule briefly was — and every request on
+	// every service type pays a full unmarshal of its body before the service-type
+	// check rules it out. Benchmarked on a 1 MiB chat body: 4.69 ms and 1,057,463 B
+	// per request against 2.27 ns and zero allocations for this order, which also
+	// defeats hasE2EEMarker below — a substring scan that exists precisely to keep
+	// the parse off the non-sealed majority.
+	if jsonIfiedServiceType(c.Service.Type) && isJSONIfiedRoute(targetPath) {
+		// One parse, two answers. isSealedJSON would re-unmarshal the same bytes
+		// into the same type, so asking it here doubled the work on exactly the
+		// bodies that are largest — a sealed transcription carries the audio.
+		if obj, isObject := jsonObjectBody(reqBody); isObject {
+			if _, sealed := obj[e2eeBodyMarker]; !sealed {
+				return nil, fmt.Errorf("this endpoint takes multipart/form-data, or a sealed JSON envelope carrying a top-level %q object (SPEC §5.3.1). A JSON body that is not an envelope is refused rather than forwarded", e2eeBodyMarker)
+			}
+		}
 	}
 	if !hasE2EEMarker(reqBody) {
 		return reqBody, nil
@@ -288,6 +426,25 @@ func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, reqBody []byte) ([]byte, err
 	if !sealable {
 		return nil, fmt.Errorf("sealed requests are not supported for service type %q on the %q API surface", c.Service.Type, surface)
 	}
+	// The speech profile is also scoped to its ROUTE, not just its service type.
+	// Profile resolution is otherwise route-blind: it answers from the service
+	// type alone, so before this check a sealed envelope POSTed to a free route
+	// on a speech provider — /signature/{chatID}, /attestation/report — was
+	// opened, materialized into multipart, and answered in the clear. Measured:
+	// the body came back as a 499-byte multipart form with the context marked
+	// sealed, on a route that serves no inference at all.
+	//
+	// Scoped to speech because this PR is what made that reachable: before it,
+	// this arm returned ("", false) for the service type and the envelope was
+	// refused. ProfileImage is route-blind in the same way and predates this
+	// change: measured on a text-to-image provider, a sealed image envelope is
+	// opened on every route including the free ones, with the sealed prompt
+	// restored and the context marked sealed. Widening the rule wants a
+	// per-profile route set rather than a second profile-specific `&&`, so it is
+	// tracked as #734 rather than smuggled in here.
+	if profile == wire.ProfileSpeech && !isJSONIfiedRoute(targetPath) {
+		return nil, fmt.Errorf("a sealed %s request is only accepted on %s, not %q (SPEC §5.3)", profile, speechTranscriptionRoute, ctx.Request.URL.Path)
+	}
 
 	// Extract the client's response ephemeral key before opening, so the response
 	// path can seal even though the field lives in the (now consumed) envelope.
@@ -334,13 +491,34 @@ func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, reqBody []byte) ([]byte, err
 		return nil, fmt.Errorf("re-encode unsealed request: %w", err)
 	}
 
+	// SPEC §5.3: a JSON-ified profile's upstream speaks only multipart, so the
+	// request is materialized back here — inside the enclave, after the AAD has
+	// been verified over the JSON form.
+	//
+	// The Content-Type has to move with the body. Everything downstream (form
+	// parsing for the billed duration, the upstream request itself) reads the
+	// boundary out of the header, so forwarding a multipart body under the
+	// envelope's `application/json` would hand the upstream a body it cannot
+	// parse. Content-Length too: the sealed envelope's length describes bytes that
+	// no longer exist.
+	forward := plaintext
+	if profile == wire.ProfileSpeech {
+		materialized, contentType, merr := materializeSpeechRequest(reconstructed)
+		if merr != nil {
+			return nil, fmt.Errorf("materialize the unsealed speech request: %w", merr)
+		}
+		ctx.Request.Header.Set("Content-Type", contentType)
+		ctx.Request.Header.Set("Content-Length", strconv.Itoa(len(materialized)))
+		ctx.Request.ContentLength = int64(len(materialized))
+		forward = materialized
+	}
+
 	ctx.Set(CtxKeyE2EESealed, true)
 	ctx.Set(CtxKeyE2EEProfile, profile)
 	ctx.Set(CtxKeyE2EEClientEphPub, pccrypto.PublicKey(clientEphPub))
-	ctx.Set(CtxKeyE2EEPlaintextReq, plaintext)
 	ctx.Set(CtxKeyE2EEReqBindHash, reqBindHash)
 	c.logger.Debugf("E2EE: unsealed request (sealed_fields=%v, key_id=%s)", e2ee.SealedFields, e2ee.KeyID)
-	return plaintext, nil
+	return forward, nil
 }
 
 // profileForRequest maps the endpoint this broker serves — service type AND the
@@ -393,6 +571,12 @@ func profileForRequest(svcType, surface string) (p wire.Profile, sealable bool) 
 		}
 	case constant.ServiceTypeTextToImage:
 		return wire.ProfileImage, true
+	case constant.ServiceTypeSpeechToText:
+		// The first JSON-ified profile (SPEC §5.3): the client seals a JSON object
+		// and the enclave materializes multipart for the upstream. Nothing about
+		// the envelope or the crypto is multipart-aware — see
+		// materializeSpeechRequest.
+		return wire.ProfileSpeech, true
 	default:
 		return "", false
 	}
@@ -427,17 +611,6 @@ func e2eeSealedRequest(ctx *gin.Context) (pccrypto.PublicKey, bool) {
 		return nil, false
 	}
 	return pub, true
-}
-
-// e2eePlaintextRequest returns the reconstructed plaintext request captured at
-// unseal time, used as the request side of the §8 content binding.
-func e2eePlaintextRequest(ctx *gin.Context) ([]byte, bool) {
-	v, ok := ctx.Get(CtxKeyE2EEPlaintextReq)
-	if !ok {
-		return nil, false
-	}
-	b, ok := v.([]byte)
-	return b, ok && len(b) > 0
 }
 
 // e2eeReqBindHash returns the §8 request binding hash (sha256 of the sealed

@@ -7,6 +7,7 @@ import (
 
 	"github.com/patrickmn/go-cache"
 
+	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/common/tee"
 	"github.com/0glabs/0g-serving-broker/inference/contract"
 	"github.com/0glabs/0g-serving-broker/inference/model"
@@ -54,4 +55,12 @@ func (c *Ctrl) StoreTestImage(chatKey string, images [][]byte) error {
 		return fmt.Errorf("image store not initialised, call SetupImageStoreForTest first")
 	}
 	return c.imageStore.store(chatKey, images)
+}
+
+// SetLoggerForTest injects a logger so tests in other packages can drive request
+// paths that log. The chat-profile proxy tests never needed it because they fail
+// before the first log line; the speech route-scoping test reaches the successful
+// unseal, which logs.
+func (c *Ctrl) SetLoggerForTest(logger log.Logger) {
+	c.logger = logger
 }

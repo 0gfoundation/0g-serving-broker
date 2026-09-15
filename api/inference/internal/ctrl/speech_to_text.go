@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/0gfoundation/0g-pc-e2ee/protocol/proof"
 	"github.com/andybalholm/brotli"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -239,8 +240,22 @@ type SpeechToTextStreamChunk struct {
 
 // handleSpeechToTextResponse handles speech-to-text transcription response
 func (c *Ctrl) handleSpeechToTextResponse(ctx *gin.Context, resp *http.Response, _ model.User, _ string, reqBody []byte, reqModel model.Request) error {
-	// Check if request is for streaming by parsing the request body
-	isStream := c.isSpeechToTextStream(reqBody)
+	// A SEALED request is non-streaming by protocol — SPEC §5.3.3 defines no
+	// streaming frames for this profile and the sealer refuses `stream` — so it
+	// must take the sealing handler, decided from the protocol rather than from
+	// the body.
+	//
+	// That distinction is the whole fix. handleStreamingSpeechToText is
+	// E2EE-unaware and forwards the transcript line by line in the clear, and the
+	// branch was chosen by a substring scan over the MATERIALIZED multipart: a
+	// sealed `prompt` whose text merely contained `name="stream"` and a line
+	// reading `true` flipped it, publishing the plaintext transcript. Measured,
+	// on a payload a user could plausibly dictate. Routing sealed traffic here is
+	// fail-closed rather than a guess: if the upstream really did stream, the
+	// non-streaming handler cannot parse the body as a frame and
+	// maybeSealNonStreamResponse fails the request instead of forwarding it.
+	_, e2eeSealed := e2eeSealedRequest(ctx)
+	isStream := !e2eeSealed && c.isSpeechToTextStream(ctx, reqBody)
 
 	if !isStream {
 		return c.handleNonStreamingSpeechToText(ctx, resp, reqBody, reqModel)
@@ -255,8 +270,25 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 
 	chatKey := uuid.NewString()
 
-	if !c.Service.TargetSeparated {
-		c.logger.Debug("LLM server in the same network, setting ZG-Res-Key header")
+	// ZG-Res-Key is emitted when the broker is the one that signs: in-network,
+	// centralized, OR sealed. The sealed arm is not a special case — it is the
+	// same rule chat and image already carry: on a sealed turn the broker's TEE
+	// signs the §8 ciphertext binding, so the client needs the handle to that
+	// signature even from a TargetSeparated provider.
+	//
+	// Emitting it is necessary but NOT today sufficient, and this comment used to
+	// claim otherwise ("so the client must be able to fetch that signature"). On a
+	// TargetSeparated NON-FORWARDER provider — the decentralized topology that
+	// sentence was about — handleSignatureRoute declines to serve from the cache
+	// and proxies GET /signature/{chatID} upstream, which has never heard of a
+	// broker-minted chatKey. So the signature is signed and cached and the handle
+	// is advertised, and the fetch still does not resolve. Shared identically with
+	// chat and image, so this PR is the third caller of an inaccurate claim rather
+	// than its cause; tracked as #735, whose fix (a cache probe before the
+	// forward) changes chat and image too and belongs with them.
+	_, e2eeSealed := e2eeSealedRequest(ctx)
+	if !c.Service.TargetSeparated || c.Service.IsCentralized() || e2eeSealed {
+		c.logger.Debug("Setting ZG-Res-Key header for broker-signed response")
 		ctx.Writer.Header().Set("ZG-Res-Key", chatKey)
 	}
 
@@ -267,24 +299,58 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 		return err
 	}
 
+	// DECODE ONCE, HERE, ABOVE EVERYTHING THAT READS THE BODY. The sync path forces
+	// `Accept-Encoding: identity` upstream, but an upstream that ignores it delivers
+	// compressed bytes, and three separate readers below want plaintext: the #184
+	// sanitizer, the §7.3 seal, and the billing parse. This used to be decoded for
+	// forwarders only, in the block below, which broke the other two:
+	//
+	//   - the SEAL ran on gzip bytes on any non-forwarder upstream that compresses.
+	//     Measured end to end: `seal response: body is not a JSON object` → a 400
+	//     attributed `upstream`, AFTER the transcription was produced and paid for
+	//     in GPU time, on a shape the billing path two screens down handles fine.
+	//   - the BILLING parse re-decoded a body the forwarder branch had already
+	//     decoded, because that branch cleared Content-Encoding on ctx.Writer but
+	//     not on resp.Header. The mechanism is worse than a failed read:
+	//     initializeSpeechReader calls gzip.NewReader, which CONSUMES the 10-byte
+	//     header probe before returning an error, and then falls back to that same
+	//     now-drained reader. Measured on a 91-byte JSON body: 81 bytes survive, the
+	//     JSON parse fails on the truncation, and the request bills by WORD-COUNT
+	//     ESTIMATE. Silent, and wrong in the provider's favour or the user's
+	//     depending on the transcript.
+	//
+	// Both are one bug — the decode was in the wrong place — so this is one hoist
+	// rather than two guards, and resp.Header is cleared alongside ctx.Writer so
+	// the reader below is a no-op rather than a second decode attempt.
+	//
+	// WIRE-VISIBLE for non-E2EE traffic, deliberately: a compressed transcription
+	// from a non-forwarder upstream now reaches the client decompressed, where
+	// before it was relayed still compressed. The broker already did this for
+	// forwarders, and it already asks for identity, so this narrows a divergence
+	// rather than opening one — and it makes the §8 signature bind the bytes the
+	// client actually receives, which it did not when the body was signed
+	// compressed and no other path agreed on what "the body" was.
+	if enc := resp.Header.Get("Content-Encoding"); isCompressedEncoding(enc) {
+		if decoded, derr := decodeBody(body, enc); derr == nil {
+			body = decoded
+			ctx.Writer.Header().Del("Content-Encoding")
+			resp.Header.Del("Content-Encoding")
+		} else {
+			// Fail-open for the unsealed path, as before: an undecodable body is
+			// relayed and billed as best it can be. The sealed path cannot relay it
+			// and fails closed below on its own terms.
+			c.logger.Warnf("could not decode %s transcription; forwarding the upstream body as-is (leak sanitization skipped, billing may estimate): %v", enc, derr)
+		}
+	}
+
 	// For forwarder providers, strip #184 upstream identity/cost leak fields from a
 	// JSON transcription body before forwarding (and, for in-network signing,
 	// before signing — sanitize-before-sign keeps the signature bound to what the
-	// client receives). Decode a compressed body first: the sync path forces
-	// identity upstream, so an upstream that ignores it delivers compressed bytes
-	// that would otherwise never match the JSON-object check below. STT also returns
-	// non-JSON formats (text/srt/vtt) that carry no such fields; skip them (and
-	// sanitizeResponseBody's fail-open warning) by only sanitizing a JSON object
-	// body. Usage fields are not leak keys, so downstream billing is unaffected.
+	// client receives). STT also returns non-JSON formats (text/srt/vtt) that carry
+	// no such fields; skip them (and sanitizeResponseBody's fail-open warning) by
+	// only sanitizing a JSON object body. Usage fields are not leak keys, so
+	// downstream billing is unaffected.
 	if c.Service.IsForwarder() {
-		if enc := resp.Header.Get("Content-Encoding"); isCompressedEncoding(enc) {
-			if decoded, derr := decodeBody(body, enc); derr == nil {
-				body = decoded
-				ctx.Writer.Header().Del("Content-Encoding")
-			} else {
-				c.logger.Warnf("#184 leak sanitization SKIPPED: could not decode %s transcription; forwarding upstream body unsanitized (potential identity/cost leak): %v", enc, derr)
-			}
-		}
 		if bytes.HasPrefix(bytes.TrimSpace(body), []byte("{")) {
 			if sanitized, changed := c.sanitizeResponseBody(body, ""); changed {
 				body = sanitized
@@ -292,8 +358,103 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 		}
 	}
 
+	// E2EE (SPEC §7.3): if the request arrived sealed, seal the transcript before
+	// forwarding. `body` stays PLAINTEXT below — billing reads the duration out of
+	// it, and §7.3 requires that quantity to be cleartext anyway, so the sealed
+	// frame carries it too and the two agree by construction.
+	//
+	// What the profile seals is not a constant: `text` always, plus each of
+	// `segments` / `words` / `language` the frame happens to carry (§7.3). That
+	// resolution lives in the wire package and is reached through the same
+	// prepareFrameForSealing the chat and image paths use, so a `verbose_json`
+	// transcription cannot ship its per-segment transcript in the clear because
+	// this path forgot a field.
+	//
+	outBody := body
+	signedEarly := false
+	if sealed, isSealed, respBindHash, sealErr := c.maybeSealNonStreamResponse(ctx, body); isSealed {
+		if sealErr != nil {
+			// Fail-closed: never forward a plaintext transcript for a sealed request.
+			//
+			// Attributed UPSTREAM here rather than by a pre-check that restates the
+			// profile's rules. There WAS such a pre-check, and it was a strict subset
+			// of what the sealer enforces: measured, a negative `duration`, two
+			// locators that disagree, and a null `usage.seconds` alongside a valid
+			// `duration` all walked past it and were refused one line later with no
+			// attribution at all — landing back in the broker's alert bucket, which
+			// is the thing the attribution exists to prevent. A second copy of a rule
+			// is a subset of it by default; the sealer's own messages are also more
+			// precise than the one that pre-check produced.
+			//
+			// The rule: a sealed turn whose PROFILE is in hand has everything the
+			// broker owes, so what is left to fail is the upstream's response —
+			// §7.3's billable quantity, a shape §7.3 cannot express, a body that is
+			// not a JSON object at all. A missing profile is broker state and keeps
+			// the default bucket. The transcript was produced either way, so the
+			// wasted compute lands on the provider, which is also who can fix it —
+			// the incentive the image path states in the same words. Not marked
+			// ignoreError, so it stays logged.
+			// Drop the handle before answering. ZG-Res-Key went into the header map
+			// above, before the body was read, so a fail-closed arm would otherwise
+			// hand a sealed client a chatID that resolves to nothing — the same
+			// mistake the sign-before-flush ordering below exists to prevent, one
+			// error path over. The headers have not been flushed yet on this arm
+			// (nothing has been written), so deleting it is enough.
+			ctx.Writer.Header().Del("ZG-Res-Key")
+			if _, ok := e2eeProfile(ctx); ok {
+				ctx.Set(monitor.CtxKeyFailureSource, monitor.FailureSourceUpstream)
+			}
+			c.handleBrokerError(ctx, sealErr, "seal transcription response")
+			return sealErr
+		}
+		outBody = sealed
+		reqBindHash, ok := e2eeReqBindHash(ctx)
+		if !ok {
+			err := fmt.Errorf("e2ee response: request binding hash missing from context")
+			// Third fail-closed exit of this block, and it drops the handle like the
+			// other two. Not reachable today — MaybeUnsealRequest sets
+			// CtxKeyE2EEReqBindHash on the same lines as CtxKeyE2EESealed, so a
+			// sealed turn has the hash — but the arm exists precisely because that
+			// invariant could stop holding, and an arm that behaves differently from
+			// its neighbours for no stated reason is how the next reader learns the
+			// wrong rule.
+			ctx.Writer.Header().Del("ZG-Res-Key")
+			c.handleBrokerError(ctx, err, "sign transcription response")
+			return err
+		}
+		e2eeSignedText := proof.SignedTextE2EEFromHashes(reqBindHash, respBindHash)
+
+		// Cache the signature BEFORE flushing, the same ordering chat and image
+		// already use for a sealed turn (issue #619), and for two reasons that are
+		// not the same weight.
+		//
+		// The race: the client learns the chatID from ZG-Res-Key, which goes out
+		// with the flushed headers, so a sealed client fetching
+		// GET /v1/proxy/signature/{chatID} straight away could 404 on a signature
+		// cached ~70 lines later. Measured, through a writer that probes the cache
+		// from inside Write: the key was present at flush and the signature was not.
+		//
+		// The one that matters more: signing here can FAIL CLOSED. Signed after the
+		// write, a failure can only be logged — the sealed frame is already on the
+		// wire and the client holds a response it can never verify, with no way for
+		// the broker to take it back. An E2EE client refuses a response without §8,
+		// so that is a dead transcript the user still paid for.
+		//
+		// Only the sealed path is reordered; the plaintext path below keeps its
+		// existing sign-after-write order, as on the image path.
+		if err := c.signChatResponse(ctx, reqBody, body, chatKey, e2eeSignedText, reqModel.Upstream); err != nil {
+			// A broker fault (signChatE2EE fails when crypto.Sign does, i.e. a bad
+			// ProviderSigner), so 500 rather than errors.Response's 400 default.
+			// The handle goes with it, for the reason given on the seal arm above.
+			ctx.Writer.Header().Del("ZG-Res-Key")
+			c.handleBrokerError(ctx, errors.Internal(err), "sign transcription response")
+			return err
+		}
+		signedEarly = true
+	}
+
 	// Attempt to write raw response to client. If client disconnected, continue to billing.
-	if _, writeErr := ctx.Writer.Write(body); writeErr != nil {
+	if _, writeErr := ctx.Writer.Write(outBody); writeErr != nil {
 		if c.isClientDisconnectError(writeErr) {
 			ctx.Set("ignoreError", true)
 			c.logger.Warnf("Client disconnected during speech-to-text response, billing for completed response (%d bytes)", len(body))
@@ -303,15 +464,13 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 		}
 	}
 
-	// Decompress body if needed for parsing
-	contentEncoding := resp.Header.Get("Content-Encoding")
-	decompressedReader := initializeSpeechReader(bytes.NewReader(body), contentEncoding)
-	decompressedBody, err := io.ReadAll(decompressedReader)
-	if err != nil {
-		c.logger.Warnf("Failed to decompress speech-to-text response: %v", err)
-		// Fallback to estimated billing if decompression fails
-		return c.updateSpeechToTextFallback(ctx, reqModel, string(decompressedBody))
-	}
+	// Already plaintext: the decode above is the only one on this path, and it
+	// cleared Content-Encoding, so a second reader here would either be a no-op or
+	// — when the decode failed — re-attempt it and truncate the body on the
+	// fallback (see the hoist's comment). An undecodable body still reaches
+	// estimated billing, via the JSON parse below failing on it, which is where it
+	// ended up anyway.
+	decompressedBody := body
 
 	// Debug: log response content
 	c.logger.Debugf("Decompressed response length: %d", len(decompressedBody))
@@ -351,12 +510,23 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 	// absent or unbillable.
 	transcriptionResp.Usage = effectiveUsage(&transcriptionResp)
 
-	// Sign response if needed
-	if !c.Service.TargetSeparated {
-		c.logger.Debug("LLM server in the same network, signing speech-to-text response")
+	// Sign the UNSEALED response. A sealed one was signed before the flush above,
+	// which is what signedEarly records — so this is the same three-way condition
+	// as the ZG-Res-Key header (emitting the key without producing the signature
+	// would hand the client a handle that resolves to nothing) with the sealed arm
+	// already discharged rather than dropped.
+	//
+	// The empty e2eeSignedText is not a placeholder: reaching here means the
+	// request was not sealed, so there is no on-wire binding to pass and
+	// signChatResponse takes the plaintext branch it always did.
+	if !signedEarly && (!c.Service.TargetSeparated || c.Service.IsCentralized()) {
+		c.logger.Debug("Signing speech-to-text response")
 		// Logged rather than discarded, for the reason in image_editing: signing is an RPC
 		// to the controller now and refuses when the running image cannot be pinned.
-		if err := c.signChatWithKey(reqBody, body, chatKey); err != nil {
+		// Non-fatal here and fatal on the sealed path above, deliberately: an
+		// unsealed client can read its transcript without a signature, a sealed one
+		// cannot.
+		if err := c.signChatResponse(ctx, reqBody, body, chatKey, "", reqModel.Upstream); err != nil {
 			c.logger.Errorf("could not sign the transcription for %s: %v", chatKey, err)
 		}
 	}
@@ -410,8 +580,17 @@ func (c *Ctrl) handleStreamingSpeechToText(ctx *gin.Context, resp *http.Response
 
 	chatKey := uuid.NewString()
 
-	if !c.Service.TargetSeparated {
-		c.logger.Debug("LLM server in the same network, setting ZG-Res-Key header for streaming response")
+	// Same three-way gate as the non-streaming path above and as chat's own
+	// streaming path (chatbot.go). A sealed request never reaches this handler —
+	// the dispatch fails closed — so `e2eeSealed` is false here by construction
+	// and the arm that matters is IsCentralized(): without it an unsealed
+	// centralized STT provider emitted ZG-Res-Key on a non-streaming
+	// transcription and nothing at all on a streaming one, which is a difference
+	// in the client's evidence chain that the streaming flag has no business
+	// making.
+	_, e2eeSealed := e2eeSealedRequest(ctx)
+	if !c.Service.TargetSeparated || c.Service.IsCentralized() || e2eeSealed {
+		c.logger.Debug("Setting ZG-Res-Key header for broker-signed streaming response")
 		ctx.Writer.Header().Set("ZG-Res-Key", chatKey)
 	}
 
@@ -491,10 +670,18 @@ func (c *Ctrl) handleStreamingSpeechToText(ctx *gin.Context, resp *http.Response
 		}
 	})
 
-	// Sign response if needed
-	if !c.Service.TargetSeparated {
-		c.logger.Debug("LLM server in the same network, signing streaming speech-to-text response")
-		if err := c.signChatWithKey(reqBody, rawBody.Bytes(), chatKey); err != nil {
+	// Sign response if needed. Same condition as the header above, or the key
+	// would resolve to nothing.
+	//
+	// Through signChatResponse rather than signChatWithKey, matching chat's
+	// streaming path: for an in-network provider it reaches the same
+	// signChatWithKey it always did, and for a centralized one it produces the
+	// routing proof that was previously dropped on this path. The empty
+	// e2eeSignedText is not a placeholder — a sealed request cannot arrive here,
+	// so there is no on-wire binding to pass.
+	if !c.Service.TargetSeparated || c.Service.IsCentralized() || e2eeSealed {
+		c.logger.Debug("Signing streaming speech-to-text response")
+		if err := c.signChatResponse(ctx, reqBody, rawBody.Bytes(), chatKey, "", reqModel.Upstream); err != nil {
 			c.logger.Errorf("could not sign the transcription for %s: %v", chatKey, err)
 		}
 	}
@@ -984,34 +1171,26 @@ func isSubtitleComponent(p string, allowFraction bool) bool {
 }
 
 // isSpeechToTextStream checks if the request body contains stream parameter
-func (c *Ctrl) isSpeechToTextStream(reqBody []byte) bool {
-	// Parse multipart body to find stream parameter
-	bodyStr := string(reqBody)
-
-	// Look for stream parameter in multipart data
-	// Pattern: name="stream"\r\n\r\ntrue
-	isStream := contains(bodyStr, `name="stream"`) &&
-		(contains(bodyStr, "\r\n\r\ntrue") || contains(bodyStr, "\ntrue"))
-
+func (c *Ctrl) isSpeechToTextStream(ctx *gin.Context, reqBody []byte) bool {
+	// Through the parser, not a substring scan. The scan this replaces tested for
+	// `name="stream"` and for a line reading `true` INDEPENDENTLY, anywhere in the
+	// body — so any field whose VALUE contained both flipped the answer. Measured:
+	// a `prompt` of `the form field is written name="stream" and the value is\ntrue`
+	// reads as a streaming request on an ordinary multipart client, and did the
+	// same on a sealed one (see handleSpeechToTextResponse).
+	//
+	// ParseBool's set is what a form's `stream` is written as by any client that
+	// sends one. A value outside it reads as non-streaming, which is the same
+	// answer the scan gave for an absent field; getting it wrong here is a
+	// mis-parsed billing path, not a leak, because a sealed request never reaches
+	// this function.
+	value := multipartFormField(reqBody, ctx.Request.Header.Get("Content-Type"), speechStreamField)
+	isStream, err := strconv.ParseBool(value)
+	if err != nil {
+		isStream = false
+	}
 	c.logger.Debugf("Is streaming request: %t", isStream)
 	return isStream
-}
-
-// contains is a simple helper to check if string contains substring
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) &&
-		(s == substr || len(s) > len(substr) &&
-			(hasSubstring(s, substr)))
-}
-
-// hasSubstring checks if s contains substr
-func hasSubstring(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }
 
 // initializeSpeechReader returns a reader that handles compressed content

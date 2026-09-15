@@ -837,12 +837,20 @@ func TestSpeechToTextResponse_DecodeStringDuration(t *testing.T) {
 // ==========================================================================
 // isSpeechToTextStream
 //
-// Driven entirely off the raw multipart request body — must not confuse
-// a stream=true form field with stray bytes inside a file part.
+// Driven off the PARSED multipart form — must not confuse a stream=true form
+// field with the same bytes appearing inside another field's value.
+//
+// That property was this block's stated intent from the start and was never
+// asserted: the implementation tested for `name="stream"` and for a line
+// reading `true` independently, anywhere in the body, so any field whose value
+// contained both flipped the answer. The rows below that name a value are the
+// ones that were missing, and they failed against the substring version.
 // ==========================================================================
 
 func TestIsSpeechToTextStream(t *testing.T) {
 	ctrl := &Ctrl{logger: testLogger()}
+	// Every body below uses `boundary` as its boundary.
+	ctx := ginCtxWithContentType("multipart/form-data; boundary=boundary")
 
 	tests := []struct {
 		name string
@@ -869,11 +877,45 @@ func TestIsSpeechToTextStream(t *testing.T) {
 			"",
 			false,
 		},
+		// The rows the block's own comment promised. Each of these read as a
+		// streaming request under the substring scan.
+		{
+			"another field's VALUE contains the field name and the word",
+			"--boundary\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\n" +
+				"the form field is written name=\"stream\" and the value is\ntrue" +
+				"\r\n--boundary--",
+			false,
+		},
+		{
+			"stray bytes inside a file part",
+			"--boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.wav\"\r\n\r\n" +
+				"name=\"stream\"\ntrue" +
+				"\r\n--boundary--",
+			false,
+		},
+		{
+			"stream true alongside a decoy in another value",
+			"--boundary\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\nnot about streaming\r\n" +
+				"--boundary\r\nContent-Disposition: form-data; name=\"stream\"\r\n\r\ntrue\r\n--boundary--",
+			true,
+		},
+		// A value outside ParseBool's set reads as non-streaming — the same answer
+		// an absent field gives.
+		{
+			"stream yes",
+			"--boundary\r\nContent-Disposition: form-data; name=\"stream\"\r\n\r\nyes\r\n--boundary--",
+			false,
+		},
+		{
+			"stream 1",
+			"--boundary\r\nContent-Disposition: form-data; name=\"stream\"\r\n\r\n1\r\n--boundary--",
+			true,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := ctrl.isSpeechToTextStream([]byte(tt.body)); got != tt.want {
+			if got := ctrl.isSpeechToTextStream(ctx, []byte(tt.body)); got != tt.want {
 				t.Errorf("isSpeechToTextStream() = %v, want %v", got, tt.want)
 			}
 		})

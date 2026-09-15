@@ -121,36 +121,23 @@ routing/billing:
 5. Reconstruct the request = cleartext ∪ decrypted, replace the body, and run the
    normal proxy path on the plaintext.
 
-The reconstructed plaintext (pre-upstream-rewrite) is stashed on the context for
-the §8 signature.
+The reconstructed plaintext is **not** retained: the §8 binding travels as a
+32-byte hash, so nothing downstream needs the body back, and on a JSON-ified
+request it would be a retained copy proportional to the payload.
 
-### An envelope smuggled into a multipart body (SPEC §5.3.1)
+### The multipart endpoints (SPEC §5.3, §5.3.1)
 
-Step 1 detects an envelope in a JSON body. A client can also put one in a
-`multipart/form-data` part — the speech-to-text and image-editing shape — where
-step 1 never looks, because the body is not JSON. §5.3.1 is the rule against
-that: *a body that cannot be parsed as an envelope is not thereby an unsealed
-body*, and a body that **is** an envelope is one whatever `Content-Type` carries
-it. So `multipartNamesE2EEPart` enumerates the parts and refuses a request
-declaring one named `_e2ee`, on both entry points (`MaybeUnsealRequest` for the
-sync proxy, `RefuseAsync` for the async submit routes, which never reach the
-proxy and were the same hole one request shape over).
+`/v1/audio/transcriptions` carries its payload as `multipart/form-data`, which has
+no top-level JSON object — so §5.2's AAD has nothing to canonicalize. §5.3's
+answer is a **conversion, not a crypto change**: the client seals a JSON-ified
+request (form fields as JSON, the audio as base64 in `file_base64`) and the
+enclave materializes multipart back for the upstream, so nothing in the crypto or
+the envelope is multipart-aware. §5.3.1 is the companion rule that a body which
+cannot be parsed as an envelope is not thereby an unsealed body.
 
-The rule is on part **names**, never on the raw bytes: `prompt` carries arbitrary
-caller text, so a substring rule would 400 a legitimate transcription for
-mentioning the protocol.
-
-**Scope, deliberately.** It reads what Go's `mime/multipart` reads and nothing
-more. A malformed body, an unreadable boundary, a nested part, or a name spelled
-in an encoding Go declines to decode is **forwarded**. That is not an oversight:
-no endpoint accepting multipart has a sealed request profile, so a client
-evading the check has forwarded its own ciphertext upstream and gets garbage
-back — there is no adversary with a motive here, only an honest client with a
-bug, and `_e2ee` is plain ASCII that such a client has no reason to encode. The
-forwarded shapes are asserted by `TestMalformedAndExoticBodiesAreForwarded` so
-the limit is a decision on record. When speech-to-text gains a sealed request
-profile this rule inverts — multipart will legitimately carry sealed data — so
-the check is written to be replaced, not extended.
+Both, with the materialization rules, the refused characters, the constraints this
+profile puts on the router and the sidecar, and what is deliberately not covered:
+**[e2ee-speech.md](./e2ee-speech.md)**.
 
 ### Stale enc key self-heal (409)
 

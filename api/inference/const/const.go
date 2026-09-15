@@ -1,6 +1,7 @@
 package constant
 
 import (
+	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/crypto"
@@ -169,3 +170,49 @@ var (
 	DomainName    = "0G Inference Serving"
 	DomainVersion = "1"
 )
+
+// SplitTargetRoute derives, from a raw RequestURI as gin hands it to the proxy,
+// the two paths the proxy works with:
+//
+//   - route: the upstream path, still carrying any query string, appended to the
+//     service's target URL.
+//   - matchPath: the path everything MATCHES against — TargetRoute (billing keys),
+//     FreePrefixes, AuthRequiredPrefixes, and the E2EE profile's route scoping.
+//
+// It lives here, beside the tables it is matched against, because it must exist
+// exactly once. A second derivation of matchPath was a bypass: the E2EE route
+// guard asked `strings.HasSuffix(URL.Path, "/audio/transcriptions")` while the
+// dispatcher asked about this string, so `/v1/proxy/signature/audio/transcriptions`
+// was a free route to one and the transcription endpoint to the other — enough to
+// get a sealed envelope opened on a route that neither bills nor seals its reply.
+// Callers that need matchPath take it from here or are handed it; they do not
+// rebuild it.
+//
+// The /v1 collapse lets callers that hardcode it after the broker base URL
+// (Anthropic SDK → /v1/messages, OpenAI SDK → /v1/chat/completions) land on the
+// same upstream path as bare /messages or /chat/completions. Service.targetUrl is
+// expected to carry the /v1 segment for OpenAI-compatible upstreams (vLLM,
+// OpenAI, OpenRouter, DashScope, RedPill, …), and LiteLLM aliases both variants,
+// so this is safe across existing deployments. It is also why /chat/completions
+// and /messages — without /v1 — are the canonical TargetRoute entries above.
+//
+// The trailing slash is trimmed to prevent a billing bypass: `/videos/` would
+// otherwise miss TargetRoute["/videos"] and fall through to the auth-only path.
+func SplitTargetRoute(requestURI string) (route, matchPath string) {
+	route = strings.TrimPrefix(requestURI, ServicePrefix)
+	if route == "/v1" || strings.HasPrefix(route, "/v1/") {
+		route = strings.TrimPrefix(route, "/v1")
+		if route == "" {
+			route = "/"
+		}
+	}
+
+	matchPath = route
+	if idx := strings.Index(matchPath, "?"); idx != -1 {
+		matchPath = matchPath[:idx]
+	}
+	if matchPath != "/" {
+		matchPath = strings.TrimRight(matchPath, "/")
+	}
+	return route, matchPath
+}
