@@ -1,4 +1,4 @@
-package handler
+package translatorhttp
 
 import (
 	"github.com/gin-gonic/gin"
