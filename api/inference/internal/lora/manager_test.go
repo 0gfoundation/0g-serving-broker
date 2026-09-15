@@ -2,6 +2,10 @@ package lora
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -21,18 +25,69 @@ func TestUserDeployAdapter_NotFound(t *testing.T) {
 	}
 }
 
+// UserDeployAdapter transitions a Ready adapter to Loading and spawns the
+// deploy. Observing that Loading needs a point at which the spawned goroutine
+// is known to be parked, or the assertion simply races it.
+//
+// It used to have none. With AdapterPath at a path that does not exist and no
+// storageDownloader configured, redownloadAndDeploy reached
+// setAdapterState(Failed) with no I/O at all — no file, no network — so which
+// of the two goroutines the scheduler ran first decided the result. It passed
+// on an idle machine and failed on CI, where every package runs in parallel.
+//
+// The fix is a real synchronisation point rather than a wider assertion: give
+// the adapter a directory that EXISTS, so redownloadAndDeploy skips the
+// download and calls deployToVLLM, which sets Loading itself and then blocks in
+// the ServerlessLLM POST. Pointing that POST at a server which reports it has
+// been entered and then waits means the goroutine is provably inside the
+// request for the whole assertion, and cannot reach any later state.
+//
+// The stub answers 500 rather than 200 on release: deployToVLLM's SUCCESS path
+// calls m.db.UpdateLoRAAdapterState without a nil guard (setAdapterState has
+// one; that line does not), so a 200 would panic this db-less fixture in a
+// goroutine. 500 lands on the same Failed path the test always ended in.
+//
+// Known limit, stated rather than glossed: by the time the stub is entered BOTH
+// UserDeployAdapter and deployToVLLM have written Loading, so this pins "Loading
+// while the deploy is in flight" and not which line wrote it — measured, each
+// write can be deleted on its own and this still passes. Attributing it would
+// need a seam in production code (a deployFn field the test could substitute
+// with one that blocks before deployToVLLM), deliberately not added here. What
+// the CAS write is FOR is covered instead, by the second call below.
 func TestUserDeployAdapter_ReadyState(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(entered)
+		<-release
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	// LIFO: release the handler first so Close does not block on it.
+	defer srv.Close()
+	defer close(release)
+
+	dir := t.TempDir()
+	adapterPath := filepath.Join(dir, "ft-test")
+	if err := os.MkdirAll(adapterPath, 0o755); err != nil {
+		t.Fatalf("create adapter dir: %v", err)
+	}
+
 	m := &Manager{
 		adapters: make(map[string]*AdapterInfo),
-		config:   cfgForTest(t.TempDir()),
-		sllmClient: NewSLLMClient("http://fake:8343", getTestLogger()),
+		// UserDeployAdapter spawns redownloadAndDeploy with m.ctx, NOT the context
+		// it is called with. Left nil, DeployAdapter fails at
+		// http.NewRequestWithContext("net/http: nil Context") before any request is
+		// made, so the goroutine would never reach the stub.
+		ctx:        context.Background(),
+		config:     cfgForTest(dir),
+		sllmClient: NewSLLMClient(srv.URL, getTestLogger()),
 		logger:     getTestLogger(),
 	}
 
 	m.adapters["ft-test"] = &AdapterInfo{
 		AdapterName: "ft-test",
 		State:       model.AdapterStateReady,
-		AdapterPath: "/tmp/fake",
+		AdapterPath: adapterPath,
 		BaseModel:   "base",
 	}
 
@@ -41,18 +96,32 @@ func TestUserDeployAdapter_ReadyState(t *testing.T) {
 		t.Fatalf("expected no error for ready adapter, got: %v", err)
 	}
 
+	select {
+	case <-entered:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the deploy goroutine never reached the ServerlessLLM request")
+	}
+
 	m.mu.RLock()
 	state := m.adapters["ft-test"].State
 	m.mu.RUnlock()
 	if state != model.AdapterStateLoading {
 		t.Errorf("expected state=loading after deploy trigger, got %s", state)
 	}
+
+	// The point of the Loading transition, asserted rather than assumed: it is a
+	// CAS guard, so while this deploy is in flight a second request must be
+	// refused instead of starting a duplicate. Deterministic for the same reason
+	// as above — the first goroutine is parked in the stub.
+	if err := m.UserDeployAdapter(context.Background(), "ft-test"); err == nil {
+		t.Error("a second deploy while one is in flight must be refused, not started")
+	}
 }
 
 func TestUserDeployAdapter_FailedState(t *testing.T) {
 	m := &Manager{
-		adapters: make(map[string]*AdapterInfo),
-		config:   cfgForTest(t.TempDir()),
+		adapters:   make(map[string]*AdapterInfo),
+		config:     cfgForTest(t.TempDir()),
 		sllmClient: NewSLLMClient("http://fake:8343", getTestLogger()),
 		logger:     getTestLogger(),
 	}
