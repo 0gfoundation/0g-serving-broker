@@ -90,6 +90,19 @@ func TestScanFixturePasses(t *testing.T) {
 	}
 }
 
+// v0.8.0 puts the image's UKI first in the measured list, v0.7.0 put it last;
+// the boot stub's entry sits in both. Any-entry matching is what tappscan does.
+func TestScanUkiMatchesAnyMeasuredEntry(t *testing.T) {
+	raw, m := loadScanFixture(t)
+	in := goodInputs(m)
+	other := "a07f5f6e82a4c121bb6a326ac4b9ea3d03f78958abcdba162de701674482919b577ae7729e77f5377037b30418382a33"
+	in.expectedUki = other // the first entry of the fixture's two
+	ev := evaluateScanRecord(raw, in)
+	if !ev.ok || !ev.checks.Uki || ev.uki != other {
+		t.Fatalf("first-entry uki must match: ok=%v uki=%q detail=%q", ev.ok, ev.uki, ev.detail)
+	}
+}
+
 func TestScanUkiOptional(t *testing.T) {
 	raw, m := loadScanFixture(t)
 	in := goodInputs(m)
