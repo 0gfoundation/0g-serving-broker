@@ -89,6 +89,14 @@ type seedanceTierMaxSide struct {
 // calls through these instead of reading the package-level 2.5 constants (or
 // a profile's fields) directly, so there is exactly one place that could get
 // the nil-check wrong, not four.
+//
+// This contract extends to ANY future method added to seedance, not just
+// the four current ones: a value-receiver method (func (seedance) Foo())
+// that reads seedanceResolutionTokens/SeedanceMinSeconds/etc. directly
+// would silently ignore Seedance20's profile and report 2.5's numbers for
+// both versions. New methods must take a value receiver of this type (func
+// (s seedance) Foo()) and route through these five accessors, exactly like
+// NormalizeSeconds/ResolutionToken/Tier/EstimateBillableTokens already do.
 func (s seedance) bounds() (min, max int64) {
 	if s.profile != nil {
 		return s.profile.minSeconds, s.profile.maxSeconds

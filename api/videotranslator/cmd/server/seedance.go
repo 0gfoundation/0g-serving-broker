@@ -33,22 +33,39 @@ func isSeedance20(modelVersion string) bool {
 	}
 }
 
+// isSeedance25 reports whether modelVersion is the empty default or an
+// explicit 2.5 spelling — i.e. a value that DELIBERATELY selects 2.5, as
+// opposed to one that merely fails to match isSeedance20 (see
+// seedanceVersionWarning, which is the only caller that needs this
+// distinction: isSeedance20/SeedanceMain's own branching don't, since both
+// "correctly empty" and "explicitly 2.5" already take the same code path).
+// config.go's own doc for SEEDANCE_MODEL_VERSION documents "2.0" or "2.5"
+// (case-insensitive) as the two selectable values — this is what makes that
+// documented contract actually true, rather than only 2.0 spellings being
+// recognized and "2.5" silently falling through as an unrecognized value.
+func isSeedance25(modelVersion string) bool {
+	switch strings.ToLower(strings.TrimSpace(modelVersion)) {
+	case "", "2.5", "v2.5":
+		return true
+	default:
+		return false
+	}
+}
+
 // seedanceVersionWarning returns a non-empty message when modelVersion is
-// set to something isSeedance20 does not recognize as either 2.0 or the
-// empty-string default — i.e. the likely-typo case ("2.0.0",
-// "seedance-2.0", stray whitespace-only junk from a template, etc.). It
-// returns "" for a recognized 2.0 spelling and for a genuinely empty value,
-// so the caller can log a warning only when there's actually something to
-// flag, distinguishing "operator didn't set it, 2.5 is correct" from
-// "operator set it to something SeedanceMain silently couldn't use."
+// set to something neither isSeedance20 nor isSeedance25 recognizes — i.e.
+// the likely-typo case ("2.0.0", "seedance-2.0", stray whitespace-only junk
+// from a template, etc.). It returns "" for a recognized 2.0 spelling, a
+// recognized 2.5 spelling, and a genuinely empty value, so the caller can
+// log a warning only when there's actually something to flag, distinguishing
+// "operator explicitly selected 2.5 (or didn't set it, which means the same
+// thing)" from "operator set it to something SeedanceMain silently couldn't
+// use."
 func seedanceVersionWarning(modelVersion string) string {
-	if isSeedance20(modelVersion) {
+	if isSeedance20(modelVersion) || isSeedance25(modelVersion) {
 		return ""
 	}
-	if strings.TrimSpace(modelVersion) == "" {
-		return ""
-	}
-	return fmt.Sprintf("SEEDANCE_MODEL_VERSION=%q was set but not recognized as a Seedance 2.0 spelling — falling back to Seedance 2.5. If 2.0 was intended, check the value against isSeedance20's accepted spellings (\"2.0\", \"2\", \"v2\", \"v2.0\").", modelVersion)
+	return fmt.Sprintf("SEEDANCE_MODEL_VERSION=%q was set but not recognized as a Seedance 2.0 or 2.5 spelling — falling back to Seedance 2.5. If 2.0 was intended, check the value against isSeedance20's accepted spellings (\"2.0\", \"2\", \"v2\", \"v2.0\"); if 2.5 was intended, use \"2.5\" or leave the variable unset.", modelVersion)
 }
 
 // seedanceWriteTimeout mirrors writeTimeout/miniMaxWriteTimeout (see main.go)
@@ -70,7 +87,8 @@ const seedanceWriteTimeout = seedance.ContentFetchTimeout + writeTimeoutMargin
 // process serves one version for its lifetime — a provider that wants to
 // serve both runs two sidecar deployments, each with its own on-chain wire
 // model id, exactly like 32-hailuo/33-seedance already each get their own
-// CVM (see deploy/phala/2-mainnet/36-seedance20).
+// CVM (see the separate 0gfoundation/deploy repo's
+// phala/2-mainnet/36-seedance20 — not a path in this repo).
 func SeedanceMain() {
 	cfg := config.GetConfig()
 

@@ -186,3 +186,30 @@ func TestSeedanceV2AndV25AreIndependent(t *testing.T) {
 		t.Errorf("2.5 Resolution = %q, must NOT be 4k (2.5 does not serve it)", v25.Resolution)
 	}
 }
+
+// TestSeedanceVersionFromModel pins every canonical/wire spelling
+// SeedanceVersionFromModel must recognize for each version, and confirms
+// anything else (empty, a typo, an unrelated model id) reports ok=false so
+// the caller falls back to its own default rather than guessing.
+func TestSeedanceVersionFromModel(t *testing.T) {
+	tests := []struct {
+		model    string
+		wantIs20 bool
+		wantOK   bool
+	}{
+		{"bytedance/seedance-2.0", true, true},
+		{"dreamina-seedance-2-0-260128", true, true},
+		{"bytedance/seedance-2.5", false, true},
+		{"dreamina-seedance-2-5-260628", false, true},
+		{"", false, false},
+		{"bytedance/seedance-2.0.0", false, false},
+		{"gpt-4o", false, false},
+		{" bytedance/seedance-2.0 ", true, true}, // trimmed, same as seedanceWireModel's own matching
+	}
+	for _, tt := range tests {
+		gotIs20, gotOK := SeedanceVersionFromModel(tt.model)
+		if gotIs20 != tt.wantIs20 || gotOK != tt.wantOK {
+			t.Errorf("SeedanceVersionFromModel(%q) = (%v, %v), want (%v, %v)", tt.model, gotIs20, gotOK, tt.wantIs20, tt.wantOK)
+		}
+	}
+}

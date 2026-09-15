@@ -458,6 +458,37 @@ func seedanceWireModelV2(model string) string {
 	return model
 }
 
+// SeedanceVersionFromModel reports which Seedance version, if any, model
+// unambiguously identifies — checking both the canonical (bytedance/seedance-
+// 2.0 or -2.5) and wire (dreamina-seedance-2-0-260128 or -2-5-260628)
+// spellings for each version. ok is false for anything else (empty, a typo,
+// a value neither version uses), in which case the caller should fall back
+// to its own configured default rather than guess.
+//
+// This exists to close a real config-drift risk: SEEDANCE_MODEL_VERSION
+// (cmd/server/seedance.go, this sidecar's own env var) is a per-PROCESS
+// default set once at startup, but the broker's pre-flight balance reserve
+// (inference/internal/ctrl/video_reserve.go, a different process entirely)
+// resolves its copy of these rules from a COMPLETELY DIFFERENT config value
+// — billing.vendor, in the deploy config — with no code linking the two or
+// detecting when they disagree. The request's own "model" field is the more
+// trustworthy signal precisely because it is what billing.vendor's reserve
+// is computed against AND what actually gets forwarded to the vendor (via
+// seedanceWireModel/seedanceWireModelV2) — it can only be wrong if the
+// operator mis-registered the provider's on-chain model id, a pre-existing
+// risk those two functions already defend against, not a new one this
+// introduces.
+func SeedanceVersionFromModel(model string) (is20, ok bool) {
+	switch strings.TrimSpace(model) {
+	case seedanceV2CanonicalModelID, seedanceV2DefaultWireModel:
+		return true, true
+	case seedanceCanonicalModelID, seedanceDefaultWireModel:
+		return false, true
+	default:
+		return false, false
+	}
+}
+
 // seedanceSpecV2 is 2.0's own videospec profile — see seedanceSpec's doc for
 // why the broker and this translator must read the very same rules.
 var seedanceSpecV2 = videospec.Seedance20

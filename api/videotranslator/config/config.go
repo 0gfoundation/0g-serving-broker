@@ -35,11 +35,13 @@ type Config struct {
 	// existing 33-seedance-style deployment that never sets this env var
 	// must keep running Seedance 2.5 exactly as before, unaffected by 2.0
 	// existing at all. A provider that wants 2.0 sets
-	// SEEDANCE_MODEL_VERSION=2.0 in its own docker-compose (see
-	// deploy/phala/2-mainnet/36-seedance20/docker-compose.yml) — one sidecar
-	// process serves one version for its lifetime, the same way one provider
-	// deployment already gets its own wire model id; this is not a
-	// per-request choice.
+	// SEEDANCE_MODEL_VERSION=2.0 in its own docker-compose (see the separate
+	// 0gfoundation/deploy repo's phala/2-mainnet/36-seedance20/docker-compose.yml
+	// — not a path in this repo; docker-compose.seedance.example.yml in this
+	// repo is the in-repo template, and should carry a matching 2.0 section)
+	// — one sidecar process serves one version for its lifetime, the same
+	// way one provider deployment already gets its own wire model id; this
+	// is not a per-request choice.
 	SeedanceModelVersion string
 	// RequestTimeout bounds each outbound API call to the vendor.
 	RequestTimeout time.Duration
