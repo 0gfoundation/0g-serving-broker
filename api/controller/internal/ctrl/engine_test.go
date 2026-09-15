@@ -1400,3 +1400,135 @@ func TestRecordedSetCarriesAnExistingEnginesEntrypoint(t *testing.T) {
 		t.Errorf("payload = %q, want the existing engine's whole command", payload)
 	}
 }
+
+// shareGpu exists because the placement check is a proxy for a question it cannot ask.
+// docker reports which cards a container may SEE, never how much memory is left on them,
+// so "card 0 is taken" covers both a 300 GB model filling it and two 0.6B models using
+// 12% each. The default refuses; this is the caller saying they checked.
+func TestCreateEngineSharesAnOccupiedCardWhenAsked(t *testing.T) {
+	c, m, l := engineCtrl(t, fakeContainer{
+		id: "eeee" + strings.Repeat("1", 60), name: "small1", image: engineRef,
+		gpus: "0", hasGPU: true, engine: true, args: []string{"--model-path", "Qwen/Qwen3-0.6B"},
+	})
+
+	spec := okSpec()
+	spec.GPUs = "0"
+
+	// Refused by default — the check still runs.
+	if err := c.CreateEngine(context.Background(), spec); err == nil {
+		t.Fatal("CreateEngine() = nil, want the default to refuse an occupied card")
+	} else if !strings.Contains(err.Error(), "shareGpu") {
+		t.Errorf("CreateEngine() = %v, want the refusal to name the way through", err)
+	}
+
+	spec.ShareGPU = true
+	if err := c.CreateEngine(context.Background(), spec); err != nil {
+		t.Fatalf("CreateEngine() = %v, want shareGpu to place it anyway", err)
+	}
+
+	if names := m.names(); !contains(names, "small1") || !contains(names, spec.Name) {
+		t.Errorf("machine = %v, want both engines", names)
+	}
+	// Co-location is visible in the record without a field of its own: two entries name
+	// the same card. That is why shareGpu is not recorded.
+	payload := emittedEngineSet(t, l)
+	if !strings.Contains(payload, "count=2") {
+		t.Errorf("payload = %q, want both engines recorded", payload)
+	}
+	if strings.Count(payload, "\t0\t") != 2 {
+		t.Errorf("payload = %q, want two entries naming card 0", payload)
+	}
+	if strings.Contains(payload, "shareGpu") {
+		t.Errorf("payload = %q, want the flag absent: it is a request-time assertion", payload)
+	}
+}
+
+// shareGpu relaxes the placement check and nothing else. A caller cannot use it to get
+// past the allowlist, the revision rule or any other refusal.
+func TestShareGPURelaxesOnlyThePlacementCheck(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		spec func(*EngineSpec)
+		want string
+	}{
+		{"an unconfigured image", func(s *EngineSpec) { s.Image = "vllm/vllm-openai@" + testDigest }, "not configured"},
+		{"no revision", func(s *EngineSpec) { s.Model.Revision = "" }, "commit sha"},
+		{"a reserved flag", func(s *EngineSpec) { s.Args = []string{"--host", "1.2.3.4"} }, "set by the controller"},
+		{"an unpinned image", func(s *EngineSpec) { s.Image = engineRepo + ":latest" }, "must pin a digest"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _, l := engineCtrl(t, fakeContainer{
+				id: "eeee" + strings.Repeat("1", 60), name: "small1", image: engineRef,
+				gpus: "0", hasGPU: true, engine: true,
+			})
+			spec := okSpec()
+			spec.GPUs = "0"
+			spec.ShareGPU = true
+			tc.spec(&spec)
+
+			err := c.CreateEngine(context.Background(), spec)
+			if err == nil {
+				t.Fatalf("CreateEngine() = nil, want a refusal despite shareGpu")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("CreateEngine() = %v, want it to mention %q", err, tc.want)
+			}
+			if ops := l.all(); len(ops) != 0 {
+				t.Errorf("ops = %v, want nothing done", ops)
+			}
+		})
+	}
+}
+
+// The scenario shareGpu was added for: replace one engine while the other keeps serving.
+//
+// The assertion that matters is what is NOT touched. CreateEngine and RemoveEngine act on
+// the container they name; the record is a snapshot rebuilt from docker, so the engine
+// left alone has to come back out of it unchanged — same image, same cards, same command.
+func TestReplacingOneEngineLeavesTheOtherAlone(t *testing.T) {
+	const keepID = "eeee" + "111111111111111111111111111111111111111111111111111111111111"
+	c, m, l := engineCtrl(t, fakeContainer{
+		id: keepID, name: "keepme", image: engineRef,
+		entry: []string{"python", "-m", "sglang.launch_server"},
+		args:  []string{"--model-path", "Qwen/Qwen3-0.6B", "--mem-fraction-static", "0.12"},
+		gpus:  "0", hasGPU: true, engine: true,
+	})
+
+	// Bring the second engine up on the same card, then replace it.
+	spec := okSpec()
+	spec.GPUs = "0"
+	spec.ShareGPU = true
+	if err := c.CreateEngine(context.Background(), spec); err != nil {
+		t.Fatalf("CreateEngine() = %v", err)
+	}
+	if _, err := c.RemoveEngine(context.Background(), spec.Name); err != nil {
+		t.Fatalf("RemoveEngine() = %v", err)
+	}
+	replacement := spec
+	replacement.Model.Repo = "Qwen/Qwen3-1.7B"
+	replacement.Args = []string{"--mem-fraction-static", "0.2"}
+	if err := c.CreateEngine(context.Background(), replacement); err != nil {
+		t.Fatalf("CreateEngine(replacement) = %v", err)
+	}
+
+	// The engine that was left alone: never removed, never recreated, same id.
+	for _, op := range l.all() {
+		if strings.HasPrefix(op, "remove keepme") || strings.HasPrefix(op, "create keepme") {
+			t.Errorf("ops = %v, want nothing done to the engine being kept", l.all())
+		}
+	}
+	if _, ok := m.find(keepID); !ok {
+		t.Error("the kept engine's container is gone")
+	}
+
+	payload := emittedEngineSet(t, l)
+	if !strings.Contains(payload, "keepme\t"+engineRef+"\t0\tpython -m sglang.launch_server --model-path Qwen/Qwen3-0.6B --mem-fraction-static 0.12") {
+		t.Errorf("payload = %q, want the kept engine described exactly as before", payload)
+	}
+	if !strings.Contains(payload, "--model-path Qwen/Qwen3-1.7B") {
+		t.Errorf("payload = %q, want the replacement's own model", payload)
+	}
+	if strings.Contains(payload, "Qwen/Qwen3-0.6B --revision") {
+		t.Errorf("payload = %q, still names the replaced engine's old model", payload)
+	}
+}
