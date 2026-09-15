@@ -1921,3 +1921,54 @@ func TestCompressedTranscriptionIsBilledFromItsUsageBlock(t *testing.T) {
 		})
 	}
 }
+
+// The THIRD fail-closed exit of the sealed block drops the handle too.
+//
+// Not reachable in production: MaybeUnsealRequest sets CtxKeyE2EEReqBindHash on
+// the same lines as CtxKeyE2EESealed, so a sealed turn has the hash. The arm
+// exists because that invariant could stop holding, and the handler's contract is
+// stated in terms of the context it is given — which is exactly what a test can
+// hand it. Its two neighbours are covered by the fail-closed tests above; without
+// this one, the arm between them was the only exit that still answered with a
+// ZG-Res-Key naming a signature that will never exist.
+func TestSealedSpeechDropsTheHandleWhenTheBindingHashIsMissing(t *testing.T) {
+	f := speechFixture(t)
+	f.c.reconciliationDB = &mockReconciliationDB{}
+	// Seeded for the same reason the seal-failure test seeds it: a mutant that
+	// drops this arm's return runs on into the billing path, and an unseeded cache
+	// panics there instead of reaching the assertion. A panic is not a kill.
+	f.c.serviceCache = cache.New(5*time.Minute, 10*time.Minute)
+	f.c.serviceCache.Set("current_service", model.Service{InputPrice: "1", OutputPrice: "1"}, cache.DefaultExpiration)
+
+	rec := httptest.NewRecorder()
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest("POST", "/v1/audio/transcriptions", nil)
+	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEProfile, wire.ProfileSpeech)
+	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+	// CtxKeyE2EEReqBindHash deliberately NOT set: that is the arm under test.
+
+	const transcript = "the transcript nobody else may read"
+	upstream := `{"model":"whisper-large-v3","usage":{"type":"duration","seconds":3.5},"text":"` + transcript + `"}`
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{},
+		Body:       io.NopCloser(strings.NewReader(upstream)),
+	}
+
+	err := f.c.handleNonStreamingSpeechToText(ctx, resp, nil, model.Request{IsWhitelisted: true, RequestHash: "req-1"})
+	if err == nil {
+		t.Fatal("a missing request binding hash on a sealed turn must fail the request")
+	}
+	// The premise: this is the binding-hash arm, not one of its neighbours.
+	if !strings.Contains(err.Error(), "request binding hash missing") {
+		t.Fatalf("failed on a different arm than the one under test: %v", err)
+	}
+	if got := rec.Header().Get("ZG-Res-Key"); got != "" {
+		t.Errorf("ZG-Res-Key = %q on the binding-hash arm; the other two exits of this block drop it", got)
+	}
+	if bytes.Contains(rec.Body.Bytes(), []byte(transcript)) {
+		t.Errorf("the plaintext transcript was flushed: %s", rec.Body.Bytes())
+	}
+}

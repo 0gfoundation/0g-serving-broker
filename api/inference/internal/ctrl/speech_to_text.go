@@ -411,6 +411,14 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 		reqBindHash, ok := e2eeReqBindHash(ctx)
 		if !ok {
 			err := fmt.Errorf("e2ee response: request binding hash missing from context")
+			// Third fail-closed exit of this block, and it drops the handle like the
+			// other two. Not reachable today — MaybeUnsealRequest sets
+			// CtxKeyE2EEReqBindHash on the same lines as CtxKeyE2EESealed, so a
+			// sealed turn has the hash — but the arm exists precisely because that
+			// invariant could stop holding, and an arm that behaves differently from
+			// its neighbours for no stated reason is how the next reader learns the
+			// wrong rule.
+			ctx.Writer.Header().Del("ZG-Res-Key")
 			c.handleBrokerError(ctx, err, "sign transcription response")
 			return err
 		}
@@ -1183,23 +1191,6 @@ func (c *Ctrl) isSpeechToTextStream(ctx *gin.Context, reqBody []byte) bool {
 	}
 	c.logger.Debugf("Is streaming request: %t", isStream)
 	return isStream
-}
-
-// contains is a simple helper to check if string contains substring
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) &&
-		(s == substr || len(s) > len(substr) &&
-			(hasSubstring(s, substr)))
-}
-
-// hasSubstring checks if s contains substr
-func hasSubstring(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }
 
 // initializeSpeechReader returns a reader that handles compressed content
