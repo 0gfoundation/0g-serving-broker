@@ -45,6 +45,24 @@ type EngineSpec struct {
 	// not say; it does not decide what a caller must say, because every engine's tuning
 	// flags differ and a template could not hold them.
 	Args []string `json:"args"`
+
+	// ShareGPU places this engine on cards another container already holds.
+	//
+	// The placement check exists because the mistake an operator actually makes is putting
+	// a second model on a card a large one already fills. It cannot tell that case from a
+	// safe one: docker reports which cards a container may SEE and never how much memory
+	// is left on them — see GPUAllocation, which says the same about itself. So the check
+	// is a proxy for a question it cannot ask, the default is to refuse, and this field is
+	// the caller saying they have checked.
+	//
+	// It does not make room. An engine that does not fit fails in its own logs when it
+	// cannot allocate, which is loud and hurts only itself: the engine already running
+	// reserved its arena at startup and does not give it back.
+	//
+	// Not recorded as a field of its own, because co-location is already visible —
+	// zg-engine-set carries every engine's GPU list, so two entries naming the same card
+	// say so. This is a request-time assertion, not a property of the resulting set.
+	ShareGPU bool `json:"shareGpu"`
 }
 
 // EngineModel is the weights and the code that comes with them.
@@ -183,8 +201,14 @@ func (c *Ctrl) CreateEngine(ctx context.Context, spec EngineSpec) error {
 		return err
 	}
 	if len(held) > 0 {
-		return refusef("cannot create %q: it asks for GPU %q, which is occupied by %s. A container with %s=all occupies every card, and a stopped one still counts because starting it reclaims them. Narrow or stop a running holder, remove an exited one, or name it in controller.engineGPUIgnore if it only observes the cards",
-			spec.Name, spec.GPUs, describeHolders(held), docker.GPUEnvVar)
+		if !spec.ShareGPU {
+			return refusef("cannot create %q: it asks for GPU %q, which is occupied by %s. A container with %s=all occupies every card, and a stopped one still counts because starting it reclaims them. Narrow or stop a running holder, remove an exited one, name it in controller.engineGPUIgnore if it only observes the cards, or set shareGpu if the memory genuinely fits",
+				spec.Name, spec.GPUs, describeHolders(held), docker.GPUEnvVar)
+		}
+		// Logged at WARN with the holders named, because this is the one placement nothing
+		// here verified. A reader of the log should be able to see exactly what was
+		// overridden without going back to the request.
+		c.logger.Warnf("[CreateEngine] Placing %q on GPU %q alongside %s because the request set shareGpu; nothing here checked that the memory fits", spec.Name, spec.GPUs, describeHolders(held))
 	}
 
 	// Pulled before the record, because a pull is the long step and a record naming an
