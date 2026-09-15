@@ -168,6 +168,35 @@ boolean `false` and the string `"false"` are one value.
 - a field name or `filename` containing **CR, LF, `"` or `;` is refused**, and a
   field named **`file` is refused** — see below.
 
+**Every cleartext field is materialized, including ones the client did not
+write.** The request's cleartext half is rewritable in transit *by design* —
+that is what `unbound_fields` is for, and the protocol package's own
+`DefaultUnboundFields` doc names `x_0g_trace` and `route_options` as fields a
+client may declare unbound so the router can inject them. On a JSON endpoint an
+injected field is inert; here it reaches the multipart body. Measured, with
+`x_0g_trace` declared unbound and injected after sealing:
+
+| injected value | outcome |
+| --- | --- |
+| `"abc123"` (scalar) | materialized as an ordinary form field — the upstream sees router observability metadata in the transcription request |
+| `{"req_id":"abc123"}` (object) | **400**: `field "x_0g_trace" is a composite value, which has no form rendering` |
+
+Neither is a hole, and the object refusal is still right — there is no one
+rendering of a nested object in a form. But the second row is a 400 **the client
+cannot act on and the provider cannot fix**, so it is a constraint on the
+*router*, recorded here rather than discovered from a support ticket: **a router
+must not inject an object-valued field into a sealed speech request.** A scalar
+is fine. Coordinate with `0g-router` before adding a structured request-side
+trace field.
+
+**A sealed client should always seal a `filename`.** When it seals none the
+materializer writes `audio`, which the part needs to read as a file upload at
+all — but with no extension. Since the profile seals no content type and the
+part is written `application/octet-stream`, the extension is the *only* container
+hint that survives the sealed channel, so a backend that sniffs the container
+loses both. Not the materializer's to fix (guessing an extension would be
+inventing one); it is a client-side requirement.
+
 **`response_format` is mandatory on a sealed request, not merely restricted.**
 The pinned-cleartext check fails on *absence* as well as on a disallowed value —
 `sealed request must set "response_format" to "json" or "verbose_json"

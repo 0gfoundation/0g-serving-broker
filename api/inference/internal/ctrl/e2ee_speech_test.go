@@ -515,6 +515,68 @@ func TestTheJSONRuleParsesTheBodyItJudgesOnce(t *testing.T) {
 	}
 }
 
+// A field the ROUTER injected is materialized like any other cleartext field,
+// and that makes the object refusal a constraint on the router rather than only
+// on the client. The request's cleartext half is rewritable in transit by design
+// — `unbound_fields` exists for it, and the protocol package's own
+// DefaultUnboundFields doc names `x_0g_trace` as a field a client may declare
+// unbound so the router can inject it. On a JSON endpoint that is inert; here it
+// reaches the multipart body.
+//
+// Pinned because docs/design/e2ee.md now tells the router "a scalar is fine, an
+// object is a 400 the client cannot act on and the provider cannot fix", and an
+// unpinned claim in a design doc rots. Not a hole either way: the object refusal
+// is right, there being no one rendering of a nested object in a form.
+func TestSealedSpeechMaterializesAnInjectedCleartextField(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		injected  any
+		wantRefus string
+	}{
+		{"a scalar the router injected is forwarded", "abc123", ""},
+		{"an object the router injected is refused", map[string]string{"req_id": "abc123"}, "composite value"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f := speechFixture(t)
+			req := wire.Request{
+				"model":           mustRaw(t, "whisper-large-v3"),
+				"response_format": mustRaw(t, "json"),
+				"file_base64":     mustRaw(t, base64.StdEncoding.EncodeToString([]byte(speechAudio))),
+			}
+			// Sealed with x_0g_trace unbound, which is what makes the injection
+			// survive the AAD check — i.e. the shape the router would actually use.
+			sealed, err := wire.SealRequestFor(wire.ProfileSpeech, f.encPub, req, speechSealedFields(req), f.signerAddr, f.clientEphPub, "model", "x_0g_trace")
+			if err != nil {
+				t.Fatalf("SealRequestFor with x_0g_trace unbound: %v", err)
+			}
+			sealed["x_0g_trace"] = mustRaw(t, tt.injected)
+			body, err := json.Marshal(sealed)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+
+			ctx := speechCtx()
+			out, err := f.c.MaybeUnsealRequest(ctx, body)
+			if tt.wantRefus != "" {
+				if err == nil {
+					t.Fatalf("an object-valued injected field must be refused; body was:\n%s", out)
+				}
+				if !strings.Contains(err.Error(), tt.wantRefus) {
+					t.Errorf("refused for the wrong reason: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("a scalar injected field must be forwarded, not refused: %v", err)
+			}
+			_, _, fields := readForm(t, ctx.Request.Header.Get("Content-Type"), out)
+			if got := fields["x_0g_trace"]; !slices.Equal(got, []string{"abc123"}) {
+				t.Errorf("the injected field reached the upstream as %v, want [abc123]", got)
+			}
+		})
+	}
+}
+
 // A sealed envelope is only opened on the route its profile serves. Profile
 // resolution answers from the service type alone, so without this a sealed
 // speech envelope POSTed to a FREE route — /signature/{chatID},
