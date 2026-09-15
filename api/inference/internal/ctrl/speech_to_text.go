@@ -230,56 +230,6 @@ func effectiveUsage(resp *SpeechToTextResponse) *SpeechToTextUsage {
 	return resp.Usage
 }
 
-// speechLacksCleartextDuration reports whether a transcription body is a JSON
-// object that does NOT carry the billable audio length where SPEC §7.3 requires
-// a sealed response to put it: a numeric `usage.seconds` or a numeric top-level
-// `duration`.
-//
-// Deliberately narrower than hasBillableUsage in both directions, because they
-// answer different questions and that divergence is the point:
-//
-//   - hasBillableUsage asks what the BROKER can bill, and accepts token counts
-//     (gpt-4o-transcribe) and, through flexFloat64, a quoted number. §7.3
-//     accepts neither.
-//   - this asks only whether the locator is present as a JSON number. A
-//     `seconds` of exactly 0 satisfies §7.3 (a genuine zero is a value) while
-//     being unbillable to hasBillableUsage, which then falls through to the
-//     estimate — a billing question, not a sealing one.
-//
-// A body that is not a JSON object at all returns false: that is the sealer's
-// own "not a JSON object" refusal, which is already accurate, and claiming a
-// missing duration for a body with no fields would be misleading.
-func speechLacksCleartextDuration(body []byte) bool {
-	var top map[string]json.RawMessage
-	if err := json.Unmarshal(body, &top); err != nil || top == nil {
-		return false
-	}
-	if isJSONNumber(top["duration"]) {
-		return false
-	}
-	var usage map[string]json.RawMessage
-	if err := json.Unmarshal(top["usage"], &usage); err != nil {
-		return true
-	}
-	return !isJSONNumber(usage["seconds"])
-}
-
-// isJSONNumber reports whether raw is a present JSON number.
-//
-// A quoted number is not one, and neither is `null` — both distinctions the
-// protocol package draws, measured: it refuses `"3.2"` ("a quoted string is not
-// accepted") and `null` ("null is the absence of one, not a zero"). Decoding
-// into *float64 rather than float64 is what separates the second pair: `null`
-// unmarshals into a float64 WITHOUT error, leaving a zero indistinguishable
-// from a genuine `0`.
-func isJSONNumber(raw json.RawMessage) bool {
-	if len(raw) == 0 {
-		return false
-	}
-	var f *float64
-	return json.Unmarshal(raw, &f) == nil && f != nil
-}
-
 // SpeechToTextStreamChunk represents a streaming transcription chunk
 type SpeechToTextStreamChunk struct {
 	Type  string             `json:"type"`
@@ -376,50 +326,33 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 	// transcription cannot ship its per-segment transcript in the clear because
 	// this path forgot a field.
 	//
-	// §7.3 also requires the billable audio length to reach the router in
-	// CLEARTEXT — a numeric `usage.seconds` or a numeric top-level `duration` —
-	// and the upstream does not always send one. Measured against the pinned
-	// protocol package, three shapes this broker bills happily when proxying are
-	// refused when sealing:
-	//
-	//	{"text":"…"}                                  whisper-1 / faster-whisper, response_format=json
-	//	{"text":"…","usage":{"type":"tokens",…}}      gpt-4o-transcribe, which bills in tokens
-	//	{"text":"…","duration":"3.2"}                 a quoted number; see flexFloat64, observed in the wild
-	//
-	// So sealing is strictly more demanding of the upstream than proxying is, and
-	// this file's own updateSpeechToTextFallback exists precisely because
-	// upstreams often report no usage. Fail-closed is still the right answer —
-	// synthesizing the number would have §8 sign a duration the model never
-	// produced, which is what that fallback's word-count estimate is — but the
-	// refusal must be named and attributed, not left to surface as an
-	// unclassified broker fault.
-	//
-	// Attributed UPSTREAM, matching the image profile's answer to the same
-	// situation (text_to_image.go: a 200 with no verifiable image count): the
-	// transcript was produced, the provider's response SHAPE is what makes it
-	// unusable, and a provider must not be able to move that into the broker's
-	// alert bucket by emitting an unbillable 200. The cost of the wasted compute
-	// lands on the provider, which is also who can fix it. The error is NOT
-	// marked ignoreError — unlike the image path — so it stays logged: this is a
-	// provider degradation an operator wants to see, and the attribution override
-	// already keeps the metric out of the client bucket.
-	//
-	// Checked here rather than left to the sealer because the sealer's refusal
-	// carries no distinguishable error type, only a message. The sealer remains
-	// the only GATE — if these two ever disagree it still fails closed behind
-	// this check — so this is attribution and diagnosis, not a second authority.
-	if _, isSealed := e2eeSealedRequest(ctx); isSealed && speechLacksCleartextDuration(body) {
-		ctx.Set(monitor.CtxKeyFailureSource, monitor.FailureSourceUpstream)
-		err := fmt.Errorf("e2ee: provider returned a transcription carrying no cleartext audio duration (neither a numeric usage.seconds nor a numeric top-level duration), which SPEC §7.3 requires of a sealed response so the router can bill it; refusing to seal rather than bill a fabricated duration")
-		c.handleBrokerError(ctx, err, "sealed transcription response")
-		return err
-	}
-
 	outBody := body
 	signedEarly := false
 	if sealed, isSealed, respBindHash, sealErr := c.maybeSealNonStreamResponse(ctx, body); isSealed {
 		if sealErr != nil {
 			// Fail-closed: never forward a plaintext transcript for a sealed request.
+			//
+			// Attributed UPSTREAM here rather than by a pre-check that restates the
+			// profile's rules. There WAS such a pre-check, and it was a strict subset
+			// of what the sealer enforces: measured, a negative `duration`, two
+			// locators that disagree, and a null `usage.seconds` alongside a valid
+			// `duration` all walked past it and were refused one line later with no
+			// attribution at all — landing back in the broker's alert bucket, which
+			// is the thing the attribution exists to prevent. A second copy of a rule
+			// is a subset of it by default; the sealer's own messages are also more
+			// precise than the one that pre-check produced.
+			//
+			// The rule: a sealed turn whose PROFILE is in hand has everything the
+			// broker owes, so what is left to fail is the upstream's response —
+			// §7.3's billable quantity, a shape §7.3 cannot express, a body that is
+			// not a JSON object at all. A missing profile is broker state and keeps
+			// the default bucket. The transcript was produced either way, so the
+			// wasted compute lands on the provider, which is also who can fix it —
+			// the incentive the image path states in the same words. Not marked
+			// ignoreError, so it stays logged.
+			if _, ok := e2eeProfile(ctx); ok {
+				ctx.Set(monitor.CtxKeyFailureSource, monitor.FailureSourceUpstream)
+			}
 			c.handleBrokerError(ctx, sealErr, "seal transcription response")
 			return sealErr
 		}

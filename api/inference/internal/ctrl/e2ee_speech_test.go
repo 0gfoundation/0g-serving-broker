@@ -388,6 +388,120 @@ func TestSealedSpeechRefusesHeaderInjectionInNamesAndFilename(t *testing.T) {
 	}
 }
 
+// The §5.3.1 predicate's operand ORDER is load-bearing, not style. All four are
+// pure, so `&&` short-circuits left to right; with the body test first, every
+// request on every service type pays a full unmarshal before the service-type
+// check rules it out — defeating hasE2EEMarker, the substring scan that exists
+// to keep the parse off the non-sealed majority.
+//
+// Asserted as bytes allocated per request rather than time, which is what makes
+// it a test rather than a benchmark — and bytes rather than allocation COUNT,
+// because the count does not separate the two orders cleanly: measured on a
+// 1 MiB chat body, the bad order costs 4.69 ms / 1,057,463 B / 14 allocs and the
+// good one 20 µs / 48 B / 1 alloc. That one remaining 48-byte allocation is
+// pre-existing and not this rule's; the megabyte is.
+func TestTheJSONRuleDoesNotParseBodiesItWillNotJudge(t *testing.T) {
+	const bodySize = 1 << 20
+	body := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"` + strings.Repeat("x", bodySize) + `"}]}`)
+
+	res := testing.Benchmark(func(b *testing.B) {
+		f := newE2EEFixture(&testing.T{}) // chatbot: jsonIfiedServiceType is false
+		ctx := ginCtxWithContentType("application/json")
+		ctx.Request = httptest.NewRequest("POST", "/v1/proxy/chat/completions", nil)
+		ctx.Request.Header.Set("Content-Type", "application/json")
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			if _, err := f.c.MaybeUnsealRequest(ctx, body); err != nil {
+				b.Fatalf("an ordinary chat request must be forwarded: %v", err)
+			}
+		}
+	})
+	// Two orders of magnitude below the body, so it cannot be passing by parsing
+	// something smaller — and far enough above 48 B not to fail on an unrelated
+	// small allocation appearing later.
+	if got := res.AllocedBytesPerOp(); got > bodySize/1024 {
+		t.Errorf("MaybeUnsealRequest allocated %d B for a non-sealed %d B chat body; the §5.3.1 rule is parsing a body it will not judge", got, bodySize)
+	}
+}
+
+// The same property on the service type the rule DOES apply to, which the chat
+// case cannot see: there jsonIfiedServiceType short-circuits first, so any
+// ordering of the remaining three passes. On a speech provider the route check
+// is what rules out a free route, and it must come BEFORE the body test or every
+// large request to /signature, /attestation and the rest pays a parse it will
+// never use. Found by a mutation that moved the body test to second and survived
+// the chat test.
+func TestTheJSONRuleDoesNotParseBodiesOnRoutesItWillNotJudge(t *testing.T) {
+	const bodySize = 1 << 20
+	body := []byte(`{"model":"whisper-large-v3","prompt":"` + strings.Repeat("x", bodySize) + `"}`)
+
+	res := testing.Benchmark(func(b *testing.B) {
+		f := speechFixture(&testing.T{})
+		gin.SetMode(gin.TestMode)
+		ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		ctx.Request = httptest.NewRequest("POST", "/v1/proxy/signature/some-chat-id", nil)
+		ctx.Request.Header.Set("Content-Type", "application/json")
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			if _, err := f.c.MaybeUnsealRequest(ctx, body); err != nil {
+				b.Fatalf("a non-sealed body on a free route must be forwarded: %v", err)
+			}
+		}
+	})
+	if got := res.AllocedBytesPerOp(); got > bodySize/1024 {
+		t.Errorf("MaybeUnsealRequest allocated %d B for a %d B body on a route the rule does not cover", got, bodySize)
+	}
+}
+
+// A sealed envelope is only opened on the route its profile serves. Profile
+// resolution answers from the service type alone, so without this a sealed
+// speech envelope POSTed to a FREE route — /signature/{chatID},
+// /attestation/report — was opened, materialized into multipart and answered in
+// the clear on a route that serves no inference. Measured before the fix: a
+// 499-byte multipart body with the context marked sealed.
+func TestSealedSpeechIsOnlyOpenedOnItsOwnRoute(t *testing.T) {
+	for _, tt := range []struct {
+		path   string
+		opened bool
+	}{
+		{"/v1/proxy/audio/transcriptions", true},
+		{"/v1/proxy/v1/audio/transcriptions", true},
+		{"/v1/proxy/signature/some-chat-id", false},
+		{"/v1/proxy/attestation/report", false},
+		{"/v1/proxy/chat/completions", false},
+	} {
+		t.Run(tt.path, func(t *testing.T) {
+			f := speechFixture(t)
+			req := wire.Request{
+				"model":           mustRaw(t, "whisper-large-v3"),
+				"response_format": mustRaw(t, "json"),
+				"file_base64":     mustRaw(t, base64.StdEncoding.EncodeToString([]byte(speechAudio))),
+			}
+			gin.SetMode(gin.TestMode)
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx.Request = httptest.NewRequest("POST", tt.path, nil)
+			ctx.Request.Header.Set("Content-Type", "application/json")
+
+			out, err := f.c.MaybeUnsealRequest(ctx, sealSpeech(t, f, req))
+			if tt.opened != (err == nil) {
+				t.Fatalf("opened = %v, want %v (err: %v)", err == nil, tt.opened, err)
+			}
+			if tt.opened {
+				return
+			}
+			// Refused means refused: nothing materialized, nothing marked sealed.
+			if strings.HasPrefix(string(out), "--") {
+				t.Errorf("the envelope was materialized into multipart on a route that serves no inference: %s", out[:60])
+			}
+			if sealed, ok := ctx.Get(CtxKeyE2EESealed); ok && sealed == true {
+				t.Error("the context was marked sealed on a refused route, so the response path would try to seal")
+			}
+		})
+	}
+}
+
 // A filename is a NAME, not a path. Go's ReadForm never uses the client
 // filename as a disk path, but a backend that joins it onto an upload directory
 // (Werkzeug without secure_filename, several faster-whisper wrappers) does — and
@@ -1095,9 +1209,14 @@ func TestSealedSpeechFailsClosedWhenTheFrameCannotBeSealed(t *testing.T) {
 // report no usage.
 //
 // Fail-closed is right (a synthesized duration would have §8 sign a number the
-// model never produced), so what is under test is that the refusal is NAMED and
-// attributed UPSTREAM — the transcript was produced and the provider's shape is
-// what makes it unusable, so it must not land in the broker's alert bucket.
+// model never produced), so what is under test is that the refusal is attributed
+// UPSTREAM — the transcript was produced and the provider's shape is what makes
+// it unusable, so it must not land in the broker's alert bucket.
+//
+// The attribution is taken at the SEAL FAILURE, not by a pre-check restating
+// §7.3. There was such a pre-check and it was a strict subset: the last three
+// rows below are shapes that walked straight past it and were then refused with
+// no attribution at all. A second copy of a rule is a subset of it by default.
 func TestSealedSpeechRefusesAnUnbillableUpstreamShape(t *testing.T) {
 	for _, tt := range []struct {
 		name string
@@ -1113,6 +1232,12 @@ func TestSealedSpeechRefusesAnUnbillableUpstreamShape(t *testing.T) {
 		// rather than worked around: making the protocol accept a quoted number is
 		// the protocol package's call, not the broker's.
 		{"duration as a quoted number", `{"text":"hello","duration":"3.2"}`, true},
+		// The three the removed pre-check let through, measured one by one.
+		{"a negative duration", `{"text":"hello","duration":-1}`, true},
+		{"two locators that disagree", `{"text":"hello","duration":3.5,"usage":{"seconds":9.9}}`, true},
+		{"a null usage.seconds beside a valid duration", `{"text":"hello","duration":3.5,"usage":{"seconds":null}}`, true},
+		// A non-object `usage` the pre-check DID catch, kept so the class stays covered.
+		{"a non-object usage", `{"text":"hello","usage":3.5}`, true},
 		// And the shapes that DO satisfy §7.3 must still go through, or the guard
 		// would be a blanket refusal rather than a shape check.
 		{"numeric usage.seconds", `{"text":"hello","usage":{"type":"duration","seconds":3.2}}`, false},
@@ -1161,10 +1286,11 @@ func TestSealedSpeechRefusesAnUnbillableUpstreamShape(t *testing.T) {
 			if bytes.Contains(rec.Body.Bytes(), []byte("hello")) {
 				t.Errorf("the plaintext transcript reached the client: %s", rec.Body.Bytes())
 			}
-			// Named, so an operator reading the log or the response knows this is a
-			// provider shape problem and not a broker fault.
-			if !strings.Contains(err.Error(), "no cleartext audio duration") {
-				t.Errorf("the refusal is not the duration-specific one: %v", err)
+			// The sealer's own message, which names the exact problem more precisely
+			// than the removed pre-check did — asserted as a class rather than
+			// verbatim, so the protocol package may reword it.
+			if !strings.Contains(err.Error(), "seal response:") {
+				t.Errorf("the refusal did not come from sealing: %v", err)
 			}
 			// Attributed upstream. Without the override resolveFailureSource returns
 			// "broker" for an un-flagged 4xx, which would fire the broker alert for a
@@ -1453,43 +1579,6 @@ func TestUnsealedCentralizedSpeechIsSignedOnBothBranches(t *testing.T) {
 			// binding — ProviderType is set only by the centralized path.
 			if sig.ProviderType == "" {
 				t.Error("a centralized provider must cache a routing proof, not a plain request/response binding")
-			}
-		})
-	}
-}
-
-// The predicate itself, on the shapes the handler test cannot reach: a non-JSON
-// body must stay on the sealer's own "not a JSON object" refusal, which is
-// already accurate, rather than being reported as a missing duration.
-func TestSpeechLacksCleartextDuration(t *testing.T) {
-	for _, tt := range []struct {
-		body string
-		want bool
-	}{
-		{`{"text":"hello"}`, true},
-		{`{"text":"hello","usage":{"type":"tokens","input_tokens":14}}`, true},
-		{`{"text":"hello","duration":"3.2"}`, true},
-		{`{"text":"hello","usage":{"seconds":"3.2"}}`, true},
-		// The protocol package refuses all three null shapes by name, measured:
-		// "null is the absence of one, not a zero". A plain float64 decode would
-		// accept null silently and read it as a genuine 0.
-		{`{"text":"hello","usage":null}`, true},
-		{`{"text":"hello","duration":null}`, true},
-		{`{"text":"hello","usage":{"seconds":null}}`, true},
-		{`{"text":"hello","duration":3.2}`, false},
-		{`{"text":"hello","duration":0}`, false},
-		{`{"text":"hello","usage":{"seconds":3.2}}`, false},
-		{`{"text":"hello","usage":{"seconds":0}}`, false},
-		// Not JSON objects: the sealer's refusal is the accurate one.
-		{`a bare transcript`, false},
-		{`null`, false},
-		{`[]`, false},
-		{`"hello"`, false},
-		{``, false},
-	} {
-		t.Run(tt.body, func(t *testing.T) {
-			if got := speechLacksCleartextDuration([]byte(tt.body)); got != tt.want {
-				t.Errorf("speechLacksCleartextDuration(%s) = %v, want %v", tt.body, got, tt.want)
 			}
 		})
 	}

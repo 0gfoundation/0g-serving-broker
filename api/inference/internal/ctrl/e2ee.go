@@ -334,7 +334,16 @@ func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, reqBody []byte) ([]byte, err
 	// a silent upstream failure with a clear 400. Supporting it is small —
 	// materializeSpeechRequest is profile-independent — but it is a product
 	// decision, not a protocol one. See docs/design/e2ee.md.
-	if isJSONObjectBody(reqBody) && jsonIfiedServiceType(c.Service.Type) && isJSONIfiedRoute(ctx.Request) && !isSealedJSON(reqBody) {
+	// ORDER MATTERS, and it is not style. All four operands are pure, so `&&`
+	// short-circuits left to right and the cheap ones lead: a string compare, then
+	// a path suffix, and only then anything that touches the body. Put
+	// isJSONObjectBody first — as this rule briefly was — and every request on
+	// every service type pays a full unmarshal of its body before the service-type
+	// check rules it out. Benchmarked on a 1 MiB chat body: 4.69 ms and 1,057,463 B
+	// per request against 2.27 ns and zero allocations for this order, which also
+	// defeats hasE2EEMarker below — a substring scan that exists precisely to keep
+	// the parse off the non-sealed majority.
+	if jsonIfiedServiceType(c.Service.Type) && isJSONIfiedRoute(ctx.Request) && isJSONObjectBody(reqBody) && !isSealedJSON(reqBody) {
 		return nil, fmt.Errorf("this endpoint takes multipart/form-data, or a sealed JSON envelope carrying a top-level %q object (SPEC §5.3.1). A JSON body that is not an envelope is refused rather than forwarded", e2eeBodyMarker)
 	}
 	if !hasE2EEMarker(reqBody) {
@@ -384,6 +393,22 @@ func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, reqBody []byte) ([]byte, err
 	profile, sealable := profileForRequest(c.Service.Type, surface)
 	if !sealable {
 		return nil, fmt.Errorf("sealed requests are not supported for service type %q on the %q API surface", c.Service.Type, surface)
+	}
+	// The speech profile is also scoped to its ROUTE, not just its service type.
+	// Profile resolution is otherwise route-blind: it answers from the service
+	// type alone, so before this check a sealed envelope POSTed to a free route
+	// on a speech provider — /signature/{chatID}, /attestation/report — was
+	// opened, materialized into multipart, and answered in the clear. Measured:
+	// the body came back as a 499-byte multipart form with the context marked
+	// sealed, on a route that serves no inference at all.
+	//
+	// Scoped to speech because this PR is what made that reachable: before it,
+	// this arm returned ("", false) for the service type and the envelope was
+	// refused. ProfileImage is route-blind in the same way and predates this
+	// change, so widening the rule to every profile needs a per-profile route set
+	// and belongs in its own change — noted rather than smuggled in here.
+	if profile == wire.ProfileSpeech && !isJSONIfiedRoute(ctx.Request) {
+		return nil, fmt.Errorf("a sealed %s request is only accepted on %s, not %q (SPEC §5.3)", profile, speechTranscriptionRoute, ctx.Request.URL.Path)
 	}
 
 	// Extract the client's response ephemeral key before opening, so the response

@@ -172,6 +172,16 @@ The **`Content-Type` and `Content-Length` move with the body**. Everything
 downstream reads the boundary out of the header, so a multipart body still
 labelled `application/json` reaches the upstream unparseable.
 
+**A sealed envelope is only opened on the route its profile serves.** Profile
+resolution answers from the service type alone, so without this a sealed speech
+envelope POSTed to a free route — `/signature/{chatID}`, `/attestation/report` —
+was opened, materialized into multipart and answered in the clear on a route that
+serves no inference at all. Scoped to the speech profile, because that is what
+made it reachable: before, the arm returned `("", false)` for the service type
+and the envelope was refused. `ProfileImage` is route-blind in the same way and
+predates this; widening the rule to every profile needs a per-profile route set
+and belongs in its own change.
+
 **Sealed audio tops out well below what an unsealed upload gets.** `file_base64`
 inflates the payload ~4/3 before it is sealed, and the 32MB body cap applies to
 the *envelope*, so the largest audio that fits a sealed request is around 23MB
@@ -285,6 +295,17 @@ duration the model never produced, which is precisely what
 profile already gives a provider that returns a 200 with no verifiable image
 count.
 
+The attribution is taken **at the seal failure**, not by a pre-check restating
+§7.3. There was such a pre-check and it was a strict subset of what the sealer
+enforces — measured, a negative `duration`, two locators that disagree, and a
+null `usage.seconds` beside a valid `duration` all walked past it and were then
+refused with no attribution at all, landing back in the bucket the attribution
+exists to empty. A second copy of a rule is a subset of it by default, and the
+sealer's own messages are more precise than the pre-check's were. The rule now: a
+sealed turn whose profile is in hand has everything the broker owes, so what is
+left to fail is the upstream's response; a missing profile is broker state and
+keeps the default bucket.
+
 Two consequences are wired deliberately:
 
 - **Attributed upstream**, not to the broker. The provider's response *shape* is
@@ -344,6 +365,17 @@ Both halves of §5.3.1 now hold, and they are separate rules: a **multipart** bo
 must not contain an `_e2ee` part (above), and on an endpoint with a JSON-ified
 profile a **JSON** body must be a valid envelope or be refused — never forwarded
 as an unsealed JSON request "just in case".
+
+The predicate's **operand order is load-bearing**. All four are pure, so `&&`
+short-circuits left to right and the cheap ones lead: service type, then route,
+then anything that touches the body. Written the other way round — as it briefly
+was — every request on every service type pays a full unmarshal before the
+service-type check rules it out, which also defeats `hasE2EEMarker`, the
+substring scan that exists to keep the parse off the non-sealed majority.
+Measured on a 1 MiB chat body: **4.69 ms and 1,057,463 B per request against
+20 µs and 48 B**. Two tests pin it by allocated bytes — one on chatbot, one on a
+speech provider's free routes, because on chatbot the service-type check
+short-circuits first and hides any ordering of the rest.
 
 That second half is keyed on the **body's shape**, not on the declared media
 type. Leading with a `Content-Type` check made the rule hold for a body
