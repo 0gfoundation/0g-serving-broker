@@ -28,6 +28,16 @@ type Config struct {
 	// only (no path) — the /api/v3 version lives in the client's path
 	// constants; a path suffix here would double-prefix every call.
 	SeedanceBaseURL string
+	// KlingBaseURL is the Kling (Aliyun Bailian / model-studio) API base URL.
+	// UNLIKE every other vendor's base URL here, this one has NO default:
+	// Kling is served from a WORKSPACE-SPECIFIC subdomain
+	// (https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com), so there is no
+	// universal public endpoint to fall back to. An empty value here means
+	// KlingMain fails fast at startup rather than silently constructing
+	// requests against no host at all. MUST still be scheme+host only (no
+	// path, same reason as SeedanceBaseURL above) — this vendor is exempt
+	// from having a default, not from the path-suffix risk.
+	KlingBaseURL string
 	// RequestTimeout bounds each outbound API call to the vendor.
 	RequestTimeout time.Duration
 	// Logger configures the translator's own logger.
@@ -50,8 +60,9 @@ func GetConfig() *Config {
 	timeout := defaultRequestTimeout
 	// Either vendor's timeout env sets the single outbound-call timeout; a
 	// given deployment only runs one translator, so whichever it configures
-	// wins (MiniMax checked last so it takes precedence if both are set).
-	for _, envName := range []string{"DASHSCOPE_REQUEST_TIMEOUT_SECONDS", "MINIMAX_REQUEST_TIMEOUT_SECONDS", "SEEDANCE_REQUEST_TIMEOUT_SECONDS"} {
+	// wins (checked in this order, so a later one takes precedence if more
+	// than one happens to be set — Kling is checked last).
+	for _, envName := range []string{"DASHSCOPE_REQUEST_TIMEOUT_SECONDS", "MINIMAX_REQUEST_TIMEOUT_SECONDS", "SEEDANCE_REQUEST_TIMEOUT_SECONDS", "KLING_REQUEST_TIMEOUT_SECONDS"} {
 		if v := os.Getenv(envName); v != "" {
 			if s, err := strconv.Atoi(v); err == nil && s > 0 {
 				timeout = time.Duration(s) * time.Second
@@ -73,6 +84,7 @@ func GetConfig() *Config {
 		DashScopeBaseURL: os.Getenv("DASHSCOPE_BASE_URL"),
 		MiniMaxBaseURL:   os.Getenv("MINIMAX_BASE_URL"),
 		SeedanceBaseURL:  os.Getenv("SEEDANCE_BASE_URL"),
+		KlingBaseURL:     os.Getenv("KLING_BASE_URL"),
 		RequestTimeout:   timeout,
 		Logger: &commonconfig.LoggerConfig{
 			Level:  level,
