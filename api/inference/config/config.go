@@ -2352,6 +2352,23 @@ func loadConfig(cfg *Config) error {
 		return err
 	}
 
+	return applyAndValidate(cfg, raw)
+}
+
+// applyAndValidate is everything loadConfig does after the bytes are parsed: the
+// deprecation migration, the environment overrides, every default, and every validation
+// rule.
+//
+// It exists as its own function for one reason: PUT /v1/config/core has to be able to
+// refuse a config the broker could not load. Measured on a live deployment — a config
+// with service.modelPricing and no providerType passed the endpoint's YAML-syntax check,
+// so the change was recorded in RTMR3, the signing key rotated, the file was written and
+// the broker was restarted into a crash loop, and the endpoint answered 200. The ledger,
+// the key and the on-chain acknowledgement were then describing three different states.
+//
+// Hand-picking a subset of the rules for the controller to check would drift from what
+// the broker enforces, so both callers run this.
+func applyAndValidate(cfg *Config, raw map[string]interface{}) error {
 	if err := migrateDeprecated(cfg, raw); err != nil {
 		return err
 	}
@@ -2911,150 +2928,186 @@ func loadConfig(cfg *Config) error {
 	return nil
 }
 
-func GetConfig() *Config {
-	once.Do(func() {
-		instance = &Config{
-			AllowOrigins:    []string{"*"},
-			ContractAddress: "0x47340d900bdFec2BD393c626E12ea0656F938d84",
-			Database: struct {
-				DSN      string `yaml:"dsn"`
-				Provider string `yaml:"provider,omitempty"`
-			}{
-				DSN: "root:123456@tcp(mysql:3306)/provider?parseTime=true",
+// ValidateConfigContent reports whether config content would load.
+//
+// Used by ctrl.ApplyCoreConfig before it records anything: RTMR3 only appends, so a
+// config recorded and then found unloadable cannot be taken back, and the deployment is
+// left down with its ledger, its signing key and its on-chain acknowledgement disagreeing.
+//
+// # One asymmetry, stated rather than hidden
+//
+// applyAndValidate reads TARGET_URL and DATABASE_DSN from the PROCESS environment, and
+// the controller's environment is not necessarily the broker's. Where the broker has an
+// override the controller lacks, this can refuse a config the broker would have accepted
+// — a false refusal, which leaves the deployment exactly as it was. The opposite
+// direction, accepting what the broker will reject, is the one that breaks things, and an
+// override the controller has and the broker lacks would be the only way to reach it.
+//
+// The candidate is validated on a throwaway Config: nothing here touches the singleton
+// the running process is using.
+func ValidateConfigContent(data []byte) error {
+	cfg := defaultConfig()
+	raw := config.RawYAMLKeys(data)
+	if err := yaml.UnmarshalStrict(data, cfg); err != nil {
+		return err
+	}
+	return applyAndValidate(cfg, raw)
+}
+
+// defaultConfig is the configuration before any file is read.
+//
+// Extracted from GetConfig so ValidateConfigContent can start from the SAME defaults
+// the running process does. A validator that started from a zero Config would refuse
+// configs the broker accepts, and one that started from different defaults would
+// accept configs the broker refuses — which is the whole failure this exists to stop.
+func defaultConfig() *Config {
+	return &Config{
+		AllowOrigins:    []string{"*"},
+		ContractAddress: "0x47340d900bdFec2BD393c626E12ea0656F938d84",
+		Database: struct {
+			DSN      string `yaml:"dsn"`
+			Provider string `yaml:"provider,omitempty"`
+		}{
+			DSN: "root:123456@tcp(mysql:3306)/provider?parseTime=true",
+		},
+		Event: struct {
+			ListenAddr   string `yaml:"listenAddr"`
+			ProviderAddr string `yaml:"providerAddr,omitempty"`
+		}{
+			ListenAddr: ":8088",
+		},
+		GasPrice:    "2000000007",
+		MaxGasPrice: "",
+		Interval: struct {
+			AutoSettleBufferTime     time.Duration `yaml:"autoSettleBufferTime"`
+			ForceSettlementProcessor time.Duration `yaml:"forceSettlementProcessor"`
+			SettlementProcessor      time.Duration `yaml:"settlementProcessor"`
+			ReconciliationProcessor  time.Duration `yaml:"reconciliationProcessor"`
+		}{
+			AutoSettleBufferTime:     60 * time.Second,
+			ForceSettlementProcessor: 10 * time.Minute,
+			SettlementProcessor:      5 * time.Minute,
+			ReconciliationProcessor:  60 * time.Second,
+		},
+		Settlement: struct {
+			MinSettlementFee string `yaml:"minSettlementFee"`
+		}{
+			MinSettlementFee: "4000000000000000",
+		},
+		RevenueTransfer: struct {
+			TargetAddress string        `yaml:"targetAddress"`
+			ReserveAmount string        `yaml:"reserveAmount"`
+			Interval      time.Duration `yaml:"interval"`
+		}{
+			TargetAddress: "",
+			ReserveAmount: "10000000000000000000",
+			Interval:      time.Hour,
+		},
+		Monitor: struct {
+			Enable       bool   `yaml:"enable"`
+			EventAddress string `yaml:"eventAddress"`
+		}{
+			Enable:       false,
+			EventAddress: "0g-serving-provider-event:3081",
+		},
+		ZK: struct {
+			URL           string `yaml:"url"`
+			Provider      string `yaml:"provider,omitempty"`
+			RequestLength int    `yaml:"requestLength"`
+		}{
+			URL:           "nginx:3001",
+			RequestLength: 40,
+		},
+		LoRA: LoRAConfig{
+			Enable:            false,
+			LoraModulesDir:    "/data/lora-modules",
+			SllmUrl:           "http://sllm:8343",
+			OffloadAfter:      60 * time.Minute,
+			EnableColdStorage: false,
+			PollBlockInterval: 5 * time.Second,
+			StorageTurbo:      false,
+		},
+		ChatCacheExpiration: time.Minute * 20,
+		NvGPU:               false,
+		Logger: &config.LoggerConfig{
+			Format:        "text",
+			Level:         "info",
+			Path:          "./logs/inference.log",
+			RotationCount: 7,
+		},
+		LogPaths: LogPathsConfig{
+			BrokerLogDir: "/var/log/inference",
+			EventLogDir:  "/var/log/event",
+		},
+		Controller: ControllerConfig{
+			Enable:         false,
+			Port:           3090,
+			AdminAddresses: []string{},
+			AllowedIPs:     []string{},
+			ImageRepo:      "ghcr.io/0gfoundation/0g-serving-broker",
+			Docker: DockerConfig{
+				Host:       "unix:///var/run/docker.sock",
+				APIVersion: "1.41",
 			},
-			Event: struct {
-				ListenAddr   string `yaml:"listenAddr"`
-				ProviderAddr string `yaml:"providerAddr,omitempty"`
-			}{
-				ListenAddr: ":8088",
-			},
-			GasPrice:    "2000000007",
-			MaxGasPrice: "",
-			Interval: struct {
-				AutoSettleBufferTime     time.Duration `yaml:"autoSettleBufferTime"`
-				ForceSettlementProcessor time.Duration `yaml:"forceSettlementProcessor"`
-				SettlementProcessor      time.Duration `yaml:"settlementProcessor"`
-				ReconciliationProcessor  time.Duration `yaml:"reconciliationProcessor"`
-			}{
-				AutoSettleBufferTime:     60 * time.Second,
-				ForceSettlementProcessor: 10 * time.Minute,
-				SettlementProcessor:      5 * time.Minute,
-				ReconciliationProcessor:  60 * time.Second,
-			},
-			Settlement: struct {
-				MinSettlementFee string `yaml:"minSettlementFee"`
-			}{
-				MinSettlementFee: "4000000000000000",
-			},
-			RevenueTransfer: struct {
-				TargetAddress string        `yaml:"targetAddress"`
-				ReserveAmount string        `yaml:"reserveAmount"`
-				Interval      time.Duration `yaml:"interval"`
-			}{
-				TargetAddress: "",
-				ReserveAmount: "10000000000000000000",
-				Interval:      time.Hour,
-			},
-			Monitor: struct {
-				Enable       bool   `yaml:"enable"`
-				EventAddress string `yaml:"eventAddress"`
-			}{
-				Enable:       false,
-				EventAddress: "0g-serving-provider-event:3081",
-			},
-			ZK: struct {
-				URL           string `yaml:"url"`
-				Provider      string `yaml:"provider,omitempty"`
-				RequestLength int    `yaml:"requestLength"`
-			}{
-				URL:           "nginx:3001",
-				RequestLength: 40,
-			},
-			LoRA: LoRAConfig{
-				Enable:            false,
-				LoraModulesDir:    "/data/lora-modules",
-				SllmUrl:           "http://sllm:8343",
-				OffloadAfter:      60 * time.Minute,
-				EnableColdStorage: false,
-				PollBlockInterval: 5 * time.Second,
-				StorageTurbo:      false,
-			},
-			ChatCacheExpiration: time.Minute * 20,
-			NvGPU:               false,
 			Logger: &config.LoggerConfig{
 				Format:        "text",
 				Level:         "info",
-				Path:          "./logs/inference.log",
+				Path:          "./logs/controller.log",
 				RotationCount: 7,
 			},
-			LogPaths: LogPathsConfig{
-				BrokerLogDir: "/var/log/inference",
-				EventLogDir:  "/var/log/event",
-			},
-			Controller: ControllerConfig{
-				Enable:         false,
-				Port:           3090,
-				AdminAddresses: []string{},
-				AllowedIPs:     []string{},
-				ImageRepo:      "ghcr.io/0gfoundation/0g-serving-broker",
-				Docker: DockerConfig{
-					Host:       "unix:///var/run/docker.sock",
-					APIVersion: "1.41",
-				},
-				Logger: &config.LoggerConfig{
-					Format:        "text",
-					Level:         "info",
-					Path:          "./logs/controller.log",
-					RotationCount: 7,
-				},
-			},
-			CacheTokenBilling: CacheTokenBillingConfig{
-				Enabled: false,
-				Divisor: 4,
-			},
-			TieredPricing: TieredPricingConfig{
-				Enabled: false,
-				Tiers:   nil,
-			},
-			Whitelist: WhitelistConfig{
-				Enabled:       false,
-				UserAddresses: []string{},
-			},
-			ConcurrencyLimit: ConcurrencyLimitConfig{
-				MaxGlobalConcurrent:  20,
-				MaxPerUserConcurrent: 5,
-				PerUserRPM:           30,
-				PerUserBurst:         5,
-				PerUserTPM:           0, // disabled by default
-				PerUserTPMBurst:      0,
-				PerUserIPM:           0, // disabled by default
-				PerUserIPMBurst:      0,
-				PerUserOverrides:     nil,
-			},
-			Async: AsyncConfig{
-				Enabled:           true,
-				MaxConcurrentJobs: 10,
-				MaxQueueSize:      100,
-				ResultTTL:         30 * time.Minute,
-				CleanupInterval:   60 * time.Second,
-				JobTimeout:        15 * time.Minute,
-			},
-			VideoPoll: VideoPollConfig{
-				Enabled:            true,
-				MaxConcurrentPolls: 10,
-				PollInterval:       10 * time.Second,
-				MaxPollDuration:    20 * time.Minute,
-				ScanInterval:       5 * time.Second,
-				LeaseWindow:        90 * time.Second, // 3x PollRequestTimeout, leaving margin for parse/bill/write
-				PollRequestTimeout: 30 * time.Second,
-				RetentionTTL:       30 * time.Minute,
-				CleanupInterval:    5 * time.Minute,
-			},
-			ProviderHttp: ProviderHttpConfig{
-				TotalTimeout:          15 * time.Minute,
-				ResponseHeaderTimeout: 15 * time.Minute,
-			},
-		}
+		},
+		CacheTokenBilling: CacheTokenBillingConfig{
+			Enabled: false,
+			Divisor: 4,
+		},
+		TieredPricing: TieredPricingConfig{
+			Enabled: false,
+			Tiers:   nil,
+		},
+		Whitelist: WhitelistConfig{
+			Enabled:       false,
+			UserAddresses: []string{},
+		},
+		ConcurrencyLimit: ConcurrencyLimitConfig{
+			MaxGlobalConcurrent:  20,
+			MaxPerUserConcurrent: 5,
+			PerUserRPM:           30,
+			PerUserBurst:         5,
+			PerUserTPM:           0, // disabled by default
+			PerUserTPMBurst:      0,
+			PerUserIPM:           0, // disabled by default
+			PerUserIPMBurst:      0,
+			PerUserOverrides:     nil,
+		},
+		Async: AsyncConfig{
+			Enabled:           true,
+			MaxConcurrentJobs: 10,
+			MaxQueueSize:      100,
+			ResultTTL:         30 * time.Minute,
+			CleanupInterval:   60 * time.Second,
+			JobTimeout:        15 * time.Minute,
+		},
+		VideoPoll: VideoPollConfig{
+			Enabled:            true,
+			MaxConcurrentPolls: 10,
+			PollInterval:       10 * time.Second,
+			MaxPollDuration:    20 * time.Minute,
+			ScanInterval:       5 * time.Second,
+			LeaseWindow:        90 * time.Second, // 3x PollRequestTimeout, leaving margin for parse/bill/write
+			PollRequestTimeout: 30 * time.Second,
+			RetentionTTL:       30 * time.Minute,
+			CleanupInterval:    5 * time.Minute,
+		},
+		ProviderHttp: ProviderHttpConfig{
+			TotalTimeout:          15 * time.Minute,
+			ResponseHeaderTimeout: 15 * time.Minute,
+		},
+	}
+}
+
+func GetConfig() *Config {
+	once.Do(func() {
+		instance = defaultConfig()
 
 		if err := loadConfig(instance); err != nil {
 			panic(err)

@@ -17,7 +17,6 @@ import (
 	"github.com/Dstack-TEE/dstack/sdk/go/dstack"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
-	"gopkg.in/yaml.v3"
 
 	"github.com/0glabs/0g-serving-broker/common/attest"
 	"github.com/0glabs/0g-serving-broker/common/log"
@@ -562,9 +561,26 @@ func (c *Ctrl) GetCoreConfig() (string, error) {
 // publishes the record — the broker serves a quote it took at startup, so an event
 // emitted while it runs reaches no reader until it restarts.
 func (c *Ctrl) ApplyCoreConfig(ctx context.Context, configContent string) error {
-	// Validate YAML format (but don't use parsed result to preserve original content)
-	var tmp interface{}
-	if err := yaml.Unmarshal([]byte(configContent), &tmp); err != nil {
+	// Refused BEFORE anything is recorded, and through the same code the broker runs at
+	// startup — not a syntax check.
+	//
+	// This used to be `yaml.Unmarshal` into an interface{}, which accepts any well-formed
+	// YAML. Measured on a live deployment: a config carrying service.modelPricing without
+	// providerType passed that check, so the change was recorded in RTMR3, the signing key
+	// rotated to the new upstream set, the file was written, and the broker was restarted
+	// into a crash loop — panicking on exactly the rule this check now runs. The endpoint
+	// answered 200.
+	//
+	// What that leaves behind is worse than the outage. RTMR3 only appends, so the ledger
+	// permanently names a config the deployment never ran; the controller derives keys for
+	// the new set while the chain still acknowledges the signer of the old one; and the
+	// broker, the only party that would push the new address, cannot start. Three sources
+	// disagreeing, none of them retractable.
+	//
+	// config.ValidateConfigContent runs the deprecation migration, the defaults and every
+	// validation rule loadConfig runs, on a throwaway Config. A hand-picked subset would
+	// drift from what the broker enforces, which is how this hole opened.
+	if err := config.ValidateConfigContent([]byte(configContent)); err != nil {
 		return &InvalidConfigError{Err: err}
 	}
 

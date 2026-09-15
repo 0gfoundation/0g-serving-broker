@@ -323,14 +323,14 @@ func newChangeCtrlWithDeriver(t *testing.T, l *opLog, emitErr error, configFile 
 func TestConfigChangeIsRecordedBeforeItHappens(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
-	if err := os.WriteFile(path, []byte("service:\n  name: before\n"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte("service:\n  model: before\n"), 0o644); err != nil {
 		t.Fatalf("seeding the config file: %v", err)
 	}
 
 	l := &opLog{}
 	c := newChangeCtrl(t, l, nil, path, okPull)
 
-	const content = "service:\n  name: after\n"
+	const content = "service:\n  model: after\n"
 	if err := c.ApplyCoreConfig(context.Background(), content); err != nil {
 		t.Fatalf("ApplyCoreConfig() = %v, want nil", err)
 	}
@@ -361,7 +361,7 @@ func TestConfigChangeIsRecordedBeforeItHappens(t *testing.T) {
 func TestConfigChangeAbortsWhenItCannotBeRecorded(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
-	const before = "service:\n  name: before\n"
+	const before = "service:\n  model: before\n"
 	if err := os.WriteFile(path, []byte(before), 0o644); err != nil {
 		t.Fatalf("seeding the config file: %v", err)
 	}
@@ -369,7 +369,7 @@ func TestConfigChangeAbortsWhenItCannotBeRecorded(t *testing.T) {
 	l := &opLog{}
 	c := newChangeCtrl(t, l, errors.New("dstack.sock: connection refused"), path, okPull)
 
-	if err := c.ApplyCoreConfig(context.Background(), "service:\n  name: after\n"); err == nil {
+	if err := c.ApplyCoreConfig(context.Background(), "service:\n  model: after\n"); err == nil {
 		t.Fatal("ApplyCoreConfig() = nil, want an error when the change cannot be recorded")
 	}
 
@@ -623,7 +623,7 @@ func TestImageChangeAfterTheBrokerMovedDoesNotRestore(t *testing.T) {
 func TestFailedConfigWriteRestoresTheRecord(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
-	const onDisk = "service:\n  name: on-disk\n"
+	const onDisk = "service:\n  model: on-disk\n"
 	if err := os.WriteFile(path, []byte(onDisk), 0o644); err != nil {
 		t.Fatalf("seeding the config file: %v", err)
 	}
@@ -654,7 +654,7 @@ func TestFailedConfigWriteRestoresTheRecord(t *testing.T) {
 func TestFailedRestoreIsReported(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
-	if err := os.WriteFile(path, []byte("service:\n  name: x\n"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte("service:\n  model: x\n"), 0o644); err != nil {
 		t.Fatalf("seeding the config file: %v", err)
 	}
 
@@ -685,7 +685,7 @@ func TestConcurrentChangesAreRefused(t *testing.T) {
 	if _, err := c.UpdateImages(context.Background(), testDigest); !errors.Is(err, ErrChangeInProgress) {
 		t.Errorf("UpdateImages() = %v, want ErrChangeInProgress", err)
 	}
-	if err := c.ApplyCoreConfig(context.Background(), "service:\n  name: x\n"); !errors.Is(err, ErrChangeInProgress) {
+	if err := c.ApplyCoreConfig(context.Background(), "service:\n  model: x\n"); !errors.Is(err, ErrChangeInProgress) {
 		t.Errorf("ApplyCoreConfig() = %v, want ErrChangeInProgress", err)
 	}
 	if ops := l.all(); len(ops) != 0 {
@@ -776,7 +776,7 @@ func TestUpgradeRefusesAContainerItCannotNameExactly(t *testing.T) {
 func TestRestoreRunsOnItsOwnContext(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
-	const onDisk = "service:\n  name: on-disk\n"
+	const onDisk = "service:\n  model: on-disk\n"
 	if err := os.WriteFile(path, []byte(onDisk), 0o644); err != nil {
 		t.Fatalf("seeding the config file: %v", err)
 	}
