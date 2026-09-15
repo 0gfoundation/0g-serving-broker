@@ -80,6 +80,14 @@ func materializeSpeechRequest(req wire.Request) (body []byte, contentType string
 
 	var buf bytes.Buffer
 	w := multipart.NewWriter(&buf)
+	// CreateFormFile declares the part `application/octet-stream`, and there is
+	// nothing better to write: the profile seals no content type, so the one the
+	// caller's multipart request carried (`audio/mpeg`, `audio/wav`, …) never
+	// crosses the sealed channel. A backend that sniffs the container from the
+	// part header rather than the extension therefore sees a difference between a
+	// sealed and an unsealed request for the same audio — which is the other half
+	// of why the sealed `filename` is forwarded above: the extension is the only
+	// container hint that survives.
 	part, err := w.CreateFormFile(speechUpstreamFileField, filename)
 	if err != nil {
 		return nil, "", fmt.Errorf("create the audio part: %w", err)

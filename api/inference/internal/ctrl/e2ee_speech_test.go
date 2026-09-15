@@ -313,6 +313,11 @@ func TestTheJSONRuleFiresOnlyOnTheTranscriptionRoute(t *testing.T) {
 		{"/v1/proxy/v1/audio/transcriptions", true},
 		{"/v1/proxy/audio/transcriptions/", true},
 		{"/v1/proxy/audio/transcriptions?foo=bar", true},
+		// A percent-encoded `?` is part of the PATH, not a query, so this is a
+		// different endpoint and the rule must not fire. It did while
+		// isJSONIfiedRoute stripped at the first '?' — a strip that was
+		// unreachable for a real query and wrong for this one.
+		{"/v1/proxy/audio/transcriptions%3Ffoo=bar", false},
 		// Everything else on the same provider must pass through untouched.
 		{"/v1/proxy/signature/some-chat-id", false},
 		{"/v1/proxy/attestation/report", false},

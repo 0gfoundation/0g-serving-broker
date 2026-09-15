@@ -229,10 +229,18 @@ func isJSONIfiedRoute(req *http.Request) bool {
 	if req == nil {
 		return false
 	}
+	// No query strip: URL.Path never carries one — net/http splits it into
+	// RawQuery at parse time. A strip here was copied from proxy.go, where
+	// targetRoute IS built from a string that still carries the query and the
+	// invariant is therefore different. Measured, it was not merely unreachable:
+	// a client percent-encoding the `?` gets a literal one INSIDE Path
+	// (`/…/transcriptions%3Ffoo=bar` → Path `/…/transcriptions?foo=bar`), and the
+	// strip truncated that real path segment, making the rule fire on a path that
+	// is not this endpoint.
+	//
+	// The trailing-slash trim below does real work: `/…/transcriptions/` reaches
+	// the same handler.
 	path := req.URL.Path
-	if i := strings.IndexByte(path, '?'); i >= 0 {
-		path = path[:i]
-	}
 	if path != "/" {
 		path = strings.TrimRight(path, "/")
 	}
