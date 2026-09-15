@@ -524,10 +524,11 @@ func TestTheJSONRuleParsesTheBodyItJudgesOnce(t *testing.T) {
 // unbound so the router can inject it. On a JSON endpoint that is inert; here it
 // reaches the multipart body.
 //
-// Pinned because docs/design/e2ee.md now tells the router "a scalar is fine, an
-// object is a 400 the client cannot act on and the provider cannot fix", and an
-// unpinned claim in a design doc rots. Not a hole either way: the object refusal
-// is right, there being no one rendering of a nested object in a form.
+// Pinned because docs/design/e2ee-speech.md now tells the router "a scalar is
+// fine, an object is a 400 the client cannot act on and the provider cannot
+// fix", and an unpinned claim in a design doc rots. Not a hole either way: the
+// object refusal is right, there being no one rendering of a nested object in
+// a form.
 func TestSealedSpeechMaterializesAnInjectedCleartextField(t *testing.T) {
 	for _, tt := range []struct {
 		name      string

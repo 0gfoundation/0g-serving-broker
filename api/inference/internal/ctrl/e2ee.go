@@ -358,7 +358,7 @@ func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, targetPath string, reqBody [
 	// a JSON body". So the refusal matches what is actually promoted and replaces
 	// a silent upstream failure with a clear 400. Supporting it is small —
 	// materializeSpeechRequest is profile-independent — but it is a product
-	// decision, not a protocol one. See docs/design/e2ee.md.
+	// decision, not a protocol one. See docs/design/e2ee-speech.md.
 	// ORDER MATTERS, and it is not style. All four operands are pure, so `&&`
 	// short-circuits left to right and the cheap ones lead: a string compare, then
 	// a path suffix, and only then anything that touches the body. Put
