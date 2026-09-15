@@ -57,7 +57,7 @@ type scanChecks struct {
 	ChainSigner bool `json:"chain_signer"` // record signer == TappRegistry.getNodeList(app)
 	SignerBound bool `json:"signer_bound"` // quote attests that same signer
 	Image       bool `json:"image"`        // matched reference file == expected.image
-	Uki         bool `json:"uki"`          // measured uki == expected.uki (true when not configured)
+	Uki         bool `json:"uki"`          // expected.uki is among the measured uki entries (true when not configured)
 	Replay      bool `json:"replay"`       // eventlog replay reproduces the RTMRs
 	Tcb         bool `json:"tcb"`          // tcb_status in requireTcb
 	Clean       bool `json:"clean"`        // no note, no advisories
@@ -296,8 +296,21 @@ func evaluateScanRecord(raw []byte, in scanInputs) scanEval {
 	ev.checkedAt = st.CheckedAt
 	ev.tlsKey = strings.ToLower(a.TlsPublicKey)
 	ev.image = a.Image
-	if u := a.Measured["uki"]; len(u) > 0 {
-		ev.uki = strings.ToLower(u[len(u)-1])
+	// The event log measures more than one "uki"-typed component (the boot
+	// stub is one of them and is identical across image versions), and where
+	// the image's own UKI lands in that list moved between v0.7.0 (last) and
+	// v0.8.0 (first). tappscan matches the reference against any entry; so do
+	// we. ev.uki is the entry that matched, or the whole list when none did.
+	measuredUki := a.Measured["uki"]
+	ukiMatched := false
+	for _, u := range measuredUki {
+		if in.expectedUki != "" && eqHex(u, in.expectedUki) {
+			ev.uki, ukiMatched = strings.ToLower(u), true
+			break
+		}
+	}
+	if !ukiMatched {
+		ev.uki = strings.ToLower(strings.Join(measuredUki, ","))
 	}
 
 	errNull := len(st.Error) == 0 || string(st.Error) == "null"
@@ -317,7 +330,7 @@ func evaluateScanRecord(raw []byte, in scanInputs) scanEval {
 	if !ev.checks.Image {
 		fail("image", fmt.Sprintf("record %q vs expected %q", a.Image, in.expectedImage))
 	}
-	ev.checks.Uki = in.expectedUki == "" || eqHex(ev.uki, in.expectedUki)
+	ev.checks.Uki = in.expectedUki == "" || ukiMatched
 	if !ev.checks.Uki {
 		fail("uki", fmt.Sprintf("measured %s vs expected %s", ev.uki, in.expectedUki))
 	}
