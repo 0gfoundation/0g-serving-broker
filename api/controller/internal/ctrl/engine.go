@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -72,6 +73,9 @@ type GPUClaim struct {
 	GPU      string `json:"gpu"`
 	HeldBy   string `json:"heldBy"`
 	ByEngine bool   `json:"byEngine"`
+	// Running is false for a container that is stopped but would reclaim the card if
+	// something started it. It still counts as holding it.
+	Running bool `json:"running"`
 	// Monitoring is true when controller.engineGPUIgnore names this container: it can see
 	// the card but is declared not to allocate on it. Reported rather than filtered out,
 	// so the answer stays what docker actually says and only the placement DECISION uses
@@ -109,7 +113,7 @@ func (c *Ctrl) GPUAllocation(ctx context.Context) (map[string][]GPUClaim, error)
 	for _, cont := range containers {
 		for _, gpu := range cont.HeldGPUs() {
 			out[gpu] = append(out[gpu], GPUClaim{
-				GPU: gpu, HeldBy: cont.Name, ByEngine: cont.Engine,
+				GPU: gpu, HeldBy: cont.Name, ByEngine: cont.Engine, Running: cont.Running,
 				Monitoring: monitoring[cont.Name],
 			})
 		}
@@ -174,12 +178,13 @@ func (c *Ctrl) CreateEngine(ctx context.Context, spec EngineSpec) error {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), engineChangeTimeout)
 	defer cancel()
 
-	free, err := c.gpusAreFree(ctx, spec.GPUs)
+	held, err := c.occupiedBy(ctx, spec.GPUs)
 	if err != nil {
 		return err
 	}
-	if !free {
-		return refusef("cannot create %q: it asks for GPU %q and that is already occupied. A container running with %s=all occupies every card; narrow it in the compose, or name it in controller.engineGPUIgnore if it only observes the cards", spec.Name, spec.GPUs, docker.GPUEnvVar)
+	if len(held) > 0 {
+		return refusef("cannot create %q: it asks for GPU %q, which is occupied by %s. A container with %s=all occupies every card, and a stopped one still counts because starting it reclaims them. Narrow or stop a running holder, remove an exited one, or name it in controller.engineGPUIgnore if it only observes the cards",
+			spec.Name, spec.GPUs, describeHolders(held), docker.GPUEnvVar)
 	}
 
 	// Pulled before the record, because a pull is the long step and a record naming an
@@ -194,14 +199,17 @@ func (c *Ctrl) CreateEngine(ctx context.Context, spec EngineSpec) error {
 	// Derived rather than remembered: docker is the authority on which containers exist,
 	// and a list this process kept could disagree with it.
 	if err := c.recordEngineSet(ctx, append(c.engineSetFromDocker(ctx), attest.Engine{
-		Name: spec.Name, Image: spec.Image, GPUs: spec.GPUs, Args: strings.Join(args, " "),
+		Name: spec.Name, Image: spec.Image, GPUs: spec.GPUs,
+		// Entrypoint first, matching what docker will run and what engineSetFromDocker
+		// reads back for every other engine in the set.
+		Args: strings.Join(append(append([]string(nil), img.Entrypoint...), args...), " "),
 	})); err != nil {
 		return err
 	}
 
 	if err := c.dockerClient.CreateEngine(ctx, docker.CreateEngineSpec{
 		Name: spec.Name, Image: spec.Image, GPUs: spec.GPUs, Port: spec.Port,
-		Args: args, IPCHost: img.IPCHost, ShmSize: img.ShmSize,
+		Entrypoint: img.Entrypoint, Args: args, IPCHost: img.IPCHost, ShmSize: img.ShmSize,
 		Network: c.config.EngineNetwork, Volumes: c.config.EngineVolumes,
 		Env: c.engineEnv(),
 	}); err != nil {
@@ -378,11 +386,14 @@ func (c *Ctrl) engineSetFromDocker(ctx context.Context) []attest.Engine {
 			Name:  cont.Name,
 			Image: cont.Image,
 			GPUs:  cont.GPUs,
+			// The WHOLE command, entrypoint included: a flag list on its own says nothing,
+			// because which program consumes it is a separate choice the image does not fix.
+			//
 			// Space-joined, which is lossy for an argument containing a space — and no engine
 			// takes one. The alternative is a nested quoting grammar inside a tab-separated
 			// field, and a reader would then have to parse the writer's quoting to see the
 			// flags; the loss is bounded and visible, the grammar's complexity would not be.
-			Args: strings.Join(cont.Args, " "),
+			Args: strings.Join(cont.Command(), " "),
 		})
 	}
 	return out
@@ -458,25 +469,46 @@ func (c *Ctrl) engineEnv() map[string]string {
 // compose from starting a container in between. It is the cheap answer that catches the
 // mistake an operator actually makes — placing a second engine on an occupied card — and
 // docker refuses a name collision on its own. Nothing here relies on it for safety.
-func (c *Ctrl) gpusAreFree(ctx context.Context, want string) (bool, error) {
+func (c *Ctrl) occupiedBy(ctx context.Context, want string) ([]GPUClaim, error) {
 	alloc, err := c.GPUAllocation(ctx)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	occupied := func(gpu string) bool {
+	seen := map[string]bool{}
+	var out []GPUClaim
+	collect := func(gpu string) {
 		for _, claim := range alloc[gpu] {
-			if !claim.Monitoring {
-				return true
+			if claim.Monitoring || seen[claim.HeldBy] {
+				continue
 			}
+			seen[claim.HeldBy] = true
+			out = append(out, claim)
 		}
-		return false
 	}
 	for _, gpu := range (docker.Container{HasGPU: true, GPUs: want}).HeldGPUs() {
-		if occupied(gpu) || occupied(docker.GPUAll) {
-			return false, nil
-		}
+		collect(gpu)
+		collect(docker.GPUAll)
 	}
-	return true, nil
+	sort.Slice(out, func(i, j int) bool { return out[i].HeldBy < out[j].HeldBy })
+	return out, nil
+}
+
+// describeHolders renders the holders for a refusal, saying of each whether it is running.
+//
+// Naming them is the difference between a message an operator can act on and one they
+// cannot. Measured on a dev CVM: ten containers left over from `docker run --gpus all`,
+// all exited for months, every one of them occupying every card — and the refusal said
+// only "narrow it in the compose", on a machine with no compose at all.
+func describeHolders(claims []GPUClaim) string {
+	parts := make([]string, 0, len(claims))
+	for _, claim := range claims {
+		state := "exited"
+		if claim.Running {
+			state = "running"
+		}
+		parts = append(parts, fmt.Sprintf("%s (%s, holds %s)", claim.HeldBy, state, claim.GPU))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // validateEngineSpec is the allowlist. Everything it refuses, it refuses because the

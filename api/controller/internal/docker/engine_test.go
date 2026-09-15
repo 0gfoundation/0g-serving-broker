@@ -39,6 +39,8 @@ func engineDaemon(t *testing.T) (*Client, *created) {
 				HostConfig       container.HostConfig
 				NetworkingConfig network.NetworkingConfig
 			}
+			// container.Config's Entrypoint is a strslice.StrSlice, which decodes from
+			// either a string or an array — the same shape docker itself accepts.
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			got = created{
 				name: r.URL.Query().Get("name"),
@@ -425,5 +427,46 @@ func TestRemoveEngineRefusesAnUnlabelledContainer(t *testing.T) {
 	}
 	if !removed {
 		t.Error("the container was not removed")
+	}
+}
+
+// The entrypoint has to reach the container, because an image whose own entrypoint does
+// not take a flag list dies before the engine starts — measured on lmsysorg/sglang,
+// whose nvidia_entrypoint.sh does `exec "$@"` and fails with `exec: --: invalid option`.
+func TestCreateEngineSetsTheEntrypoint(t *testing.T) {
+	c, got := engineDaemon(t)
+	spec := engineSpec()
+	spec.Entrypoint = []string{"python", "-m", "sglang.launch_server"}
+
+	if err := c.CreateEngine(context.Background(), spec); err != nil {
+		t.Fatalf("CreateEngine() = %v, want nil", err)
+	}
+	if strings.Join(got.cfg.Entrypoint, " ") != "python -m sglang.launch_server" {
+		t.Errorf("entrypoint = %v, want the configured launcher", got.cfg.Entrypoint)
+	}
+	if strings.Join(got.cfg.Cmd, " ") != strings.Join(spec.Args, " ") {
+		t.Errorf("cmd = %v, want the flags unchanged", got.cfg.Cmd)
+	}
+}
+
+func TestCreateEngineLeavesTheEntrypointUnsetWhenNoneIsGiven(t *testing.T) {
+	c, got := engineDaemon(t)
+	if err := c.CreateEngine(context.Background(), engineSpec()); err != nil {
+		t.Fatalf("CreateEngine() = %v, want nil", err)
+	}
+	if len(got.cfg.Entrypoint) != 0 {
+		t.Errorf("entrypoint = %v, want the image's own left alone", got.cfg.Entrypoint)
+	}
+}
+
+func TestContainerCommandPutsTheEntrypointFirst(t *testing.T) {
+	c := Container{Entrypoint: []string{"python", "-m", "x"}, Args: []string{"--a", "1"}}
+	if strings.Join(c.Command(), " ") != "python -m x --a 1" {
+		t.Errorf("Command() = %v", c.Command())
+	}
+	// And it does not alias either slice, since the record is built from the result.
+	_ = c.Command()
+	if strings.Join(c.Entrypoint, " ") != "python -m x" {
+		t.Errorf("Entrypoint was mutated to %v", c.Entrypoint)
 	}
 }

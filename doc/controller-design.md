@@ -74,6 +74,7 @@ controller:
     HF_HOME: "/root/.cache/huggingface"
   engines:                       # the allowlist, and the per-image flag table (§4.5)
     - imageRepo: "lmsysorg/sglang"
+      entrypoint: ["python", "-m", "sglang.launch_server"]   # its own is nvidia_entrypoint.sh
       modelFlag: "--model-path"
       revisionFlag: "--revision"
       portFlag: "--port"
@@ -470,6 +471,25 @@ optionally `hostFlag`; those four are exactly the flags a **request may not pass
 since the controller sets them and a caller that could also set them could make the
 container disagree with the record. `hostFlag` is forced to `0.0.0.0`, which inside a
 container with no published ports means "reachable from the broker and nothing else".
+
+**`entrypoint` is the entry that is not optional in practice, and the one thing only a
+real run found.** `lmsysorg/sglang`'s own entrypoint is `nvidia_entrypoint.sh`, which does
+`exec "$@"` — so a flag list with no program in front of it fails with
+`exec: --: invalid option` before the engine starts. This project's compose already knows
+that and sets the same three words for its own engine service. Leave it empty only for an
+image whose own entrypoint takes a flag list.
+
+Per image and never per request: the digest pins what *could* run, the entrypoint chooses
+which of it does, so a caller who could set it could run anything in the image while the
+recorded flag list described nothing. For the same reason the record carries the **whole**
+command, entrypoint first — and `zg-engine-set` read back off a real CVM shows it:
+
+```
+count=1
+zg-live-qwen ⇥ lmsysorg/sglang@sha256:fc458e79… ⇥ 0 ⇥ python -m sglang.launch_server
+    --model-path Qwen/Qwen3-0.6B --revision c1899de289a04d12100db370d81485cdf75e47ca
+    --port 8000 --host 0.0.0.0 --mem-fraction-static 0.12 --tp 1
+```
 
 **GPU placement** is read off docker rather than off NVIDIA: assignment is a
 docker-level fact, and asking docker avoids an NVML dependency and a second source
