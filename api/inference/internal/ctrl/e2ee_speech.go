@@ -164,15 +164,36 @@ func materializeSpeechRequest(req wire.Request) (body []byte, contentType string
 // assumed: Go writes `a.mp3"; name="model` as `filename="a.mp3\"; name=\"model"`,
 // which Go's own ParseMediaType resolves correctly back to one parameter — but a
 // parser that does not process backslash escapes reads a second `name`
-// parameter out of it. A backslash is NOT in the set: escaped, it yields a
-// literal backslash in the value rather than a parameter break, and rejecting it
+// parameter out of it.
+//
+// The SEMICOLON is in the set too, and it is a third mechanism rather than a
+// variation on the other two. CR/LF need no escaping because the writer emits
+// them verbatim; the quote needs escaping and gets it. A semicolon needs
+// NEITHER: inside a quoted parameter it is RFC-legal and ordinary, so
+// multipart.Writer writes it as-is and Go's own reader is right to keep it.
+// What breaks is a parser that splits the disposition on `;` before honouring
+// the quotes — and those exist. Measured, both halves of the damage the quote is
+// refused for:
+//
+//	a field named `zz; name=model`
+//	   RFC reader   → one field literally named `zz; name=model`, model = cheap-model
+//	   `;`-splitter → a SECOND `name=model`, so last-wins reads the injected value
+//
+//	a field named `zz; name=file; filename=decoy.mp3`
+//	   `;`-splitter → a second FILE part, filename decoy.mp3 — which walks past the
+//	   `file` reservation above, because the sealed field is not named `file`
+//
+// An `=` is NOT in the set, measured for the same reason the backslash is not:
+// `zz=model` is written `name="zz=model"` and a `;`-splitter still sees one
+// segment, so there is no second parameter to read. Nor is a backslash: escaped,
+// it yields a literal backslash rather than a parameter break, and rejecting it
 // would refuse an ordinary Windows-style filename for no gain.
 //
 // Refused, not sanitized, and for the reason an object-valued field is refused
 // above: a rewritten name is not the name the client sealed, and the client's
 // signature covers what it sealed.
 func speechHeaderSafe(kind, s string) error {
-	if i := strings.IndexAny(s, "\r\n\""); i >= 0 {
+	if i := strings.IndexAny(s, "\r\n\";"); i >= 0 {
 		return fmt.Errorf("%s %q contains %q at offset %d, which cannot appear in a multipart part header (RFC 7578 §5.1, SPEC §5.3)", kind, s, s[i], i)
 	}
 	return nil

@@ -370,6 +370,17 @@ func TestSealedSpeechRefusesHeaderInjectionInNamesAndFilename(t *testing.T) {
 		{"a field name carrying a quote", wire.Request{`a"; name="model`: mustRaw(t, "v")}},
 		{"a filename carrying CRLF", wire.Request{"filename": mustRaw(t, "a.mp3\r\nX-Injected-Header: yes")}},
 		{"a filename carrying a quote", wire.Request{"filename": mustRaw(t, `a.mp3"; name="model`)}},
+		// The semicolon is a THIRD mechanism, not a variation: inside a quoted
+		// parameter it is RFC-legal and the writer emits it verbatim, so nothing is
+		// escaped and Go's own reader is right to keep it. What breaks is a parser
+		// that splits the disposition on `;` before honouring the quotes. Measured,
+		// both halves of the damage the quote is refused for.
+		{"a field name carrying a semicolon and a second name=", wire.Request{`zz; name=model`: mustRaw(t, "expensive-model")}},
+		{"a field name smuggling a second file part", wire.Request{`zz; name=file; filename=decoy.mp3`: mustRaw(t, "v")}},
+		// A semicolon and NOTHING else: no quote to carry the refusal, and the
+		// filename is one speechFilename accepts, so this row reaches
+		// speechHeaderSafe and can only be refused by the semicolon itself.
+		{"a filename carrying a semicolon", wire.Request{"filename": mustRaw(t, `a;b.mp3`)}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			f := speechFixture(t)
@@ -460,6 +471,50 @@ func TestTheJSONRuleDoesNotParseBodiesOnRoutesItWillNotJudge(t *testing.T) {
 	}
 }
 
+// And the body the rule DOES judge is parsed ONCE. The two tests above pin the
+// operand order, which keeps the parse off bodies the rule will not judge; they
+// are blind to how many times it parses the body it will. Asking isSealedJSON
+// for the marker after jsonObjectBody had already decoded the same bytes into
+// the same type was a second full unmarshal — wire.Request IS
+// map[string]json.RawMessage — of exactly the largest bodies the broker sees, a
+// sealed transcription carrying its audio inline as base64 (SPEC §5.3.2).
+//
+// The body here carries the marker but is otherwise a malformed envelope, and
+// both halves of that are load-bearing:
+//
+//   - WITH the marker, because isSealedJSON leads with hasE2EEMarker, a substring
+//     scan. A marker-free body short-circuits there and never reaches the second
+//     parse, so measuring the plain refusal path cannot see this mutation at all —
+//     it passed under it.
+//   - MALFORMED, so unsealing bails immediately and the parses are what is left
+//     to measure. On a real sealed envelope the HPKE open, the base64 decode and
+//     the multipart build dominate: measured on a 1.86 MB envelope, 30.2 MB/op
+//     single-parse against 31.8 MB/op double. A 5% margin is not a test.
+//
+// Bounded as a MULTIPLE of the body rather than a small constant, because two
+// passes over it are legitimate here (this rule's, then the envelope's own).
+// Measured: 2.02× single-parse against 3.03× double, so 2.5× separates them with
+// roughly a quarter of the body to spare on each side.
+func TestTheJSONRuleParsesTheBodyItJudgesOnce(t *testing.T) {
+	const bodySize = 1 << 20
+	body := []byte(`{"_e2ee":{},"file_base64":"` + strings.Repeat("A", bodySize) + `"}`)
+
+	res := testing.Benchmark(func(b *testing.B) {
+		f := speechFixture(&testing.T{})
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			ctx := speechCtx()
+			if _, err := f.c.MaybeUnsealRequest(ctx, body); err == nil {
+				b.Fatal("an envelope this malformed must be refused")
+			}
+		}
+	})
+	if got, limit := res.AllocedBytesPerOp(), int64(bodySize)*5/2; got > limit {
+		t.Errorf("the §5.3.1 rule allocated %d B judging a %d B body (limit %d B); it is parsing the body more than once", got, bodySize, limit)
+	}
+}
+
 // A sealed envelope is only opened on the route its profile serves. Profile
 // resolution answers from the service type alone, so without this a sealed
 // speech envelope POSTed to a FREE route — /signature/{chatID},
@@ -537,6 +592,29 @@ func TestSealedSpeechRefusesAPathAsTheFilename(t *testing.T) {
 				t.Errorf("refused for the wrong reason: %v", err)
 			}
 		})
+	}
+}
+
+// The refused set stays as narrow as it can: an `=` is NOT refused, measured for
+// the same reason the backslash is not. `zz=model` is written `name="zz=model"`,
+// and a parser that splits on `;` still sees one segment — there is no second
+// parameter to read out of it, so there is nothing to refuse.
+func TestSealedSpeechAcceptsAnEqualsInAFieldName(t *testing.T) {
+	f := speechFixture(t)
+	req := wire.Request{
+		"model":           mustRaw(t, "cheap-model"),
+		"response_format": mustRaw(t, "json"),
+		"file_base64":     mustRaw(t, base64.StdEncoding.EncodeToString([]byte(speechAudio))),
+		`zz=model`:        mustRaw(t, "v"),
+	}
+	ctx := speechCtx()
+	out, err := f.c.MaybeUnsealRequest(ctx, sealSpeech(t, f, req))
+	if err != nil {
+		t.Fatalf("an `=` in a field name must be forwarded: %v", err)
+	}
+	// And it did not become a second `model`.
+	if got := ExtractModelName(out, ctx.Request.Header.Get("Content-Type")); got != "cheap-model" {
+		t.Errorf("model = %q, want cheap-model", got)
 	}
 }
 

@@ -165,8 +165,19 @@ boolean `false` and the string `"false"` are one value.
   **object is refused**, because bracket paths, JSON-in-a-field and dotted keys
   are all in use and guessing one would forward a different request than the
   client sealed;
-- a field name or `filename` containing **CR, LF or `"` is refused**, and a field
-  named **`file` is refused** — see below.
+- a field name or `filename` containing **CR, LF, `"` or `;` is refused**, and a
+  field named **`file` is refused** — see below.
+
+**`response_format` is mandatory on a sealed request, not merely restricted.**
+The pinned-cleartext check fails on *absence* as well as on a disallowed value —
+`sealed request must set "response_format" to "json" or "verbose_json"
+explicitly (an absent value takes the server's default, which may not be
+permitted)` — so a client that simply omits it, which is legal on the unsealed
+endpoint and gets `json` by default, gets a 400 here. That is the right
+behaviour and not an oversight: the profile can only seal a response it can find
+a `_e2ee` slot in, and *the server* chooses the default, so an omitted format is
+the client betting on a value it does not control. But it is a second rule on
+top of the value restriction below, and the two are easy to read as one.
 
 The **`Content-Type` and `Content-Length` move with the body**. Everything
 downstream reads the boundary out of the header, so a multipart body still
@@ -179,8 +190,11 @@ was opened, materialized into multipart and answered in the clear on a route tha
 serves no inference at all. Scoped to the speech profile, because that is what
 made it reachable: before, the arm returned `("", false)` for the service type
 and the envelope was refused. `ProfileImage` is route-blind in the same way and
-predates this; widening the rule to every profile needs a per-profile route set
-and belongs in its own change.
+predates this — measured on a text-to-image provider, a sealed image envelope is
+opened on *every* route including the free ones, with the sealed `prompt`
+restored and the context marked sealed. Widening the rule wants a per-profile
+route set rather than a second profile-specific condition, so it is tracked as
+[#734](https://github.com/0gfoundation/0g-serving-broker/issues/734).
 
 **Sealed audio tops out well below what an unsealed upload gets.** `file_base64`
 inflates the payload ~4/3 before it is sealed, and the 32MB body cap applies to
@@ -216,6 +230,23 @@ that does not process backslash escapes reads a second `name` out of it. A
 **backslash is deliberately not refused**: escaped, it yields a literal backslash
 in the value rather than a parameter break, and refusing it would reject an
 ordinary Windows-style filename for no gain.
+
+The **semicolon is a third mechanism, not a variation on the other two.** CR and
+LF need no escaping because the writer emits them verbatim; the quote needs it
+and gets it. A semicolon needs *neither*: inside a quoted parameter it is
+RFC-legal and ordinary, so the writer emits it as-is and Go's own reader is right
+to keep it. What breaks is a parser that splits the disposition on `;` before
+honouring the quotes — and those exist. Both halves of the damage the quote is
+refused for, measured the same way:
+
+| sealed field name | RFC-compliant reader | `;`-splitting reader |
+| --- | --- | --- |
+| `zz; name=model` | one field literally named `zz; name=model` | a **second `name=model`**, so last-wins reads the injected model |
+| `zz; name=file; filename=decoy.mp3` | one oddly-named field | a **second `file` part** named `decoy.mp3` — walking straight past the `file` reservation below, because the sealed field is not itself named `file` |
+
+An `=` is **not** refused, measured for the same reason the backslash is not:
+`zz=model` is written `name="zz=model"` and a `;`-splitter still sees one
+segment, so there is no second parameter to read.
 
 **A `filename` is a name, not a path.** One containing `/`, or equal to `.` or
 `..`, is refused. Go's `ReadForm` never uses the client filename as a disk path,

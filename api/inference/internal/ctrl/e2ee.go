@@ -172,18 +172,28 @@ func multipartNamesE2EEPart(contentType string, reqBody []byte) bool {
 	}
 }
 
-// isJSONObjectBody reports whether these bytes ARE a JSON object, which is what
-// §5.3.1's second half turns on — not whether a header says they are.
+// jsonObjectBody parses these bytes as a JSON object, ONCE, returning the object
+// and whether they were one — which is what §5.3.1's second half turns on, not
+// whether a header says so.
 //
-// Replaced a Content-Type check: a client that mislabels a JSON body as
-// text/plain, or sends no Content-Type, must get the same answer, or the rule
-// holds for a body labelled JSON rather than for a JSON body. Only an object
-// counts: a bare array, string or number is not a request shape this endpoint
-// has ever accepted, sealed or not, and the upstream's own refusal is the
-// clearer error for it.
-func isJSONObjectBody(body []byte) bool {
+// It keys on the body rather than the Content-Type because a client that
+// mislabels a JSON body as text/plain, or sends none, must get the same answer.
+// Only an object counts: a bare array, string or number is not a request shape
+// this endpoint has ever accepted, sealed or not, and the upstream's own refusal
+// is the clearer error for it.
+//
+// Returning the object rather than a bool is the point. Asking "is it an object"
+// and then "is it an envelope" as two predicates unmarshals the same bytes into
+// the same type twice — wire.Request IS map[string]json.RawMessage — and
+// json.RawMessage copies, so it is two full passes and two full copies where one
+// answers both questions. Measured on a 1 MiB marker-carrying body, the rule's
+// own cost doubles: 1× the body against 2×.
+func jsonObjectBody(body []byte) (map[string]json.RawMessage, bool) {
 	var obj map[string]json.RawMessage
-	return json.Unmarshal(body, &obj) == nil && obj != nil
+	if json.Unmarshal(body, &obj) != nil || obj == nil {
+		return nil, false
+	}
+	return obj, true
 }
 
 // jsonIfiedServiceType reports whether this service type's endpoint carries its
@@ -351,8 +361,15 @@ func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, reqBody []byte) ([]byte, err
 	// per request against 2.27 ns and zero allocations for this order, which also
 	// defeats hasE2EEMarker below — a substring scan that exists precisely to keep
 	// the parse off the non-sealed majority.
-	if jsonIfiedServiceType(c.Service.Type) && isJSONIfiedRoute(ctx.Request) && isJSONObjectBody(reqBody) && !isSealedJSON(reqBody) {
-		return nil, fmt.Errorf("this endpoint takes multipart/form-data, or a sealed JSON envelope carrying a top-level %q object (SPEC §5.3.1). A JSON body that is not an envelope is refused rather than forwarded", e2eeBodyMarker)
+	if jsonIfiedServiceType(c.Service.Type) && isJSONIfiedRoute(ctx.Request) {
+		// One parse, two answers. isSealedJSON would re-unmarshal the same bytes
+		// into the same type, so asking it here doubled the work on exactly the
+		// bodies that are largest — a sealed transcription carries the audio.
+		if obj, isObject := jsonObjectBody(reqBody); isObject {
+			if _, sealed := obj[e2eeBodyMarker]; !sealed {
+				return nil, fmt.Errorf("this endpoint takes multipart/form-data, or a sealed JSON envelope carrying a top-level %q object (SPEC §5.3.1). A JSON body that is not an envelope is refused rather than forwarded", e2eeBodyMarker)
+			}
+		}
 	}
 	if !hasE2EEMarker(reqBody) {
 		return reqBody, nil
@@ -413,8 +430,11 @@ func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, reqBody []byte) ([]byte, err
 	// Scoped to speech because this PR is what made that reachable: before it,
 	// this arm returned ("", false) for the service type and the envelope was
 	// refused. ProfileImage is route-blind in the same way and predates this
-	// change, so widening the rule to every profile needs a per-profile route set
-	// and belongs in its own change — noted rather than smuggled in here.
+	// change: measured on a text-to-image provider, a sealed image envelope is
+	// opened on every route including the free ones, with the sealed prompt
+	// restored and the context marked sealed. Widening the rule wants a
+	// per-profile route set rather than a second profile-specific `&&`, so it is
+	// tracked as #734 rather than smuggled in here.
 	if profile == wire.ProfileSpeech && !isJSONIfiedRoute(ctx.Request) {
 		return nil, fmt.Errorf("a sealed %s request is only accepted on %s, not %q (SPEC §5.3)", profile, speechTranscriptionRoute, ctx.Request.URL.Path)
 	}
