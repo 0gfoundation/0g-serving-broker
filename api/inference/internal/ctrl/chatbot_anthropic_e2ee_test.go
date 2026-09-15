@@ -51,7 +51,7 @@ func TestAnthropicSurfaceUnsealsUnderTheAnthropicProfile(t *testing.T) {
 	f := newE2EEFixture(t)
 	ctx := newAnthropicGinCtx()
 
-	plaintext, err := f.c.MaybeUnsealRequest(ctx, f.sealAnthropicRequest(t, []string{"messages", "system"}))
+	plaintext, err := unsealOn(f.c, ctx, f.sealAnthropicRequest(t, []string{"messages", "system"}))
 	if err != nil {
 		t.Fatalf("unseal: %v", err)
 	}
@@ -81,11 +81,11 @@ func TestAnthropicSurfaceRefusesACleartextSystemPrompt(t *testing.T) {
 
 	// Same bytes on the OpenAI surface are a legitimate chat request: the point is
 	// that the surface, not the body, decides which rule applies.
-	if _, err := f.c.MaybeUnsealRequest(newGinCtx(), leaky); err != nil {
+	if _, err := unsealOn(f.c, newGinCtx(), leaky); err != nil {
 		t.Fatalf("precondition: the envelope is valid as a chat request: %v", err)
 	}
 
-	_, err := f.c.MaybeUnsealRequest(newAnthropicGinCtx(), leaky)
+	_, err := unsealOn(f.c, newAnthropicGinCtx(), leaky)
 	if err == nil {
 		t.Fatal("expected the enclave to refuse a /v1/messages request whose system prompt arrived in the clear")
 	}
@@ -102,7 +102,7 @@ func TestAnthropicSurfaceRefusesACleartextSystemPrompt(t *testing.T) {
 func TestAnthropicNonStreamResponseSealsContentNotChoices(t *testing.T) {
 	f := newE2EEFixture(t)
 	ctx := newAnthropicGinCtx()
-	if _, err := f.c.MaybeUnsealRequest(ctx, f.sealAnthropicRequest(t, []string{"messages", "system"})); err != nil {
+	if _, err := unsealOn(f.c, ctx, f.sealAnthropicRequest(t, []string{"messages", "system"})); err != nil {
 		t.Fatalf("unseal: %v", err)
 	}
 
@@ -224,7 +224,7 @@ func (f *e2eeTestFixture) sealAnthropicStream(t *testing.T, ctx *gin.Context) (o
 func TestAnthropicStreamSealsPerFrameShape(t *testing.T) {
 	f := newE2EEFixture(t)
 	ctx := newAnthropicGinCtx()
-	if _, err := f.c.MaybeUnsealRequest(ctx, f.sealAnthropicRequest(t, []string{"messages", "system"})); err != nil {
+	if _, err := unsealOn(f.c, ctx, f.sealAnthropicRequest(t, []string{"messages", "system"})); err != nil {
 		t.Fatalf("unseal: %v", err)
 	}
 
@@ -326,7 +326,7 @@ func openAnthropicStream(t *testing.T, f *e2eeTestFixture, frames []wire.Respons
 func TestAnthropicStreamSynthesizesMessageStopOnEOF(t *testing.T) {
 	f := newE2EEFixture(t)
 	ctx := newAnthropicGinCtx()
-	if _, err := f.c.MaybeUnsealRequest(ctx, f.sealAnthropicRequest(t, []string{"messages", "system"})); err != nil {
+	if _, err := unsealOn(f.c, ctx, f.sealAnthropicRequest(t, []string{"messages", "system"})); err != nil {
 		t.Fatalf("unseal: %v", err)
 	}
 	sealer, err := f.c.newResponseFrameSealer(ctx)
@@ -383,7 +383,7 @@ func TestAnthropicStreamSynthesizesMessageStopOnEOF(t *testing.T) {
 func TestAnthropicStreamMarksAnErrorFrameFinal(t *testing.T) {
 	f := newE2EEFixture(t)
 	ctx := newAnthropicGinCtx()
-	if _, err := f.c.MaybeUnsealRequest(ctx, f.sealAnthropicRequest(t, []string{"messages", "system"})); err != nil {
+	if _, err := unsealOn(f.c, ctx, f.sealAnthropicRequest(t, []string{"messages", "system"})); err != nil {
 		t.Fatalf("unseal: %v", err)
 	}
 	sealer, err := f.c.newResponseFrameSealer(ctx)
@@ -439,7 +439,7 @@ func TestAnthropicStreamMarksAnErrorFrameFinal(t *testing.T) {
 func TestAnthropicStreamRebuildsTheEventLine(t *testing.T) {
 	f := newE2EEFixture(t)
 	ctx := newAnthropicGinCtx()
-	if _, err := f.c.MaybeUnsealRequest(ctx, f.sealAnthropicRequest(t, []string{"messages", "system"})); err != nil {
+	if _, err := unsealOn(f.c, ctx, f.sealAnthropicRequest(t, []string{"messages", "system"})); err != nil {
 		t.Fatalf("unseal: %v", err)
 	}
 	sealer, err := f.c.newResponseFrameSealer(ctx)
@@ -547,7 +547,7 @@ func TestStreamFrameSealerChatEmitsNoEventLine(t *testing.T) {
 func TestAnthropicStreamSealsAToolUseTurn(t *testing.T) {
 	f := newE2EEFixture(t)
 	ctx := newAnthropicGinCtx()
-	if _, err := f.c.MaybeUnsealRequest(ctx, f.sealAnthropicRequest(t, []string{"messages", "system"})); err != nil {
+	if _, err := unsealOn(f.c, ctx, f.sealAnthropicRequest(t, []string{"messages", "system"})); err != nil {
 		t.Fatalf("unseal: %v", err)
 	}
 	sealer, err := f.c.newResponseFrameSealer(ctx)
@@ -607,7 +607,7 @@ func TestAnthropicStreamSealsAToolUseTurn(t *testing.T) {
 func TestAnthropicStreamSealsANonNullStopSequence(t *testing.T) {
 	f := newE2EEFixture(t)
 	ctx := newAnthropicGinCtx()
-	if _, err := f.c.MaybeUnsealRequest(ctx, f.sealAnthropicRequest(t, []string{"messages", "system"})); err != nil {
+	if _, err := unsealOn(f.c, ctx, f.sealAnthropicRequest(t, []string{"messages", "system"})); err != nil {
 		t.Fatalf("unseal: %v", err)
 	}
 	sealer, err := f.c.newResponseFrameSealer(ctx)
@@ -676,7 +676,7 @@ func sealedFrameFrom(t *testing.T, out string) (wire.Response, bool) {
 func TestAnthropicStreamHandlesADataFrameAfterTheTerminalFrame(t *testing.T) {
 	f := newE2EEFixture(t)
 	ctx := newAnthropicGinCtx()
-	if _, err := f.c.MaybeUnsealRequest(ctx, f.sealAnthropicRequest(t, []string{"messages", "system"})); err != nil {
+	if _, err := unsealOn(f.c, ctx, f.sealAnthropicRequest(t, []string{"messages", "system"})); err != nil {
 		t.Fatalf("unseal: %v", err)
 	}
 	sealer, err := f.c.newResponseFrameSealer(ctx)
@@ -812,7 +812,7 @@ func TestAnthropicNonStreamResponseSealsStopSequenceWhenPresent(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			f := newE2EEFixture(t)
 			ctx := newAnthropicGinCtx()
-			if _, err := f.c.MaybeUnsealRequest(ctx, f.sealAnthropicRequest(t, []string{"messages", "system"})); err != nil {
+			if _, err := unsealOn(f.c, ctx, f.sealAnthropicRequest(t, []string{"messages", "system"})); err != nil {
 				t.Fatalf("unseal: %v", err)
 			}
 			provider := `{"id":"msg_1","type":"message","role":"assistant","model":"claude-x",` +
@@ -874,7 +874,7 @@ func TestAnthropicNonStreamResponseSealsStopSequenceWhenPresent(t *testing.T) {
 func TestAnthropicNonStreamResponseFailsClosedWithoutContent(t *testing.T) {
 	f := newE2EEFixture(t)
 	ctx := newAnthropicGinCtx()
-	if _, err := f.c.MaybeUnsealRequest(ctx, f.sealAnthropicRequest(t, []string{"messages", "system"})); err != nil {
+	if _, err := unsealOn(f.c, ctx, f.sealAnthropicRequest(t, []string{"messages", "system"})); err != nil {
 		t.Fatalf("unseal: %v", err)
 	}
 
@@ -905,7 +905,7 @@ func TestAnthropicNonStreamResponseFailsClosedWithoutContent(t *testing.T) {
 func TestAnthropicStreamFailsClosedOnAContentFrameMissingItsPayload(t *testing.T) {
 	f := newE2EEFixture(t)
 	ctx := newAnthropicGinCtx()
-	if _, err := f.c.MaybeUnsealRequest(ctx, f.sealAnthropicRequest(t, []string{"messages", "system"})); err != nil {
+	if _, err := unsealOn(f.c, ctx, f.sealAnthropicRequest(t, []string{"messages", "system"})); err != nil {
 		t.Fatalf("unseal: %v", err)
 	}
 	sealer, err := f.c.newResponseFrameSealer(ctx)

@@ -137,7 +137,7 @@ func TestSealedSpeechRequestIsMaterializedAsMultipart(t *testing.T) {
 	})
 
 	ctx := speechCtx()
-	out, err := f.c.MaybeUnsealRequest(ctx, body)
+	out, err := unsealOn(f.c, ctx, body)
 	if err != nil {
 		t.Fatalf("MaybeUnsealRequest: %v", err)
 	}
@@ -200,7 +200,7 @@ func TestSealedSpeechRequestWithOnlyTheAudio(t *testing.T) {
 	})
 
 	ctx := speechCtx()
-	out, err := f.c.MaybeUnsealRequest(ctx, body)
+	out, err := unsealOn(f.c, ctx, body)
 	if err != nil {
 		t.Fatalf("MaybeUnsealRequest: %v", err)
 	}
@@ -243,7 +243,7 @@ func TestJSONBodyOnTheSpeechEndpointMustBeAnEnvelope(t *testing.T) {
 		{"JSON null", `null`, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := f.c.MaybeUnsealRequest(speechCtx(), []byte(tt.body))
+			_, err := unsealOn(f.c, speechCtx(), []byte(tt.body))
 			if tt.refused != (err != nil) {
 				t.Errorf("refused = %v, want %v (err: %v)", err != nil, tt.refused, err)
 			}
@@ -260,7 +260,7 @@ func TestJSONBodyOnTheSpeechEndpointMustBeAnEnvelope(t *testing.T) {
 			ctx := speechCtx()
 			ctx.Request.Header.Set("Content-Type", contentType)
 			body := []byte(`{"model":"whisper-large-v3","file_base64":"AA=="}`)
-			if _, err := f.c.MaybeUnsealRequest(ctx, body); err == nil {
+			if _, err := unsealOn(f.c, ctx, body); err == nil {
 				t.Error("a JSON object here must be refused whatever the Content-Type claims")
 			}
 		})
@@ -271,7 +271,7 @@ func TestJSONBodyOnTheSpeechEndpointMustBeAnEnvelope(t *testing.T) {
 	body, contentType := transcriptionBody(t, nil)
 	ctx := speechCtx()
 	ctx.Request.Header.Set("Content-Type", contentType)
-	got, err := f.c.MaybeUnsealRequest(ctx, body)
+	got, err := unsealOn(f.c, ctx, body)
 	if err != nil {
 		t.Fatalf("an ordinary multipart transcription must be forwarded, got %v", err)
 	}
@@ -285,7 +285,7 @@ func TestJSONBodyOnTheSpeechEndpointMustBeAnEnvelope(t *testing.T) {
 func TestTheJSONRuleIsScopedToJSONIfiedEndpoints(t *testing.T) {
 	f := newE2EEFixture(t) // chatbot
 	plain := []byte(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`)
-	got, err := f.c.MaybeUnsealRequest(ginCtxWithContentType("application/json"), plain)
+	got, err := unsealOn(f.c, ginCtxWithContentType("application/json"), plain)
 	if err != nil {
 		t.Fatalf("an ordinary chat request must be forwarded, got %v", err)
 	}
@@ -335,7 +335,7 @@ func TestTheJSONRuleFiresOnlyOnTheTranscriptionRoute(t *testing.T) {
 
 				// A real non-envelope JSON object: the rule is keyed on the body, so a
 				// nil one would make every row pass for the wrong reason.
-				_, err := f.c.MaybeUnsealRequest(ctx, []byte(`{"model":"whisper-large-v3","file_base64":"AA=="}`))
+				_, err := unsealOn(f.c, ctx, []byte(`{"model":"whisper-large-v3","file_base64":"AA=="}`))
 				if tt.refused != (err != nil) {
 					t.Fatalf("refused = %v, want %v (err: %v)", err != nil, tt.refused, err)
 				}
@@ -392,7 +392,7 @@ func TestSealedSpeechRefusesHeaderInjectionInNamesAndFilename(t *testing.T) {
 			maps.Copy(req, tt.req)
 
 			ctx := speechCtx()
-			out, err := f.c.MaybeUnsealRequest(ctx, sealSpeech(t, f, req))
+			out, err := unsealOn(f.c, ctx, sealSpeech(t, f, req))
 			if err == nil {
 				t.Fatalf("a name that cannot appear in a multipart header must be refused; body was:\n%s", out)
 			}
@@ -428,7 +428,7 @@ func TestTheJSONRuleDoesNotParseBodiesItWillNotJudge(t *testing.T) {
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			if _, err := f.c.MaybeUnsealRequest(ctx, body); err != nil {
+			if _, err := unsealOn(f.c, ctx, body); err != nil {
 				b.Fatalf("an ordinary chat request must be forwarded: %v", err)
 			}
 		}
@@ -461,7 +461,7 @@ func TestTheJSONRuleDoesNotParseBodiesOnRoutesItWillNotJudge(t *testing.T) {
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			if _, err := f.c.MaybeUnsealRequest(ctx, body); err != nil {
+			if _, err := unsealOn(f.c, ctx, body); err != nil {
 				b.Fatalf("a non-sealed body on a free route must be forwarded: %v", err)
 			}
 		}
@@ -505,7 +505,7 @@ func TestTheJSONRuleParsesTheBodyItJudgesOnce(t *testing.T) {
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			ctx := speechCtx()
-			if _, err := f.c.MaybeUnsealRequest(ctx, body); err == nil {
+			if _, err := unsealOn(f.c, ctx, body); err == nil {
 				b.Fatal("an envelope this malformed must be refused")
 			}
 		}
@@ -556,7 +556,7 @@ func TestSealedSpeechMaterializesAnInjectedCleartextField(t *testing.T) {
 			}
 
 			ctx := speechCtx()
-			out, err := f.c.MaybeUnsealRequest(ctx, body)
+			out, err := unsealOn(f.c, ctx, body)
 			if tt.wantRefus != "" {
 				if err == nil {
 					t.Fatalf("an object-valued injected field must be refused; body was:\n%s", out)
@@ -590,9 +590,26 @@ func TestSealedSpeechIsOnlyOpenedOnItsOwnRoute(t *testing.T) {
 	}{
 		{"/v1/proxy/audio/transcriptions", true},
 		{"/v1/proxy/v1/audio/transcriptions", true},
+		{"/v1/proxy/audio/transcriptions/", true},
+		{"/v1/proxy/audio/transcriptions?foo=bar", true},
 		{"/v1/proxy/signature/some-chat-id", false},
 		{"/v1/proxy/attestation/report", false},
 		{"/v1/proxy/chat/completions", false},
+		// A free route with the endpoint's spelling APPENDED. Every row above uses
+		// a well-formed path, which is why a suffix match passed five review
+		// passes: any path at all, plus the route, ends with the route. These
+		// opened, materialized, and marked the context sealed — and traced to the
+		// end on a TargetSeparated non-forwarder provider, handleSignatureRoute
+		// declines, FreePrefixes matches, and the plain passthrough forwards the
+		// decoded audio unbilled with the reply in the clear.
+		{"/v1/proxy/signature/audio/transcriptions", false},
+		{"/v1/proxy/attestation/audio/transcriptions", false},
+		{"/v1/proxy/models/audio/transcriptions", false},
+		{"/v1/proxy/chat/completions/audio/transcriptions", false},
+		// And the same trick on the spellings the two legitimate rows use, so a
+		// fix that only special-cases `/signature/` does not pass.
+		{"/v1/proxy/videos/v1/audio/transcriptions", false},
+		{"/v1/proxy/embeddings/audio/transcriptions/", false},
 	} {
 		t.Run(tt.path, func(t *testing.T) {
 			f := speechFixture(t)
@@ -606,7 +623,7 @@ func TestSealedSpeechIsOnlyOpenedOnItsOwnRoute(t *testing.T) {
 			ctx.Request = httptest.NewRequest("POST", tt.path, nil)
 			ctx.Request.Header.Set("Content-Type", "application/json")
 
-			out, err := f.c.MaybeUnsealRequest(ctx, sealSpeech(t, f, req))
+			out, err := unsealOn(f.c, ctx, sealSpeech(t, f, req))
 			if tt.opened != (err == nil) {
 				t.Fatalf("opened = %v, want %v (err: %v)", err == nil, tt.opened, err)
 			}
@@ -646,7 +663,7 @@ func TestSealedSpeechRefusesAPathAsTheFilename(t *testing.T) {
 				"file_base64":     mustRaw(t, base64.StdEncoding.EncodeToString([]byte(speechAudio))),
 				"filename":        mustRaw(t, name),
 			}
-			out, err := f.c.MaybeUnsealRequest(speechCtx(), sealSpeech(t, f, req))
+			out, err := unsealOn(f.c, speechCtx(), sealSpeech(t, f, req))
 			if err == nil {
 				t.Fatalf("a path must be refused as a filename; body was:\n%s", out)
 			}
@@ -670,7 +687,7 @@ func TestSealedSpeechAcceptsAnEqualsInAFieldName(t *testing.T) {
 		`zz=model`:        mustRaw(t, "v"),
 	}
 	ctx := speechCtx()
-	out, err := f.c.MaybeUnsealRequest(ctx, sealSpeech(t, f, req))
+	out, err := unsealOn(f.c, ctx, sealSpeech(t, f, req))
 	if err != nil {
 		t.Fatalf("an `=` in a field name must be forwarded: %v", err)
 	}
@@ -693,7 +710,7 @@ func TestSealedSpeechAcceptsABackslashInAFilename(t *testing.T) {
 		"filename":        mustRaw(t, `C:\recordings\a.mp3`),
 	}
 	ctx := speechCtx()
-	out, err := f.c.MaybeUnsealRequest(ctx, sealSpeech(t, f, req))
+	out, err := unsealOn(f.c, ctx, sealSpeech(t, f, req))
 	if err != nil {
 		t.Fatalf("an ordinary Windows-style filename must be forwarded: %v", err)
 	}
@@ -720,7 +737,7 @@ func TestSealedSpeechRefusesAFieldNamedFile(t *testing.T) {
 		"file":            mustRaw(t, "decoy"),
 	}
 	ctx := speechCtx()
-	out, err := f.c.MaybeUnsealRequest(ctx, sealSpeech(t, f, req))
+	out, err := unsealOn(f.c, ctx, sealSpeech(t, f, req))
 	if err == nil {
 		t.Fatalf("a sealed %q field must be refused; body was:\n%s", speechUpstreamFileField, out)
 	}
@@ -790,7 +807,7 @@ func TestSealedSpeechAcceptsAbsentAndFalseStream(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := speechCtx()
-			out, err := f.c.MaybeUnsealRequest(ctx, sealSpeech(t, f, tt.req))
+			out, err := unsealOn(f.c, ctx, sealSpeech(t, f, tt.req))
 			if err != nil {
 				t.Fatalf("must be accepted: %v", err)
 			}
@@ -1003,7 +1020,7 @@ func TestSpeechMaterializationFieldOrderIsStable(t *testing.T) {
 
 	order := func() []string {
 		ctx := speechCtx()
-		out, err := f.c.MaybeUnsealRequest(ctx, sealSpeech(t, f, req))
+		out, err := unsealOn(f.c, ctx, sealSpeech(t, f, req))
 		if err != nil {
 			t.Fatalf("MaybeUnsealRequest: %v", err)
 		}
@@ -1195,7 +1212,7 @@ func TestSealedSpeechNeverTakesTheStreamingBranch(t *testing.T) {
 	})
 
 	unsealCtx := speechCtx()
-	materialized, err := f.c.MaybeUnsealRequest(unsealCtx, sealedBody)
+	materialized, err := unsealOn(f.c, unsealCtx, sealedBody)
 	if err != nil {
 		t.Fatalf("MaybeUnsealRequest: %v", err)
 	}

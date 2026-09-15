@@ -384,35 +384,13 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	svcType := p.serviceType
 	p.serviceRoutesLock.RUnlock()
 
-	targetRoute := strings.TrimPrefix(ctx.Request.RequestURI, constant.ServicePrefix)
-	// Collapse a redundant "/v1" prefix so callers that hardcode it after the
-	// broker base URL (Anthropic SDK → /v1/messages, OpenAI SDK → /v1/chat/completions)
-	// land on the same upstream path as bare /messages or /chat/completions.
-	// Service.targetUrl is expected to carry the /v1 segment for OpenAI-compatible
-	// upstreams (vLLM, OpenAI, OpenRouter, DashScope, RedPill, …); LiteLLM also
-	// aliases both prefix variants, so this normalization is safe across all
-	// existing deployments. Billing keys (TargetRoute) are matched against the
-	// post-strip path, which is why /chat/completions and /messages — without
-	// /v1 — are the canonical entries in const.go.
-	if targetRoute == "/v1" || strings.HasPrefix(targetRoute, "/v1/") {
-		targetRoute = strings.TrimPrefix(targetRoute, "/v1")
-		if targetRoute == "" {
-			targetRoute = "/"
-		}
-	}
+	// One derivation, in constant, beside the tables targetPath is matched
+	// against — TargetRoute, FreePrefixes, AuthRequiredPrefixes — and now also
+	// handed to MaybeUnsealRequest for the E2EE profile's route scoping. A second
+	// copy of it was a bypass; see SplitTargetRoute.
+	targetRoute, targetPath := constant.SplitTargetRoute(ctx.Request.RequestURI)
 	if targetRoute != "/" {
 		targetURL += targetRoute
-	}
-
-	// Extract path without query parameters for route matching
-	targetPath := targetRoute
-	if idx := strings.Index(targetPath, "?"); idx != -1 {
-		targetPath = targetPath[:idx]
-	}
-	// Normalize trailing slashes to prevent billing bypass
-	// (e.g., /videos/ would skip TargetRoute["/videos"] and fall through to auth-only path)
-	if targetPath != "/" {
-		targetPath = strings.TrimRight(targetPath, "/")
 	}
 
 	p.logger.Debugf("Proxy: method=%s, url=%s, Content-Type=%s, Content-Length=%s", ctx.Request.Method, ctx.Request.URL.String(), ctx.Request.Header.Get("Content-Type"), ctx.Request.Header.Get("Content-Length"))
@@ -439,7 +417,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	// downstream processing (model enforcement, billing, forwarding) operates on
 	// the real request. Fail-closed: a sealed request that cannot be opened is a
 	// client-caused rejection, never forwarded as cleartext.
-	unsealed, err := p.ctrl.MaybeUnsealRequest(ctx, reqBody)
+	unsealed, err := p.ctrl.MaybeUnsealRequest(ctx, targetPath, reqBody)
 	if err != nil {
 		ctx.Set("ignoreError", true)
 		if errors.Is(err, ctrl.ErrE2EEKeyMismatch) {

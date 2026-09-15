@@ -209,7 +209,7 @@ func TestMaybeUnsealRequest_RoundTrip(t *testing.T) {
 	body := f.sealRequest(t, f.signerAddr)
 	ctx := newGinCtx()
 
-	plaintext, err := f.c.MaybeUnsealRequest(ctx, body)
+	plaintext, err := unsealOn(f.c, ctx, body)
 	if err != nil {
 		t.Fatalf("MaybeUnsealRequest: %v", err)
 	}
@@ -243,7 +243,7 @@ func TestMaybeUnsealRequest_Passthrough(t *testing.T) {
 	ctx := newGinCtx()
 	plain := []byte(`{"model":"gpt-4o","messages":[]}`)
 
-	out, err := f.c.MaybeUnsealRequest(ctx, plain)
+	out, err := unsealOn(f.c, ctx, plain)
 	if err != nil {
 		t.Fatalf("MaybeUnsealRequest: %v", err)
 	}
@@ -262,7 +262,7 @@ func TestMaybeUnsealRequest_MarkerInContentPassthrough(t *testing.T) {
 	// must pass through unchanged, NOT be rejected.
 	plain := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"what is _e2ee?"}]}`)
 
-	out, err := f.c.MaybeUnsealRequest(ctx, plain)
+	out, err := unsealOn(f.c, ctx, plain)
 	if err != nil {
 		t.Fatalf("MaybeUnsealRequest should not error on marker-in-content: %v", err)
 	}
@@ -279,7 +279,7 @@ func TestMaybeUnsealRequest_SignerAddrMismatch(t *testing.T) {
 	body := f.sealRequest(t, "0x000000000000000000000000000000000000dEaD")
 	ctx := newGinCtx()
 
-	if _, err := f.c.MaybeUnsealRequest(ctx, body); err == nil {
+	if _, err := unsealOn(f.c, ctx, body); err == nil {
 		t.Fatal("expected rejection on signer_addr mismatch")
 	} else if !strings.Contains(err.Error(), "signer_addr") {
 		t.Errorf("error = %v, want signer_addr mismatch", err)
@@ -304,7 +304,7 @@ func TestMaybeUnsealRequest_KeyIDMismatch(t *testing.T) {
 	body, _ := json.Marshal(sealed)
 	ctx := newGinCtx()
 
-	_, err = f.c.MaybeUnsealRequest(ctx, body)
+	_, err = unsealOn(f.c, ctx, body)
 	if err == nil {
 		t.Fatal("expected rejection on key_id mismatch")
 	}
@@ -331,7 +331,7 @@ func TestMaybeUnsealRequest_TamperedCleartextFailsClosed(t *testing.T) {
 	tampered, _ := json.Marshal(env)
 	ctx := newGinCtx()
 
-	err := func() error { _, e := f.c.MaybeUnsealRequest(ctx, tampered); return e }()
+	err := func() error { _, e := unsealOn(f.c, ctx, tampered); return e }()
 	if err == nil {
 		t.Fatal("expected fail-closed on tampered cleartext (AAD mismatch)")
 	}
@@ -661,7 +661,7 @@ func TestMaybeUnsealRequest_BadClientEphPubLength(t *testing.T) {
 	tampered, _ := json.Marshal(env)
 	ctx := newGinCtx()
 
-	if _, err := f.c.MaybeUnsealRequest(ctx, tampered); err == nil {
+	if _, err := unsealOn(f.c, ctx, tampered); err == nil {
 		t.Fatal("expected rejection on short client_eph_pub (pre-forward, avoids free inference)")
 	} else if !strings.Contains(err.Error(), "client_eph_pub") {
 		t.Errorf("error = %v, want client_eph_pub length error", err)
@@ -1278,7 +1278,7 @@ func TestMaybeUnsealRequest_LowOrderClientEphPubRejected(t *testing.T) {
 	tampered, _ := json.Marshal(env)
 	ctx := newGinCtx()
 
-	if _, err := f.c.MaybeUnsealRequest(ctx, tampered); err == nil {
+	if _, err := unsealOn(f.c, ctx, tampered); err == nil {
 		t.Fatal("expected rejection of a low-order client_eph_pub (pre-inference, avoids free compute)")
 	} else if !strings.Contains(err.Error(), "client_eph_pub") {
 		t.Errorf("error = %v, want client_eph_pub usability error", err)
@@ -1532,4 +1532,17 @@ func TestVerifyEncKeyID(t *testing.T) {
 	if err := f.c.verifyEncKeyID("AAAAAAAAAAA"); err == nil {
 		t.Error("verifyEncKeyID(wrong) should error")
 	}
+}
+
+// unsealOn calls MaybeUnsealRequest with the dispatcher's own matchable path for
+// the request on ctx, derived through constant.SplitTargetRoute — the single
+// derivation the proxy uses. Tests therefore drive the guard from a URL, the way
+// a caller does, rather than hand-writing a post-strip path and asserting around
+// the normalization that made /v1/proxy/signature/audio/transcriptions a bypass.
+func unsealOn(c *Ctrl, ctx *gin.Context, body []byte) ([]byte, error) {
+	var matchPath string
+	if ctx.Request != nil {
+		_, matchPath = constant.SplitTargetRoute(ctx.Request.RequestURI)
+	}
+	return c.MaybeUnsealRequest(ctx, matchPath, body)
 }

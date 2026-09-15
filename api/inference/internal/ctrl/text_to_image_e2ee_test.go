@@ -38,7 +38,7 @@ func TestMaybeUnsealImageRequestReconstructsPrompt(t *testing.T) {
 	f.c.Service = config.Service{Type: constant.ServiceTypeTextToImage}
 	ctx := newGinCtx()
 
-	out, err := f.c.MaybeUnsealRequest(ctx, f.sealImageRequest(t, []string{"prompt"}))
+	out, err := unsealOn(f.c, ctx, f.sealImageRequest(t, []string{"prompt"}))
 	if err != nil {
 		t.Fatalf("MaybeUnsealRequest: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestMaybeUnsealImageRequestRejectsSealedSetWithoutPrompt(t *testing.T) {
 		t.Fatalf("marshal envelope: %v", err)
 	}
 
-	_, err = f.c.MaybeUnsealRequest(newGinCtx(), body)
+	_, err = unsealOn(f.c, newGinCtx(), body)
 	if err == nil {
 		t.Fatal("expected the enclave to refuse an image request that does not seal its prompt")
 	}
@@ -246,7 +246,7 @@ func TestMaybeUnsealRejectsSealedRequestOnMultipartServiceTypes(t *testing.T) {
 		t.Run(svcType, func(t *testing.T) {
 			f := newE2EEFixture(t)
 			f.c.Service = config.Service{Type: svcType}
-			if _, err := f.c.MaybeUnsealRequest(newGinCtx(), f.sealRequest(t, f.signerAddr)); err == nil {
+			if _, err := unsealOn(f.c, newGinCtx(), f.sealRequest(t, f.signerAddr)); err == nil {
 				t.Fatalf("expected a sealed request on %q to be refused", svcType)
 			}
 		})
@@ -257,7 +257,7 @@ func TestMaybeUnsealRejectsSealedRequestOnMultipartServiceTypes(t *testing.T) {
 func TestMaybeUnsealChatRequestUnaffectedByProfilePolicy(t *testing.T) {
 	f := newE2EEFixture(t)
 	f.c.Service = config.Service{Type: constant.ServiceTypeChatbot}
-	if _, err := f.c.MaybeUnsealRequest(newGinCtx(), f.sealRequest(t, f.signerAddr)); err != nil {
+	if _, err := unsealOn(f.c, newGinCtx(), f.sealRequest(t, f.signerAddr)); err != nil {
 		t.Fatalf("chat request must still unseal: %v", err)
 	}
 }
@@ -269,7 +269,7 @@ func TestSealedImageResponseHidesImagesAndPublishesBillableCount(t *testing.T) {
 	f := newE2EEFixture(t)
 	f.c.Service = config.Service{Type: constant.ServiceTypeTextToImage}
 	ctx := newGinCtx()
-	if _, err := f.c.MaybeUnsealRequest(ctx, f.sealImageRequest(t, []string{"prompt"})); err != nil {
+	if _, err := unsealOn(f.c, ctx, f.sealImageRequest(t, []string{"prompt"})); err != nil {
 		t.Fatalf("unseal: %v", err)
 	}
 
@@ -329,7 +329,7 @@ func TestSealedImageResponseDetectsTamperedBillableCount(t *testing.T) {
 	f := newE2EEFixture(t)
 	f.c.Service = config.Service{Type: constant.ServiceTypeTextToImage}
 	ctx := newGinCtx()
-	if _, err := f.c.MaybeUnsealRequest(ctx, f.sealImageRequest(t, []string{"prompt"})); err != nil {
+	if _, err := unsealOn(f.c, ctx, f.sealImageRequest(t, []string{"prompt"})); err != nil {
 		t.Fatalf("unseal: %v", err)
 	}
 
@@ -518,7 +518,7 @@ func TestMaybeUnsealImageRequestRequiresExplicitB64ResponseFormat(t *testing.T) 
 				t.Fatalf("marshal envelope: %v", err)
 			}
 
-			_, err = f.c.MaybeUnsealRequest(newGinCtx(), body)
+			_, err = unsealOn(f.c, newGinCtx(), body)
 			if !tt.wantErr {
 				// Mutating a bound cleartext field breaks the AAD, so the only case
 				// that can succeed is the untouched b64_json one.
@@ -542,7 +542,7 @@ func TestMaybeUnsealImageRequestRequiresExplicitB64ResponseFormat(t *testing.T) 
 func TestMaybeUnsealChatRequestHasNoResponseFormatPin(t *testing.T) {
 	f := newE2EEFixture(t)
 	f.c.Service = config.Service{Type: constant.ServiceTypeChatbot}
-	if _, err := f.c.MaybeUnsealRequest(newGinCtx(), f.sealRequest(t, f.signerAddr)); err != nil {
+	if _, err := unsealOn(f.c, newGinCtx(), f.sealRequest(t, f.signerAddr)); err != nil {
 		t.Fatalf("a chat request without response_format must still unseal: %v", err)
 	}
 }
@@ -565,7 +565,7 @@ func TestSealedImageResponseWithoutBillableCountIsRefused(t *testing.T) {
 	f := newE2EEFixture(t)
 	f.c.Service = config.Service{Type: constant.ServiceTypeTextToImage}
 	ctx := newGinCtx()
-	if _, err := f.c.MaybeUnsealRequest(ctx, f.sealImageRequest(t, []string{"prompt"})); err != nil {
+	if _, err := unsealOn(f.c, ctx, f.sealImageRequest(t, []string{"prompt"})); err != nil {
 		t.Fatalf("unseal: %v", err)
 	}
 

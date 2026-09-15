@@ -16,7 +16,6 @@ import (
 	"fmt"
 	"mime"
 	"mime/multipart"
-	"net/http"
 	"slices"
 	"strconv"
 	"strings"
@@ -226,35 +225,43 @@ func jsonIfiedServiceType(svcType string) bool {
 // OpenAI SDKs among them — would have lost the signature fetch to the very
 // change that started producing signatures.
 //
-// Matched as a path SUFFIX rather than by re-deriving the proxy's normalization,
-// which strips the service prefix and collapses a redundant /v1 and is the input
-// to billing-key matching: a second copy of that is a drift risk pointed at
-// billing. Every spelling that reaches this endpoint ends with the route
-// (/v1/proxy/audio/transcriptions and /v1/proxy/v1/audio/transcriptions both
-// do), and nothing else in TargetRoute or FreePrefixes does. A spelling this
-// misses loses only the diagnostic refusal, never a protection — the rule turns a
-// confusing upstream failure into a clear 400; it does not guard anything, since
-// an unsealed JSON body is cleartext either way.
-func isJSONIfiedRoute(req *http.Request) bool {
-	if req == nil {
-		return false
-	}
-	// No query strip: URL.Path never carries one — net/http splits it into
-	// RawQuery at parse time. A strip here was copied from proxy.go, where
-	// targetRoute IS built from a string that still carries the query and the
-	// invariant is therefore different. Measured, it was not merely unreachable:
-	// a client percent-encoding the `?` gets a literal one INSIDE Path
-	// (`/…/transcriptions%3Ffoo=bar` → Path `/…/transcriptions?foo=bar`), and the
-	// strip truncated that real path segment, making the rule fire on a path that
-	// is not this endpoint.
-	//
-	// The trailing-slash trim below does real work: `/…/transcriptions/` reaches
-	// the same handler.
-	path := req.URL.Path
-	if path != "/" {
-		path = strings.TrimRight(path, "/")
-	}
-	return strings.HasSuffix(path, speechTranscriptionRoute)
+// Answered from the DISPATCHER'S OWN normalized path, handed in by the caller,
+// and compared for equality. Not from ctx.Request, and not as a suffix — that
+// was a bypass, measured:
+//
+//	POST /v1/proxy/signature/some-chat-id            refused   (the control)
+//	POST /v1/proxy/signature/audio/transcriptions    OPENED, materialized, sealed
+//	POST /v1/proxy/attestation/audio/transcriptions  OPENED
+//	POST /v1/proxy/models/audio/transcriptions       OPENED
+//
+// Any path at all, with the route appended, ends with the route. Traced to the
+// end on a TargetSeparated non-forwarder provider: handleSignatureRoute declines,
+// FreePrefixes matches `/signature`, and the request goes to the plain
+// passthrough with charging=false — so the envelope was opened, the audio decoded
+// out of it, and the plaintext forwarded to a caller-chosen upstream path,
+// unbilled, with the reply answered in the clear. That is verbatim the fail-open
+// the route guard was added to close.
+//
+// The earlier version's own argument for the suffix is why this happened, and it
+// is worth keeping: "a spelling this misses loses only the diagnostic refusal,
+// never a protection", since an unsealed JSON body is cleartext either way. That
+// was TRUE while the §5.3.1 diagnostic was the only caller — a suffix that is too
+// GENEROUS was harmless there, because firing on a non-endpoint only produces a
+// 400 on a request that had nowhere to go. Then the profile route guard was added
+// and made the same predicate load-bearing for a protection, where generosity is
+// the whole bug. The invariant was not re-derived for the new caller. A predicate
+// whose safety argument names its callers has to be re-read when one is added.
+//
+// So the two strings are now one. The proxy already computes this path (strip the
+// service prefix, collapse a redundant /v1, cut the query, trim the trailing
+// slash) and matches billing keys against it; taking it as an argument means
+// there is no second copy to drift, the compiler requires the caller to supply
+// it, and the guard and the dispatcher cannot disagree about what route a request
+// is on. Both legitimate spellings normalize to the constant exactly
+// (/v1/proxy/audio/transcriptions and /v1/proxy/v1/audio/transcriptions), and
+// nothing else does.
+func isJSONIfiedRoute(targetPath string) bool {
+	return targetPath == speechTranscriptionRoute
 }
 
 // isSealedJSON reports whether reqBody is a sealed envelope (SPEC §5): a JSON
@@ -314,7 +321,7 @@ func (c *Ctrl) RefuseAsync(contentType string, reqBody []byte) string {
 // is returned as an error and MUST be treated as fail-closed by the caller (no
 // plaintext fallback, SPEC §6) — a sealed request that cannot be opened, whose
 // signer_addr is not this enclave, or whose key_id is unknown is rejected.
-func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, reqBody []byte) ([]byte, error) {
+func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, targetPath string, reqBody []byte) ([]byte, error) {
 	// Asked FIRST, and of the Content-Type rather than the body: a multipart body
 	// never parses as JSON, so every test below it would call an envelope in a
 	// form part "not sealed" and forward it. See multipartNamesE2EEPart.
@@ -361,7 +368,7 @@ func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, reqBody []byte) ([]byte, err
 	// per request against 2.27 ns and zero allocations for this order, which also
 	// defeats hasE2EEMarker below — a substring scan that exists precisely to keep
 	// the parse off the non-sealed majority.
-	if jsonIfiedServiceType(c.Service.Type) && isJSONIfiedRoute(ctx.Request) {
+	if jsonIfiedServiceType(c.Service.Type) && isJSONIfiedRoute(targetPath) {
 		// One parse, two answers. isSealedJSON would re-unmarshal the same bytes
 		// into the same type, so asking it here doubled the work on exactly the
 		// bodies that are largest — a sealed transcription carries the audio.
@@ -435,7 +442,7 @@ func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, reqBody []byte) ([]byte, err
 	// restored and the context marked sealed. Widening the rule wants a
 	// per-profile route set rather than a second profile-specific `&&`, so it is
 	// tracked as #734 rather than smuggled in here.
-	if profile == wire.ProfileSpeech && !isJSONIfiedRoute(ctx.Request) {
+	if profile == wire.ProfileSpeech && !isJSONIfiedRoute(targetPath) {
 		return nil, fmt.Errorf("a sealed %s request is only accepted on %s, not %q (SPEC §5.3)", profile, speechTranscriptionRoute, ctx.Request.URL.Path)
 	}
 

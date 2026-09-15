@@ -66,7 +66,7 @@ func TestMultipartCarryingTheEnvelopeIsRefused(t *testing.T) {
 
 	// Both entry points, because the async routes never reach the proxy and that
 	// is exactly how they came to be a hole one request shape over.
-	if _, err := (&Ctrl{}).MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err == nil {
+	if _, err := unsealOn(&Ctrl{}, ginCtxWithContentType(contentType), body); err == nil {
 		t.Error("the sync proxy must refuse a multipart body carrying the envelope")
 	}
 	if why := (&Ctrl{}).RefuseAsync(contentType, body); why == "" {
@@ -106,7 +106,7 @@ func TestTheMarkerPartIsFoundWhereverItSits(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			body, contentType := transcriptionBody(t, tt.parts)
-			if _, err := (&Ctrl{}).MaybeUnsealRequest(ginCtxWithContentType(contentType), body); err == nil {
+			if _, err := unsealOn(&Ctrl{}, ginCtxWithContentType(contentType), body); err == nil {
 				t.Error("must refuse rather than forward")
 			}
 			if why := (&Ctrl{}).RefuseAsync(contentType, body); why == "" {
@@ -143,7 +143,7 @@ func TestAnOrdinaryTranscriptionIsForwarded(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			body, contentType := transcriptionBody(t, tt.parts)
-			got, err := (&Ctrl{}).MaybeUnsealRequest(ginCtxWithContentType(contentType), body)
+			got, err := unsealOn(&Ctrl{}, ginCtxWithContentType(contentType), body)
 			if err != nil {
 				t.Fatalf("must be forwarded, got %v", err)
 			}
@@ -211,7 +211,7 @@ func TestMalformedAndExoticBodiesAreForwarded(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := (&Ctrl{}).MaybeUnsealRequest(ginCtxWithContentType(tt.contentType), []byte(tt.body)); err != nil {
+			if _, err := unsealOn(&Ctrl{}, ginCtxWithContentType(tt.contentType), []byte(tt.body)); err != nil {
 				t.Errorf("this shape is knowingly out of scope and must forward, got %v", err)
 			}
 			if why := (&Ctrl{}).RefuseAsync(tt.contentType, []byte(tt.body)); why != "" {
@@ -238,7 +238,7 @@ func TestTheJSONPathIsUnaffected(t *testing.T) {
 	if why := (&Ctrl{}).RefuseAsync("application/json", plain); why != "" {
 		t.Errorf("mentioning the marker is not sending one, got %q", why)
 	}
-	got, err := (&Ctrl{}).MaybeUnsealRequest(ginCtxWithContentType("application/json"), plain)
+	got, err := unsealOn(&Ctrl{}, ginCtxWithContentType("application/json"), plain)
 	if err != nil {
 		t.Fatalf("must be forwarded, got %v", err)
 	}

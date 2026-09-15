@@ -42,7 +42,7 @@ func (f *e2eeTestFixture) newSealedImageHandlerCtx(t *testing.T) (*gin.Context, 
 	ctx.Request = httptest.NewRequest("POST", "/v1/images/generations", nil)
 
 	sealedBytes := f.sealImageRequest(t, []string{"prompt"})
-	if _, err := f.c.MaybeUnsealRequest(ctx, sealedBytes); err != nil {
+	if _, err := unsealOn(f.c, ctx, sealedBytes); err != nil {
 		t.Fatalf("MaybeUnsealRequest: %v", err)
 	}
 	var reqEnv wire.Request
@@ -180,7 +180,7 @@ func TestHandleTextToImageResponse_SignsBeforeFlush(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	ctx, _ := gin.CreateTestContext(probe)
 	ctx.Request = httptest.NewRequest("POST", "/v1/images/generations", nil)
-	if _, err := f.c.MaybeUnsealRequest(ctx, f.sealImageRequest(t, []string{"prompt"})); err != nil {
+	if _, err := unsealOn(f.c, ctx, f.sealImageRequest(t, []string{"prompt"})); err != nil {
 		t.Fatalf("MaybeUnsealRequest: %v", err)
 	}
 

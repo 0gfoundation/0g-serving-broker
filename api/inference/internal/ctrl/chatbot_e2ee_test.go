@@ -43,7 +43,7 @@ func (f *e2eeTestFixture) newSealedHandlerCtx(t *testing.T) (*gin.Context, *http
 	// ephemeral key, and — critically for §8 — the request binding hash are all set
 	// the same way production sets them.
 	sealedBytes := f.sealRequest(t, f.signerAddr)
-	if _, err := f.c.MaybeUnsealRequest(ctx, sealedBytes); err != nil {
+	if _, err := unsealOn(f.c, ctx, sealedBytes); err != nil {
 		t.Fatalf("MaybeUnsealRequest: %v", err)
 	}
 	var reqEnv wire.Request

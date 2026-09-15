@@ -469,14 +469,44 @@ Clients that set `Content-Type: application/json` on every request — the OpenA
 SDKs among them — would have lost the signature fetch to the very change that
 started producing signatures.
 
-The route is matched as a path **suffix** rather than by re-deriving the proxy's
-normalization (which strips the service prefix, collapses a redundant `/v1`, and
-is the input to billing-key matching — a second copy of that is a drift risk
-pointed at billing). Every spelling that reaches the endpoint ends with
-`/audio/transcriptions`, and nothing else in `TargetRoute` or `FreePrefixes`
-does. A spelling this misses loses only the diagnostic refusal, never a
-protection: the rule turns a confusing upstream failure into a clear 400, and an
-unsealed JSON body is cleartext either way.
+**The route is the dispatcher's own normalized path, compared for equality** —
+handed to `MaybeUnsealRequest` by the proxy, derived once in
+`constant.SplitTargetRoute` beside the tables it is matched against.
+
+It used to be a path **suffix** over `ctx.Request.URL.Path`, on the argument that
+a second derivation would be a drift risk pointed at billing and that "a spelling
+this misses loses only the diagnostic refusal, never a protection". Both halves
+went wrong at once, and the way they went wrong is the point:
+
+- The suffix was **bypassable**, because any path plus the route ends with the
+  route. Measured: `/v1/proxy/signature/audio/transcriptions` and
+  `/v1/proxy/attestation/audio/transcriptions` were opened, materialized into
+  multipart and marked sealed. Traced on a `TargetSeparated` non-forwarder
+  provider: `handleSignatureRoute` declines, `FreePrefixes` matches `/signature`,
+  and the plain passthrough forwards with `charging=false` — so the audio left
+  the enclave in the clear, to a caller-chosen upstream path, unbilled.
+- The safety argument was **true when it was written and not re-read when it
+  stopped being true**. While the §5.3.1 diagnostic was the only caller, a
+  too-generous suffix was harmless: firing on a non-endpoint only 400s a request
+  that had nowhere to go. Then this profile's route guard was added and made the
+  same predicate load-bearing for a protection, where generosity is the entire
+  bug. *A predicate whose safety argument names its callers has to be re-read when
+  a caller is added.*
+
+The drift worry was right, and the fix answers it properly rather than by keeping
+a weaker match: the derivation now exists **once**, in `constant`, and the proxy
+both matches billing keys against it and passes it in. There is no second copy to
+diverge, the compiler requires the caller to supply it, and the guard cannot
+disagree with the dispatcher about what route a request is on. Both legitimate
+spellings normalize to the constant exactly (`/v1/proxy/audio/transcriptions` and
+`/v1/proxy/v1/audio/transcriptions`), and nothing else does.
+
+Pinned at both levels, because neither alone is enough: the `ctrl` tests drive
+the guard from URLs through the shared derivation, and one `proxy` test drives
+`proxyHTTPRequest` end to end — the only place the *wiring* exists. Passing
+`ctx.Request.URL.Path` there closes the bypass and breaks sealed speech
+completely, with every `ctrl` test still green, since none of them goes through
+the proxy.
 
 The rule is on part **names**, never on the raw bytes: `prompt` carries arbitrary
 caller text, so a substring rule would 400 a legitimate transcription for
