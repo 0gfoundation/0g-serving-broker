@@ -153,6 +153,17 @@ type ModelPricing struct {
 	Completion string `json:"completion"`
 	Image      string `json:"image,omitempty"`
 	Video      string `json:"video,omitempty"`
+	// Audio is the wei price per second of GENERATED audio for an
+	// audio-generation model.
+	//
+	// It carries no companion `audio_unit` field, unlike Video. VideoUnit exists
+	// because video's flat scalar is ambiguous across three billing modes — it
+	// can price a second, a table unit, or a completion token. Audio has exactly
+	// one mode and one unit, so naming it would restate what the field already
+	// means; videoPriceUnit's own doc argues against publishing a unit a consumer
+	// already assumes correctly. If a second audio billing shape ever appears,
+	// this becomes ambiguous too and gets its unit field then.
+	Audio string `json:"audio,omitempty"`
 	// VideoUnit names what one Video buys — see videoPriceUnit. Omitted when
 	// the model's billing shape gives the flat scalar no single-unit meaning.
 	VideoUnit         string                  `json:"video_unit,omitempty"`
@@ -183,6 +194,13 @@ type ModelPricingUSD struct {
 	// video-generation model (decimal string). Set alongside Prompt/Completion
 	// (both reported as "0", not omitted), same convention as Image above.
 	Video string `json:"video,omitempty"`
+	// Audio is the USD price per second of generated audio for a USD-denominated
+	// audio-generation model (decimal string), derived from
+	// OutputPriceUSDPerMillionTokens with the same ÷1e6 the wei conversion uses.
+	// Set alongside Prompt/Completion (both "0", not omitted) — audio bills per
+	// second, so there is no per-token rate to report. See ModelPricing.Audio for
+	// why there is no companion unit field.
+	Audio string `json:"audio,omitempty"`
 	// VideoUnit is the USD counterpart of ModelPricing.VideoUnit — the same
 	// name for the same unit, since the two blocks price one quantity in two
 	// denominations.
@@ -684,7 +702,24 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 				}
 			}
 
-			if isUSD && svc.Type == constant.ServiceTypeVideoGeneration {
+			if isUSD && svc.Type == constant.ServiceTypeAudioGeneration {
+				// USD audio: the bill unit is a generated second, and unlike video
+				// there is only one of them — no per-mode unit label to resolve, and
+				// no `variants` rows, because this modality has no tier axis (see
+				// config.BillingModePerAudioSecond). The ÷1e6 helper is the same one
+				// every other USD display value goes through, so a price configured
+				// identically renders identically across modalities.
+				if audio, ok := h.derivePerUnitUSD("second", mp.OutputPriceUSDPerMillionTokens, mp.Model); ok {
+					obj.PricingUSD = &ModelPricingUSD{Prompt: "0", Completion: "0", Audio: audio}
+				}
+				if ratUSDPerOG != nil {
+					if outRat, err := pricefeed.ParseUSDPerMillion(mp.OutputPriceUSDPerMillionTokens); err == nil {
+						if wei, err := pricefeed.USDPerMillionToWeiPerToken(outRat, ratUSDPerOG); err == nil {
+							obj.Pricing.Audio = wei.String()
+						}
+					}
+				}
+			} else if isUSD && svc.Type == constant.ServiceTypeVideoGeneration {
 				// USD video: bill unit is the effective output second, not a token.
 				// Surface the per-second USD and, when the feed is up, the
 				// rate-converted wei-per-second under `video`. Deriving the display
@@ -752,6 +787,11 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 				obj.Pricing.Video = mp.OutputPrice
 				obj.Pricing.VideoUnit = videoPriceUnit(mp.Billing)
 				obj.Pricing.Variants = videoPriceVariantsNative(mp.Billing, mp.OutputPrice)
+			} else if svc.Type == constant.ServiceTypeAudioGeneration {
+				// Same reasoning as video one branch up: surfaced under its own
+				// field rather than `completion`, so an OpenAI-compatible client
+				// cannot read a per-second rate as a per-token one.
+				obj.Pricing.Audio = mp.OutputPrice
 			} else {
 				obj.Pricing.Prompt = mp.InputPrice
 				obj.Pricing.Completion = mp.OutputPrice

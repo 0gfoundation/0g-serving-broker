@@ -8,6 +8,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/util/rand"
 
+	audioTranslatorServer "github.com/0glabs/0g-serving-broker/audiotranslator/cmd/server"
 	controllerServer "github.com/0glabs/0g-serving-broker/controller/cmd/server"
 	fineTuningServer "github.com/0glabs/0g-serving-broker/fine-tuning/cmd/server"
 	providerEvent "github.com/0glabs/0g-serving-broker/inference/cmd/event"
@@ -24,6 +25,7 @@ func main() {
 		"0g-dashscope-video-translator": videoTranslatorServer.Main,
 		"0g-minimax-video-translator":   videoTranslatorServer.MiniMaxMain,
 		"0g-seedance-video-translator":  videoTranslatorServer.SeedanceMain,
+		"0g-seedaudio-translator":       audioTranslatorServer.Main,
 	}
 
 	names := []string{}

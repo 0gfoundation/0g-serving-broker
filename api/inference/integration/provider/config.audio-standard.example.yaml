@@ -1,0 +1,81 @@
+# Example: an audio-generation service forwarding to a BytePlus Seed Audio
+# adaptor, priced per second of generated audio.
+#
+# SYNCHRONOUS. Seed Audio answers one POST with the audio itself, so there is no
+# job to poll and no scheduler to configure — unlike video-generation, whose
+# example sits beside this one. See docs/design/seed-audio-generation.md.
+#
+# The broker forwards POST /v1/audio/speech to targetUrl and bills from the
+# response's X-0G-Audio-Duration-Seconds header, because the response BODY is the
+# audio file and has nowhere to carry a usage block. The adaptor is responsible for
+# setting that header from the vendor's `original_duration` — see
+# docs/design/audio-request-response.md for why not `duration`.
+
+interval:
+  autoSettleBufferTime: "60s"
+  forceSettlementProcessor: "10m"
+  settlementProcessor: "5m"
+
+network:
+  url: "https://evmrpc-testnet.0g.ai"
+  chainID: 16602
+  privateKeys:
+    - <Private_Key>
+  transactionLimit: 5000000
+  gasEstimationBuffer: 100000
+
+# Required because service.priceDenomination is "USD" below.
+priceFeed:
+  sources:
+    - "coingecko"
+    - "binance"
+  updateInterval: "5m"
+  # coinGeckoApiKey: <CoinGecko API Key>
+
+service:
+  type: "audio-generation"
+  providerType: "standard"
+  model: "seed-audio-1.0"
+  # The ADAPTOR, not BytePlus directly. The adaptor speaks OpenAI
+  # /v1/audio/speech to the broker and BytePlus's own protocol upstream
+  # (POST /api/v3/tts/create, X-Api-Key / X-Api-Request-Id headers).
+  targetUrl: "http://audiotranslator:8090"
+  servingUrl: <Serving URL>
+
+  # BytePlus's credentials, attached to every outbound request. Note this is a
+  # header SET, not a single Authorization — the BytePlus Voice platform does not
+  # use bearer auth, unlike Ark (which is what Seedance uses).
+  additionalSecret:
+    X-Api-Key: <BytePlus API Key>
+
+  priceDenomination: "USD"
+
+  modelPricing:
+    - model: "seed-audio-1.0"
+      canonicalId: "seed-audio-1.0"
+      # Seed Audio's published rate is ~$0.15 per generated MINUTE, i.e.
+      # $0.0025 per second. Priced per SECOND here because that is the unit the
+      # vendor bills in and the unit the broker charges in.
+      outputPriceUSDPerSecond: "0.0025"
+      billing:
+        mode: per_audio_second
+        # Names which rules in common/audiospec apply. Without it the broker
+        # cannot look up the vendor's output ceiling, so every create is
+        # forwarded WITHOUT a pre-flight reserve and is gated only by the
+        # minimum locked balance — counted by
+        # broker_audio_reserve_skipped_total{reason="unknown_vendor"}.
+        vendor: "seedaudio"
+      modelInfo:
+        name: "Seed Audio 1.0"
+        description: "ByteDance Seed Audio 1.0 — dialogue, music, ambience and sound effects from one prompt, up to 120 seconds"
+        architecture:
+          modality: "text->audio"
+          inputModalities: ["text", "audio", "image"]
+          outputModalities: ["audio"]
+        supportedParameters:
+          - input
+          - voice
+          - response_format
+          - speed
+          - max_duration
+          - sample_rate

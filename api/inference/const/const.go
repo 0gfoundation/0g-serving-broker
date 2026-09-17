@@ -19,6 +19,26 @@ const (
 	// response's `usage` carries no completion_tokens.
 	ServiceTypeEmbedding       = "embedding"
 	ServiceTypeVideoGeneration = "video-generation"
+	// ServiceTypeAudioGeneration is audio generation (POST /audio/speech): a script
+	// in, generated audio out — dialogue, music, ambience and sound effects, not only
+	// speech. Billed per second of OUTPUT audio.
+	//
+	// SYNCHRONOUS. Seed Audio answers one POST with the audio itself, so there is no
+	// job to poll and no async machinery for this modality. A vendor that IS async
+	// would need that built — audiospec is a registry precisely so a second vendor
+	// can be admitted — but nothing speculative is carried for it today.
+	//
+	// It is NOT the inverse of ServiceTypeSpeechToText and must not be folded into
+	// it. STT consumes audio and bills the INPUT dimension; this produces audio and
+	// bills the OUTPUT dimension. The router's fanOutPrices sorts service types into
+	// exactly those two buckets and refuses a model that fits neither, so the two
+	// have to be distinguishable there.
+	//
+	// The name is "audio-generation" rather than "text-to-speech" because the first
+	// vendor (ByteDance Seed Audio 1.0) generates a whole scene in one pass. Calling
+	// that text-to-speech would mislead every consumer that branches on the service
+	// type, starting with the router's catalog labels.
+	ServiceTypeAudioGeneration = "audio-generation"
 )
 
 // Provider type constants for distinguishing between decentralized GPU providers
@@ -63,9 +83,16 @@ func DefaultBillingUnitForService(serviceType string) string {
 	switch serviceType {
 	case ServiceTypeTextToImage, ServiceTypeImageEditing:
 		return BillingUnitImages
-	case ServiceTypeSpeechToText, ServiceTypeVideoGeneration:
+	case ServiceTypeSpeechToText, ServiceTypeVideoGeneration, ServiceTypeAudioGeneration:
 		// Video bills the raw output seconds (resolution folded into rate_class, not the
 		// unit); whisper STT also bills by seconds. See docs/design/provider-reconciliation.md.
+		//
+		// Audio generation bills output seconds too, and reuses this unit rather than
+		// introducing one: a reconciliation query grouping on "seconds" means the same
+		// thing for all three. What it does NOT mean is that they can be summed — STT's
+		// seconds are audio consumed, audio-generation's are audio produced. The
+		// service_type column is what separates them, which is exactly why this
+		// function exists rather than the unit being inferred from the count alone.
 		return BillingUnitSeconds
 	default:
 		// chatbot bills in tokens.
@@ -110,6 +137,18 @@ var (
 		"/audio/transcriptions": {},
 		"/videos":               {}, // Video generation (OpenAI Video API)
 		"/embeddings":           {}, // Text embeddings (OpenAI Embeddings API)
+		// Audio generation (OpenAI Audio Speech API). Synchronous: one request, one
+		// response carrying the audio bytes, with the billable duration in a response
+		// header (see ctrl.AudioDurationHeader).
+		//
+		// This WAS "/audio/generations", chosen when the vendor API was believed to be
+		// an async submit-poll job. BytePlus's own reference says otherwise — Seed
+		// Audio is a single synchronous POST — so the async shape had nothing to model
+		// and "/audio/speech" is honourable: it is OpenAI's real TTS path, and an
+		// adaptor that base64-decodes the vendor's audio returns exactly what that
+		// contract promises. See the CORRECTION section of
+		// docs/design/seed-audio-generation.md.
+		"/audio/speech": {},
 	}
 
 	// FreePrefixes defines path prefixes that can be accessed without charging
