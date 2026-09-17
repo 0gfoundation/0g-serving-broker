@@ -429,17 +429,18 @@ func TestWithEmbeddingUsage(t *testing.T) {
 // has already paid for. The first arm made the decentralized row pass regardless,
 // which is why one row was not enough.
 func TestHandleEmbeddingResponseSealsAndPublishesTheBilledCount(t *testing.T) {
+	decentralized := config.Service{
+		Type:         constant.ServiceTypeEmbedding,
+		ProviderType: constant.ProviderTypeDecentralized,
+	}
 	for _, tc := range []struct {
 		name string
 		svc  config.Service
+		// usage is the upstream's own `usage` block (a JSON fragment ending in a
+		// comma), or "" for an upstream that sends none.
+		usage string
 	}{
-		{
-			name: "in-network decentralized",
-			svc: config.Service{
-				Type:         constant.ServiceTypeEmbedding,
-				ProviderType: constant.ProviderTypeDecentralized,
-			},
-		},
+		{name: "in-network decentralized", svc: decentralized},
 		{
 			// Neither arm of the OLD gate fires here: TargetSeparated is true and
 			// the provider is not centralized.
@@ -450,14 +451,27 @@ func TestHandleEmbeddingResponseSealsAndPublishesTheBilledCount(t *testing.T) {
 				TargetSeparated: true,
 			},
 		},
+		{
+			// prompt_tokens ≠ total_tokens, which is what makes "publishes the
+			// BILLABLE field" falsifiable. With no upstream usage the broker's
+			// estimator returns prompt == total, so a frame built from
+			// `usage.TotalTokens` would be indistinguishable — this row is the one
+			// that tells the two apart.
+			name:  "upstream reports prompt_tokens != total_tokens",
+			svc:   decentralized,
+			usage: `"usage":{"prompt_tokens":9,"total_tokens":40},`,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			runSealedEmbeddingHandler(t, tc.svc)
+			runSealedEmbeddingHandler(t, tc.svc, tc.usage)
 		})
 	}
 }
 
-func runSealedEmbeddingHandler(t *testing.T, svc config.Service) {
+// runSealedEmbeddingHandler drives the real handler on a sealed turn.
+// providerUsage is the upstream's `usage` block, as a JSON fragment ending in a
+// comma, or "" for an upstream that reports none.
+func runSealedEmbeddingHandler(t *testing.T, svc config.Service, providerUsage string) {
 	t.Helper()
 	encPriv, encPub, err := pccrypto.GenerateRecipientKey()
 	if err != nil {
@@ -470,7 +484,12 @@ func runSealedEmbeddingHandler(t *testing.T, svc config.Service) {
 	keyID := sha256.Sum256(encPub)
 
 	c := newChatbotTestCtrl(t, svc)
-	c.reconciliationDB = &mockReconciliationDB{}
+	// Held, not discarded: this is what the drift assertion reads. The whitelisted
+	// branch funnels through recordWhitelistedUsage → AccumulateHourlyUsage, so the
+	// row's InputCount is the handler's OWN number — the one it would bill on —
+	// rather than a recomputation of it.
+	recon := &mockReconciliationDB{}
+	c.reconciliationDB = recon
 	c.teeService = &teeutil.TeeService{
 		ProviderSigner: signerKey,
 		Address:        crypto.PubkeyToAddress(signerKey.PublicKey),
@@ -513,15 +532,16 @@ func runSealedEmbeddingHandler(t *testing.T, svc config.Service) {
 		t.Fatalf("enclave did not recover the input: %s", reconstructed)
 	}
 
-	// What the broker will bill: the estimator over the DECRYPTED request, which
-	// is what the handler receives as reqBody on a sealed turn.
-	wantTokens := estimateEmbeddingUsageFromRequest(reconstructed).PromptTokens
-	if wantTokens <= 1 {
-		t.Fatalf("precondition: the fixture must estimate to more than the floor, got %d", wantTokens)
+	// A floor check on the fixture only — NOT the value the drift assertion
+	// compares against. The number that matters is read back off the handler
+	// below; recomputing it here and comparing the two would assert that the
+	// estimator is deterministic, which it trivially is, and would pass just as
+	// well if the handler published `usage.TotalTokens` or any other field.
+	if floor := estimateEmbeddingUsageFromRequest(reconstructed).PromptTokens; floor <= 1 {
+		t.Fatalf("precondition: the fixture must estimate to more than the flat floor, got %d", floor)
 	}
 
-	// An upstream that reports no usage at all.
-	provider := []byte(`{"object":"list","model":"m","data":[` +
+	provider := []byte(`{"object":"list","model":"m",` + providerUsage + `"data":[` +
 		`{"object":"embedding","index":0,"embedding":[0.0231,-0.0917]}]}`)
 	resp := &http.Response{
 		StatusCode: http.StatusOK,
@@ -568,10 +588,15 @@ func runSealedEmbeddingHandler(t *testing.T, svc config.Service) {
 	if err := json.Unmarshal(frame["usage"], &usage); err != nil {
 		t.Fatalf("usage must be readable cleartext: %v", err)
 	}
-	if usage.PromptTokens != wantTokens {
-		t.Fatalf("the frame publishes %d tokens but the broker bills %d: the router would "+
-			"transact this request at a different price than the provider",
-			usage.PromptTokens, wantTokens)
+	// THE drift assertion: the number in the frame must be the number the handler
+	// accounted for, read back off its own ledger write rather than recomputed.
+	if len(recon.calls) != 1 {
+		t.Fatalf("want exactly one usage row recorded, got %d", len(recon.calls))
+	}
+	if billed := recon.calls[0].InputCount; int64(usage.PromptTokens) != billed {
+		t.Fatalf("the frame publishes %d tokens but the broker accounted for %d: the router "+
+			"would transact this request at a different price than the provider",
+			usage.PromptTokens, billed)
 	}
 
 	// And the client can still open it.
