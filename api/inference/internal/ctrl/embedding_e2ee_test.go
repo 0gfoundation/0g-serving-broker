@@ -21,15 +21,20 @@ import (
 	teeutil "github.com/0glabs/0g-serving-broker/common/tee"
 )
 
-// The corpus the tests check never leaks. An ARRAY rather than a single string
-// because the batch form is what a retrieval pipeline sends, and it is the form
-// where `input` is a corpus rather than a query.
+// The corpus the tests check never leaks. Sealed as a two-element ARRAY rather
+// than one string, because the batch form is what a retrieval pipeline sends and
+// it is the form where `input` is a corpus rather than a query.
 const (
 	embSecretA = "patient chart 4471: presenting complaint"
 	embSecretB = "internal roadmap Q3: acquisition targets"
 )
 
-func (f *e2eeTestFixture) sealEmbeddingRequest(t *testing.T, sealedFields []string) []byte {
+// sealEmbeddingRequest seals with the profile's DEFAULT sealed set (nil), which
+// is the only set these tests need: the non-default cases are argued at build
+// time in TestMaybeUnsealEmbeddingRequestRejectsCleartextInput, which calls
+// wire.SealRequestFor directly. No `sealedFields` parameter, so there is no
+// unused knob to mislead the next caller.
+func (f *e2eeTestFixture) sealEmbeddingRequest(t *testing.T) []byte {
 	t.Helper()
 	req := wire.Request{
 		"model":           mustRaw(t, "qwen3.7-text-embedding"),
@@ -37,7 +42,7 @@ func (f *e2eeTestFixture) sealEmbeddingRequest(t *testing.T, sealedFields []stri
 		"dimensions":      mustRaw(t, 256),
 		"input":           mustRaw(t, []string{embSecretA, embSecretB}),
 	}
-	sealed, err := wire.SealRequestFor(wire.ProfileEmbedding, f.encPub, req, sealedFields, f.signerAddr, f.clientEphPub)
+	sealed, err := wire.SealRequestFor(wire.ProfileEmbedding, f.encPub, req, nil, f.signerAddr, f.clientEphPub)
 	if err != nil {
 		t.Fatalf("SealRequestFor(embedding): %v", err)
 	}
@@ -55,7 +60,7 @@ func (f *e2eeTestFixture) newSealedEmbeddingCtx(t *testing.T) (*gin.Context, []b
 	t.Helper()
 	f.c.Service = config.Service{Type: constant.ServiceTypeEmbedding}
 	ctx := newGinCtx()
-	out, err := unsealOn(f.c, ctx, f.sealEmbeddingRequest(t, nil))
+	out, err := unsealOn(f.c, ctx, f.sealEmbeddingRequest(t))
 	if err != nil {
 		t.Fatalf("unseal embedding request: %v", err)
 	}
@@ -95,16 +100,35 @@ func TestMaybeUnsealEmbeddingRequestReconstructsInput(t *testing.T) {
 	}
 }
 
-// A sealed set that omits `input` defeats the profile, and the enclave is the
-// half that has to refuse it — a third-party client is under no obligation to
-// run the sender-side check.
-func TestMaybeUnsealEmbeddingRequestRejectsSealedSetWithoutInput(t *testing.T) {
+// A sealed request that leaves `input` readable defeats the profile, and BOTH
+// halves must refuse it — §12's rule, since a third-party client is under no
+// obligation to run the sender's check.
+//
+// The two halves are reached differently, which is why they are separate
+// assertions rather than one round trip:
+//
+//   - the SENDER is refused at build time for a sealed set that omits `input`;
+//   - the ENCLAVE cannot be handed that same envelope — SealRequestFor will not
+//     build it and there is no non-conforming request sealer — so what is
+//     exercised here is the reachable half: `input` re-added to the CLEARTEXT
+//     side on the wire is refused.
+//
+// Note WHICH mechanism refuses that second case, because it is not the payload
+// rule and the difference is the point. `input` is still named in
+// `sealed_fields`, so re-adding it in cleartext is a sealed/cleartext COLLISION
+// (§5.1), and that check sits after the decrypt — while the cleartext half is
+// inside the AAD, so the AEAD fails first. A tampered envelope can therefore
+// only ever produce an authentication failure, which is the stronger answer: an
+// intermediary cannot smuggle a payload field back into the readable half at
+// all. The rule-based half of the enclave check (a sealed set that never covered
+// the payload, caught by validatePayloadSealedFor BEFORE any decrypt) is
+// profile-independent and covered upstream by the protocol's own
+// TestOpenRequestForRunsEveryReceiverSideCheck.
+func TestMaybeUnsealEmbeddingRequestRejectsCleartextInput(t *testing.T) {
 	f := newE2EEFixture(t)
 	f.c.Service = config.Service{Type: constant.ServiceTypeEmbedding}
 
-	// Sealing `dimensions` instead: a well-formed envelope that covers the wrong
-	// field. SealRequestFor refuses to BUILD it, which is the sender-side half, so
-	// the enclave-side half is checked against what that refusal says.
+	// Sender side.
 	req := wire.Request{
 		"model":      mustRaw(t, "m"),
 		"dimensions": mustRaw(t, 256),
@@ -112,9 +136,31 @@ func TestMaybeUnsealEmbeddingRequestRejectsSealedSetWithoutInput(t *testing.T) {
 	}
 	if _, err := wire.SealRequestFor(wire.ProfileEmbedding, f.encPub, req,
 		[]string{"dimensions"}, f.signerAddr, f.clientEphPub); err == nil {
-		t.Fatal("a sealed set omitting `input` must be refused")
+		t.Fatal("a sealed set omitting `input` must be refused at build time")
 	} else if !strings.Contains(err.Error(), "input") {
 		t.Errorf("error should name the payload field, got %v", err)
+	}
+
+	// Enclave side: a conforming envelope, then `input` re-added in the clear.
+	var env map[string]json.RawMessage
+	if err := json.Unmarshal(f.sealEmbeddingRequest(t), &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	env["input"] = mustRaw(t, embSecretA)
+	tampered, err := json.Marshal(env)
+	if err != nil {
+		t.Fatalf("marshal tampered envelope: %v", err)
+	}
+	out, err := unsealOn(f.c, newGinCtx(), tampered)
+	if err == nil {
+		t.Fatalf("the enclave must refuse a sealed request carrying `input` in cleartext, got %s", out)
+	}
+	// The cleartext half is bound, so this is an authentication failure rather
+	// than a rule violation — see the note above. Asserted so a future change that
+	// moved `input` out of the AAD (which would make this pass for the wrong
+	// reason, via the collision rule) is visible here.
+	if !strings.Contains(err.Error(), "authentication failed") {
+		t.Errorf("want the AEAD to refuse the tampered cleartext half, got %v", err)
 	}
 }
 
@@ -303,6 +349,17 @@ func TestWithEmbeddingUsage(t *testing.T) {
 			wantErr:      true,
 		},
 		{
+			// The case a `[1,2,3]` fixture walks straight past: a JSON `null` body
+			// unmarshals into a nil map with NO error, so an implementation that
+			// wraps the (nil) error returns (nil, nil) and the caller reads a
+			// success with no body. Wants a non-nil error, like every other
+			// malformed body.
+			name:         "JSON null body",
+			body:         `null`,
+			promptTokens: 14,
+			wantErr:      true,
+		},
+		{
 			// A compressed body that could not be decoded reaches here as bytes,
 			// and must fail rather than be sealed as opaque content.
 			name:         "not JSON at all",
@@ -361,7 +418,47 @@ func TestWithEmbeddingUsage(t *testing.T) {
 // estimator over a SEALED `input`, floored to 1 token, and the two sides priced
 // one request differently. Asserting the frame's number equals the estimator's
 // is what pins that shut.
+// Run across both signing topologies, because they take different paths to the
+// ZG-Res-Key handle and only one of them was covered before.
+//
+// `TargetSeparated && !IsCentralized` is the case that exposed a real hole: the
+// header gate used to read `!TargetSeparated || IsCentralized()`, with no
+// e2eeSealed arm, so on this topology the broker sealed the frame, signed §8 and
+// cached the signature while sending NO handle — and an E2EE client refuses a
+// response it cannot verify, so that is a response the caller must reject and
+// has already paid for. The first arm made the decentralized row pass regardless,
+// which is why one row was not enough.
 func TestHandleEmbeddingResponseSealsAndPublishesTheBilledCount(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		svc  config.Service
+	}{
+		{
+			name: "in-network decentralized",
+			svc: config.Service{
+				Type:         constant.ServiceTypeEmbedding,
+				ProviderType: constant.ProviderTypeDecentralized,
+			},
+		},
+		{
+			// Neither arm of the OLD gate fires here: TargetSeparated is true and
+			// the provider is not centralized.
+			name: "targetSeparated, not centralized",
+			svc: config.Service{
+				Type:            constant.ServiceTypeEmbedding,
+				ProviderType:    constant.ProviderTypeStandard,
+				TargetSeparated: true,
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runSealedEmbeddingHandler(t, tc.svc)
+		})
+	}
+}
+
+func runSealedEmbeddingHandler(t *testing.T, svc config.Service) {
+	t.Helper()
 	encPriv, encPub, err := pccrypto.GenerateRecipientKey()
 	if err != nil {
 		t.Fatalf("GenerateRecipientKey (enc): %v", err)
@@ -372,10 +469,7 @@ func TestHandleEmbeddingResponseSealsAndPublishesTheBilledCount(t *testing.T) {
 	}
 	keyID := sha256.Sum256(encPub)
 
-	c := newChatbotTestCtrl(t, config.Service{
-		Type:         constant.ServiceTypeEmbedding,
-		ProviderType: constant.ProviderTypeDecentralized,
-	})
+	c := newChatbotTestCtrl(t, svc)
 	c.reconciliationDB = &mockReconciliationDB{}
 	c.teeService = &teeutil.TeeService{
 		ProviderSigner: signerKey,
@@ -437,6 +531,20 @@ func TestHandleEmbeddingResponseSealsAndPublishesTheBilledCount(t *testing.T) {
 	reqModel := model.Request{IsWhitelisted: true, ServiceName: "embedding", RequestHash: "h"}
 	if err := c.handleEmbeddingResponse(ctx, resp, model.User{}, "0", reconstructed, reqModel); err != nil {
 		t.Fatalf("handleEmbeddingResponse: %v", err)
+	}
+
+	// The handle, and a signature that actually resolves through it. A sealed turn
+	// that ships a frame with no ZG-Res-Key gives the client no way to fetch §8,
+	// and an E2EE client refuses a response it cannot verify — so a cached
+	// signature with no handle is strictly worse than no signature: the caller is
+	// billed for a response it must throw away.
+	handle := rec.Header().Get("ZG-Res-Key")
+	if handle == "" {
+		t.Fatal("a sealed turn must publish ZG-Res-Key, whatever the signing topology: " +
+			"the client cannot fetch the §8 signature without it")
+	}
+	if _, err := c.GetChatSignature(handle); err != nil {
+		t.Fatalf("ZG-Res-Key %q does not resolve to a cached signature: %v", handle, err)
 	}
 
 	out := rec.Body.Bytes()

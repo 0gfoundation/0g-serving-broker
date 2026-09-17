@@ -85,7 +85,12 @@ type EmbeddingUsage struct {
 func withEmbeddingUsage(body []byte, promptTokens int) ([]byte, error) {
 	var resp map[string]json.RawMessage
 	if err := json.Unmarshal(body, &resp); err != nil || resp == nil {
-		return nil, errors.Wrap(err, "attach usage.prompt_tokens: embedding response is not a JSON object")
+		// fmt.Errorf, not errors.Wrap, and that is the difference between an error
+		// and a silent nil: a JSON `null` body unmarshals into a nil map with NO
+		// error, so err is nil on that branch and errors.Wrap(nil, …) returns nil —
+		// this would have handed the caller (nil, nil). withImageUsage uses
+		// fmt.Errorf and never had the hole; diverging from it was the mistake.
+		return nil, fmt.Errorf("attach usage.prompt_tokens: embedding response is not a JSON object: %w", err)
 	}
 
 	// Adopt the upstream's usage only when it decodes to an actual object —
@@ -128,7 +133,18 @@ func (c *Ctrl) handleEmbeddingResponse(ctx *gin.Context, resp *http.Response, _ 
 	defer resp.Body.Close()
 
 	chatKey := uuid.NewString()
-	if !c.Service.TargetSeparated || c.Service.IsCentralized() {
+	// The third arm is not optional on a sealed turn, and its absence here was a
+	// real hole: the sealed path below signs §8 UNCONDITIONALLY and caches it, so
+	// on a provider with TargetSeparated && !IsCentralized the broker sealed the
+	// frame, signed it and cached the signature while sending no handle — and an
+	// E2EE client refuses a response it cannot verify (signChatResponse's own
+	// note). That is a response the caller must reject and has already been billed
+	// for. Every other handler already carries this arm (chatbot 218/334,
+	// text_to_image 179, speech_to_text 290/592); embedding was the one that did
+	// not, and the fail-closed arms further down assume the header IS set, which
+	// made their Del calls no-ops on exactly that topology.
+	_, e2eeSealed := e2eeSealedRequest(ctx)
+	if !c.Service.TargetSeparated || c.Service.IsCentralized() || e2eeSealed {
 		ctx.Writer.Header().Set("ZG-Res-Key", chatKey)
 	}
 
@@ -153,24 +169,6 @@ func (c *Ctrl) handleEmbeddingResponse(ctx *gin.Context, resp *http.Response, _ 
 		body = c.sanitizeForwarderEmbeddingResponseBody(ctx, body, resp.Header.Get("Content-Encoding"))
 	}
 
-	// Signing: centralized providers get a routing proof (TLS cert fingerprint
-	// bound at request time); an in-network decentralized provider gets a plain
-	// content signature. Mirrors chatbot's identical dispatch and — critically —
-	// chatbot's cache-BEFORE-flush ordering (signChatResponse / handleChargingResponse):
-	// cache the signature before the body reaches the client, so that by the time
-	// it reads ZG-Res-Key and fetches GET /v1/proxy/signature/{chatID}, the
-	// signature already resolves rather than racing a post-flush cache write
-	// (issue #619). Signs `body`, which is the sanitized bytes as of the
-	// reassignment above (identical to what will be written to the client).
-	//
-	// The two cases are NOT symmetric on error, matching signChatResponse exactly:
-	//   - IsCentralized(): a missing/malformed TLS fingerprint is an expected,
-	//     non-fatal condition (no sidecar report, etc.) — log and continue. A
-	//     404 on the signature endpoint is more honest than blocking a request
-	//     that has nothing to do with TLS evidence being absent.
-	//   - !TargetSeparated: signChatWithKey only fails when the TEE signer
-	//     itself fails, which is a genuine broker fault — fail closed rather
-	//     than serve a body the client can never verify.
 	// Decompress (if the forwarder sanitization above did not already, i.e. a
 	// non-forwarder provider) so usage can be parsed regardless of upstream
 	// compression.
@@ -226,7 +224,7 @@ func (c *Ctrl) handleEmbeddingResponse(ctx *gin.Context, resp *http.Response, _ 
 	// sealed frame instead.
 	outBody := body
 	signedEarly := false
-	if _, isSealed := e2eeSealedRequest(ctx); isSealed {
+	if e2eeSealed {
 		// The sealed frame is freshly marshalled JSON, so whatever the upstream
 		// said about its encoding no longer describes what the client receives.
 		// Sealing from `decompressedBody` also means an undecodable compressed
@@ -294,6 +292,27 @@ func (c *Ctrl) handleEmbeddingResponse(ctx *gin.Context, resp *http.Response, _ 
 		signedEarly = true
 	}
 
+	// Signing for the UNSEALED turn: centralized providers get a routing proof
+	// (TLS cert fingerprint bound at request time); an in-network decentralized
+	// provider gets a plain content signature. Mirrors chatbot's identical
+	// dispatch and — critically — chatbot's cache-BEFORE-flush ordering
+	// (signChatResponse / handleChargingResponse): cache the signature before the
+	// body reaches the client, so that by the time it reads ZG-Res-Key and fetches
+	// GET /v1/proxy/signature/{chatID}, the signature already resolves rather than
+	// racing a post-flush cache write (issue #619). Signs `body`, the sanitized
+	// bytes (identical to what will be written to the client on this path).
+	//
+	// The two cases are NOT symmetric on error, matching signChatResponse exactly:
+	//   - IsCentralized(): a missing/malformed TLS fingerprint is an expected,
+	//     non-fatal condition (no sidecar report, etc.) — log and continue. A
+	//     404 on the signature endpoint is more honest than blocking a request
+	//     that has nothing to do with TLS evidence being absent.
+	//   - !TargetSeparated: signChatWithKey only fails when the TEE signer
+	//     itself fails, which is a genuine broker fault — fail closed rather
+	//     than serve a body the client can never verify.
+	//
+	// Skipped when the sealed path above already signed: a sealed turn's signature
+	// is §8 over the on-wire ciphertext, which this switch cannot produce.
 	if !signedEarly {
 		switch {
 		case c.Service.IsCentralized():
