@@ -19,6 +19,22 @@ const (
 	// response's `usage` carries no completion_tokens.
 	ServiceTypeEmbedding       = "embedding"
 	ServiceTypeVideoGeneration = "video-generation"
+	// ServiceTypeAudioGeneration is asynchronous audio generation (POST
+	// /audio/generations, then status and content): a script in, generated audio
+	// out — dialogue, music, ambience and sound effects, not only speech. Billed
+	// per second of OUTPUT audio.
+	//
+	// It is NOT the inverse of ServiceTypeSpeechToText and must not be folded into
+	// it. STT consumes audio and bills the INPUT dimension; this produces audio and
+	// bills the OUTPUT dimension. The router's fanOutPrices sorts service types into
+	// exactly those two buckets and refuses a model that fits neither, so the two
+	// have to be distinguishable there.
+	//
+	// The name is "audio-generation" rather than "text-to-speech" because the first
+	// vendor (ByteDance Seed Audio 1.0) generates a whole scene in one pass. Calling
+	// that text-to-speech would mislead every consumer that branches on the service
+	// type, starting with the router's catalog labels.
+	ServiceTypeAudioGeneration = "audio-generation"
 )
 
 // Provider type constants for distinguishing between decentralized GPU providers
@@ -63,9 +79,16 @@ func DefaultBillingUnitForService(serviceType string) string {
 	switch serviceType {
 	case ServiceTypeTextToImage, ServiceTypeImageEditing:
 		return BillingUnitImages
-	case ServiceTypeSpeechToText, ServiceTypeVideoGeneration:
+	case ServiceTypeSpeechToText, ServiceTypeVideoGeneration, ServiceTypeAudioGeneration:
 		// Video bills the raw output seconds (resolution folded into rate_class, not the
 		// unit); whisper STT also bills by seconds. See docs/design/provider-reconciliation.md.
+		//
+		// Audio generation bills output seconds too, and reuses this unit rather than
+		// introducing one: a reconciliation query grouping on "seconds" means the same
+		// thing for all three. What it does NOT mean is that they can be summed — STT's
+		// seconds are audio consumed, audio-generation's are audio produced. The
+		// service_type column is what separates them, which is exactly why this
+		// function exists rather than the unit being inferred from the count alone.
 		return BillingUnitSeconds
 	default:
 		// chatbot bills in tokens.
