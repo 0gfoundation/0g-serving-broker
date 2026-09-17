@@ -19,10 +19,27 @@ enclave**. The router routes on the cleartext fields (`model`, sampling params,
 `stream`) but cannot read the prompt. The enclave decrypts inside the TEE, runs
 inference, and seals the response (`choices`) back to a client ephemeral key.
 
-Which fields those are is the **wire profile**'s answer, not a constant: `chat`
-seals `messages`/`tools` → `choices`, `image` seals `prompt` → `data`, and
-`anthropic` seals `messages` plus a top-level `system` → a field per response
-event shape (SPEC §7.2). See "Profile resolution" below.
+Which fields those are is the **wire profile**'s answer, not a constant:
+
+| Profile | Request seals | Response seals | Billable cleartext the enclave MUST write |
+|---|---|---|---|
+| `chat` | `messages`, `tools`/`tool_choice` when present | `choices` | — (token counts, §7 floor on `usage`) |
+| `anthropic` | `messages`, `system`/`tools`/`tool_choice` when present | a field per response event shape (§7.2) | — (see §7.2's TODO) |
+| `image` | `prompt` | `data` | `usage.output_images` (§7.1) |
+| `speech` | `file_base64`, `filename`/`language`/`prompt` when present | `text`, plus `segments`/`words`/`language` when the frame carries them (§7.3) | `usage.seconds` OR top-level `duration` (§7.3) |
+| `embedding` | `input` | `data` | `usage.prompt_tokens` (§7.4) |
+
+The last column is the one to read twice: `usage` staying CLEARTEXT is a floor
+rule, but that rule forbids *sealing* the field — it never requires the field to
+EXIST. Where a profile's billable quantity would otherwise be unrecoverable, the
+enclave must write it even when the upstream omitted one. For `embedding` that
+is not optional politeness: the router's fallback estimator measures the
+request's `input`, which this profile seals, so a frame with no
+`usage.prompt_tokens` bills a flat constant while the enclave — holding the
+decrypted input — bills the provider accurately. See `withEmbeddingUsage` and
+`withImageUsage`.
+
+See "Profile resolution" below for how a request is mapped to a profile.
 
 ## Crypto suite (SPEC §3)
 
@@ -168,14 +185,28 @@ applied silently.
 | `chatbot` | `/chat/completions` | `chat` |
 | `chatbot` | `/messages`, `/v1/messages` | `anthropic` |
 | `chatbot` | an unrecognized path | **refused** |
-| `text-to-image` | any (not a chat surface) | `image` |
-| everything else | any | refused |
+| `text-to-image` | any (route-blind) | `image` |
+| `speech-to-text` | any (route-blind), but ALSO route-scoped — see below | `speech` |
+| `embedding` | any (route-blind) | `embedding` |
+| everything else — `image-editing`, `video-generation`, anything newer | any | refused |
 
-**The surface is half the key, not decoration.** One chatbot service answers on
-both chat paths, so keyed on the service type alone an Anthropic sealed request
-resolved to `chat`: the response path then sealed an injected empty `choices`
-while the real `content`/`delta` rode in the frame's cleartext half — no error
-anywhere, since the wire format is identical and the frames look plausible.
+**The surface is half the key for `chatbot` and for nothing else.** One chatbot
+service answers on both chat paths, so keyed on the service type alone an
+Anthropic sealed request resolved to `chat`: the response path then sealed an
+injected empty `choices` while the real `content`/`delta` rode in the frame's
+cleartext half — no error anywhere, since the wire format is identical and the
+frames look plausible. The other three service types serve one surface each, so
+the surface they arrived on is whatever the path happened to be and only the
+chatbot arm consults it.
+
+**Route-blind is not the same as route-scoped, and only `speech` is both.**
+Profile resolution answers from the service type, so on an image or embedding
+provider a sealed envelope POSTed to a route that serves no inference at all —
+`/signature/{chatID}`, `/attestation/report` — is OPENED rather than refused.
+`speech` carries an extra `isJSONIfiedRoute` check because its own change is
+what made that reachable for multipart; image predates it and embedding inherits
+the same gap. Widening the rule wants a per-profile route set rather than a
+third profile-specific `&&`, so it is tracked as `#734`.
 
 An **unrecognized** chatbot path is refused for the same reason, and it is the
 likelier way in: adding a chat route means adding to `constant.TargetRoute`,
