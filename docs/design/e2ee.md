@@ -9,7 +9,7 @@ than reimplementing the crypto/wire format.
 
 Related issues: broker `#601` (E2EE flow) and `#602` (report_data §4.2 binding),
 router acceptance `0g-router#618`, client-side attestation verification
-`0g-pc-e2ee#7`, response-signature evolution `#552`.
+`0g-pc-e2ee#7`, on-wire signature binding `0g-pc-e2ee#16`.
 
 ## Goal
 
@@ -445,27 +445,35 @@ variadic (`SealResponse` / `NewResponseSealer`).
 
 ## Response signature (SPEC §8)
 
-Today `ctrl/signing.go` → `signChatE2EE` binds the JCS-canonical reconstructed
-request and the JCS-canonical decrypted response. Non-E2EE requests keep the
-existing `signChatWithKey` behaviour.
+`ctrl/signing.go` → `signChatE2EE` binds the **on-wire bytes** —
+`sha256(aad ‖ ciphertext)` of the sealed request against the same of the sealed
+response (0g-pc-e2ee#16), not `JCS(plaintext)`. Nothing about the sealed content
+is canonicalized, and the signature covers exactly the non-`unbound` content. A
+client that has just decrypted the response already holds those exact bytes, so
+it verifies without reconstructing or re-canonicalizing any plaintext. Non-E2EE
+requests keep the existing `signChatWithKey` behaviour (plaintext
+`sha256(req):sha256(resp)`).
 
-> ⚠️ **Divergence from the current SPEC §8.** 0g-pc-e2ee#16 redefined §8 to bind
-> the on-wire bytes — `sha256(request aad ‖ ciphertext) : sha256(response aad ‖
-> ciphertext)` — instead of `JCS(plaintext)`, so that no canonicalization of the
-> sealed content is needed and the signature covers exactly the non-`unbound`
-> content. Our `signChatE2EE` has not been reworked to this yet; it is a known,
-> tracked gap (not urgent — client-side verification `0g-pc-e2ee#7` is not yet
-> implemented, and the rework is blocked on the wire package exporting an
-> `aad ‖ ciphertext` signing-bytes helper). Tracked with `#552`.
+**The signed text is assembled in the shared `protocol/proof` package, not
+here.** That is what makes drift impossible rather than merely unlikely: the
+broker and the client verifier call the same helpers out of the same module, so
+"reconcile the two implementations" is not a task that exists.
 
-### Streaming signature — TODO (tracked)
+| | Signer (broker) | Signed text |
+|---|---|---|
+| non-stream | `proof.SignedTextE2EEFromHashes(reqH, respH)` — `chatbot.go`, `text_to_image.go`, `speech_to_text.go` | `zg-sig-v1/e2ee-ct:<reqH>:<respH>` |
+| stream | `proof.NewStreamBinderFromReqHash` + `StreamBinder.AddFrame` per sealed frame (`e2ee.go`) | `zg-sig-v1/e2ee-ct-stream:<reqH>:<respH>` |
 
-A streaming response has no single canonical JSON object, and the client-side
-verify implementation (`0g-pc-e2ee#7`) is not yet in place. As a **provisional**
-binding the broker hashes the ordered concatenation of the delivered plaintext
-frames as-is (whole-frame plaintext concatenation). The exact canonicalization
-MUST be reconciled with the client verify implementation before streaming E2EE
-signatures are relied upon. Tracked in `#552` and `0g-pc-e2ee#7`.
+`reqH` is computed at unseal time and `respH` after sealing, so the broker never
+has to retain the request envelope. For a stream, `respH` aggregates the sealed
+frames as `sha256( H(f₀) ‖ … ‖ H(fₙ₋₁) )` in send order, which is order-, count-
+and truncation-sensitive. The frames fed to the binder are the **sealed** ones
+(ciphertext), so a streaming signature is bound the same way a non-streaming one
+is — there is no separate plaintext-concatenation rule.
+
+The scheme tag is what lets a verifier select exactly one binding
+(`proof.SchemeE2EECiphertext` / `SchemeE2EECiphertextStream` /
+`SchemePlaintext`), so the three can never be confused for one another.
 
 ### An upstream HTTP error body is NOT sealed
 
@@ -503,9 +511,10 @@ protocol work; tracked below.
 
 ## Out of scope (tracked elsewhere)
 
-Client-side attestation verify (`0g-pc-e2ee#7`); router acceptance of sealed requests
-(`0g-router#618`); candidate scoring; finalized streaming signature format
-(`#552`); §4.2 `report_data` binding of `enc_pub` (deferred follow-up, see above);
+Client-side attestation verify (`0g-pc-e2ee#7`, shipped — `protocol/attest` +
+`protocol/proof` + `client/cmd/pcverify`); router acceptance of sealed requests
+(`0g-router#618`, shipped);
+candidate scoring; §4.2 `report_data` binding of `enc_pub` (deferred follow-up, see above);
 a sealed shape for an upstream **HTTP error body** (see the section directly
 above — needs a `0g-pc-e2ee` wire shape first, so today a non-200 upstream body
 reaches the client in the clear on a sealed turn).
