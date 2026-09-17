@@ -3,11 +3,13 @@ package ctrl
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"unicode/utf8"
 
+	"github.com/0gfoundation/0g-pc-e2ee/protocol/proof"
 	"github.com/google/uuid"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
@@ -52,6 +54,70 @@ type EmbeddingResponse struct {
 type EmbeddingUsage struct {
 	PromptTokens int `json:"prompt_tokens"`
 	TotalTokens  int `json:"total_tokens"`
+}
+
+// withEmbeddingUsage returns body with a top-level `usage.prompt_tokens` set to
+// promptTokens, the input token count the enclave actually billed (SPEC §7.4).
+//
+// It exists for the sealed path, and for a reason weaker than image's twin looks
+// from the outside. `usage` staying cleartext is a floor rule
+// (mustStayCleartextInResponse), but that rule forbids SEALING the field — it
+// never requires it to EXIST. §7.4 is what requires it, so on a sealed turn the
+// enclave must publish the count even when the upstream sent no `usage` at all.
+//
+// Without it the router has nothing to bill on and no way to recover it: its own
+// estimator for a usage-less embedding response measures the REQUEST's `input`
+// (a response echoes no text back to measure instead), and that is the field
+// this profile seals, so it floors to a flat constant. The enclave, holding the
+// decrypted input, would meanwhile bill the provider an accurate count — one
+// request transacted at two prices. Hence the count comes from the same `usage`
+// the billing below uses, not from a second computation.
+//
+// It stays BOUND (not in unbound_fields), so the seal AAD and the §8 signature
+// cover it: the router reads it without decrypting, and a count that does not
+// match what the enclave billed fails the client's verify.
+//
+// Any usage object the upstream already sent is preserved and only
+// "prompt_tokens" is overridden, since the broker's number is the authority (it
+// IS the upstream's when the upstream reported a usable one). `total_tokens` is
+// deliberately not synthesized when absent: §7.4 does not require it, and the
+// plaintext path does not invent one either.
+func withEmbeddingUsage(body []byte, promptTokens int) ([]byte, error) {
+	var resp map[string]json.RawMessage
+	if err := json.Unmarshal(body, &resp); err != nil || resp == nil {
+		return nil, errors.Wrap(err, "attach usage.prompt_tokens: embedding response is not a JSON object")
+	}
+
+	// Adopt the upstream's usage only when it decodes to an actual object —
+	// a string, a number or `null` is replaced rather than failing the request.
+	// `null` is the case that matters: it unmarshals into a map as the ZERO value
+	// with NO error, so decoding in place would leave a nil map and the write
+	// below would panic on it. Decoding into a separate variable makes that
+	// unreachable by construction. (Same hazard, same fix as withImageUsage.)
+	usage := map[string]json.RawMessage{}
+	if raw, ok := resp["usage"]; ok {
+		var upstream map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &upstream); err == nil && upstream != nil {
+			usage = upstream
+		}
+	}
+	count, err := json.Marshal(promptTokens)
+	if err != nil {
+		return nil, errors.Wrap(err, "attach usage.prompt_tokens: encode count")
+	}
+	usage["prompt_tokens"] = count
+
+	merged, err := json.Marshal(usage)
+	if err != nil {
+		return nil, errors.Wrap(err, "attach usage.prompt_tokens: encode usage")
+	}
+	resp["usage"] = merged
+
+	out, err := json.Marshal(resp)
+	if err != nil {
+		return nil, errors.Wrap(err, "attach usage.prompt_tokens: encode response")
+	}
+	return out, nil
 }
 
 // handleEmbeddingResponse handles the OpenAI Embeddings API response
@@ -105,32 +171,15 @@ func (c *Ctrl) handleEmbeddingResponse(ctx *gin.Context, resp *http.Response, _ 
 	//   - !TargetSeparated: signChatWithKey only fails when the TEE signer
 	//     itself fails, which is a genuine broker fault — fail closed rather
 	//     than serve a body the client can never verify.
-	switch {
-	case c.Service.IsCentralized():
-		fingerprint := ctx.GetString(CtxKeyUpstreamCertFingerprint)
-		if err := c.signCentralizedRoutingProof(reqBody, body, chatKey, fingerprint, ""); err != nil {
-			c.logger.Errorf("routing proof not created for embedding %s: %v", chatKey, err)
-		}
-	case !c.Service.TargetSeparated:
-		if err := c.signChatWithKey(reqBody, body, chatKey); err != nil {
-			c.handleBrokerError(ctx, errors.Internal(err), "sign embedding response")
-			return err
-		}
-	}
-
-	if _, writeErr := ctx.Writer.Write(body); writeErr != nil {
-		if c.isClientDisconnectError(writeErr) {
-			ctx.Set("ignoreError", true)
-			c.logger.Warnf("Client disconnected during embedding response, billing for completed response (%d bytes)", len(body))
-		} else {
-			c.handleBrokerError(ctx, writeErr, "write embedding response")
-			// Still proceed to billing below.
-		}
-	}
-
 	// Decompress (if the forwarder sanitization above did not already, i.e. a
 	// non-forwarder provider) so usage can be parsed regardless of upstream
 	// compression.
+	//
+	// Hoisted above the signing and the flush, which it used to sit below. The
+	// sealed path needs the billable count BEFORE it seals, because §7.4 makes
+	// that count part of the frame — the same reason the image path computes
+	// `imageNum` before its own flush. Nothing about the plaintext path changes:
+	// it signs and writes the same `body` in the same order as before.
 	decompressedBody := body
 	if contentEncoding := resp.Header.Get("Content-Encoding"); contentEncoding != "" && !c.Service.IsForwarder() {
 		if decoded, derr := decodeBody(body, contentEncoding); derr == nil {
@@ -167,6 +216,106 @@ func (c *Ctrl) handleEmbeddingResponse(ctx *gin.Context, resp *http.Response, _ 
 			usage = &EmbeddingUsage{PromptTokens: usage.TotalTokens, TotalTokens: usage.TotalTokens}
 		} else {
 			usage = estimateEmbeddingUsageFromRequest(reqBody)
+		}
+	}
+
+	// E2EE (SPEC §7.4): seal `data` to the client's ephemeral key and publish the
+	// billable input count as cleartext `usage.prompt_tokens`, so the router bills
+	// without holding the vectors. `decompressedBody` stays PLAINTEXT for the
+	// billing below; the §8 signature binds the on-wire aad‖ciphertext of the
+	// sealed frame instead.
+	outBody := body
+	signedEarly := false
+	if _, isSealed := e2eeSealedRequest(ctx); isSealed {
+		// The sealed frame is freshly marshalled JSON, so whatever the upstream
+		// said about its encoding no longer describes what the client receives.
+		// Sealing from `decompressedBody` also means an undecodable compressed
+		// body fails closed below (it is not a JSON object) rather than being
+		// sealed as opaque bytes.
+		ctx.Writer.Header().Del("Content-Encoding")
+
+		// Both arms below attribute the same way, on the rule the speech path
+		// states: a sealed turn whose PROFILE is in hand has everything the broker
+		// owes, so what is left to fail is the upstream's response — a body that is
+		// not a JSON object, or one carrying no `data` at all (which this profile
+		// deliberately has no placeholder for, see placeholderSealedFields). A
+		// MISSING profile is broker state and keeps the default bucket, so the gate
+		// is not decoration: without it a broker-state problem would be alerted on
+		// as a provider fault. The §7.4 count is never what fails here — it is
+		// written from the same number the billing below uses.
+		_, profileInHand := e2eeProfile(ctx)
+
+		withUsage, usageErr := withEmbeddingUsage(decompressedBody, usage.PromptTokens)
+		if usageErr != nil {
+			// Fail-closed: never forward plaintext vectors for a sealed request.
+			// ZG-Res-Key went into the header map before the body was read, and
+			// nothing has been flushed yet, so drop the handle — otherwise a sealed
+			// client is handed a chatID that resolves to no signature.
+			ctx.Writer.Header().Del("ZG-Res-Key")
+			if profileInHand {
+				ctx.Set(monitor.CtxKeyFailureSource, monitor.FailureSourceUpstream)
+			}
+			c.handleBrokerError(ctx, usageErr, "sealed embedding response")
+			return usageErr
+		}
+		sealed, _, respBindHash, sealErr := c.maybeSealNonStreamResponse(ctx, withUsage)
+		if sealErr != nil {
+			ctx.Writer.Header().Del("ZG-Res-Key")
+			if profileInHand {
+				ctx.Set(monitor.CtxKeyFailureSource, monitor.FailureSourceUpstream)
+			}
+			c.handleBrokerError(ctx, sealErr, "seal embedding response")
+			return sealErr
+		}
+		outBody = sealed
+
+		reqBindHash, ok := e2eeReqBindHash(ctx)
+		if !ok {
+			err := fmt.Errorf("e2ee embedding response: request binding hash missing from context")
+			ctx.Writer.Header().Del("ZG-Res-Key")
+			c.handleBrokerError(ctx, err, "sign embedding response")
+			return err
+		}
+		// signChatResponse rather than this handler's own centralized/in-network
+		// switch below: the sealed turn owes §8 AND, on a centralized provider, the
+		// routing proof nested inside it — neither of which that switch can
+		// produce. It is also given reqModel.Upstream as the provider identity,
+		// which the unsealed switch below passes as "" (a pre-existing gap in this
+		// handler, left alone here rather than changed under an e2ee PR: altering
+		// it would change the signed content of proofs for existing plaintext
+		// embedding traffic).
+		e2eeSignedText := proof.SignedTextE2EEFromHashes(reqBindHash, respBindHash)
+		if err := c.signChatResponse(ctx, reqBody, outBody, chatKey, e2eeSignedText, reqModel.Upstream); err != nil {
+			// A broker fault (signChatE2EE fails when the TEE signer does), so 500.
+			ctx.Writer.Header().Del("ZG-Res-Key")
+			c.handleBrokerError(ctx, errors.Internal(err), "sign embedding response")
+			return err
+		}
+		signedEarly = true
+	}
+
+	if !signedEarly {
+		switch {
+		case c.Service.IsCentralized():
+			fingerprint := ctx.GetString(CtxKeyUpstreamCertFingerprint)
+			if err := c.signCentralizedRoutingProof(reqBody, body, chatKey, fingerprint, ""); err != nil {
+				c.logger.Errorf("routing proof not created for embedding %s: %v", chatKey, err)
+			}
+		case !c.Service.TargetSeparated:
+			if err := c.signChatWithKey(reqBody, body, chatKey); err != nil {
+				c.handleBrokerError(ctx, errors.Internal(err), "sign embedding response")
+				return err
+			}
+		}
+	}
+
+	if _, writeErr := ctx.Writer.Write(outBody); writeErr != nil {
+		if c.isClientDisconnectError(writeErr) {
+			ctx.Set("ignoreError", true)
+			c.logger.Warnf("Client disconnected during embedding response, billing for completed response (%d bytes)", len(outBody))
+		} else {
+			c.handleBrokerError(ctx, writeErr, "write embedding response")
+			// Still proceed to billing below.
 		}
 	}
 
