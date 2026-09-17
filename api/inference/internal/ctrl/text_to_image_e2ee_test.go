@@ -135,6 +135,10 @@ func TestProfileForRequest(t *testing.T) {
 		// to multipart inside the enclave, so the envelope is ordinary and only
 		// the materialization is new.
 		{"speech-to-text", constant.ServiceTypeSpeechToText, "", wire.ProfileSpeech, true},
+		// SPEC §7.4. Route-blind like text-to-image — the surface is whatever the
+		// path happened to be and must not change the answer.
+		{"embedding", constant.ServiceTypeEmbedding, "", wire.ProfileEmbedding, true},
+		{"embedding on a chat path", constant.ServiceTypeEmbedding, config.APIFormatOpenAI, wire.ProfileEmbedding, true},
 		// Still an ALLOWLIST, not a switch with a default. image-editing is the
 		// other multipart endpoint and §5.3 does not cover it yet, so it has no
 		// profile; video-generation and anything added later likewise. Guessing
