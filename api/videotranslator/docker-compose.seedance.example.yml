@@ -140,6 +140,75 @@
 # depends on how it asked: a 4K PIXEL SIZE snaps to 1080p, while the bare token
 # "4k" is not a recognised token at all and falls to the 720p default. There is no 4K tier for this model at all, so 2.0's
 # 4K-specific vendor rate limit (15 RPM / 1 concurrent) does not apply here.
+#
+# ============================================================================
+# Seedance 2.0 — same binary/image/command, a different runtime config.
+# ============================================================================
+#
+# 2.0 is served by this SAME container image and command
+# (0g-seedance-video-translator) — it is a version profile in
+# common/videospec/seedance.go, not a parallel deployment artifact. A
+# provider that wants 2.0 instead of 2.5 changes exactly these four things
+# relative to the service above:
+#
+#   1. SEEDANCE_MODEL_VERSION=2.0 in this container's environment (see
+#      cmd/server/seedance.go's isSeedance20). Left unset/anything else
+#      unrecognized means 2.5 — this is the ONLY thing that selects 2.0 in
+#      this file; everything else below is the broker-side config.yaml
+#      wiring 2.0 needs to actually agree with it.
+#   2. Broker-side on-chain Service.Url — same pattern as 2.5's #1 above, but
+#      the wire id is 2.0's own: "dreamina-seedance-2-0-260128", NOT
+#      "dreamina-seedance-2-5-260628" and NOT the router catalog's canonical
+#      "bytedance/seedance-2.0".
+#   3. Billing: set `vendor: seedance-2.0` (not plain `seedance`) on the
+#      model's billing config — this is what selects
+#      common/videospec/seedance.go's Seedance20 profile ([4,15]s duration,
+#      480p/720p/1080p/4k resolution) for the broker's pre-flight balance
+#      reserve, and it MUST agree with this container's
+#      SEEDANCE_MODEL_VERSION above: the reserve is computed broker-side from
+#      `vendor`, independently of what this sidecar actually enforces, and
+#      the two currently have no automated cross-check. If they disagree —
+#      e.g. `vendor: seedance-2.0` with SEEDANCE_MODEL_VERSION left unset —
+#      the broker reserves against 2.0's tighter 15s ceiling while this
+#      sidecar (running 2.5's rules) accepts and forwards up to 30s, which
+#      the vendor renders and bills for in full: a real, silent under-reserve
+#      relative to what gets charged. The translator's own request handling
+#      also treats the incoming request's own "model" field as the more
+#      trustworthy signal when it unambiguously names one version's wire or
+#      canonical id (logging a warning if it disagrees with
+#      SEEDANCE_MODEL_VERSION) — but that self-correction only helps once a
+#      request actually arrives with that model id populated; get `vendor`
+#      and SEEDANCE_MODEL_VERSION right at deploy time rather than relying on
+#      it.
+#      2.0's tokenPriceTiers needs a 4k row 2.5 doesn't have — BytePlus
+#      publishes no 4K per-token rate card, so this is derived from the
+#      vendor's own published formula (width × height × fps × duration /
+#      1024), not read off a price table (see
+#      common/videospec/seedance.go's seedance4kTokensPerSecond doc for the
+#      derivation). Official BytePlus rate card for 2.0 (USD per 1M tokens,
+#      no video input — same has_video_input caveat as 2.5's table above
+#      applies here too):
+#        billing:
+#          mode: per_video_token
+#          vendor: seedance-2.0
+#          tokenPriceTiers:
+#            - resolution: 480p
+#              multiplier: 0.9090909090909091   # 7.0 / 7.7
+#            - resolution: 720p
+#              multiplier: 0.9090909090909091
+#            - resolution: 1080p
+#              multiplier: 1                     # outputPrice's own tier (dearest): 7.7
+#            - resolution: 4k
+#              multiplier: 0.5194805194805194    # 4.0 / 7.7
+#   4. modelInfo/description etc.: mention the 4-15s range (not 2.5's 4-30),
+#      the 4k tier, and that this model has no output_format field at all
+#      (2.0's wire shape predates it — a client-supplied value is silently
+#      ignored, never forwarded or rejected).
+#
+# Everything else — TEE wiring (targetTLSProxy/upstreamDomain/providerType),
+# SEEDANCE_BASE_URL, duration clamping (not rejection) behavior, and the
+# text-to-video / single-first-frame-image-to-video capability scope — is
+# identical to 2.5 above.
 services:
   0g-seedance-video-translator:
     image: ghcr.io/0gfoundation/0g-serving-broker:latest

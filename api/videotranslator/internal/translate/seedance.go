@@ -408,6 +408,164 @@ func FromSeedanceGetTaskResponse(publicID string, resp seedance.GetTaskResponse)
 	return out
 }
 
+// ============================================================================
+// Seedance 2.0 — shares this entire file's helpers (seedanceFirstFrame,
+// seedanceReferenceImage, isSeedanceAssetScheme, sizeToSeedanceRatio,
+// parseSeedanceSeed) verbatim: those rules are version-independent, part of
+// this integration's own client-facing surface, not the vendor's. Only three
+// things differ, all confirmed against this integration's own prior (later
+// retired) 2.0 client implementation (0g-serving-broker@def557a, @857b4e4)
+// and this repo's own 2.0->2.5 migration commit (@8ef9a5e), plus a
+// third-party Seedance 2.0 API reference (OpenRouter's model page) for the
+// duration/resolution enums:
+//
+//  1. Duration/resolution rules come from videospec.Seedance20, not
+//     videospec.Seedance — 2.0's ceiling is 15s (not 2.5's 30s) and its
+//     resolution set adds 4k.
+//  2. output_format is never sent. internal/seedance.CreateRequest carries
+//     the field because 2.5 needs it, but that field did not exist on
+//     Seedance 2.0's own wire shape at all (it was added in the 2.5
+//     migration) — forwarding it to a 2.0 wire model risks a 400 from
+//     BytePlus's strict validation of a field 2.0 never documented.
+//  3. The wire/canonical model id pair is 2.0's own
+//     (dreamina-seedance-2-0-260128 / bytedance/seedance-2.0), not 2.5's.
+//
+// Deliberately NOT reintroduced here: last-frame control and multimodal
+// reference generation, which 2.0's original (later retired) implementation
+// had. 2.5's own migration already dropped those from this integration's
+// client-facing surface for a reason independent of which Seedance version is
+// behind it — OpenAI's Video API has no field to express either one (see
+// ToSeedanceCreateRequest's doc) — and that reasoning applies to 2.0 exactly
+// as it does to 2.5. Reintroducing them for 2.0 only would make the two
+// versions' client-facing surfaces gratuitously different for a reason that
+// has nothing to do with the vendor.
+// ============================================================================
+
+// seedanceV2CanonicalModelID / seedanceV2DefaultWireModel: 2.0's own
+// canonical/wire pair. The wire id is exactly what this integration's own
+// prior 2.0 client sent (0g-serving-broker@def557a) before 2.5 replaced it.
+const (
+	seedanceV2CanonicalModelID = "bytedance/seedance-2.0"
+	seedanceV2DefaultWireModel = "dreamina-seedance-2-0-260128"
+)
+
+// seedanceWireModelV2 mirrors seedanceWireModel for 2.0's own canonical/wire
+// pair — see that function's doc for the remap's purpose.
+func seedanceWireModelV2(model string) string {
+	if strings.TrimSpace(model) == seedanceV2CanonicalModelID {
+		return seedanceV2DefaultWireModel
+	}
+	return model
+}
+
+// SeedanceVersionFromModel reports which Seedance version, if any, model
+// unambiguously identifies — checking both the canonical (bytedance/seedance-
+// 2.0 or -2.5) and wire (dreamina-seedance-2-0-260128 or -2-5-260628)
+// spellings for each version. ok is false for anything else (empty, a typo,
+// a value neither version uses), in which case the caller should fall back
+// to its own configured default rather than guess.
+//
+// This exists to close a real config-drift risk: SEEDANCE_MODEL_VERSION
+// (cmd/server/seedance.go, this sidecar's own env var) is a per-PROCESS
+// default set once at startup, but the broker's pre-flight balance reserve
+// (inference/internal/ctrl/video_reserve.go, a different process entirely)
+// resolves its copy of these rules from a COMPLETELY DIFFERENT config value
+// — billing.vendor, in the deploy config — with no code linking the two or
+// detecting when they disagree. The request's own "model" field is the more
+// trustworthy signal precisely because it is what billing.vendor's reserve
+// is computed against AND what actually gets forwarded to the vendor (via
+// seedanceWireModel/seedanceWireModelV2) — it can only be wrong if the
+// operator mis-registered the provider's on-chain model id, a pre-existing
+// risk those two functions already defend against, not a new one this
+// introduces.
+func SeedanceVersionFromModel(model string) (is20, ok bool) {
+	switch strings.TrimSpace(model) {
+	case seedanceV2CanonicalModelID, seedanceV2DefaultWireModel:
+		return true, true
+	case seedanceCanonicalModelID, seedanceDefaultWireModel:
+		return false, true
+	default:
+		return false, false
+	}
+}
+
+// seedanceSpecV2 is 2.0's own videospec profile — see seedanceSpec's doc for
+// why the broker and this translator must read the very same rules.
+var seedanceSpecV2 = videospec.Seedance20
+
+// normalizeSeedanceResolutionV2 mirrors normalizeSeedanceResolution, reading
+// videospec.Seedance20 instead of videospec.Seedance.
+func normalizeSeedanceResolutionV2(size string) string {
+	return seedanceSpecV2.Tier(size)
+}
+
+// parseSeedanceDurationV2 mirrors parseSeedanceDuration, reading
+// videospec.Seedance20 instead of videospec.Seedance — the only behavioral
+// difference is 2.0's own [4,15] ceiling rather than 2.5's [4,30].
+func parseSeedanceDurationV2(seconds string) int64 {
+	d, outcome := seedanceSpecV2.NormalizeSeconds(seconds)
+	if outcome != videospec.SecondsResolved {
+		return 0
+	}
+	return d
+}
+
+// ToSeedanceV2CreateRequest mirrors ToSeedanceCreateRequest for Seedance
+// 2.0 — same content/ratio/watermark/seed/camera_fixed construction, reusing
+// every version-independent helper verbatim; only the three differences this
+// section's doc comment lists apply: 2.0's own duration/resolution rules, no
+// output_format, and 2.0's own wire/canonical model id pair.
+func ToSeedanceV2CreateRequest(req CreateVideoRequest) seedance.CreateRequest {
+	content := []seedance.ContentItem{{Type: "text", Text: req.Prompt}}
+	ratio := sizeToSeedanceRatio(req.Size)
+
+	if ref := seedanceFirstFrame(req); ref != "" {
+		content = append(content, seedance.ContentItem{
+			Type:     "image_url",
+			ImageURL: &seedance.URLRef{URL: ref},
+			Role:     "first_frame",
+		})
+		ratio = "adaptive"
+	}
+
+	// Same reasoning as ToSeedanceCreateRequest: no paying customer wants the
+	// vendor's default AI watermark, and there is no client-facing field to
+	// opt back in.
+	watermark := false
+
+	return seedance.CreateRequest{
+		Model:       seedanceWireModelV2(req.Model),
+		Content:     content,
+		Resolution:  normalizeSeedanceResolutionV2(req.Size),
+		Ratio:       ratio,
+		Duration:    parseSeedanceDurationV2(req.Seconds),
+		Watermark:   &watermark,
+		Seed:        parseSeedanceSeed(req.Seed),
+		CameraFixed: req.CameraFixed,
+		// OutputFormat intentionally omitted — see this section's doc
+		// comment, point 2. Never populated from req.OutputFormat here, even
+		// if a client sent one: 2.0's wire shape predates the field.
+	}
+}
+
+// ValidateSeedanceV2CreateRequest mirrors ValidateSeedanceCreateRequest for
+// 2.0's own duration rules (videospec.Seedance20); the asset:// / file_id
+// rules are version-independent (this integration exposes the same
+// text-to-video / single-first-frame-image-to-video subset for both
+// versions) and enforced identically.
+func ValidateSeedanceV2CreateRequest(req CreateVideoRequest) error {
+	if _, outcome := seedanceSpecV2.NormalizeSeconds(req.Seconds); outcome == videospec.SecondsRejected {
+		return ErrSecondsOutOfRange
+	}
+	if isSeedanceAssetScheme(req.InputReferenceImageURL) {
+		return fmt.Errorf("input_reference asset:// scheme is not supported")
+	}
+	if strings.TrimSpace(req.InputReferenceFileID) != "" {
+		return fmt.Errorf("input_reference.file_id is not supported for this model; use image_url instead")
+	}
+	return nil
+}
+
 // ValidateSeedanceCreateRequest is the create-time pre-flight, surfaced by
 // the handler as a 400. It enforces the rules left once this integration
 // is scoped to only the OpenAI-expressible subset of Seedance (text-to-video,
