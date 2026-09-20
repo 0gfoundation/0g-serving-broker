@@ -44,6 +44,12 @@ func TestTargetRoute_ContainsVideos(t *testing.T) {
 	}
 }
 
+func TestTargetRoute_ContainsDecisions(t *testing.T) {
+	if _, ok := constant.TargetRoute["/decisions"]; !ok {
+		t.Error("expected /decisions to be in TargetRoute")
+	}
+}
+
 func TestTargetRoute_VideoSubpathsNotInTargetRoute(t *testing.T) {
 	// Video status and content paths should NOT be in TargetRoute
 	// (they use AuthRequiredPrefixes instead)

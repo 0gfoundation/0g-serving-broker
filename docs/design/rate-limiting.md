@@ -11,7 +11,7 @@ different resource type:
 | Dimension | Unit | Applies To | Purpose |
 |-----------|------|------------|---------|
 | **RPM** (Requests Per Minute) | Request count | All services | Prevent cancel-retry abuse and general request flooding |
-| **TPM** (Tokens Per Minute) | Token count | chatbot, speech-to-text, embedding | Prevent GPU exhaustion via large-context requests |
+| **TPM** (Tokens Per Minute) | Token count | chatbot, speech-to-text, embedding, decisions | Prevent GPU exhaustion via large-context requests |
 | **IPM** (Images Per Minute) | Image count | text-to-image, image-editing | Prevent GPU exhaustion via bulk image generation |
 
 Whitelisted users (internal services, monitoring) are exempt from all per-user limits
@@ -23,7 +23,7 @@ but remain subject to the global concurrency limit.
 Request In
   │
   ├─ RPM check ─────── (all services, cheap, no resource acquisition)
-  ├─ TPM check ─────── (chatbot/speech-to-text/embedding only)
+  ├─ TPM check ─────── (chatbot/speech-to-text/embedding/decisions only)
   ├─ IPM check ─────── (text-to-image/image-editing only)
   ├─ Concurrency check  (acquire slot, defer Release)
   │
@@ -31,7 +31,7 @@ Request In
   ├─ Forward to backend
   │
   └─ Response complete
-       ├─ chatbot/stt/embedding ──→ ConsumeTokens(actual_tokens)
+       ├─ chatbot/stt/embedding/decisions ──→ ConsumeTokens(actual_tokens)
        └─ image services → ConsumeTokens(image_count)
 ```
 
@@ -270,6 +270,7 @@ All three dimensions return consistent 429 error responses:
 | `api/inference/internal/ctrl/chatbot.go` | TPM post-consume (chatbot) |
 | `api/inference/internal/ctrl/speech_to_text.go` | TPM post-consume (speech-to-text) |
 | `api/inference/internal/ctrl/embedding.go` | TPM post-consume (embedding) |
+| `api/inference/internal/ctrl/decisions.go` | TPM post-consume (decisions) |
 | `api/inference/internal/ctrl/text_to_image.go` | IPM post-consume (text-to-image) |
 | `api/inference/internal/ctrl/image_editing.go` | IPM post-consume (image-editing) |
 | `api/inference/internal/handler/models.go` | Rate limits in /v1/models response |

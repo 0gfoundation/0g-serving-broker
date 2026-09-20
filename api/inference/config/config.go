@@ -2437,15 +2437,15 @@ func applyAndValidate(cfg *Config, raw map[string]interface{}) error {
 	// service.upstreamModel / modelAliases / canonicalID are consumed only by
 	// PrepareHTTPRequest's single-model rewrite path (proxy.go), which runs
 	// exclusively on the chatbot JSON request path — setting any of them on an
-	// embedding service would silently no-op (no rewrite, no alias
+	// embedding or decisions service would silently no-op (no rewrite, no alias
 	// acceptance, no canonical mapping) rather than producing the behavior an
 	// operator configuring them would expect. Reject at load rather than let
 	// a config that looks correct do nothing at request time. Scoped to
-	// embedding only: the other non-chatbot types (speech-to-text,
+	// embedding and decisions only: the other non-chatbot types (speech-to-text,
 	// text-to-image, image-editing, video-generation) have this exact same
 	// gap pre-existing this change, and retroactively tightening it for them
 	// is out of scope here.
-	if cfg.Service.Type == constant.ServiceTypeEmbedding {
+	if cfg.Service.Type == constant.ServiceTypeEmbedding || cfg.Service.Type == constant.ServiceTypeDecisions {
 		if cfg.Service.UpstreamModel != "" {
 			return fmt.Errorf("invalid config: service.upstreamModel is only supported for service type '%s' (the body rewrite runs only on the JSON chatbot path), got '%s'", constant.ServiceTypeChatbot, cfg.Service.Type)
 		}

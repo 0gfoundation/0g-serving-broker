@@ -84,7 +84,7 @@ func (c *Ctrl) handleEmbeddingResponse(ctx *gin.Context, resp *http.Response, _ 
 	// forwarder+centralized case this feature targets.
 	// Handles decompression itself (see its own doc).
 	if c.Service.IsForwarder() {
-		body = c.sanitizeForwarderEmbeddingResponseBody(ctx, body, resp.Header.Get("Content-Encoding"))
+		body = c.sanitizeForwarderResponseBodyExcept(ctx, body, resp.Header.Get("Content-Encoding"), "data", "")
 	}
 
 	// Signing: centralized providers get a routing proof (TLS cert fingerprint
@@ -230,7 +230,7 @@ func (c *Ctrl) updateEmbeddingWithUsage(ctx *gin.Context, usage *EmbeddingUsage,
 	metricUpstream := c.metricUpstream(ctx)
 	monitor.RecordTokens(embeddingMetricLabel, metricModel, metricUpstream, int64(usage.PromptTokens), 0)
 
-	c.consumeEmbeddingLimiter(ctx, usage.PromptTokens)
+	c.consumeTPMLimiter(ctx, usage.PromptTokens)
 	return nil
 }
 
@@ -255,30 +255,30 @@ func embeddingTieredInputPrice(tiers []config.PricingTier, basePrice string, pro
 	return price, matchedTierRateClass(tiers, promptTokens), nil
 }
 
-// consumeEmbeddingLimiter feeds the post-consume TPM bucket with the actual
-// token count. Mirrors speech-to-text's consumeSpeechToTextLimiter, including
+// consumeTPMLimiter feeds the post-consume TPM bucket with the actual token
+// count (embedding and decisions). Mirrors speech-to-text's consumeSpeechToTextLimiter, including
 // its debug-only "missing" logging: these are not errors (some tests / internal
 // calls drive Ctrl without a gin context), but if a production path ever
 // stopped wiring the limiter through, rate limiting would silently disable for
-// embedding — the debug logs let operators discover that by toggling log level.
-func (c *Ctrl) consumeEmbeddingLimiter(ctx *gin.Context, tokens int) {
+// these services — the debug logs let operators discover that by toggling log level.
+func (c *Ctrl) consumeTPMLimiter(ctx *gin.Context, tokens int) {
 	if tokens <= 0 {
 		return
 	}
 	userAddr, ok := ctx.Get("userAddress")
 	userStr, userOk := userAddr.(string)
 	if !ok || !userOk {
-		c.logger.Debugf("consumeEmbeddingLimiter: userAddress missing from gin.Context (tokens=%d), limiter skipped", tokens)
+		c.logger.Debugf("consumeTPMLimiter: userAddress missing from gin.Context (tokens=%d), limiter skipped", tokens)
 		return
 	}
 	tpmLimiter, exists := ctx.Get("tpmLimiter")
 	if !exists {
-		c.logger.Debugf("consumeEmbeddingLimiter: tpmLimiter missing from gin.Context user=%s (tokens=%d), limiter skipped", userStr, tokens)
+		c.logger.Debugf("consumeTPMLimiter: tpmLimiter missing from gin.Context user=%s (tokens=%d), limiter skipped", userStr, tokens)
 		return
 	}
 	limiter, ok := tpmLimiter.(*middleware.PerUserTPMLimiter)
 	if !ok {
-		c.logger.Debugf("consumeEmbeddingLimiter: tpmLimiter has unexpected type %T user=%s (tokens=%d), limiter skipped", tpmLimiter, userStr, tokens)
+		c.logger.Debugf("consumeTPMLimiter: tpmLimiter has unexpected type %T user=%s (tokens=%d), limiter skipped", tpmLimiter, userStr, tokens)
 		return
 	}
 	limiter.ConsumeTokens(userStr, tokens)
@@ -364,15 +364,16 @@ func countTokenIDs(input json.RawMessage) int {
 	return 0
 }
 
-// sanitizeForwarderEmbeddingResponseBody is sanitizeForwarderResponseBody's
-// embedding-scoped counterpart: same decompress-first contract (a compressed
-// body is decoded before sanitizing so the #184 leak control can never
-// silently no-op on bytes it cannot parse as JSON), but calls
-// sanitizeEmbeddingResponseBody instead of the general-purpose
-// sanitizeResponseBody, so the (potentially large) `data` vector array is
-// never decoded into Go's generic interface{} tree. See
-// sanitizeEmbeddingResponseBody's doc for why that matters here specifically.
-func (c *Ctrl) sanitizeForwarderEmbeddingResponseBody(ctx *gin.Context, body []byte, contentEncoding string) []byte {
+// sanitizeForwarderResponseBodyExcept is sanitizeForwarderResponseBody's
+// carve-out counterpart: same decompress-first contract (a compressed body is
+// decoded before sanitizing so the #184 leak control can never silently no-op
+// on bytes it cannot parse as JSON), but calls sanitizeResponseBodyExcept so
+// the top-level `carveOut` key is never decoded or walked. Embedding passes
+// "data" (the vector array — see sanitizeResponseBodyExcept for why),
+// decisions passes "answers" (user-named keys that may legitimately collide
+// with a leak key). newID is forwarded to sanitizeResponseBody's id rewrite
+// ("" leaves the upstream id alone).
+func (c *Ctrl) sanitizeForwarderResponseBodyExcept(ctx *gin.Context, body []byte, contentEncoding, carveOut, newID string) []byte {
 	out := body
 	if isCompressedEncoding(contentEncoding) {
 		decoded, err := decodeBody(body, contentEncoding)
@@ -383,16 +384,20 @@ func (c *Ctrl) sanitizeForwarderEmbeddingResponseBody(ctx *gin.Context, body []b
 		out = decoded
 		ctx.Writer.Header().Del("Content-Encoding")
 	}
-	if sanitized, changed := c.sanitizeEmbeddingResponseBody(out); changed {
+	if sanitized, changed := c.sanitizeResponseBodyExcept(out, carveOut, newID); changed {
 		return sanitized
 	}
 	return out
 }
 
-// sanitizeEmbeddingResponseBody strips #184 upstream identity/cost leak
-// fields from an embeddings response body without paying the cost of
-// decoding `data` (the embedding vectors) into Go's generic interface{}
-// tree — which the shared sanitizeResponseBody/stripLeakKeys machinery does,
+// sanitizeResponseBodyExcept strips #184 upstream identity/cost leak fields
+// from a response body while leaving the top-level `carveOut` key untouched.
+// Two callers, two reasons: embedding carves out `data` (the vectors) to avoid
+// decoding them into Go's generic interface{} tree; decisions carves out
+// `answers`, whose keys are user-chosen question / option names that could
+// legitimately be "cost" or "provider" and must not be stripped as leaks.
+//
+// The embedding cost argument: decoding `data` — which the shared sanitizeResponseBody/stripLeakKeys machinery does,
 // and which scales with vector count × dimensions: a 64-input batch at 1536
 // dimensions is roughly 1MB of floats, each becoming its own heap-allocated
 // json.Number under sanitizeResponseBody's decoder. None of the #184 leak
@@ -401,47 +406,48 @@ func (c *Ctrl) sanitizeForwarderEmbeddingResponseBody(ctx *gin.Context, body []b
 // {object, index, embedding}, per the OpenAI Embeddings API shape — so `data`
 // is carved out untouched here and reattached after sanitizing every OTHER
 // top-level field with that same, already-tested stripLeakKeys logic (via
-// sanitizeResponseBody), rather than duplicating a second leak-key list that
-// could drift out of sync with it.
+// sanitizeResponseBody, which also applies the newID rewrite when non-empty),
+// rather than duplicating a second leak-key list that could drift out of sync
+// with it.
 //
 // Returns (body, false) unchanged on any decode/encode failure or when
 // nothing needed stripping, matching sanitizeResponseBody's own fail-open
 // contract: a body this cannot parse is forwarded as-is rather than dropped.
-func (c *Ctrl) sanitizeEmbeddingResponseBody(body []byte) ([]byte, bool) {
+func (c *Ctrl) sanitizeResponseBodyExcept(body []byte, carveOut, newID string) ([]byte, bool) {
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(body, &top); err != nil {
 		if len(bytes.TrimSpace(body)) > 0 {
-			c.logger.Warnf("sanitizeEmbeddingResponseBody: body not a JSON object, leak-field stripping skipped (forwarded unsanitized): %v", err)
+			c.logger.Warnf("sanitizeResponseBodyExcept: body not a JSON object, leak-field stripping skipped (forwarded unsanitized): %v", err)
 		}
 		return body, false
 	}
 
-	rawData, hasData := top["data"]
-	delete(top, "data")
+	rawCarved, hasCarved := top[carveOut]
+	delete(top, carveOut)
 
 	rest, err := json.Marshal(top)
 	if err != nil {
-		c.logger.Errorf("sanitizeEmbeddingResponseBody: failed to marshal non-data fields, forwarding original unsanitized: %v", err)
+		c.logger.Errorf("sanitizeResponseBodyExcept: failed to marshal non-%s fields, forwarding original unsanitized: %v", carveOut, err)
 		return body, false
 	}
 
-	sanitizedRest, changed := c.sanitizeResponseBody(rest, "")
+	sanitizedRest, changed := c.sanitizeResponseBody(rest, newID)
 	if !changed {
 		return body, false
 	}
 
 	var sanitizedTop map[string]json.RawMessage
 	if err := json.Unmarshal(sanitizedRest, &sanitizedTop); err != nil {
-		c.logger.Errorf("sanitizeEmbeddingResponseBody: failed to re-parse sanitized fields, forwarding original unsanitized: %v", err)
+		c.logger.Errorf("sanitizeResponseBodyExcept: failed to re-parse sanitized fields, forwarding original unsanitized: %v", err)
 		return body, false
 	}
-	if hasData {
-		sanitizedTop["data"] = rawData
+	if hasCarved {
+		sanitizedTop[carveOut] = rawCarved
 	}
 
 	out, err := json.Marshal(sanitizedTop)
 	if err != nil {
-		c.logger.Errorf("sanitizeEmbeddingResponseBody: failed to re-encode sanitized body, forwarding original unsanitized: %v", err)
+		c.logger.Errorf("sanitizeResponseBodyExcept: failed to re-encode sanitized body, forwarding original unsanitized: %v", err)
 		return body, false
 	}
 	return out, true
