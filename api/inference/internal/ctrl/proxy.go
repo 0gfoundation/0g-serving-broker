@@ -1265,13 +1265,17 @@ func (c *Ctrl) EnforceConfiguredModel(body []byte, userAddr string) ([]byte, err
 			c.logger.Warnf("Model mismatch detected and REJECTED: user=%s, requested=%s, accepted=%v",
 				userAddr, requestModelStr, accepted)
 
-			// Record this attempt in rate limiter if user address is available
-			if userAddr != "" {
+			// Record this attempt in rate limiter if user address is available.
+			// Whitelisted callers are exempt for the same reason they skip the
+			// per-user limiters in proxy.go: they are internal services, and the
+			// router in particular multiplexes every end user onto one address,
+			// so a block there punishes everyone for one client's bad name.
+			if userAddr != "" && !c.IsWhitelistedUser(userAddr) {
 				rateLimiter := GetRateLimiter()
-				shouldBlock, blockedUntil := rateLimiter.RecordModelMismatch(userAddr)
+				shouldBlock, blockedUntil := rateLimiter.RecordModelMismatch(userAddr, requestModelStr)
 				if shouldBlock {
-					c.logger.Warnf("User will be blocked due to excessive model mismatch: user=%s, blocked_until=%s",
-						userAddr, blockedUntil.Format("2006-01-02 15:04:05"))
+					c.logger.Warnf("User will be blocked due to excessive model mismatch: user=%s, model=%s, blocked_until=%s",
+						userAddr, requestModelStr, blockedUntil.Format("2006-01-02 15:04:05"))
 				}
 			}
 
@@ -1636,12 +1640,12 @@ func (c *Ctrl) ResolveModelForBilling(ctx *gin.Context, body []byte, contentType
 // when ResolveRequestedModel reports the requested model is not allowed.
 func (c *Ctrl) recordModelMismatch(userAddr, requestModel string) {
 	c.logger.Warnf("Model allowlist rejected: user=%s, requested=%s", userAddr, requestModel)
-	if userAddr != "" {
+	if userAddr != "" && !c.IsWhitelistedUser(userAddr) {
 		rateLimiter := GetRateLimiter()
-		shouldBlock, blockedUntil := rateLimiter.RecordModelMismatch(userAddr)
+		shouldBlock, blockedUntil := rateLimiter.RecordModelMismatch(userAddr, requestModel)
 		if shouldBlock {
-			c.logger.Warnf("User will be blocked due to excessive invalid model requests: user=%s, blocked_until=%s",
-				userAddr, blockedUntil.Format("2006-01-02 15:04:05"))
+			c.logger.Warnf("User will be blocked due to excessive invalid model requests: user=%s, model=%s, blocked_until=%s",
+				userAddr, requestModel, blockedUntil.Format("2006-01-02 15:04:05"))
 		}
 	}
 }

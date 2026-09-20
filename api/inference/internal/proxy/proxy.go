@@ -757,25 +757,44 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		middleware.SetRateLimitHeaders(ctx, ctx.Request.URL.Path, rpmInfo, resourceInfo, resourceType)
 	}
 
-	// Check if user is rate-limited due to excessive model mismatch attempts
-	rateLimiter := ctrl.GetRateLimiter()
-	if blocked, blockedUntil := rateLimiter.IsBlocked(userAddress); blocked {
-		// User is blocked - return error immediately without processing.
-		// Recorded (not per-event logged) because a blocked client that keeps
-		// retrying would otherwise emit one warning per request until the block
-		// expires — the same unbounded-log concern as the rate-limit gate.
-		ctx.Set("ignoreError", true)
-		remainingTime := blockedUntil.Sub(time.Now())
-		p.rejections.record(ctx, monitor.RejectionModelMismatch, userAddress)
+	reqModelName := ctrl.ExtractModelName(reqBody, ctx.Request.Header.Get("Content-Type"))
 
-		ctx.JSON(http.StatusTooManyRequests, gin.H{
-			"error": fmt.Sprintf("Rate limit exceeded: too many invalid model requests. Please try again in %v", remainingTime.Round(time.Minute)),
-		})
-		return
+	// Check whether this caller is blocked for spamming THIS model name.
+	//
+	// Both halves of that sentence are load-bearing, and both were wrong before:
+	// the block was keyed on the address alone, and it sat outside the
+	// !isWhitelisted guard above. Our router reaches the broker as one
+	// whitelisted address on behalf of every end user, so any client spamming a
+	// model we do not serve blocked EVERY model on this provider for EVERY
+	// router user for an hour (observed 2026-09-20: gpt-5.6-luna, the only
+	// provider serving it network-wide, dark for 3.5h behind a gpt-4o probe).
+	// Whitelisted callers are now exempt, matching the per-user limiters above,
+	// and the key is per (caller, model) so a bad name cannot reach a good one.
+	if !isWhitelisted {
+		// Normalize the empty request model the same way the recording side
+		// does (ResolveModelForBilling), or a recorded block never matches.
+		blockModel := reqModelName
+		if blockModel == "" {
+			blockModel = p.ctrl.Service.ModelType
+		}
+		rateLimiter := ctrl.GetRateLimiter()
+		if blocked, blockedUntil := rateLimiter.IsBlocked(userAddress, blockModel); blocked {
+			// User is blocked - return error immediately without processing.
+			// Recorded (not per-event logged) because a blocked client that keeps
+			// retrying would otherwise emit one warning per request until the block
+			// expires — the same unbounded-log concern as the rate-limit gate.
+			ctx.Set("ignoreError", true)
+			remainingTime := blockedUntil.Sub(time.Now())
+			p.rejections.record(ctx, monitor.RejectionModelMismatch, userAddress)
+
+			ctx.JSON(http.StatusTooManyRequests, gin.H{
+				"error": fmt.Sprintf("Rate limit exceeded: too many invalid model requests for %q. Please try again in %v", blockModel, remainingTime.Round(time.Minute)),
+			})
+			return
+		}
 	}
 
 	// LoRA owner check: for ft-* models, verify requester is the task owner
-	reqModelName := ctrl.ExtractModelName(reqBody, ctx.Request.Header.Get("Content-Type"))
 	if err := p.ctrl.CheckLoRAOwnership(reqModelName, userAddress); err != nil {
 		ctx.Set("ignoreError", true)
 		if errors.Is(err, ctrl.ErrLoRAUnavailable) {
