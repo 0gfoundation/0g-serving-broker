@@ -3900,6 +3900,26 @@ service:
 	}
 }
 
+// TestLoadConfig_DecisionsRejectsServiceLevelUpstreamModel: decisions shares
+// embedding's rewrite-path gap (the JSON body rewrite runs only on the chatbot
+// path), so the same load-time rejection applies. Operators point a decisions
+// service at OpenRouter's public model id directly.
+func TestLoadConfig_DecisionsRejectsServiceLevelUpstreamModel(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://openrouter.ai/api/alpha"
+  type: "decisions"
+  model: "typesafe/jev-1.13"
+  verifiability: "TeeML"
+  upstreamModel: "~typesafe/jev-latest"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "upstreamModel is only supported") {
+		t.Fatalf("expected service-level upstreamModel rejection for decisions, got: %v", err)
+	}
+}
+
 // TestLoadConfig_EmbeddingRejectsServiceLevelModelAliases mirrors
 // TestLoadConfig_EmbeddingRejectsServiceLevelUpstreamModel for
 // service.modelAliases — same rewrite-path gap, same fix.

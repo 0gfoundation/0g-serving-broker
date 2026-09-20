@@ -23,8 +23,15 @@ func (d *DB) ListRequest(q model.RequestListOptions) ([]model.Request, *big.Int,
 		ret := tx.Model(model.Request{}).
 			Where("processed = ? ", q.Processed)
 
+		// ExcludeZeroOutput keeps its name for the /request list API, but the
+		// predicate is "counts not yet finalized": a row is created with both
+		// counts 0 and stays that way while in flight, on a vendor error, or on
+		// a video reserve (ReserveRequestFee). Input-only modalities — embedding,
+		// decisions with a free output side — finalize with output_count = 0 and
+		// a positive input_count, and must still settle; keying on output alone
+		// left every such row unsettleable (and then pruned).
 		if q.ExcludeZeroOutput {
-			ret = ret.Where("output_count != ?", 0)
+			ret = ret.Where("NOT (input_count = 0 AND output_count = 0)")
 		}
 
 		// Exclude requests currently being settled on-chain
@@ -148,7 +155,7 @@ func (d *DB) UpdateRequestVideoBilling(requestHash, outputFee, fee string, secon
 // CalculateUnsettledFee (which sums fee over unprocessed rows) counts it against
 // the wallet's balance while the work is outstanding.
 //
-// Only output_count stays 0, which keeps the row out of on-chain settlement
+// Both counts stay 0, which keeps the row out of on-chain settlement
 // (ListRequest's ExcludeZeroOutput) — a reserve is a hold on the balance, never
 // something to settle. The settling path overwrites both when the real amount
 // lands; the release paths reset the fee to "0".
@@ -229,7 +236,7 @@ func (d *DB) PruneRequest(pruneThreshold time.Duration) error {
 			model.VideoPollStatusPending,
 			model.VideoPollStatusPolling,
 		})
-	return d.db.Where("output_count = 0 AND created_at <= ?", cutoffTime).
+	return d.db.Where("input_count = 0 AND output_count = 0 AND created_at <= ?", cutoffTime).
 		Where("request_hash NOT IN (?)", activeVideoPollRequests).
 		Delete(&model.Request{}).Error
 }

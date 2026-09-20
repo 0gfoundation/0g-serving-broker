@@ -168,8 +168,8 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 	// shape) can price it. Single-model providers keep billing at the configured
 	// on-chain price (resolvedModel unset).
 	//
-	// Embedding is deliberately NOT in this list: multi-model pricing for
-	// embedding is rejected outright at config load (validateModelPricing,
+	// Embedding and decisions are deliberately NOT in this list: multi-model
+	// pricing for them is rejected outright at config load (validateModelPricing,
 	// model_pricing.go) rather than supported here, so there is no resolution
 	// path to wire — an embedding service always bills at its single configured
 	// on-chain price. Revisit together if multi-model embedding billing is
@@ -512,6 +512,8 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 		return c.handleImageEditingResponse(ctx, resp, account, outputPrice, body, reqModel)
 	case "embedding":
 		return c.handleEmbeddingResponse(ctx, resp, account, outputPrice, body, reqModel)
+	case "decisions":
+		return c.handleDecisionsResponse(ctx, resp, account, outputPrice, body, reqModel)
 	case "video-generation":
 		return c.handleVideoGenerationResponse(ctx, resp, account, outputPrice, body, reqModel)
 	default:

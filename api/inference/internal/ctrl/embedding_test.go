@@ -463,20 +463,20 @@ func TestHandleEmbeddingResponse_WhitelistedStampsRateClass(t *testing.T) {
 	assert.Equal(t, "tier:unbounded", mockDB.calls[0].RateClass)
 }
 
-// TestSanitizeEmbeddingResponseBody_StripsTopLevelLeaksLeavesDataUntouched
-// covers both halves of sanitizeEmbeddingResponseBody's contract: (1) a
+// TestSanitizeResponseBodyExcept_StripsTopLevelLeaksLeavesDataUntouched
+// covers both halves of sanitizeResponseBodyExcept's contract (embedding's "data" carve-out): (1) a
 // top-level #184 leak key is stripped exactly as the shared
 // sanitizeResponseBody would, and (2) `data` — carved out and reattached
 // rather than run through the general decode — survives byte-for-byte,
 // proving the vector payload was never decoded into Go's generic
 // interface{} tree (the O(vector) cost this function exists to avoid).
-func TestSanitizeEmbeddingResponseBody_StripsTopLevelLeaksLeavesDataUntouched(t *testing.T) {
+func TestSanitizeResponseBodyExcept_StripsTopLevelLeaksLeavesDataUntouched(t *testing.T) {
 	c := newChatbotTestCtrl(t, config.Service{})
 
 	const rawData = `[{"object":"embedding","index":0,"embedding":[0.1,0.2,0.30000000001]}]`
 	body := []byte(`{"object":"list","data":` + rawData + `,"model":"m","usage":{"prompt_tokens":4,"total_tokens":4},"provider":"leaked-upstream"}`)
 
-	out, changed := c.sanitizeEmbeddingResponseBody(body)
+	out, changed := c.sanitizeResponseBodyExcept(body, "data", "")
 	require.True(t, changed, "the leaked provider field must trigger a change")
 
 	assert.NotContains(t, string(out), "leaked-upstream", "top-level leak key must be stripped")
@@ -492,15 +492,15 @@ func TestSanitizeEmbeddingResponseBody_StripsTopLevelLeaksLeavesDataUntouched(t 
 	}
 }
 
-// TestSanitizeEmbeddingResponseBody_NoLeaksReturnsUnchanged covers the
+// TestSanitizeResponseBodyExcept_NoLeaksReturnsUnchanged covers the
 // no-op path: a clean response (nothing to strip) must report changed=false,
 // matching sanitizeResponseBody's own contract, so callers skip the
 // re-encode when there is nothing to fix.
-func TestSanitizeEmbeddingResponseBody_NoLeaksReturnsUnchanged(t *testing.T) {
+func TestSanitizeResponseBodyExcept_NoLeaksReturnsUnchanged(t *testing.T) {
 	c := newChatbotTestCtrl(t, config.Service{})
 
 	body := []byte(`{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.1]}],"model":"m","usage":{"prompt_tokens":1,"total_tokens":1}}`)
-	out, changed := c.sanitizeEmbeddingResponseBody(body)
+	out, changed := c.sanitizeResponseBodyExcept(body, "data", "")
 	assert.False(t, changed)
 	assert.Equal(t, body, out)
 }

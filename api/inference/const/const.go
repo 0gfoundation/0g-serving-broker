@@ -19,6 +19,13 @@ const (
 	// response's `usage` carries no completion_tokens.
 	ServiceTypeEmbedding       = "embedding"
 	ServiceTypeVideoGeneration = "video-generation"
+	// ServiceTypeDecisions is the OpenRouter Decisions API shape (POST
+	// /decisions): a "System One" model (TypeSafe Jev) takes app state plus
+	// typed questions and returns typed answers with probabilities, not text.
+	// Synchronous (the endpoint ignores `stream`), billed on the response's
+	// `usage.input_tokens` / `usage.output_tokens` — Anthropic-style names, not
+	// prompt_tokens / completion_tokens.
+	ServiceTypeDecisions = "decisions"
 )
 
 // Provider type constants for distinguishing between decentralized GPU providers
@@ -110,6 +117,7 @@ var (
 		"/audio/transcriptions": {},
 		"/videos":               {}, // Video generation (OpenAI Video API)
 		"/embeddings":           {}, // Text embeddings (OpenAI Embeddings API)
+		"/decisions":            {}, // Typed decisions (OpenRouter Decisions API)
 	}
 
 	// FreePrefixes defines path prefixes that can be accessed without charging
