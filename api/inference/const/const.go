@@ -24,7 +24,11 @@ const (
 	// typed questions and returns typed answers with probabilities, not text.
 	// Synchronous (the endpoint ignores `stream`), billed on the response's
 	// `usage.input_tokens` / `usage.output_tokens` — Anthropic-style names, not
-	// prompt_tokens / completion_tokens.
+	// prompt_tokens / completion_tokens. service.model must be the upstream
+	// model id verbatim (e.g. typesafe/jev-1.13): the chatbot-only
+	// upstreamModel rewrite does not run on this path and the router forwards
+	// the on-chain id as the body's `model`. Output price must be 0 — see the
+	// load-time guard in config.go.
 	ServiceTypeDecisions = "decisions"
 )
 
