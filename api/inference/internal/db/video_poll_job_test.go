@@ -554,6 +554,42 @@ func TestPruneRequest_DeletesUnrelatedOldZeroOutputRequest(t *testing.T) {
 	}
 }
 
+// TestListRequest_InputOnlyRowIsSettleable pins the settlement predicate for input-only
+// modalities: embedding (and a decisions model with a free output side) finalize a row with a
+// positive input_count and output_count = 0. Keying settlement on output_count alone silently
+// left every such row unsettleable and then pruned — the provider did the work and could never
+// collect. A row with BOTH counts 0 is still an unfinalized row and must stay excluded/prunable.
+func TestListRequest_InputOnlyRowIsSettleable(t *testing.T) {
+	d := setupTestDB(t)
+	migrateVideoPollTables(t, d)
+	seedVideoRequest(t, d, "input-only")
+	seedVideoRequest(t, d, "never-finalized")
+
+	if err := d.UpdateRequestWithAccurateTokens("input-only", "477", "0", "477", 477, 0, "tokens", 0, 0, ""); err != nil {
+		t.Fatalf("UpdateRequestWithAccurateTokens: %v", err)
+	}
+
+	list, _, err := d.ListRequest(model.RequestListOptions{Processed: false, ExcludeZeroOutput: true})
+	if err != nil {
+		t.Fatalf("ListRequest: %v", err)
+	}
+	if len(list) != 1 || list[0].RequestHash != "input-only" {
+		t.Fatalf("settleable rows = %+v, want exactly the input-only row", list)
+	}
+
+	backdateRequestCreatedAt(t, d, "input-only", time.Now().Add(-2*time.Hour))
+	backdateRequestCreatedAt(t, d, "never-finalized", time.Now().Add(-2*time.Hour))
+	if err := d.PruneRequest(1 * time.Hour); err != nil {
+		t.Fatalf("PruneRequest: %v", err)
+	}
+	if _, err := d.GetRequest("input-only"); err != nil {
+		t.Fatalf("a finalized input-only row must survive PruneRequest, got: %v", err)
+	}
+	if _, err := d.GetRequest("never-finalized"); !errors.Is(err, gorm.ErrRecordNotFound) {
+		t.Fatalf("GetRequest error = %v, want gorm.ErrRecordNotFound (both-zero row must be pruned)", err)
+	}
+}
+
 // TestPruneRequest_DeletesRequestWithTerminalVideoPollJob confirms the exclusion is scoped to
 // non-terminal jobs only: once a VideoPollJob has resolved to completed/failed/timed_out, its
 // Request row is eligible for pruning like any other old zero-output row (a completed job's

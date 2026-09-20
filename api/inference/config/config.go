@@ -1246,8 +1246,9 @@ type AsyncConfig struct {
 	JobTimeoutMinutes int `yaml:"jobTimeoutMinutes,omitempty"`
 }
 
-// ZeroOutputRequestPruneThreshold is how old a zero-output Request row must be before
-// ctrl.SettleFeesWithTEE's periodic prune pass deletes it (db.PruneRequest). Exported here,
+// ZeroOutputRequestPruneThreshold is how old a Request row with both counts still 0 (never
+// finalized: in flight, vendor error, released reserve) must be before ctrl.SettleFeesWithTEE's
+// periodic prune pass deletes it (db.PruneRequest). Exported here,
 // rather than left as a local literal in settlement_tee.go, for discoverability.
 //
 // VideoPollConfig.MaxPollDuration does NOT need to stay under this value: a still in-flight

@@ -202,7 +202,7 @@ func (d *DB) CompleteVideoPollJobWithBilling(id uint64, claimAttempts int, reque
 
 // FailVideoPollJob marks a job failed — the provider reported a terminal failure, or a poll
 // attempt hit a non-retryable error. Bills nothing; the linked Request row (when one exists —
-// see IsWhitelisted) keeps its zero-output default and is excluded from settlement
+// see IsWhitelisted) keeps its zero-count defaults and is excluded from settlement
 // (ListRequest's ExcludeZeroOutput) until pruned.
 //
 // Guarded on status='polling' AND attempts=claimAttempts for the same reason as
