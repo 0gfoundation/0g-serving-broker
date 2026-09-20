@@ -43,10 +43,11 @@ type DecisionsUsage struct {
 // (POST /decisions). Always synchronous — the endpoint ignores `stream` and
 // returns one JSON object — so there is only one response path here, like
 // embedding and unlike chatbot's stream/non-stream split. Bills
-// InputTokens × InputPrice + OutputTokens × OutputPrice; the only decisions
-// model today (TypeSafe Jev) prices output at 0, which the operator expresses
-// as outputPrice "0" rather than this handler hardcoding an input-only
-// convention that a future decisions model may not share.
+// InputTokens × InputPrice + OutputTokens × OutputPrice. Config load currently
+// pins OutputPrice to 0 for this type (the router charges nothing on the
+// output side, so a non-zero price here would settle what the user never
+// paid); the formula keeps both terms so lifting that guard later needs no
+// handler change.
 func (c *Ctrl) handleDecisionsResponse(ctx *gin.Context, resp *http.Response, _ model.User, _ string, reqBody []byte, reqModel model.Request) error {
 	defer resp.Body.Close()
 
