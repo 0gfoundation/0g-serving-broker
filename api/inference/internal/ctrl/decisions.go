@@ -32,8 +32,8 @@ type DecisionsResponse struct {
 // OpenAI-style (prompt_tokens / completion_tokens), so chatbot.go's Usage
 // would decode both to zero and silently fall to the estimate — hence its own
 // type. `cost` (OpenRouter's wholesale figure) is a #184 leak key stripped
-// before the client sees the body; it is deliberately not modelled here so
-// nothing can bill from it.
+// for forwarder providers before the client sees the body; it is deliberately
+// not modelled here so nothing can bill from it.
 type DecisionsUsage struct {
 	InputTokens  int `json:"input_tokens"`
 	OutputTokens int `json:"output_tokens"`
