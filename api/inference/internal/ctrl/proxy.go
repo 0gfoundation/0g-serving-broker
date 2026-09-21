@@ -491,10 +491,20 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 		return c.handleResponse(ctx, resp)
 	}
 
-	_, err = c.GetOrCreateAccount(ctx, reqModel.UserAddress)
-	if err != nil {
-		c.handleBrokerError(ctx, err, "")
-		return err
+	// Whitelisted traffic is never billed or settled, so it has no use for the
+	// caller's on-chain sub-account with this provider. Requiring one anyway
+	// (the lookup below fails with "account not exists" when the caller has
+	// never funded this provider) coupled "free for this user" to "this user
+	// already paid this provider once", which blocked the router's own
+	// whitelisted wallet from reaching any provider it had not yet opened a
+	// sub-account with — including a not-yet-acknowledged one under test,
+	// where nothing ever opens it. The result of the lookup was discarded
+	// here in any case; `account` below carries only the address.
+	if !reqModel.IsWhitelisted {
+		if _, err = c.GetOrCreateAccount(ctx, reqModel.UserAddress); err != nil {
+			c.handleBrokerError(ctx, err, "")
+			return err
+		}
 	}
 
 	account := model.User{
