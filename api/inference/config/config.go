@@ -1652,6 +1652,18 @@ func validateUSDPriceString(field, value string) error {
 	return nil
 }
 
+// isZeroOrEmptyPrice reports whether a price string is unset or a decimal zero
+// ("", "0", "0.0", "000"). Non-numeric strings are NOT zero — they are left for
+// the field's own validator to reject with a precise message.
+func isZeroOrEmptyPrice(s string) bool {
+	trimmed := strings.TrimSpace(s)
+	if trimmed == "" {
+		return true
+	}
+	r, ok := new(big.Rat).SetString(trimmed)
+	return ok && r.Sign() == 0
+}
+
 // normalizeUSDPerUnitPrice validates a USD-per-unit decimal string (fieldPath
 // names it for error messages, e.g. "service.outputPriceUSDPerImage") and
 // normalizes it into the per-1M-unit representation the shared USD pipeline
@@ -2772,6 +2784,18 @@ func applyAndValidate(cfg *Config, raw map[string]interface{}) error {
 	// output price for a dimension that is never billed (and that value would
 	// otherwise be published on-chain by the price processor).
 	isEmbeddingType := cfg.Service.Type == constant.ServiceTypeEmbedding
+	// Decisions is priced on both sides by handleDecisionsResponse, but the
+	// router (0g-router DecisionsHandler) charges the user nothing for the
+	// output side — it cannot, its pricing layer reads a "0" completion price
+	// as absent. A non-zero output price here would therefore settle
+	// output_tokens × outputPrice against the router that it never collected.
+	// Refuse it at load, in either denomination, until the router can bill it;
+	// the only decisions model today (Jev) prices output at 0 anyway.
+	if cfg.Service.Type == constant.ServiceTypeDecisions {
+		if !isZeroOrEmptyPrice(cfg.Service.OutputPrice) || !isZeroOrEmptyPrice(cfg.Service.OutputPriceUSDPerMillionTokens) {
+			return fmt.Errorf("invalid config: service.outputPrice / service.outputPriceUSDPerMillionTokens must be 0 for service type '%s' (the router bills decisions on input only; a non-zero output price would settle what the user was never charged)", constant.ServiceTypeDecisions)
+		}
+	}
 	multiModelUSD := len(cfg.Service.ModelPricing) > 0
 	switch cfg.Service.PriceDenomination {
 	case constant.PriceDenominationNative:

@@ -3920,6 +3920,47 @@ service:
 	}
 }
 
+// TestLoadConfig_DecisionsRejectsNonZeroOutputPrice: the router bills decisions
+// on input only, so a broker-side output price would settle output_tokens ×
+// price that the user was never charged. Refused in both denominations; zero
+// and empty are accepted.
+func TestLoadConfig_DecisionsRejectsNonZeroOutputPrice(t *testing.T) {
+	base := `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://openrouter.ai/api/alpha"
+  type: "decisions"
+  model: "typesafe/jev-1.13"
+  verifiability: "TeeML"
+`
+	for _, tt := range []struct {
+		name    string
+		extra   string
+		wantErr bool
+	}{
+		{"native non-zero output", "  inputPrice: \"1\"\n  outputPrice: \"1\"\n", true},
+		{"native zero output", "  inputPrice: \"1\"\n  outputPrice: \"0\"\n", false},
+		{"native empty output", "  inputPrice: \"1\"\n", false},
+		{"usd non-zero output", "  priceDenomination: USD\n  inputPriceUSDPerMillionTokens: \"0.05\"\n  outputPriceUSDPerMillionTokens: \"0.01\"\npriceFeed:\n  sources: [\"coingecko\"]\n", true},
+		{"usd zero output", "  priceDenomination: USD\n  inputPriceUSDPerMillionTokens: \"0.05\"\n  outputPriceUSDPerMillionTokens: \"0\"\npriceFeed:\n  sources: [\"coingecko\"]\n", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			configPath := writeTestConfig(t, base+tt.extra)
+			t.Setenv("CONFIG_FILE", configPath)
+			err := loadConfig(&Config{})
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "must be 0 for service type 'decisions'") {
+					t.Fatalf("expected non-zero output price rejection for decisions, got: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("expected config to load, got: %v", err)
+			}
+		})
+	}
+}
+
 // TestLoadConfig_EmbeddingRejectsServiceLevelModelAliases mirrors
 // TestLoadConfig_EmbeddingRejectsServiceLevelUpstreamModel for
 // service.modelAliases — same rewrite-path gap, same fix.
