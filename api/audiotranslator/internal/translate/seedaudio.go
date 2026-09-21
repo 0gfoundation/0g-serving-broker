@@ -226,14 +226,39 @@ func DecodeAudio(resp seedaudio.CreateResponse) ([]byte, error) {
 // Falls back to `duration` only when original_duration is absent or unusable:
 // some charge is closer to right than none, and the broker's own fallback
 // (charging the reserved ceiling) is strictly worse for the caller.
-func BillableSeconds(resp seedaudio.CreateResponse) (float64, bool) {
+//
+// The SOURCE is returned, not just the number, because that fallback is
+// otherwise invisible. It still populates the duration header, so the broker
+// takes its normal usage path and neither
+// broker_audio_billing_fallback_total{source="reserve"} nor the router's
+// router_audio_billing_source_total moves off the healthy value — every
+// dashboard on both hops reads green while a speed-adjusted request is billed
+// for roughly half what it produced. A vendor-side change to original_duration
+// would therefore discount silently and indefinitely. The caller logs on
+// DurationSourcePostProcessed so the degradation has at least one signal.
+type DurationSource string
+
+const (
+	// DurationSourceOriginal: original_duration, the field the vendor's own
+	// reference names as the billing figure. The expected path.
+	DurationSourceOriginal DurationSource = "original_duration"
+	// DurationSourcePostProcessed: `duration`, the POST-PROCESSED length. Equal
+	// to original_duration only when no speed or post-processing applied, so
+	// this under-bills exactly the requests that adjust speed.
+	DurationSourcePostProcessed DurationSource = "duration"
+	// DurationSourceNone: neither field was usable; the broker will bill the
+	// reserved ceiling, which over-bills.
+	DurationSourceNone DurationSource = "none"
+)
+
+func BillableSeconds(resp seedaudio.CreateResponse) (float64, DurationSource, bool) {
 	if f, err := resp.OriginalDuration.Float64(); err == nil && f > 0 && !math.IsInf(f, 0) && !math.IsNaN(f) {
-		return f, true
+		return f, DurationSourceOriginal, true
 	}
 	if f, err := resp.Duration.Float64(); err == nil && f > 0 && !math.IsInf(f, 0) && !math.IsNaN(f) {
-		return f, true
+		return f, DurationSourcePostProcessed, true
 	}
-	return 0, false
+	return 0, DurationSourceNone, false
 }
 
 // ContentTypeFor maps a response_format onto the media type to return. Unknown

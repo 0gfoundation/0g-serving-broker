@@ -42,4 +42,24 @@ func TestAudioExampleConfigLoads(t *testing.T) {
 	if e.OutputPriceUSDPerMillionTokens != "2500" {
 		t.Errorf("normalized USD = %q, want 2500", e.OutputPriceUSDPerMillionTokens)
 	}
+
+	// A client discovers what it may send from supportedParameters, and nothing
+	// downstream filters the list (AdvertisedSupportedParameters only appends a
+	// reasoning key), so whatever is written here is exactly what /v1/models
+	// advertises. An omission is therefore silent: the capability works but no
+	// caller learns of it.
+	//
+	// Pinned because the list already drifted once — the reference pair, which
+	// is the entire reason this modality accepts multipart, was missing along
+	// with pitch and loudness.
+	want := []string{
+		"input", "voice", "response_format", "speed", "max_duration",
+		"sample_rate", "reference_audio", "reference_image", "pitch", "loudness",
+	}
+	got := e.ModelInfo.SupportedParameters
+	for _, w := range want {
+		if !containsString(got, w) {
+			t.Errorf("supportedParameters is missing %q; a caller reading /v1/models never learns it is accepted (have %v)", w, got)
+		}
+	}
 }

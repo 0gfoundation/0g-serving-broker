@@ -81,8 +81,16 @@ func (h *AudioHandler) Speech(c *gin.Context) {
 
 	// Set before the body: once the first byte is written the headers are
 	// committed, and the duration is the only channel the broker has for billing.
-	if secs, ok := translate.BillableSeconds(*resp); ok {
+	if secs, source, ok := translate.BillableSeconds(*resp); ok {
 		c.Writer.Header().Set(DurationHeader, strconv.FormatFloat(secs, 'f', -1, 64))
+		if source == translate.DurationSourcePostProcessed {
+			// UNDER-bills any speed-adjusted request, and silently: the header is
+			// still set, so the broker bills normally and every fallback series on
+			// both hops stays on its healthy value. This log is the only signal
+			// that the vendor stopped sending original_duration.
+			h.logger.Errorf("seedaudio: response carried no usable original_duration; billed the POST-PROCESSED duration (%vs) instead, which UNDER-bills any speed-adjusted request. Check the vendor response shape",
+				secs)
+		}
 	} else {
 		// The broker falls back to the reserved ceiling, which OVER-bills. Logged
 		// loudly here because this side is where the cause is visible.

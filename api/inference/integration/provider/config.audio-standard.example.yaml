@@ -72,6 +72,13 @@ service:
           modality: "text->audio"
           inputModalities: ["text", "audio", "image"]
           outputModalities: ["audio"]
+        # A client discovers what it may legally send from this list, via
+        # /v1/models — nothing downstream filters it, so an omission here is
+        # simply a capability the caller never learns about. Four were missing:
+        # the reference pair is the whole point of the modality's multipart
+        # shape (voice cloning), and pitch/loudness are accepted alongside
+        # speed. Keep this in step with the request fields the router
+        # documents (inference.AudioSpeechRequest).
         supportedParameters:
           - input
           - voice
@@ -79,3 +86,10 @@ service:
           - speed
           - max_duration
           - sample_rate
+          # Mutually exclusive with each other: up to 3 audio clips for voice
+          # cloning, OR one image. The vendor enforces that; advertising both
+          # is correct, since either is legal on its own.
+          - reference_audio
+          - reference_image
+          - pitch
+          - loudness

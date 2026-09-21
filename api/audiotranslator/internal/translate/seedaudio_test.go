@@ -21,24 +21,34 @@ func TestBillableSecondsPrefersOriginalDuration(t *testing.T) {
 		Duration:         json.Number("24"), // what a 2x-speed listener hears
 		OriginalDuration: json.Number("48"), // what the model produced — bills
 	}
-	got, ok := BillableSeconds(resp)
+	got, source, ok := BillableSeconds(resp)
 	if !ok || got != 48 {
 		t.Fatalf("got %v (ok=%v), want 48 — duration must never win over original_duration", got, ok)
+	}
+	if source != DurationSourceOriginal {
+		t.Errorf("source = %q, want %q", source, DurationSourceOriginal)
 	}
 }
 
 // Falling back to `duration` beats falling through to the broker's reserved
 // ceiling, which over-bills by construction.
 func TestBillableSecondsFallsBackToDuration(t *testing.T) {
-	got, ok := BillableSeconds(seedaudio.CreateResponse{Duration: json.Number("12.5")})
+	got, source, ok := BillableSeconds(seedaudio.CreateResponse{Duration: json.Number("12.5")})
 	if !ok || got != 12.5 {
 		t.Fatalf("got %v (ok=%v), want 12.5", got, ok)
 	}
-	if _, ok := BillableSeconds(seedaudio.CreateResponse{}); ok {
-		t.Error("an empty response reported a usable duration")
+	// The source is what makes this fallback visible. It still populates the
+	// duration header, so without it the broker bills normally and every
+	// fallback metric on both hops stays green while speed-adjusted requests
+	// are under-billed.
+	if source != DurationSourcePostProcessed {
+		t.Errorf("source = %q, want %q — the caller logs on this value", source, DurationSourcePostProcessed)
+	}
+	if _, source, ok := BillableSeconds(seedaudio.CreateResponse{}); ok || source != DurationSourceNone {
+		t.Errorf("an empty response reported ok=%v source=%q", ok, source)
 	}
 	for _, bad := range []string{"0", "-5", "abc"} {
-		if _, ok := BillableSeconds(seedaudio.CreateResponse{OriginalDuration: json.Number(bad), Duration: json.Number(bad)}); ok {
+		if _, _, ok := BillableSeconds(seedaudio.CreateResponse{OriginalDuration: json.Number(bad), Duration: json.Number(bad)}); ok {
 			t.Errorf("%q was accepted as a duration", bad)
 		}
 	}
