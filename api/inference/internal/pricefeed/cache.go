@@ -91,11 +91,17 @@ func (c *Cache) Get() Snapshot {
 //
 // rate may be nil for callers that don't track it (e.g. tests), which wipes
 // the cached rate while still marking everything fresh — note this differs
-// from RefreshDerived, where a nil rate is a no-op. Set can afford it because
-// it always leaves a usable wei pair behind; RefreshDerived cannot, because
-// the rate is its entire contribution. No production caller passes nil:
-// Bootstrap errors rather than return a nil rate, and every tick path has one
-// in hand before it gets here.
+// from RefreshDerived, where a nil rate is a no-op.
+//
+// Set no longer "gets away with" nil the way it once did. The overlay in
+// GetCachedService used to read the stored wei pair, so a rate-less cache was
+// still billable; it now derives from the rate like every other path, so a nil
+// rate here produces a cache that passes Populated and IsStale but fails
+// closed on the first request with ErrPricingUnavailable. That is the correct
+// outcome — we cannot state a price — but it makes the nil affordance purely a
+// test convenience. No production caller passes nil: Bootstrap errors rather
+// than return a nil rate, and every tick path has one in hand before it gets
+// here.
 func (c *Cache) Set(inputWei, outputWei *big.Int, rate *big.Rat, at time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -110,37 +116,33 @@ func (c *Cache) Set(inputWei, outputWei *big.Int, rate *big.Rat, at time.Time) {
 	c.lastChainSync = at
 }
 
-// RefreshDerived stores the freshly derived prices WITHOUT marking them
+// RefreshDerived stores the freshly derived pair and rate WITHOUT marking them
 // published. For the tick whose chain write failed.
 //
-// It deliberately breaks the old cache.wei == on-chain invariant, and replaces
-// it with a sharper one: the cached pair is always what we would charge, and
-// LastChainSync says when the chain last agreed. Holding the previously
-// published pair instead — the first version of this change — looked safer but
-// silently mis-bills: GetBillingPrices falls back to GetCachedService for
-// single-model services AND for any multi-model request whose model does not
-// resolve, and that path bills straight off the cached wei. Freezing it while
-// LastUpdate kept advancing would have charged a stale price indefinitely
-// rather than failing closed, which is worse than the outage this set out to
-// fix — a wrong bill is not a degraded service.
+// It deliberately breaks the old cache.wei == on-chain invariant and replaces
+// it with a sharper one: the cached pair is always the current derivation, and
+// LastChainSync says when the chain last agreed.
 //
-// Nothing needs the cached pair to equal the chain. The contract never reads
-// the price at settlement; ProcessSettlement uses it for a batching threshold;
-// and the drift check in SyncServiceWithPrices compares against the value it
-// reads from the contract, not against this cache.
+// Since the service-level overlay in ctrl.GetCachedService moved to deriving
+// from the rate, no production billing path reads InputPriceWei/OutputPriceWei
+// any more — every path converts from RateUSDPerOG. The pair is kept because
+// Set records the published values into it and LastChainSync/ChainSyncLag are
+// defined against that publish; storing the fresh derivation here rather than
+// the stale published one keeps the field truthful for anything that inspects
+// it (status output, future metrics), but nothing is billed from it. If that
+// ever changes, the rate is the value to trust, not this pair.
 //
-// A nil rate is a no-op, not a refresh: the rate is what makes the derived
-// pair meaningful, so accepting nil would advance LastUpdate with nothing
-// behind it and turn a clear PRICING_UNAVAILABLE into a per-request failure
-// deeper in conversion.
+// A nil rate or nil pair is a no-op, not a refresh: an incomplete tick must not
+// advance LastUpdate, or it would pass the staleness gate with nothing behind
+// it and turn a clear PRICING_UNAVAILABLE into a per-request failure deeper in.
 //
 // It also refuses to populate a cache that has never been published. Populated
 // means "this service has a registered price", which main.go guarantees before
 // serving by panicking if the bootstrap sync fails — so this state is
 // unreachable in production, and keeping the meaning intact is free. Without
-// the guard a never-published service could start billing off a derived pair
-// while ChainSyncLag read 0 (its zero LastChainSync is indistinguishable from
-// "in sync"), hiding exactly the condition the field exists to show.
+// the guard a never-published service could start billing while ChainSyncLag
+// read 0 (its zero LastChainSync is indistinguishable from "in sync"), hiding
+// exactly the condition the field exists to show.
 func (c *Cache) RefreshDerived(inputWei, outputWei *big.Int, rate *big.Rat, at time.Time) {
 	if rate == nil || inputWei == nil || outputWei == nil {
 		return

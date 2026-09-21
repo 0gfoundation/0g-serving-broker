@@ -74,8 +74,26 @@ func (c *Ctrl) GetCachedService(ctx context.Context) (model.Service, error) {
 			return model.Service{}, fmt.Errorf("%w: USD price cache is stale (last update %s ago, threshold %s)",
 				ErrPricingUnavailable, time.Since(snap.LastUpdate).Round(time.Second), c.priceFeed.StalenessThreshold)
 		}
-		service.InputPrice = snap.InputPriceWei.String()
-		service.OutputPrice = snap.OutputPriceWei.String()
+		// Derive from the live rate rather than reading back snap.InputPriceWei,
+		// which is the last pair the syncer confirmed on chain.
+		//
+		// GetBillingPrices falls back to this function for every provider
+		// without modelPricing, so the published pair was the billing price for
+		// them — which made minOnChainUpdateBps their billing error bound, not
+		// just a gas-vs-display knob. A drift-skip deliberately keeps the older
+		// pair, so at 500 bps they billed up to 5% off the market and at 3000
+		// bps they would bill up to 30% off. Converting here puts them on the
+		// same live rate the per-model path has always used, and makes the
+		// threshold mean the same thing for every provider.
+		inWei, outWei, err := usdPairToWei(
+			c.Service.InputPriceUSDPerMillionTokens,
+			c.Service.OutputPriceUSDPerMillionTokens,
+			snap.RateUSDPerOG, "service")
+		if err != nil {
+			return model.Service{}, err
+		}
+		service.InputPrice = inWei
+		service.OutputPrice = outWei
 		// Also carry the configured per-1M-tokens USD value through so the
 		// /v1/models handler can surface it.  Verbatim — conversion to
 		// per-token for display happens at the JSON boundary.
@@ -564,21 +582,38 @@ func (c *Ctrl) modelUSDPricesToWei(entry *config.ModelPricingEntry) (inputWei, o
 		return "", "", fmt.Errorf("%w: USD price cache is stale (last update %s ago, threshold %s)",
 			ErrPricingUnavailable, time.Since(snap.LastUpdate).Round(time.Second), c.priceFeed.StalenessThreshold)
 	}
-	inRat, err := pricefeed.ParseUSDPerMillion(entry.InputPriceUSDPerMillionTokens)
+	return usdPairToWei(entry.InputPriceUSDPerMillionTokens,
+		entry.OutputPriceUSDPerMillionTokens, snap.RateUSDPerOG, "model")
+}
+
+// usdPairToWei converts a configured USD-per-1M pair to wei per token at the
+// given rate. Shared by the per-model path and the service-level overlay in
+// GetCachedService so both bill at the same live rate — until this existed
+// only the per-model path did, and the service-level one read back the last
+// on-chain pair instead.
+//
+// Fails closed as ErrPricingUnavailable rather than returning a bare error:
+// every failure here means we cannot state a price (rate missing or
+// non-positive, USD string unparseable), and callers already treat that
+// sentinel as "reject the request" rather than "bill something".  what names
+// the source ("model" / "service") so the message says which config is at
+// fault.
+func usdPairToWei(inUSD, outUSD string, rate *big.Rat, what string) (string, string, error) {
+	inRat, err := pricefeed.ParseUSDPerMillion(inUSD)
 	if err != nil {
-		return "", "", fmt.Errorf("parse model inputPriceUSDPerMillionTokens: %w", err)
+		return "", "", fmt.Errorf("%w: parse %s inputPriceUSDPerMillionTokens: %v", ErrPricingUnavailable, what, err)
 	}
-	outRat, err := pricefeed.ParseUSDPerMillion(entry.OutputPriceUSDPerMillionTokens)
+	outRat, err := pricefeed.ParseUSDPerMillion(outUSD)
 	if err != nil {
-		return "", "", fmt.Errorf("parse model outputPriceUSDPerMillionTokens: %w", err)
+		return "", "", fmt.Errorf("%w: parse %s outputPriceUSDPerMillionTokens: %v", ErrPricingUnavailable, what, err)
 	}
-	inWei, err := pricefeed.USDPerMillionToWeiPerToken(inRat, snap.RateUSDPerOG)
+	inWei, err := pricefeed.USDPerMillionToWeiPerToken(inRat, rate)
 	if err != nil {
-		return "", "", fmt.Errorf("convert model input USD to wei: %w", err)
+		return "", "", fmt.Errorf("%w: convert %s input USD to wei: %v", ErrPricingUnavailable, what, err)
 	}
-	outWei, err := pricefeed.USDPerMillionToWeiPerToken(outRat, snap.RateUSDPerOG)
+	outWei, err := pricefeed.USDPerMillionToWeiPerToken(outRat, rate)
 	if err != nil {
-		return "", "", fmt.Errorf("convert model output USD to wei: %w", err)
+		return "", "", fmt.Errorf("%w: convert %s output USD to wei: %v", ErrPricingUnavailable, what, err)
 	}
 	return inWei.String(), outWei.String(), nil
 }
