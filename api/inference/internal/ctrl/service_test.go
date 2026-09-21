@@ -75,18 +75,68 @@ func TestGetCachedService_StaleCacheDistinctError(t *testing.T) {
 }
 
 func TestGetCachedService_FreshCacheOverlaysPrices(t *testing.T) {
+	// The overlay derives from the LIVE rate, and must not read back
+	// snap.InputPriceWei — the last pair confirmed on chain.
+	//
+	// GetBillingPrices falls back here for every provider without
+	// modelPricing, so the published pair used to be the billing price for
+	// them. That made minOnChainUpdateBps their billing error bound rather
+	// than a gas-vs-display knob: a drift-skip keeps the older pair, so at
+	// 500 bps they billed up to 5% off the market, and the 3000 bps the
+	// multi-model providers moved to would have been 30%.
 	pc := pricefeed.NewCache()
-	pc.Set(big.NewInt(100), big.NewInt(200), nil, time.Now())
+	rate, ok := new(big.Rat).SetString("0.25")
+	if !ok {
+		t.Fatal("bad test rate")
+	}
+	// A published pair deliberately unrelated to the rate: if the overlay
+	// still reads it back, these are the numbers that show up.
+	pc.Set(big.NewInt(100), big.NewInt(200), rate, time.Now())
 	c := newUSDOverlayCtrl(t, pc, time.Hour)
 
 	svc, err := c.GetCachedService(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if svc.InputPrice != "100" {
-		t.Errorf("InputPrice = %q, want 100 (from price cache overlay)", svc.InputPrice)
+
+	wantIn, err := pricefeed.USDPerMillionToWeiPerToken(mustRatCtrl(t, "0.50"), rate)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if svc.OutputPrice != "200" {
-		t.Errorf("OutputPrice = %q, want 200 (from price cache overlay)", svc.OutputPrice)
+	wantOut, err := pricefeed.USDPerMillionToWeiPerToken(mustRatCtrl(t, "1.50"), rate)
+	if err != nil {
+		t.Fatal(err)
 	}
+	if svc.InputPrice == "100" || svc.OutputPrice == "200" {
+		t.Fatalf("overlay returned the published pair (%s, %s); billing would track the chain, not the market",
+			svc.InputPrice, svc.OutputPrice)
+	}
+	if svc.InputPrice != wantIn.String() {
+		t.Errorf("InputPrice = %q, want %q derived from $0.50/1M at rate 0.25", svc.InputPrice, wantIn)
+	}
+	if svc.OutputPrice != wantOut.String() {
+		t.Errorf("OutputPrice = %q, want %q derived from $1.50/1M at rate 0.25", svc.OutputPrice, wantOut)
+	}
+}
+
+// A populated, fresh cache with no rate cannot state a price, so the overlay
+// must fail closed rather than fall back to the published pair.
+func TestGetCachedService_NoRateFailsClosed(t *testing.T) {
+	pc := pricefeed.NewCache()
+	pc.Set(big.NewInt(100), big.NewInt(200), nil, time.Now())
+	c := newUSDOverlayCtrl(t, pc, time.Hour)
+
+	_, err := c.GetCachedService(context.Background())
+	if !errors.Is(err, ErrPricingUnavailable) {
+		t.Errorf("err = %v, want ErrPricingUnavailable", err)
+	}
+}
+
+func mustRatCtrl(t *testing.T, s string) *big.Rat {
+	t.Helper()
+	r, ok := new(big.Rat).SetString(s)
+	if !ok {
+		t.Fatalf("bad rat %q", s)
+	}
+	return r
 }

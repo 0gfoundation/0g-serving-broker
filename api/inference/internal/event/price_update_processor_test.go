@@ -345,11 +345,21 @@ func TestProcessor_Tick_DriftSkipKeepsWeiBumpsTimestampAndRate(t *testing.T) {
 	}
 }
 
-func TestProcessor_Tick_SyncErrorDoesNotUpdateCache(t *testing.T) {
-	// Aggregation succeeds, conversion succeeds, but the syncer returns
-	// an error (e.g. transaction failed).  The cache must remain
-	// untouched so the cache.wei == on-chain invariant isn't broken with
-	// a value we can't confirm is on chain.
+func TestProcessor_Tick_SyncErrorCachesDerivedPriceAndFlagsTheLag(t *testing.T) {
+	// Aggregation and conversion succeed; the chain write does not (out of
+	// gas, RPC down, reverted tx).
+	//
+	// This test used to assert the opposite — that the whole cache stayed
+	// untouched — on the reasoning that cache.wei == on-chain needs chain
+	// state we lack after a failure. That invariant was the wrong one to
+	// protect. Nothing needs the cached pair to equal the chain, while
+	// GetBillingPrices reads the pair directly on its fallback path, so
+	// freezing it bills a stale price for as long as the wallet stays empty.
+	// Freezing LastUpdate alongside it was worse still: the staleness gate
+	// then fail-closed a provider that knew exactly what to charge. On
+	// 2026-09-21 that took seedance-2.5's only provider offline for 3.5h with
+	// PRICING_UNAVAILABLE while CoinGecko was healthy throughout, and the
+	// hourly retry could not break the loop.
 	srcs := []pricefeed.Source{pricefeedtest.NewMockSource("mock", mustRat("0.003"))}
 	syncer := &mockSyncer{returnErr: errors.New("chain offline")}
 
@@ -358,7 +368,6 @@ func TestProcessor_Tick_SyncErrorDoesNotUpdateCache(t *testing.T) {
 		OutputPriceUSDPerMillionTokens: "1.50",
 	}, defaultPFCfg())
 
-	// Prime with a known-good baseline so we can detect any mutation.
 	priorInput := big.NewInt(12345)
 	priorOutput := big.NewInt(67890)
 	priorRate := mustRat("0.002")
@@ -368,18 +377,42 @@ func TestProcessor_Tick_SyncErrorDoesNotUpdateCache(t *testing.T) {
 	p.tick(context.Background())
 
 	snap := cache.Get()
-	if snap.InputPriceWei.Cmp(priorInput) != 0 {
-		t.Errorf("cache InputPriceWei = %s, want %s (unchanged after sync error)", snap.InputPriceWei, priorInput)
+
+	// Billing reads this pair, so it has to be what we would charge now — not
+	// what was last published.
+	if snap.InputPriceWei.Cmp(priorInput) == 0 {
+		t.Error("InputPriceWei still holds the last published value; billing would charge a stale price")
 	}
-	if snap.OutputPriceWei.Cmp(priorOutput) != 0 {
-		t.Errorf("cache OutputPriceWei = %s, want %s (unchanged after sync error)", snap.OutputPriceWei, priorOutput)
+	if snap.OutputPriceWei.Cmp(priorOutput) == 0 {
+		t.Error("OutputPriceWei still holds the last published value")
 	}
-	if snap.RateUSDPerOG.Cmp(priorRate) != 0 {
-		t.Errorf("cache RateUSDPerOG = %v, want %v (unchanged after sync error)", snap.RateUSDPerOG, priorRate)
+	wantIn, err := pricefeed.USDPerMillionToWeiPerToken(mustRat("0.50"), mustRat("0.003"))
+	if err != nil {
+		t.Fatalf("derive expected input wei: %v", err)
 	}
-	if !snap.LastUpdate.Equal(priorTime) {
-		t.Errorf("cache LastUpdate = %v, want %v (unchanged after sync error)", snap.LastUpdate, priorTime)
+	if snap.InputPriceWei.Cmp(wantIn) != 0 {
+		t.Errorf("InputPriceWei = %s, want %s derived at the fresh rate", snap.InputPriceWei, wantIn)
 	}
+
+	if snap.RateUSDPerOG.Cmp(mustRat("0.003")) != 0 {
+		t.Errorf("cache RateUSDPerOG = %v, want the freshly aggregated 0.003", snap.RateUSDPerOG)
+	}
+	if !snap.LastUpdate.After(priorTime) {
+		t.Errorf("LastUpdate = %v, want it advanced past %v — not advancing it is the fail-closed bug",
+			snap.LastUpdate, priorTime)
+	}
+	if snap.IsStale(defaultPFCfg().StalenessThreshold, time.Now()) {
+		t.Error("cache reads stale after a chain-write failure; the provider would refuse to serve")
+	}
+
+	// The lag is what actually went wrong, and it stays visible.
+	if !snap.LastChainSync.Equal(priorTime) {
+		t.Errorf("LastChainSync = %v, want the last successful publish %v", snap.LastChainSync, priorTime)
+	}
+	if snap.ChainSyncLag() <= 0 {
+		t.Error("ChainSyncLag = 0, want the gap between a derived price and a stale published one")
+	}
+
 	if syncer.callCount != 1 {
 		t.Errorf("syncer call count = %d, want 1", syncer.callCount)
 	}

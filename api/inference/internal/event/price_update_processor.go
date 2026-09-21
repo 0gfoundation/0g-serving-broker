@@ -150,8 +150,13 @@ func (p *PriceUpdateProcessor) aggregateWithRetry(ctx context.Context, label str
 // the returned wei values to SyncServiceWithPrices, which can adopt on-chain
 // prices instead of the freshly-derived ones (when drift is within
 // threshold).  The caller seeds the cache with whatever SyncServiceWithPrices
-// reports as the effective chain-aligned values, so the invariant
-// cache.wei == on-chain holds from the very first tick.
+// reports as the effective chain-aligned values, so the cached pair matches
+// the chain at boot — and main.go panics if that sync fails, which is what
+// makes Populated mean "this service has a registered price".
+//
+// It matches only at boot. From there the pair tracks what we would charge,
+// which diverges from the chain whenever a write fails; see tick and
+// Cache.RefreshDerived. LastChainSync is how far apart they are.
 //
 // The rate is returned alongside so the caller can record it in the cache
 // together with the post-sync effective wei prices.
@@ -199,21 +204,37 @@ func (p *PriceUpdateProcessor) Start(ctx context.Context) error {
 	}
 }
 
-// tick runs one update cycle: aggregate → convert → push via syncer →
-// update cache with effective chain-aligned values.
+// tick runs one update cycle: aggregate → convert → push via syncer → cache.
 //
-// The cache is only refreshed on successful chain-sync, and it's populated
-// with the "effective" wei prices returned by the syncer — which equal the
-// freshly-derived values on a push, or the prior baseline on a drift-skip.
-// This maintains the invariant cache.InputPriceWei == lastPushed ==
-// on-chain value so every billing calculation matches what a future
-// settlement will charge.  Rate and LastUpdate still reflect the live
-// market so SDK clients see the true 0G/USD rate even when on-chain prices
-// haven't moved.
+// Three outcomes, and they cache different pairs on purpose:
+//
+//	chain write succeeded or was skipped for drift
+//	  Set() the "effective" pair the syncer reports — the freshly derived
+//	  values on a push, the prior on-chain baseline on a drift-skip. Both
+//	  match what is registered, and LastChainSync advances.
+//
+//	chain write failed
+//	  RefreshDerived() the freshly derived pair instead. There is no
+//	  effective value to adopt, and the previously published one must not be
+//	  reused: GetBillingPrices reads this pair directly on its fallback path,
+//	  so holding it would bill a stale price for as long as the failure
+//	  lasted. LastChainSync stays put, so the lag stays visible.
+//
+//	feed failed
+//	  nothing cached. We do not know the price, so readers must fail closed
+//	  once StalenessThreshold elapses. This is the one case where the old
+//	  "cache is not touched on failure" rule still applies.
+//
+// Note the asymmetry between the first two: a drift-skip deliberately bills at
+// the older published pair (that is what the drift threshold buys — fewer
+// writes, at up to minOnChainUpdateBps of billing lag), while a failed write
+// bills at the fresher derived one. The threshold is a policy about when a
+// chain write is worth its gas, not about how responsive billing should be, so
+// applying it on a path that is not writing anything would only make billing
+// less accurate.
 //
 // Retries the aggregation up to tickMaxAttempts to absorb transient feed
-// failures.  On sustained feed failure OR a chain-sync failure, the cache
-// is NOT touched — readers enforce StalenessThreshold independently.
+// failures.
 func (p *PriceUpdateProcessor) tick(ctx context.Context) {
 	rate, err := p.aggregateWithRetry(ctx, "tick", tickMaxAttempts, tickBaseBackoff, tickMaxBackoff)
 	if err != nil {
@@ -244,11 +265,33 @@ func (p *PriceUpdateProcessor) tick(ctx context.Context) {
 
 	effectiveInput, effectiveOutput, err := p.syncer.SyncServicePrices(ctx, newInput, newOutput)
 	if err != nil {
-		// Do NOT update the cache.  The invariant cache.wei ==
-		// on-chain requires us to know the chain state, which we
-		// don't after a sync failure.  Staleness will surface the
-		// problem to readers if it persists.
-		p.logger.Errorf("pricefeed tick: SyncServicePrices failed (cache NOT updated): %v", err)
+		// Cache what we would charge; leave LastChainSync where it was.
+		//
+		// This used to skip the cache entirely, on the invariant cache.wei ==
+		// on-chain. That invariant is the wrong one to keep here: nothing needs
+		// the cached pair to equal the chain (the contract never reads the
+		// price at settlement), while several billing paths DO read the pair
+		// directly — GetBillingPrices falls back to GetCachedService for
+		// single-model services and for any request whose model does not
+		// resolve. Freezing the pair there would bill a stale price for as long
+		// as the wallet stayed empty, which is worse than the outage below.
+		//
+		// The cost of conflating the two was a full outage. When 33-seedance's
+		// wallet could not pay for the write on 2026-09-21, the rate feed was
+		// healthy the whole time and the provider knew exactly what to charge;
+		// three hours of held-back LastUpdate tripped the staleness gate anyway
+		// and it fail-closed with PRICING_UNAVAILABLE. seedance-2.5 has one
+		// provider network-wide, so the model was gone for 3.5h, and the hourly
+		// retry failed for the same reason every time — it could not self-heal.
+		//
+		// So billing stays correct on every path while only the PUBLISHED
+		// number goes stale — which costs display accuracy and nothing else:
+		// ProcessSettlement uses the pair for a batching threshold, not for an
+		// amount, and SyncServiceWithPrices computes drift against the value it
+		// reads back from the contract rather than against this cache.
+		p.cache.RefreshDerived(newInput, newOutput, rate, time.Now())
+		p.logger.Errorf("pricefeed tick: SyncServicePrices failed (rate cached, on-chain price NOT updated "+
+			"— serving continues at the correct rate; published price is stale): %v", err)
 		return
 	}
 
