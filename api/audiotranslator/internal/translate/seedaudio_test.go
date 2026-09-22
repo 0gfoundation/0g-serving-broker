@@ -206,3 +206,41 @@ func TestDecodeAudio(t *testing.T) {
 }
 
 func intp(v int) *int { return &v }
+
+// A speaker entry is an AUDIO reference, and the vendor refuses a request that
+// mixes audio and image references. `voice` is REQUIRED by OpenAI's
+// /v1/audio/speech, so every image-guided request from an OpenAI SDK carries
+// one — and used to emit a mixed array the vendor rejected.
+func TestToCreateRequestVoiceIsDroppedBesideAnImageReference(t *testing.T) {
+	out := ToCreateRequest(SpeechRequest{
+		Model:          "seed-audio-1.0",
+		Input:          "describe this",
+		Voice:          "zh_female_01",
+		ReferenceImage: "https://example.com/a.png",
+	})
+	for i, ref := range out.References {
+		if ref.Speaker != "" {
+			t.Fatalf("references[%d] carries a speaker beside an image reference; the vendor refuses a mixed array", i)
+		}
+	}
+	if len(out.References) != 1 || out.References[0].ImageURL != "https://example.com/a.png" {
+		t.Fatalf("want exactly the image reference, got %+v", out.References)
+	}
+}
+
+// Omitting response_format is legal — OpenAI's own default is mp3, and
+// ContentTypeFor answers audio/mpeg for the empty string. The vendor's default
+// is wav, so the format must be sent explicitly or the bytes and the advertised
+// Content-Type disagree.
+func TestToCreateRequestDefaultsFormatToMP3(t *testing.T) {
+	out := ToCreateRequest(SpeechRequest{Model: "seed-audio-1.0", Input: "hi"})
+	if out.AudioConfig == nil {
+		t.Fatal("audio_config was dropped, so the vendor applies its wav default while we advertise audio/mpeg")
+	}
+	if out.AudioConfig.Format != "mp3" {
+		t.Errorf("format = %q, want mp3 to match ContentTypeFor(\"\")", out.AudioConfig.Format)
+	}
+	if got := ContentTypeFor(""); got != "audio/mpeg" {
+		t.Errorf("ContentTypeFor(\"\") = %q; the two ends must agree", got)
+	}
+}

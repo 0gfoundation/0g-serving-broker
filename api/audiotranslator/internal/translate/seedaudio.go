@@ -110,12 +110,27 @@ func ToCreateRequest(r SpeechRequest) seedaudio.CreateRequest {
 	// supplied: the vendor takes exactly one of audio_url / audio_data / speaker
 	// per entry, and a cloning request has already said which voice it wants by
 	// supplying the clips.
-	if v := strings.TrimSpace(r.Voice); v != "" && len(r.ReferenceAudio) == 0 {
+	//
+	// It is ALSO suppressed when an image reference was supplied, which the
+	// earlier condition missed. A speaker entry is an AUDIO reference, and this
+	// vendor refuses a request mixing audio and image references — so
+	// `{"voice":"x","reference_image":"..."}` emitted a mixed array and was
+	// rejected upstream. That combination is not exotic: OpenAI's
+	// /v1/audio/speech makes `voice` a required parameter, so every
+	// image-guided request issued through an OpenAI SDK hit it.
+	if v := strings.TrimSpace(r.Voice); v != "" && len(r.ReferenceAudio) == 0 && strings.TrimSpace(r.ReferenceImage) == "" {
 		out.References = append(out.References, seedaudio.Reference{Speaker: v})
 	}
 
 	cfg := seedaudio.AudioConfig{
-		Format:     toVendorFormat(r.ResponseFormat),
+		// Defaulted here rather than left empty. The response Content-Type is
+		// derived from the OpenAI-side field, whose default is mp3, but an empty
+		// Format let the whole audio_config block drop out and the VENDOR default
+		// (wav) apply — so a request omitting response_format got wav bytes
+		// labelled audio/mpeg, and a client writing them to .mp3 got a file that
+		// would not play. Sending the format explicitly keeps the two ends
+		// agreeing.
+		Format:     toVendorFormat(defaultAudioFormat(r.ResponseFormat)),
 		SampleRate: derefInt(r.SampleRate),
 	}
 	cfg.SpeechRate = toRateOffset(r.Speed, -50, 100)
@@ -259,6 +274,17 @@ func BillableSeconds(resp seedaudio.CreateResponse) (float64, DurationSource, bo
 		return f, DurationSourcePostProcessed, true
 	}
 	return 0, DurationSourceNone, false
+}
+
+// defaultAudioFormat pins the container when the caller named none. OpenAI's
+// /v1/audio/speech defaults to mp3 and ContentTypeFor answers audio/mpeg for
+// the empty string, so the vendor has to be told mp3 explicitly — its own
+// default is wav.
+func defaultAudioFormat(f string) string {
+	if strings.TrimSpace(f) == "" {
+		return "mp3"
+	}
+	return f
 }
 
 // ContentTypeFor maps a response_format onto the media type to return. Unknown
