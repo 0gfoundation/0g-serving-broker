@@ -577,6 +577,13 @@ func profileForRequest(svcType, surface string) (p wire.Profile, sealable bool) 
 		// the envelope or the crypto is multipart-aware — see
 		// materializeSpeechRequest.
 		return wire.ProfileSpeech, true
+	case constant.ServiceTypeEmbedding:
+		// SPEC §7.4. Route-blind like ProfileImage, and inheriting the same known
+		// gap: a sealed envelope POSTed to a free route on an embedding provider is
+		// opened rather than refused. Not fixed here for the reason the speech arm
+		// above gives for not widening its own check — the rule wants a per-profile
+		// route set, tracked as #734, not a third profile-specific `&&`.
+		return wire.ProfileEmbedding, true
 	default:
 		return "", false
 	}
@@ -1417,6 +1424,17 @@ func (rs *responseFrameSealer) signedText() (text string, ok bool, err error) {
 //     mark final a frame containing an empty answer, while the router bills the
 //     output tokens the same response reported. Nothing would report a problem:
 //     exactly the silent failure this profile's rules exist to remove.
+//
+// Embedding has NO entry either, and its absence is the clearest case for why
+// this map is keyed on the profile rather than the field name. Its sealed field
+// is called `data` and IS an array, so a name-keyed set would hand it image's
+// permission automatically — the coincidence of vocabulary named above. But
+// `/v1/embeddings` has no well-formed response without `data`: the vectors are
+// the entire point of the call, so a frame missing them is a broken upstream,
+// not a trailing bookkeeping frame. A placeholder there would seal, sign and
+// mark final a response with no vectors in it while the router bills the
+// `usage.prompt_tokens` that same frame is now required to carry (§7.4) — the
+// Anthropic failure above exactly, with the bill attached.
 //
 // So a frame whose shape declares a field it does not carry fails closed here,
 // with the sealer's own "sealed field not present in frame".
