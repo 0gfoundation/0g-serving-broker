@@ -287,32 +287,13 @@ func (c *Ctrl) ValidateRequestWithEstimatedFee(ctx *gin.Context, req model.Reque
 		return errors.New("user not acknowledge the provider, please use acknowledgeProviderSigner function in sdk first, it will take effect in 2 minutes")
 	}
 
-	// Try to get service from cache first
-	serviceCacheKey := "current_service"
-	var service model.Service
-
-	if cachedService, found := c.serviceCache.Get(serviceCacheKey); found {
-		// Use cached service data
-		if svc, ok := cachedService.(model.Service); ok {
-			service = svc
-		} else {
-			// Cache data is invalid, fetch from contract
-			service, err := c.GetService(ctx)
-			if err != nil {
-				return errors.Wrap(err, "get service from context")
-			}
-			// Update cache with fresh data
-			c.serviceCache.Set(serviceCacheKey, service, cache.DefaultExpiration)
-		}
-	} else {
-		// Not in cache, fetch from contract
-		var err error
-		service, err = c.GetService(ctx)
-		if err != nil {
-			return errors.Wrap(err, "get service from context")
-		}
-		// Cache the service data
-		c.serviceCache.Set(serviceCacheKey, service, cache.DefaultExpiration)
+	// Read through cachedService rather than this function's own copy of the cache dance:
+	// the TTL that decides how long an unacknowledged signer keeps the provider rejecting
+	// lives there, and the copy that used to be here also dropped a fetched service on the
+	// floor when the cached value had the wrong type, leaving TeeSignerAcknowledged false.
+	service, err := c.cachedService(ctx)
+	if err != nil {
+		return errors.Wrap(err, "get service from context")
 	}
 
 	if !service.TeeSignerAcknowledged {

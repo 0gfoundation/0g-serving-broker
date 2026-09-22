@@ -42,6 +42,64 @@ func newUSDOverlayCtrl(t *testing.T, priceCache *pricefeed.Cache, staleness time
 	}
 }
 
+// The bug this guards: every config change rotates the signer and resets
+// teeSignerAcknowledged, and the request path used to cache that answer for the full 15
+// minutes. A single request in the window between the restart and the owner's
+// transaction then kept the provider rejecting for a quarter of an hour after the
+// acknowledgement had landed.
+//
+// What this does NOT cover: that cachedService calls serviceCacheTTL. Reaching its fetch
+// path needs a contract, and Ctrl.contract is a concrete type — see serviceCacheTTL's
+// comment. The cache-hit test below is what covers the rest of cachedService.
+func TestUnacknowledgedServiceIsNotCachedForTheFullTTL(t *testing.T) {
+	unacked := serviceCacheTTL(model.Service{TeeSignerAcknowledged: false})
+	if unacked != unacknowledgedServiceTTL {
+		t.Errorf("TTL for an unacknowledged service = %v, want %v", unacked, unacknowledgedServiceTTL)
+	}
+	// Against the cache's own default rather than a literal, because the whole point is
+	// that the two differ: a change making the default short would not be this bug, and a
+	// change making the unacknowledged case the default would be.
+	if acked := serviceCacheTTL(model.Service{TeeSignerAcknowledged: true}); acked != cache.DefaultExpiration {
+		t.Errorf("TTL for an acknowledged service = %v, want the cache default %v", acked, cache.DefaultExpiration)
+	}
+	if unacked == cache.DefaultExpiration {
+		t.Error("the unacknowledged TTL is the cache default, so it bounds nothing")
+	}
+}
+
+// A cache hit must not re-Set the entry: re-setting slides the short TTL forward on
+// every request, so a provider under load would never leave the rejecting state — which
+// is precisely the outage the TTL exists to bound, restored by a one-line "refresh the
+// cache while we are here".
+func TestCachedServiceHitDoesNotSlideTheExpiry(t *testing.T) {
+	svcCache := cache.New(5*time.Minute, 10*time.Minute)
+	c := &Ctrl{serviceCache: svcCache}
+	svcCache.Set(serviceCacheKey, model.Service{TeeSignerAcknowledged: false}, unacknowledgedServiceTTL)
+
+	before, found := svcCache.Items()[serviceCacheKey]
+	if !found {
+		t.Fatal("the entry this test seeds is not in the cache")
+	}
+
+	// A nil contract is what makes this assertion meaningful: the call can only return
+	// without panicking by serving the hit, so no contract stub is needed to prove it did.
+	for i := 0; i < 3; i++ {
+		svc, err := c.cachedService(context.Background())
+		if err != nil {
+			t.Fatalf("cachedService() = %v, want the cached value", err)
+		}
+		if svc.TeeSignerAcknowledged {
+			t.Fatal("cachedService() returned an acknowledged service; the seeded one is not")
+		}
+	}
+
+	after := svcCache.Items()[serviceCacheKey]
+	if after.Expiration != before.Expiration {
+		t.Errorf("expiry moved from %d to %d across cache hits; the short TTL would never fire under load",
+			before.Expiration, after.Expiration)
+	}
+}
+
 func TestGetCachedService_UnpopulatedCacheDistinctError(t *testing.T) {
 	c := newUSDOverlayCtrl(t, pricefeed.NewCache(), time.Hour)
 

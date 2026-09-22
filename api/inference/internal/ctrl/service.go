@@ -24,6 +24,61 @@ import (
 // transient rate-feed outages from genuine internal errors.
 var ErrPricingUnavailable = errors.New("PRICING_UNAVAILABLE")
 
+// serviceCacheKey is the one key the on-chain service record is cached under. A const
+// because two callers each spelled it themselves, and the TTL rule below has to apply to
+// whichever of them writes the entry.
+const serviceCacheKey = "current_service"
+
+// unacknowledgedServiceTTL is how long a service whose TEE signer is NOT acknowledged
+// stays cached, and it is deliberately far shorter than the cache's default.
+//
+// Every config change rotates the signing key, which resets teeSignerAcknowledged on
+// chain, and ValidateRequestWithEstimatedFee rejects every paid request while that flag
+// is false. So a window always exists between the broker restart that pushes the new
+// signer and the owner's acknowledging transaction. At the default 15 minutes, one
+// request landing in that window pins "reject everything" in place long AFTER the
+// acknowledgement arrived: the outage would be bounded by this cache rather than by the
+// owner. Measured on a dev CVM, the acknowledgement landed 35s after the restart and
+// nothing but the TTL would have kept the broker rejecting for another fourteen minutes.
+//
+// Not zero, because an unacknowledged provider still receives traffic and one contract
+// read per rejected request is a worse failure than a ten-second recovery.
+const unacknowledgedServiceTTL = 10 * time.Second
+
+// serviceCacheTTL is the TTL decision on its own, so it can be exercised without a
+// contract: Ctrl.contract is a concrete type, and reaching cachedService's fetch path in
+// a test would mean an interface with one implementation.
+func serviceCacheTTL(svc model.Service) time.Duration {
+	if !svc.TeeSignerAcknowledged {
+		return unacknowledgedServiceTTL
+	}
+	return cache.DefaultExpiration
+}
+
+// cachedService reads the on-chain service record through the cache and owns how long an
+// answer may be reused.
+//
+// One function rather than a copy in each caller, which is how it came about that the
+// request path cached a rejecting answer for a quarter of an hour: the get/fetch/set
+// dance was written twice, so a TTL rule could only ever have been added to one of them.
+//
+// A cache HIT deliberately does not re-Set the entry. Re-setting would slide the short
+// TTL forward on every request, so a provider under load would never leave the rejecting
+// state at all — the failure the TTL exists to bound.
+func (c *Ctrl) cachedService(ctx context.Context) (model.Service, error) {
+	if cached, found := c.serviceCache.Get(serviceCacheKey); found {
+		if svc, ok := cached.(model.Service); ok {
+			return svc, nil
+		}
+	}
+	svc, err := c.GetService(ctx)
+	if err != nil {
+		return model.Service{}, errors.Wrap(err, "get service from contract")
+	}
+	c.serviceCache.Set(serviceCacheKey, svc, serviceCacheTTL(svc))
+	return svc, nil
+}
+
 func (c *Ctrl) GetService(ctx context.Context) (model.Service, error) {
 	svc, err := c.contract.GetService(ctx)
 	if err != nil {
@@ -42,23 +97,9 @@ func (c *Ctrl) GetService(ctx context.Context) (model.Service, error) {
 // StalenessThreshold, an error is returned so callers fail-closed on new
 // requests rather than billing at an arbitrarily out-of-date rate.
 func (c *Ctrl) GetCachedService(ctx context.Context) (model.Service, error) {
-	serviceCacheKey := "current_service"
-
-	var service model.Service
-	var fromCache bool
-	if cachedService, found := c.serviceCache.Get(serviceCacheKey); found {
-		if svc, ok := cachedService.(model.Service); ok {
-			service = svc
-			fromCache = true
-		}
-	}
-	if !fromCache {
-		fetched, err := c.GetService(ctx)
-		if err != nil {
-			return model.Service{}, errors.Wrap(err, "get service from contract")
-		}
-		c.serviceCache.Set(serviceCacheKey, fetched, cache.DefaultExpiration)
-		service = fetched
+	service, err := c.cachedService(ctx)
+	if err != nil {
+		return model.Service{}, err
 	}
 
 	// Overlay USD-derived wei prices when USD denomination is configured.
@@ -222,7 +263,7 @@ func (c *Ctrl) syncServiceOnceLocked(ctx context.Context, svc config.Service) er
 	}
 
 	// Clear service cache when service is synced/updated
-	c.serviceCache.Delete("current_service")
+	c.serviceCache.Delete(serviceCacheKey)
 
 	return nil
 }
@@ -335,7 +376,7 @@ func (c *Ctrl) SyncServicePrices(ctx context.Context, inputWei, outputWei *big.I
 	// additionalInfo).  The USD overlay then re-applies the fresher wei
 	// prices on top, so this delete doesn't affect billing — it only
 	// keeps the non-price fields in sync with chain state.
-	c.serviceCache.Delete("current_service")
+	c.serviceCache.Delete(serviceCacheKey)
 	c.logger.Infof("SyncServicePrices: on-chain prices updated to inputPriceWei=%s outputPriceWei=%s",
 		inputWei.String(), outputWei.String())
 	return new(big.Int).Set(inputWei), new(big.Int).Set(outputWei), nil
