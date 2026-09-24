@@ -213,3 +213,34 @@ func TestGetBillingPrices_USDVideoPerSecond(t *testing.T) {
 		t.Errorf("USD video input wei: got %s want 0", prices.InputPrice)
 	}
 }
+
+// The USD branch must carry the model's own tier table too (a USD multi-model
+// embedding service — the Qwen3-Embedding shape — bills long prompts by it).
+func TestGetBillingPrices_USDMultiModelCarriesTheModelsTiers(t *testing.T) {
+	tiers := []config.PricingTier{
+		{MaxInputTokens: 1000, InputMultiplier: 1, OutputMultiplier: 1},
+		{MaxInputTokens: 0, InputMultiplier: 3, OutputMultiplier: 1},
+	}
+	svc := newMultiModelService(t, "USD", []config.ModelPricingEntry{
+		{Model: "a", InputPriceUSDPerMillionTokens: "0.02", OutputPriceUSDPerMillionTokens: "0"},
+		{Model: "b", InputPriceUSDPerMillionTokens: "0.01", OutputPriceUSDPerMillionTokens: "0", Tiers: tiers},
+	}, "a")
+	cache := pricefeed.NewCache()
+	cache.Set(big.NewInt(0), big.NewInt(0), big.NewRat(2, 1), time.Now())
+	c := &Ctrl{logger: testLogger(), Service: svc, priceCache: cache, priceFeed: config.PriceFeedConfig{StalenessThreshold: time.Hour}}
+
+	prices, err := c.GetBillingPrices(ginCtxWithResolvedModel("b"))
+	if err != nil {
+		t.Fatalf("GetBillingPrices: %v", err)
+	}
+	if len(prices.Tiers) != 2 || prices.Tiers[1].InputMultiplier != 3 {
+		t.Errorf("b: tiers = %v, want its own table", prices.Tiers)
+	}
+	prices, err = c.GetBillingPrices(ginCtxWithResolvedModel("a"))
+	if err != nil {
+		t.Fatalf("GetBillingPrices: %v", err)
+	}
+	if len(prices.Tiers) != 0 {
+		t.Errorf("a: tiers = %v, want none", prices.Tiers)
+	}
+}

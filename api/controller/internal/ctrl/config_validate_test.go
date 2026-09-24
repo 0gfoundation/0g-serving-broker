@@ -34,9 +34,10 @@ func TestConfigChangeRefusesContentTheBrokerCouldNotLoad(t *testing.T) {
 		want    string
 	}{{
 		// The same kind of shape that took the live deployment down: modelPricing the
-		// loader refuses. That exact config (modelPricing with no providerType) loads
-		// now that decentralized providers may serve several models, so this uses a
-		// modality multi-model pricing is still refused on.
+		// loader refuses. That exact config (modelPricing with no providerType) is
+		// still refused, but now for a different reason (decentralized multi-model
+		// needs an in-CVM service.targetUrl), so this uses a modality multi-model
+		// pricing is refused on outright, whose message says so.
 		name:    "modelPricing on a modality that cannot resolve it",
 		content: "service:\n  model: m\n  type: text-to-image\n  modelPricing:\n    - model: m\n      inputPrice: \"1\"\n      outputPrice: \"1\"\n",
 		want:    "modelPricing is only supported for service type",

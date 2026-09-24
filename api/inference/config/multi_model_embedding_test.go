@@ -114,8 +114,15 @@ func TestMultiModelEmbedding_DecentralizedTargetSeparatedRefusesPerModelTarget(t
 	body := strings.Replace(decentralizedMultiEmbedding, "%s", "http://embed-06b:8000/v1", 1)
 	body = strings.Replace(body, `  verifiability: "TeeML"`, "  verifiability: \"TeeML\"\n  targetSeparated: true\n  targetTeeAddress: \"0x0000000000000000000000000000000000000001\"", 1)
 	_, err := loadYAML(t, body)
-	if err == nil || !strings.Contains(err.Error(), "targetSeparated") {
+	if err == nil || !strings.Contains(err.Error(), "not supported on a decentralized provider with targetSeparated") {
 		t.Fatalf("want a targetSeparated refusal, got %v", err)
+	}
+	// A realistic separated target (a remote https TEE, no per-model targetUrl)
+	// gets the same plain refusal, not "must be a plaintext http:// URL".
+	body = strings.Replace(body, `targetUrl: "http://embed-8b:8000/v1"`, `targetUrl: "https://remote-tee.example.com/v1"`, 1)
+	body = strings.Replace(body, "      targetUrl: \"http://embed-06b:8000/v1\"\n", "", 1)
+	if _, err := loadYAML(t, body); err == nil || !strings.Contains(err.Error(), "not supported on a decentralized provider with targetSeparated") {
+		t.Fatalf("remote separated target: want a targetSeparated refusal, got %v", err)
 	}
 }
 
@@ -209,9 +216,11 @@ func TestMultiModelEmbedding_DecentralizedServiceTargetStaysInCVM(t *testing.T) 
 
 // A refused URL with credentials must not put the password in the error.
 func TestMultiModelEmbedding_CredentialsNotEchoed(t *testing.T) {
-	body := strings.Replace(decentralizedMultiEmbedding, "%s", "http://u:s3cret@embed-06b:8000/v1", 1)
-	_, err := loadYAML(t, body)
-	if err == nil || strings.Contains(err.Error(), "s3cret") {
-		t.Fatalf("want a refusal without the password, got %v", err)
+	for _, target := range []string{"http://u:s3cret@embed-06b:8000/v1", "https://u:s3cret@embed-06b:8000/v1", "ftp://u:s3cret@api.openai.com/v1", "http://u:s3cret@embed-06b:bad/v1"} {
+		body := strings.Replace(decentralizedMultiEmbedding, "%s", target, 1)
+		_, err := loadYAML(t, body)
+		if err == nil || strings.Contains(err.Error(), "s3cret") {
+			t.Fatalf("%s: want a refusal without the password, got %v", target, err)
+		}
 	}
 }
