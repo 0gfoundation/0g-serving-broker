@@ -1921,6 +1921,9 @@ func validateAudioModelEntry(i int, entry *ModelPricingEntry, isUSD bool) error 
 		if err != nil {
 			return fmt.Errorf("%w for model '%s'", err, entry.Model)
 		}
+		if err := requirePositiveAudioRate(fmt.Sprintf("service.modelPricing[%d].outputPriceUSDPerSecond", i), normalized, entry.Model); err != nil {
+			return err
+		}
 		entry.OutputPriceUSDPerMillionTokens = normalized
 		entry.InputPriceUSDPerMillionTokens = "0"
 	} else {
@@ -1932,6 +1935,9 @@ func validateAudioModelEntry(i int, entry *ModelPricingEntry, isUSD bool) error 
 		}
 		if _, ok := new(big.Int).SetString(entry.OutputPrice, 10); !ok {
 			return fmt.Errorf("invalid config: service.modelPricing[%d].outputPrice must be a valid integer for audio model '%s'", i, entry.Model)
+		}
+		if err := requirePositiveAudioRate(fmt.Sprintf("service.modelPricing[%d].outputPrice", i), entry.OutputPrice, entry.Model); err != nil {
+			return err
 		}
 		if entry.InputPrice != "" {
 			if _, ok := new(big.Int).SetString(entry.InputPrice, 10); !ok {
@@ -1947,6 +1953,29 @@ func validateAudioModelEntry(i int, entry *ModelPricingEntry, isUSD bool) error 
 	// would load, validate, and never once change a fee.
 	if len(entry.Tiers) > 0 {
 		return fmt.Errorf("invalid config: service.modelPricing[%d].tiers is not supported for audio-generation (the fee is generated seconds x outputPrice, independent of input length) for model '%s'", i, entry.Model)
+	}
+	return nil
+}
+
+// requirePositiveAudioRate refuses an audio per-second rate of zero or below.
+//
+// Stricter than the other modalities on purpose. A negative rate is nonsense for
+// any of them (a negative fee credits the caller), and the native path here
+// accepted one: big.Int parses "-5" happily. Zero is refused too, because for
+// audio it is not "a free model" — the rate is ALSO what sizes the reserve, so a
+// zero rate reserves zero and silently removes the one gate that makes concurrent
+// requests from a wallet see each other. A deployment that genuinely wants free
+// audio should say so somewhere other than a price that disables the gate.
+//
+// value is an integer string (wei) or a decimal (the USD path's normalized
+// per-1M figure); both parse as a big.Rat.
+func requirePositiveAudioRate(field, value, modelName string) error {
+	r, ok := new(big.Rat).SetString(strings.TrimSpace(value))
+	if !ok {
+		return fmt.Errorf("invalid config: %s %q is not a valid number for audio model '%s'", field, value, modelName)
+	}
+	if r.Sign() <= 0 {
+		return fmt.Errorf("invalid config: %s must be greater than zero for audio model '%s' (got %q) — the per-second rate also sizes the pre-forward reserve, so zero or less would disable the balance gate", field, modelName, value)
 	}
 	return nil
 }

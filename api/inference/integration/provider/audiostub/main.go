@@ -2,7 +2,8 @@
 // broker's audio-generation path can be exercised end to end before that adaptor
 // exists and without BytePlus credentials.
 //
-// It answers POST /v1/audio/speech exactly as the real adaptor must:
+// It answers POST /audio/speech (the path the broker calls) and /v1/audio/speech
+// exactly as the real adaptor must:
 //
 //	Content-Type: audio/mpeg
 //	X-0G-Audio-Duration-Seconds: <seconds>
@@ -67,7 +68,11 @@ func requestedFormat(r *http.Request) string {
 	var body struct {
 		ResponseFormat string `json:"response_format"`
 	}
-	raw, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	// 48MB, the real adaptor's own body limit: a request carrying base64 data:
+	// references is routinely over 1MB, and truncating it here made the JSON
+	// unparseable, so the stub answered audio/mpeg for a wav request — a false
+	// result on exactly the requests this feature adds.
+	raw, err := io.ReadAll(io.LimitReader(r.Body, 48<<20))
 	if err != nil {
 		return ""
 	}
@@ -85,7 +90,10 @@ func main() {
 		defaultDuration = "47.2"
 	}
 
-	http.HandleFunc("/v1/audio/speech", func(w http.ResponseWriter, r *http.Request) {
+	// Registered on both paths, like the real adaptor (handler.SpeechRoutes): the
+	// broker strips any leading /v1 and calls targetUrl + "/audio/speech", so the
+	// unprefixed path is the one broker traffic actually hits.
+	speech := func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 
 		if s := q.Get("status"); s != "" {
@@ -102,8 +110,10 @@ func main() {
 		}
 
 		// An explicitly EMPTY duration omits the header, which is how a broken
-		// adaptor looks to the broker: it should fall back to the reserved ceiling
-		// and increment broker_audio_billing_fallback_total{source="reserve"}.
+		// adaptor looks to the broker: it should fall back to the vendor's ceiling
+		// and increment broker_audio_billing_fallback_total{source="ceiling"}. A
+		// duration above the ceiling (say ?duration=500) is clamped to it and counted
+		// as source="usage_over_ceiling".
 		duration := defaultDuration
 		if q.Has("duration") {
 			duration = q.Get("duration")
@@ -151,7 +161,9 @@ func main() {
 			log.Printf("audiostub: write body: %v", err)
 		}
 		log.Printf("audiostub: served %d bytes, duration=%q", size, duration)
-	})
+	}
+	http.HandleFunc("/audio/speech", speech)
+	http.HandleFunc("/v1/audio/speech", speech)
 
 	addr := ":" + port
 	log.Printf("audiostub listening on %s (default duration %s)", addr, defaultDuration)

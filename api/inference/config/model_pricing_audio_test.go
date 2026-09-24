@@ -177,6 +177,19 @@ func TestValidateAudioModelEntryNative(t *testing.T) {
 			entry:   ModelPricingEntry{Model: "seed-audio-1.0", OutputPrice: "0.0025", Billing: audioBilling()},
 			wantErr: "outputPrice must be a valid integer",
 		},
+		// big.Int parses both of these, so the integer check alone let them through.
+		// A negative rate credits the caller; a zero one reserves nothing and turns
+		// the balance gate off.
+		{
+			name:    "a negative outputPrice is rejected",
+			entry:   ModelPricingEntry{Model: "seed-audio-1.0", OutputPrice: "-2500000", Billing: audioBilling()},
+			wantErr: "must be greater than zero",
+		},
+		{
+			name:    "a zero outputPrice is rejected",
+			entry:   ModelPricingEntry{Model: "seed-audio-1.0", OutputPrice: "0", Billing: audioBilling()},
+			wantErr: "must be greater than zero",
+		},
 		{
 			name:    "the USD per-second field is rejected under NATIVE",
 			entry:   ModelPricingEntry{Model: "seed-audio-1.0", OutputPrice: "2500000", OutputPriceUSDPerSecond: "0.0025", Billing: audioBilling()},
@@ -259,6 +272,16 @@ func TestValidateAudioModelEntryUSDRejections(t *testing.T) {
 			name:    "a NATIVE price is rejected under USD",
 			entry:   ModelPricingEntry{Model: "m", OutputPrice: "2500000", OutputPriceUSDPerSecond: "0.0025", Billing: &BillingConfig{Mode: BillingModePerAudioSecond}},
 			wantErr: "must use outputPriceUSDPerSecond",
+		},
+		{
+			name:    "a zero USD rate is rejected",
+			entry:   ModelPricingEntry{Model: "m", OutputPriceUSDPerSecond: "0", Billing: &BillingConfig{Mode: BillingModePerAudioSecond}},
+			wantErr: "must be greater than zero",
+		},
+		{
+			name:    "a negative USD rate is rejected",
+			entry:   ModelPricingEntry{Model: "m", OutputPriceUSDPerSecond: "-0.0025", Billing: &BillingConfig{Mode: BillingModePerAudioSecond}},
+			wantErr: "non-negative",
 		},
 	}
 

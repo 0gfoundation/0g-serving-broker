@@ -87,15 +87,26 @@ func TestResolveAudioSpeechSeconds(t *testing.T) {
 		{name: "sub-second still bills one", header: "0.4", wantSecs: 1, wantSource: audioQuantityUsage},
 		{name: "surrounding whitespace is trimmed", header: "  48  ", wantSecs: 48, wantSource: audioQuantityUsage},
 
-		// Every unusable header falls back. With no vendor rules configured the
-		// reserve resolves to 0 and is floored to 1 — billing zero would read as a
-		// free request, which is the one answer that hides the problem.
-		{name: "absent", header: "", wantSecs: 1, wantSource: audioQuantityReserve},
-		{name: "zero", header: "0", wantSecs: 1, wantSource: audioQuantityReserve},
-		{name: "negative", header: "-5", wantSecs: 1, wantSource: audioQuantityReserve},
-		{name: "not a number", header: "abc", wantSecs: 1, wantSource: audioQuantityReserve},
-		{name: "unit suffix", header: "48s", wantSecs: 1, wantSource: audioQuantityReserve},
-		{name: "absurd", header: "1e300", wantSecs: 1, wantSource: audioQuantityReserve},
+		{name: "the ceiling itself", header: "120", wantSecs: 120, wantSource: audioQuantityUsage},
+		{name: "a fraction under the ceiling rounds up to it", header: "119.2", wantSecs: 120, wantSource: audioQuantityUsage},
+
+		// Every unusable header bills the ceiling. This Ctrl has no vendor rules, so
+		// the ceiling is unknownVendorAudioBillingSeconds — the router's figure for
+		// the same case. It used to floor to 1, under-billing by 119 seconds against
+		// a router that charged its user 120.
+		{name: "absent", header: "", wantSecs: 120, wantSource: audioQuantityCeiling},
+		{name: "zero", header: "0", wantSecs: 120, wantSource: audioQuantityCeiling},
+		{name: "negative", header: "-5", wantSecs: 120, wantSource: audioQuantityCeiling},
+		{name: "not a number", header: "abc", wantSecs: 120, wantSource: audioQuantityCeiling},
+		{name: "unit suffix", header: "48s", wantSecs: 120, wantSource: audioQuantityCeiling},
+		{name: "NaN", header: "NaN", wantSecs: 120, wantSource: audioQuantityCeiling},
+		{name: "infinity", header: "Inf", wantSecs: 120, wantSource: audioQuantityCeiling},
+
+		// Above the ceiling is clamped to it. The bound here used to be 24 hours, so
+		// a header of 500 billed 500 seconds against a 120-second reserve.
+		{name: "just over the ceiling", header: "120.4", wantSecs: 120, wantSource: audioQuantityOverCeiling},
+		{name: "well over the ceiling", header: "500", wantSecs: 120, wantSource: audioQuantityOverCeiling},
+		{name: "absurd", header: "1e300", wantSecs: 120, wantSource: audioQuantityOverCeiling},
 	}
 
 	for _, tt := range tests {
@@ -107,7 +118,7 @@ func TestResolveAudioSpeechSeconds(t *testing.T) {
 				h.Set(AudioDurationHeader, tt.header)
 			}
 
-			secs, source := c.resolveAudioSpeechSeconds(ctx, h, []byte(`{"model":"seed-audio-1.0","input":"hi"}`))
+			secs, source := c.resolveAudioSpeechSeconds(ctx, h)
 			if secs != tt.wantSecs {
 				t.Errorf("seconds = %d, want %d", secs, tt.wantSecs)
 			}
@@ -115,6 +126,63 @@ func TestResolveAudioSpeechSeconds(t *testing.T) {
 				t.Errorf("source = %q, want %q", source, tt.wantSource)
 			}
 		})
+	}
+}
+
+// With vendor rules recorded, the ceiling comes from audiospec — the same figure
+// the balance gate reserved — so the bill can never exceed the hold.
+func TestResolveAudioSpeechSeconds_KnownVendorUsesItsCeiling(t *testing.T) {
+	c, ctx := newAudioReserveTestCtrl(t, "seedaudio")
+	for header, want := range map[string]struct {
+		secs   int64
+		source audioQuantitySource
+	}{
+		"48":  {48, audioQuantityUsage},
+		"500": {120, audioQuantityOverCeiling},
+		"":    {120, audioQuantityCeiling},
+	} {
+		h := http.Header{}
+		if header != "" {
+			h.Set(AudioDurationHeader, header)
+		}
+		secs, source := c.resolveAudioSpeechSeconds(ctx, h)
+		if secs != want.secs || source != want.source {
+			t.Errorf("header %q: got (%d, %q), want (%d, %q)", header, secs, source, want.secs, want.source)
+		}
+	}
+}
+
+// parseAudioSeconds must bound by the ceiling it is GIVEN, and compare as a float
+// before converting — past int64's range the conversion is implementation-defined
+// (MinInt64 on amd64), which would turn an absurd value negative and let it slip
+// under a post-conversion `> ceiling` check.
+func TestParseAudioSeconds(t *testing.T) {
+	tests := []struct {
+		raw         string
+		ceiling     int64
+		wantSecs    int64
+		wantClamped bool
+		wantOK      bool
+	}{
+		{raw: "7.1", ceiling: 10, wantSecs: 8, wantOK: true},
+		{raw: "10", ceiling: 10, wantSecs: 10, wantOK: true},
+		{raw: "9.5", ceiling: 10, wantSecs: 10, wantOK: true},
+		{raw: "10.01", ceiling: 10, wantSecs: 10, wantClamped: true, wantOK: true},
+		{raw: "1e19", ceiling: 10, wantSecs: 10, wantClamped: true, wantOK: true},
+		{raw: "1e300", ceiling: 10, wantSecs: 10, wantClamped: true, wantOK: true},
+		{raw: "", ceiling: 10},
+		{raw: "0", ceiling: 10},
+		{raw: "-1e300", ceiling: 10},
+		{raw: "NaN", ceiling: 10},
+		{raw: "+Inf", ceiling: 10},
+		{raw: "ten", ceiling: 10},
+	}
+	for _, tt := range tests {
+		secs, clamped, ok := parseAudioSeconds(tt.raw, tt.ceiling)
+		if secs != tt.wantSecs || clamped != tt.wantClamped || ok != tt.wantOK {
+			t.Errorf("parseAudioSeconds(%q, %d) = (%d, %v, %v), want (%d, %v, %v)",
+				tt.raw, tt.ceiling, secs, clamped, ok, tt.wantSecs, tt.wantClamped, tt.wantOK)
+		}
 	}
 }
 
@@ -182,8 +250,8 @@ func TestHandleAudioSpeechResponse_MissingHeaderStillDeliversAndRecords(t *testi
 	if len(recon.rows) != 1 {
 		t.Fatalf("reconciliation rows = %d, want 1", len(recon.rows))
 	}
-	if recon.rows[0].OutputCount < 1 {
-		t.Errorf("recorded %d seconds; the fallback must never record zero — that reads as a free request", recon.rows[0].OutputCount)
+	if recon.rows[0].OutputCount != 120 {
+		t.Errorf("recorded %d seconds, want the 120-second ceiling — the figure the router bills for the same missing header", recon.rows[0].OutputCount)
 	}
 }
 

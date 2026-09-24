@@ -69,7 +69,16 @@ func (d *DB) AccumulateAndDeleteRequests(requests []*model.Request, opts Accumul
 	// speech-to-text writes seconds into input_count for whisper rows. Token
 	// accumulation would silently corrupt daily_stat.input_tokens, so skip
 	// it until #530 lands a dedicated audio_seconds column.
-	skipTokenAccumulation := opts.ServiceType == constant.ServiceTypeSpeechToText
+	//
+	// audio-generation is the mirror image: it writes GENERATED seconds into
+	// output_count, which would land in daily_stat.output_tokens and
+	// user_daily_stat.output_tokens as if they were tokens. Skipped for the same
+	// reason and until the same fix. (Video and image also write non-token counts
+	// into output_count — seconds and images — and are not skipped here; that is
+	// pre-existing and deliberately left for #530 rather than changed as a side
+	// effect of adding audio.)
+	skipTokenAccumulation := opts.ServiceType == constant.ServiceTypeSpeechToText ||
+		opts.ServiceType == constant.ServiceTypeAudioGeneration
 
 	// Per-wallet aggregation grouped by (user_address, model). Keyed off the
 	// same request batch so it shares the STT skip and never double-counts.

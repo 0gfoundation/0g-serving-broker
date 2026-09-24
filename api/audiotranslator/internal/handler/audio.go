@@ -27,7 +27,27 @@ const DurationHeader = "X-0G-Audio-Duration-Seconds"
 // reference clips supplied as base64 data: URIs (~40MB) plus the prompt.
 const maxRequestBytes = 48 << 20
 
-// AudioHandler serves POST /v1/audio/speech.
+// SpeechRoutes are the paths Speech is served on.
+//
+// "/audio/speech" is the one the BROKER calls. The broker strips its /v1/proxy
+// prefix and any leading /v1, then appends the rest to targetUrl — so with the
+// documented targetUrl ("http://audiotranslator:8090", no /v1, matching the video
+// translators, which serve /videos unprefixed) every request arrives here as
+// /audio/speech. Registering only "/v1/audio/speech" 404ed every broker request.
+//
+// "/v1/audio/speech" stays for callers pointing an OpenAI SDK at the adaptor
+// directly, which is how it is exercised by hand.
+var SpeechRoutes = []string{"/audio/speech", "/v1/audio/speech"}
+
+// Routes registers Speech on every path in SpeechRoutes. main uses this rather
+// than naming paths itself so the test exercises the same registration.
+func Routes(engine gin.IRoutes, h *AudioHandler) {
+	for _, path := range SpeechRoutes {
+		engine.POST(path, h.Speech)
+	}
+}
+
+// AudioHandler serves POST /audio/speech (and /v1/audio/speech) — see SpeechRoutes.
 type AudioHandler struct {
 	client *seedaudio.Client
 	logger log.Logger
@@ -81,8 +101,16 @@ func (h *AudioHandler) Speech(c *gin.Context) {
 
 	// Set before the body: once the first byte is written the headers are
 	// committed, and the duration is the only channel the broker has for billing.
-	if secs, ok := translate.BillableSeconds(*resp); ok {
+	if secs, source, ok := translate.BillableSeconds(*resp); ok {
 		c.Writer.Header().Set(DurationHeader, strconv.FormatFloat(secs, 'f', -1, 64))
+		if source == translate.DurationSourcePostProcessed {
+			// UNDER-bills any speed-adjusted request, and silently: the header is
+			// still set, so the broker bills normally and every fallback series on
+			// both hops stays on its healthy value. This log is the only signal
+			// that the vendor stopped sending original_duration.
+			h.logger.Errorf("seedaudio: response carried no usable original_duration; billed the POST-PROCESSED duration (%vs) instead, which UNDER-bills any speed-adjusted request. Check the vendor response shape",
+				secs)
+		}
 	} else {
 		// The broker falls back to the reserved ceiling, which OVER-bills. Logged
 		// loudly here because this side is where the cause is visible.
@@ -116,15 +144,39 @@ func (h *AudioHandler) writeVendorError(c *gin.Context, err error) {
 	status := http.StatusBadGateway
 	msg := "audio generation failed"
 	if apiErr, ok := err.(*seedaudio.APIError); ok {
-		// A 4xx from the vendor is the caller's request being wrong, and passing
-		// it through lets the client see that rather than a generic upstream
-		// failure. A 5xx stays 502: the vendor's outage is not the client's error.
-		if apiErr.StatusCode >= 400 && apiErr.StatusCode < 500 {
-			status = apiErr.StatusCode
-		}
-		if apiErr.Message != "" {
-			msg = apiErr.Message
+		// Only a vendor status the CALLER'S request caused is passed through. The
+		// broker stamps every non-429 4xx as a client fault, and the router then
+		// neither fails over nor penalizes the provider — correct for "your input
+		// is too long", wrong for "this provider's BytePlus key was revoked". The
+		// vendor call is signed with the PROVIDER's key, so 401/402/403 (bad key,
+		// account in arrears) and 404/405 (a misconfigured base URL) are the
+		// provider's failures: passed through, every user saw what reads as "your
+		// API key is wrong" while the provider stayed healthy and in rotation.
+		// Those become 502 with a generic message; the vendor's own is logged.
+		if passthrough := callerFacingVendorStatus(apiErr.StatusCode); passthrough != 0 {
+			status = passthrough
+			if apiErr.Message != "" {
+				msg = apiErr.Message
+			}
 		}
 	}
 	c.JSON(status, gin.H{"error": gin.H{"message": msg}})
+}
+
+// callerFacingVendorStatus returns the vendor status to pass through to the
+// caller, or 0 when the failure is the provider's and should surface as 502.
+//
+// 429 passes through too, but for the opposite reason: it is the vendor
+// throttling this provider, which the broker and router both treat as a capacity
+// signal and retry elsewhere — not a client fault.
+func callerFacingVendorStatus(vendorStatus int) int {
+	switch vendorStatus {
+	case http.StatusBadRequest,
+		http.StatusRequestEntityTooLarge,
+		http.StatusUnsupportedMediaType,
+		http.StatusUnprocessableEntity,
+		http.StatusTooManyRequests:
+		return vendorStatus
+	}
+	return 0
 }

@@ -42,4 +42,32 @@ func TestAudioExampleConfigLoads(t *testing.T) {
 	if e.OutputPriceUSDPerMillionTokens != "2500" {
 		t.Errorf("normalized USD = %q, want 2500", e.OutputPriceUSDPerMillionTokens)
 	}
+
+	// A client discovers what it may send from supportedParameters, and nothing
+	// downstream filters the list (AdvertisedSupportedParameters only appends a
+	// reasoning key), so whatever is written here is exactly what /v1/models
+	// advertises. An omission is therefore silent: the capability works but no
+	// caller learns of it.
+	//
+	// Pinned because the list already drifted once — the reference pair (voice
+	// cloning, carried as URLs or data: URIs inside the JSON body) was missing
+	// along with pitch and loudness.
+	want := []string{
+		"input", "voice", "response_format", "speed",
+		"sample_rate", "reference_audio", "reference_image", "pitch", "loudness",
+	}
+	got := e.ModelInfo.SupportedParameters
+	for _, w := range want {
+		if !containsString(got, w) {
+			t.Errorf("supportedParameters is missing %q; a caller reading /v1/models never learns it is accepted (have %v)", w, got)
+		}
+	}
+	// And the reverse: a parameter nothing maps must not be advertised. Seed Audio
+	// has no length parameter, so max_duration promised callers a cap on length
+	// and cost that no layer enforced.
+	for _, unmapped := range []string{"max_duration"} {
+		if containsString(got, unmapped) {
+			t.Errorf("supportedParameters advertises %q, which the adaptor does not map to anything", unmapped)
+		}
+	}
 }

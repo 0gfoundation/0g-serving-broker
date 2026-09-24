@@ -452,7 +452,7 @@ func PrometheusInit(serverName, providerAddress string) {
 	AudioReserveSkippedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_audio_reserve_skipped_total",
-			Help:        "Audio-generation creates forwarded without a pre-flight reserve. Only one reason exists (unknown_vendor = no rules recorded in common/audiospec for the configured vendor), because an audio reserve cannot fail for any request-shaped reason: the vendor's output ceiling bounds every request, so audiospec.ReserveSeconds always returns a usable number. That makes ANY value here a deployment misconfiguration with a one-line fix, unlike its video sibling where two of three reasons are properties of the request. Non-zero means those requests are gated only by the minimum locked balance.",
+			Help:        "Audio-generation creates forwarded without a pre-flight reserve. Only one reason exists (unknown_vendor = no rules recorded in common/audiospec for the configured vendor), because an audio reserve cannot fail for any request-shaped reason: it is the vendor's output ceiling (audiospec MaxOutputSeconds) for every request. That makes ANY value here a deployment misconfiguration with a one-line fix, unlike its video sibling where two of three reasons are properties of the request. Non-zero means those requests are gated only by the minimum locked balance.",
 			ConstLabels: constLabels,
 		},
 		[]string{"reason"},
@@ -461,7 +461,7 @@ func PrometheusInit(serverName, providerAddress string) {
 	AudioBillingSourceTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_audio_billing_fallback_total",
-			Help:        "Completed audio-generation jobs by where the billable quantity came from: usage = the duration the adaptor reported from the vendor's own billing figure (the expected path); reserve = neither was usable and the held CEILING was charged, which OVER-bills by construction. Alert on reserve: it means the adaptor stopped reporting usage.output_audio_seconds, and every affected caller is being charged the maximum rather than what they used.",
+			Help:        "Completed audio-generation requests by where the billable quantity came from: usage = the duration the adaptor reported from the vendor's own billing figure (the expected path); ceiling = no usable duration was reported and the vendor's per-request CEILING was charged, which OVER-bills by construction; usage_over_ceiling = the reported duration exceeded the ceiling and was clamped to it (not an over-bill, but the adaptor or vendor is reporting something the vendor cannot produce). Alert on ceiling: it means the adaptor stopped setting X-0G-Audio-Duration-Seconds, and every affected caller is being charged the maximum rather than what they used.",
 			ConstLabels: constLabels,
 		},
 		[]string{"source"},
@@ -961,9 +961,9 @@ func RecordVideoReserveSkipped(reason string) {
 // There is deliberately no audio counterpart to VideoReserveSkipUndeterminedDuration
 // or VideoReserveSkipUnpredictableUnits, and the absence is the point rather than an
 // omission: both of those are properties of a REQUEST the broker cannot price, and
-// an audio request always can be. audiospec.ReserveSeconds is contractually total —
-// the vendor's output ceiling bounds every request, so an absent, unreadable or
-// absurd max_duration resolves to the ceiling instead of to "unknowable".
+// an audio request always can be. The reserve is the vendor's output ceiling for
+// every request — nothing in the request lowers it (Seed Audio takes no length
+// parameter) and nothing makes it unknowable.
 //
 // So this series carries one meaning only: a deployment named a vendor nobody
 // recorded rules for. That makes it actionable without triage — any non-zero value
@@ -984,11 +984,16 @@ func RecordAudioReserveSkipped(reason string) {
 	AudioReserveSkippedTotal.WithLabelValues(reason).Inc()
 }
 
-// Billing-source labels for RecordAudioBillingSource. "reserve" is the one to alert
+// Billing-source labels for RecordAudioBillingSource. "ceiling" is the one to alert
 // on — see AudioBillingSourceTotal's help text.
+//
+// "ceiling" was "reserve" before the bill could be the ceiling with no reserve
+// behind it (a vendor with no recorded rules bills a fixed figure but reserves
+// nothing), at which point the old name described the wrong thing.
 const (
-	AudioBillingSourceUsage   = "usage"
-	AudioBillingSourceReserve = "reserve"
+	AudioBillingSourceUsage       = "usage"
+	AudioBillingSourceCeiling     = "ceiling"
+	AudioBillingSourceOverCeiling = "usage_over_ceiling"
 )
 
 // RecordAudioBillingSource increments the billing-source counter. The label comes

@@ -161,11 +161,12 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 		reqBody = modifiedBody
 	}
 
-	// Multi-model speech-to-text / video-generation: resolve the requested model
-	// for per-model billing. Both post multipart/form-data (or sometimes JSON),
-	// so we extract the model without rewriting the body — only record the
-	// resolved model so GetBillingPrices (and, for video, the per-model billing
-	// shape) can price it. Single-model providers keep billing at the configured
+	// Multi-model speech-to-text / video-generation / audio-generation: resolve the
+	// requested model for per-model billing. STT and video post multipart/form-data
+	// (or sometimes JSON), audio posts JSON. In every case we extract the model
+	// without rewriting the body — only record the resolved model so
+	// GetBillingPrices (and, for video and audio, the per-model billing shape and
+	// vendor) can price it. Single-model providers keep billing at the configured
 	// on-chain price (resolvedModel unset).
 	//
 	// Embedding is deliberately NOT in this list: multi-model pricing for
@@ -174,7 +175,15 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 	// path to wire — an embedding service always bills at its single configured
 	// on-chain price. Revisit together if multi-model embedding billing is
 	// ever needed; adding one without the other would silently mis-bill.
-	if (svcType == "speech-to-text" || svcType == "video-generation") && c.Service.HasMultiModelPricing() && len(reqBody) > 0 {
+	//
+	// Audio-generation is in the list for the path that does not resolve it
+	// beforehand. The billed path resolves it in proxy.go before its balance gate
+	// (this is then an idempotent repeat); the WHITELISTED path skips that gate and
+	// arrives here unresolved. Without this, whitelisted audio on a multi-model
+	// provider priced at the on-chain max, tripped the "resolvedModel missing"
+	// ERROR on every request, and — with no model to look a vendor up by — recorded
+	// the wrong fallback quantity for reconciliation.
+	if (svcType == "speech-to-text" || svcType == "video-generation" || svcType == "audio-generation") && c.Service.HasMultiModelPricing() && len(reqBody) > 0 {
 		userAddr, _ := ctx.Get("userAddress")
 		userAddrStr, _ := userAddr.(string)
 		if err := c.ResolveModelForBilling(ctx, reqBody, ctx.Request.Header.Get("Content-Type"), userAddrStr); err != nil {
