@@ -54,6 +54,10 @@ type Proxy struct {
 	// unbounded under a flood) with a Prometheus counter plus a bounded
 	// periodic summary log. See rejection.go.
 	rejections *rejectionAggregator
+
+	// audioGate serializes an audio request's balance gate with its row INSERT, per
+	// wallet, so concurrent requests see each other's reserve. See audio_gate.go.
+	audioGate walletGateLocks
 }
 
 func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonitor bool, concurrencyConfig config.ConcurrencyLimitConfig, logger log.Logger) *Proxy {
@@ -178,6 +182,14 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 			"Provider",
 			"Content-Type",
 			"Content-Encoding",
+			// Audio generation's bill: the body is the audio file, so the billed
+			// seconds and the fee travel only in these headers. Unexposed, a browser
+			// calling the broker directly receives them and cannot read them.
+			// Literals because New's `ctrl` parameter shadows the package here; they
+			// are ctrl.AudioDurationHeader and ctrl.AudioFeeHeader, pinned by
+			// TestAudioHeadersAreCORSExposed.
+			"X-0G-Audio-Duration-Seconds",
+			"X-0G-Fee",
 		},
 		AllowCredentials: true, // Required for Authorization headers
 		MaxAge:           12 * 3600,
@@ -349,13 +361,30 @@ func (p *Proxy) Close() {
 	}
 }
 
+// proxiedServiceTypes is every service type Start will serve.
+//
+// audio-generation was missing from this list while every other layer of the
+// modality — config, reserve, billing, pricing — accepted it, so a broker booted
+// with type audio-generation failed Start with "invalid service type" and main
+// panicked. Every unit test called handlers directly and never went through Start,
+// which is why TestProxiedServiceTypesCoverEveryServiceType now pins the list
+// against the service-type constants.
+var proxiedServiceTypes = map[string]bool{
+	"zgStorage":                         true,
+	constant.ServiceTypeChatbot:         true,
+	constant.ServiceTypeTextToImage:     true,
+	constant.ServiceTypeSpeechToText:    true,
+	constant.ServiceTypeImageEditing:    true,
+	constant.ServiceTypeVideoGeneration: true,
+	constant.ServiceTypeEmbedding:       true,
+	constant.ServiceTypeAudioGeneration: true,
+}
+
 func (p *Proxy) Start() error {
-	switch p.ctrl.Service.Type {
-	case "zgStorage", "chatbot", "text-to-image", "speech-to-text", "image-editing", "video-generation", "embedding":
-		p.AddHTTPRoute(p.ctrl.Service.TargetURL, p.ctrl.Service.Type)
-	default:
+	if !proxiedServiceTypes[p.ctrl.Service.Type] {
 		return errors.New("invalid service type")
 	}
+	p.AddHTTPRoute(p.ctrl.Service.TargetURL, p.ctrl.Service.Type)
 	return nil
 }
 
@@ -651,6 +680,17 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		// This prevents unauthorized access to unknown endpoints
 		p.logger.Warnf("Blocked unsupported endpoint: path=%s, method=%s, remote=%s, user_agent=%s",
 			targetPath, ctx.Request.Method, ctx.Request.RemoteAddr, ctx.Request.UserAgent())
+		ctx.Set("ignoreError", true)
+		p.handleBrokerError(ctx, errors.New("endpoint not supported"), "unsupported endpoint")
+		return
+	}
+
+	// A billable route this broker's service type cannot bill — see
+	// billableRouteServes. Refused before the session is even validated, the same
+	// as any other unsupported endpoint: nothing about the caller changes the answer.
+	if !billableRouteServes(targetPath, svcType) {
+		p.logger.Warnf("Blocked endpoint not served by this service type: path=%s, serviceType=%s, remote=%s",
+			targetPath, svcType, ctx.Request.RemoteAddr)
 		ctx.Set("ignoreError", true)
 		p.handleBrokerError(ctx, errors.New("endpoint not supported"), "unsupported endpoint")
 		return
@@ -1022,6 +1062,17 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	}
 
 	p.logger.Debugf("request saved: %v", req)
+	// Audio holds its wallet's gate lock from the balance check until its reserve
+	// row is inserted, so a concurrent request's check cannot run in between — see
+	// walletGateLocks. releaseGate is idempotent: called explicitly right after the
+	// INSERT, and deferred to cover every early return before it.
+	releaseGate := func() {}
+	if svcType == constant.ServiceTypeAudioGeneration {
+		var once sync.Once
+		unlock := p.audioGate.lock(userAddress)
+		releaseGate = func() { once.Do(unlock) }
+		defer releaseGate()
+	}
 	if err := p.ctrl.ValidateRequestWithEstimatedFee(ctx, req, expectedInputFee); err != nil {
 		// The billing/validation gate is where "high RPS, zero revenue" requests
 		// silently die: ValidateRequestWithEstimatedFee sets ignoreError on the
@@ -1044,7 +1095,10 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		p.handleBrokerError(ctx, err, "create request")
 		return
 	}
-	if req.Fee != "0" && svcType == "audio-generation" {
+	// The reserve is now visible to every later gate; nothing after this needs the
+	// lock, and holding it through a 10-30s generation would serialize the wallet.
+	releaseGate()
+	if req.Fee != "0" && svcType == constant.ServiceTypeAudioGeneration {
 		// Runs after ProcessHTTPRequest, by which point the synchronous response path
 		// has either billed the request or not. Covers every exit below — prepare
 		// and pricing failures, upstream errors and transport failures included — and

@@ -57,7 +57,9 @@ func Main() {
 	// emitted and the broker refuses to sign the routing proof — a failure that
 	// surfaces only as a per-response broker log line.
 	engine := translatorhttp.NewEngine()
-	engine.POST("/v1/audio/speech", audioHandler.Speech)
+	// Both /audio/speech (what the broker calls) and /v1/audio/speech — see
+	// handler.SpeechRoutes for why the unprefixed path is the one that matters.
+	handler.Routes(engine, audioHandler)
 
 	addr := ":" + cfg.Port
 	srv := &http.Server{

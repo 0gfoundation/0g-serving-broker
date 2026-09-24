@@ -5,7 +5,9 @@
 # job to poll and no scheduler to configure — unlike video-generation, whose
 # example sits beside this one. See docs/design/seed-audio-generation.md.
 #
-# The broker forwards POST /v1/audio/speech to targetUrl and bills from the
+# Callers send POST /v1/proxy/audio/speech; the broker strips the prefix and
+# forwards POST {targetUrl}/audio/speech (the adaptor serves that path, and
+# /v1/audio/speech for direct OpenAI-SDK use), then bills from the
 # response's X-0G-Audio-Duration-Seconds header, because the response BODY is the
 # audio file and has nowhere to carry a usage block. The adaptor is responsible for
 # setting that header from the vendor's `original_duration` — see

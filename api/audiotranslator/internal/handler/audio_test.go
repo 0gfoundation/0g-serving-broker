@@ -63,6 +63,30 @@ func post(t *testing.T, h *AudioHandler, body string, headers map[string]string)
 	return rec
 }
 
+// The broker calls targetUrl + "/audio/speech" (it strips any leading /v1), so
+// that path must be registered — not only the OpenAI-style /v1 one. Exercised
+// through Routes, the same registration main uses, with the handler's own
+// validation answering: a 400 for an empty input proves the route reached Speech
+// rather than gin's 404.
+func TestRoutesServeTheUnprefixedPathTheBrokerCalls(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	engine := gin.New()
+	Routes(engine, NewAudioHandler(seedaudio.NewClient("http://unused.invalid", http.DefaultClient), testLogger()))
+
+	for _, path := range []string{"/audio/speech", "/v1/audio/speech"} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"input":""}`))
+		req.Header.Set("Content-Type", "application/json")
+		engine.ServeHTTP(rec, req)
+		if rec.Code == http.StatusNotFound {
+			t.Errorf("POST %s = 404; the broker's requests would never reach the adaptor", path)
+		}
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("POST %s = %d, want 400 from Speech's own validation", path, rec.Code)
+		}
+	}
+}
+
 func okReply(audio string, duration, originalDuration string) string {
 	return `{"code":0,"message":"ok","audio":"` + base64.StdEncoding.EncodeToString([]byte(audio)) +
 		`","url":"https://asset.example/x","duration":` + duration +
@@ -188,6 +212,36 @@ func TestSpeech_VendorFailureIsNotBillable(t *testing.T) {
 				t.Error("a duration header was set on a failure")
 			}
 		})
+	}
+}
+
+// Which vendor failures reach the caller as their own fault. The broker marks
+// every non-429 4xx "client", and the router then neither fails over nor
+// penalizes the provider — so a vendor 401/403 (the PROVIDER's key rejected)
+// passed through read to every user as "your key is wrong" while the provider
+// stayed in rotation. Only statuses the request itself causes pass through.
+func TestSpeech_VendorStatusAttribution(t *testing.T) {
+	for _, tc := range []struct {
+		vendor int
+		want   int
+	}{
+		{vendor: http.StatusBadRequest, want: http.StatusBadRequest},
+		{vendor: http.StatusRequestEntityTooLarge, want: http.StatusRequestEntityTooLarge},
+		{vendor: http.StatusUnprocessableEntity, want: http.StatusUnprocessableEntity},
+		{vendor: http.StatusTooManyRequests, want: http.StatusTooManyRequests},
+
+		{vendor: http.StatusUnauthorized, want: http.StatusBadGateway},
+		{vendor: http.StatusPaymentRequired, want: http.StatusBadGateway},
+		{vendor: http.StatusForbidden, want: http.StatusBadGateway},
+		{vendor: http.StatusNotFound, want: http.StatusBadGateway},
+		{vendor: http.StatusInternalServerError, want: http.StatusBadGateway},
+	} {
+		v := &vendorDouble{reply: `{"code":1,"message":"vendor says no"}`, status: tc.vendor}
+		client := seedaudio.NewClient(v.server(t).URL, http.DefaultClient)
+		rec := post(t, NewAudioHandler(client, testLogger()), `{"input":"hi"}`, nil)
+		if rec.Code != tc.want {
+			t.Errorf("vendor %d -> %d, want %d", tc.vendor, rec.Code, tc.want)
+		}
 	}
 }
 

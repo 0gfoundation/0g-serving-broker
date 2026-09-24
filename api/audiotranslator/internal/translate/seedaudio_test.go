@@ -116,6 +116,23 @@ func TestVoiceMapsToASpeakerReference(t *testing.T) {
 	}
 }
 
+// The OpenAI SDK requires `voice`, so an SDK caller sends an OpenAI preset like
+// "alloy". That is not a Seed Audio speaker, so it must not be forwarded as one:
+// the request goes out with no speaker entry and the model's default voice applies.
+// A real speaker id still goes through.
+func TestOpenAIPresetVoicesSelectTheDefaultVoice(t *testing.T) {
+	for _, preset := range []string{"alloy", "Nova", "  SHIMMER "} {
+		out := ToCreateRequest(SpeechRequest{Input: "hi", Voice: preset})
+		if len(out.References) != 0 {
+			t.Errorf("voice %q was forwarded as %+v; an OpenAI preset is not a vendor speaker", preset, out.References)
+		}
+	}
+	out := ToCreateRequest(SpeechRequest{Input: "hi", Voice: "zh_female_vv_uranus_bigtts"})
+	if len(out.References) != 1 || out.References[0].Speaker != "zh_female_vv_uranus_bigtts" {
+		t.Errorf("a vendor speaker id was not forwarded: %+v", out.References)
+	}
+}
+
 // A data: URI carries bytes inline and belongs in audio_data; anything else is a
 // URL the vendor fetches.
 func TestReferenceRoutingByScheme(t *testing.T) {
@@ -298,5 +315,75 @@ func TestToCreateRequestDefaultsFormatToMP3(t *testing.T) {
 	}
 	if got := ContentTypeFor(""); got != "audio/mpeg" {
 		t.Errorf("ContentTypeFor(\"\") = %q; the two ends must agree", got)
+	}
+}
+
+// A format or sample rate the vendor cannot serve is refused before forwarding. A
+// vendor rejection can arrive as a non-zero code inside an HTTP 200, which the
+// adaptor reports as 502 — a provider fault the router fails over across every
+// provider — so leaving these to the vendor turned one bad request into a fleet of
+// failed providers.
+func TestValidateFormatAndSampleRate(t *testing.T) {
+	rate := func(v int) *int { return &v }
+	ok := []SpeechRequest{
+		{Input: "hi"},
+		{Input: "hi", ResponseFormat: "MP3"},
+		{Input: "hi", ResponseFormat: "opus"},
+		{Input: "hi", ResponseFormat: "ogg_opus"},
+		{Input: "hi", SampleRate: rate(24000)},
+	}
+	for _, r := range ok {
+		if err := r.Validate(); err != nil {
+			t.Errorf("Validate(%+v) = %v, want ok", r, err)
+		}
+	}
+	bad := []SpeechRequest{
+		{Input: "hi", ResponseFormat: "flac"},
+		{Input: "hi", ResponseFormat: "aac"},
+		{Input: "hi", SampleRate: rate(22050)},
+		{Input: "hi", SampleRate: rate(0)},
+	}
+	for _, r := range bad {
+		if err := r.Validate(); err == nil {
+			t.Errorf("Validate(%+v) accepted a value the vendor cannot serve", r)
+		}
+	}
+}
+
+// Upper-case formats reach the vendor lower-cased; the vendor's names are.
+func TestToVendorFormatFoldsCase(t *testing.T) {
+	for in, want := range map[string]string{"MP3": "mp3", " Wav ": "wav", "OPUS": "ogg_opus"} {
+		if got := toVendorFormat(in); got != want {
+			t.Errorf("toVendorFormat(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// pitch_rate is in SEMITONES, so a frequency ratio m is 12*log2(m). Through the
+// percent formula speed uses, pitch 1.1 became +10 semitones — nearly an octave.
+func TestPitchIsConvertedToSemitones(t *testing.T) {
+	for _, tc := range []struct {
+		pitch float64
+		want  *int
+	}{
+		{pitch: 2.0, want: intp(12)},
+		{pitch: 0.5, want: intp(-12)},
+		{pitch: 1.1, want: intp(2)},  // 12*log2(1.1) = 1.65
+		{pitch: 4.0, want: intp(12)}, // clamped
+		{pitch: 1.0, want: nil},
+		{pitch: 1.02, want: nil}, // rounds to 0: omitted
+	} {
+		p := tc.pitch
+		out := ToCreateRequest(SpeechRequest{Input: "hi", Pitch: &p})
+		var got *int
+		if out.AudioConfig != nil {
+			got = out.AudioConfig.PitchRate
+		}
+		switch {
+		case tc.want == nil && got != nil:
+			t.Errorf("pitch %v -> pitch_rate %d, want omitted", tc.pitch, *got)
+		case tc.want != nil && (got == nil || *got != *tc.want):
+			t.Errorf("pitch %v -> pitch_rate %v, want %d", tc.pitch, got, *tc.want)
+		}
 	}
 }

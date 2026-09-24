@@ -582,12 +582,11 @@ type Service struct {
 
 	// OutputPriceUSDPerSecond is the USD price per effective output second for a
 	// USD-denominated single-model video-generation service (decimal string, e.g.
-	// "0.4" = $0.40 per effective second), or per GENERATED second for a
-	// single-model audio-generation service. It is REQUIRED — and the per-1M-token
-	// USD fields are forbidden — for those service types under USD denomination
-	// when no modelPricing entries are configured, because both bill per output
-	// second, not per token. For audio it must also be greater than zero: the rate
-	// sizes the pre-forward reserve. At config load it is normalized into
+	// "0.4" = $0.40 per effective second). It is REQUIRED — and the per-1M-token
+	// USD fields are forbidden — for that service type under USD denomination when
+	// no modelPricing entries are configured, because video bills per output
+	// second, not per token. (Audio generation has no single-model form at all; its
+	// per-second USD price is ModelPricingEntry.OutputPriceUSDPerSecond.) At config load it is normalized into
 	// OutputPriceUSDPerMillionTokens (×1e6, with the input side fixed at "0"), same
 	// as OutputPriceUSDPerImage, so the existing token-shaped USD machinery prices
 	// and advertises it unchanged. When modelPricing is configured, per-model
@@ -2546,12 +2545,8 @@ func loadConfig(cfg *Config) error {
 	// the per-1M-token fields; a multi-model video service carries the USD price
 	// per entry instead (see the multiModelUSD branch below).
 	isVideoType := cfg.Service.Type == constant.ServiceTypeVideoGeneration
-	// Audio generation bills per GENERATED second, the same shape as video: a
-	// single-model audio service uses service.outputPriceUSDPerSecond, a
-	// multi-model one prices per entry. Before this it fell through to the generic
-	// token branch, which demanded BOTH per-1M-token USD fields for a modality
-	// with no tokens — so a single-model USD audio provider could only be
-	// configured by writing its per-second rate into a per-token field.
+	// Audio generation is priced per modelPricing entry ONLY — see the refusal
+	// below, just after multiModelUSD.
 	isAudioType := cfg.Service.Type == constant.ServiceTypeAudioGeneration
 	// Embedding bills PromptTokens × InputPrice only (updateEmbeddingWithUsage
 	// has no completion/output side), so — like the image/video branches below —
@@ -2561,6 +2556,20 @@ func loadConfig(cfg *Config) error {
 	// otherwise be published on-chain by the price processor).
 	isEmbeddingType := cfg.Service.Type == constant.ServiceTypeEmbedding
 	multiModelUSD := len(cfg.Service.ModelPricing) > 0
+	// A single-model audio service is refused outright, in either denomination.
+	//
+	// Its pre-forward reserve is the vendor's output ceiling, looked up from the
+	// entry's billing.vendor — and a single-model service has no entry, so no
+	// vendor, so no reserve, ever: every request is gated only by the minimum
+	// locked balance, and N concurrent requests from one wallet can each pass
+	// against the same funds and together owe N ceilings. There is also no boot
+	// warning on that path (validateAudioVendor runs per entry), so it would fail
+	// silently. The single-model pricing shapes (per-token USD fields, a
+	// per-second rate published as `completion`) were wrong as well. One
+	// modelPricing entry with billing.vendor is the whole cost of doing it right.
+	if isAudioType && !multiModelUSD {
+		return fmt.Errorf("invalid config: service.type '%s' requires service.modelPricing — at least one entry with billing.mode '%s' and billing.vendor naming the upstream (e.g. 'seedaudio'). A single-model audio service has nowhere to name its vendor, so the broker could never size the pre-forward reserve; see integration/provider/config.audio-standard.example.yaml", constant.ServiceTypeAudioGeneration, BillingModePerAudioSecond)
+	}
 	switch cfg.Service.PriceDenomination {
 	case constant.PriceDenominationNative:
 		if cfg.Service.InputPriceUSDPerMillionTokens != "" || cfg.Service.OutputPriceUSDPerMillionTokens != "" {
@@ -2572,22 +2581,13 @@ func loadConfig(cfg *Config) error {
 		if cfg.Service.OutputPriceUSDPerSecond != "" {
 			return fmt.Errorf("invalid config: service.outputPriceUSDPerSecond is only valid when priceDenomination is '%s'", constant.PriceDenominationUSD)
 		}
-		// A single-model audio rate is also its reserve (price x the vendor
-		// ceiling), so zero or less would disable the balance gate — the same rule
-		// validateAudioModelEntry applies per entry. Only checked when set: a
-		// service that leaves outputPrice to the chain has nothing to check here.
-		if isAudioType && !multiModelUSD && cfg.Service.OutputPrice != "" {
-			if err := requirePositiveAudioRate("service.outputPrice", cfg.Service.OutputPrice, cfg.Service.ModelType); err != nil {
-				return err
-			}
-		}
 	case constant.PriceDenominationUSD:
 		if cfg.Service.InputPrice != "" || cfg.Service.OutputPrice != "" {
 			return fmt.Errorf("invalid config: service.inputPrice / service.outputPrice must be empty when priceDenomination is '%s' (use the USD fields)", constant.PriceDenominationUSD)
 		}
 		if isImageType {
 			if cfg.Service.OutputPriceUSDPerSecond != "" {
-				return fmt.Errorf("invalid config: service.outputPriceUSDPerSecond is only valid for service types '%s' / '%s', got '%s'", constant.ServiceTypeVideoGeneration, constant.ServiceTypeAudioGeneration, cfg.Service.Type)
+				return fmt.Errorf("invalid config: service.outputPriceUSDPerSecond is only valid for service type '%s', got '%s'", constant.ServiceTypeVideoGeneration, cfg.Service.Type)
 			}
 			// USD image service: outputPriceUSDPerImage is mandatory; the per-1M-token
 			// fields are forbidden (image bills per image, not per token).
@@ -2603,11 +2603,10 @@ func loadConfig(cfg *Config) error {
 			}
 			cfg.Service.OutputPriceUSDPerMillionTokens = normalized
 			cfg.Service.InputPriceUSDPerMillionTokens = "0"
-		} else if (isVideoType || isAudioType) && !multiModelUSD {
-			// USD single-model video or audio service: outputPriceUSDPerSecond is
-			// mandatory; the per-1M-token and per-image fields are forbidden (video
-			// bills per effective output second, audio per generated second — neither
-			// per token nor per image).
+		} else if isVideoType && !multiModelUSD {
+			// USD single-model video service: outputPriceUSDPerSecond is mandatory; the
+			// per-1M-token and per-image fields are forbidden (video bills per effective
+			// output second, not per token or per image).
 			if cfg.Service.InputPriceUSDPerMillionTokens != "" || cfg.Service.OutputPriceUSDPerMillionTokens != "" {
 				return fmt.Errorf("invalid config: service.inputPriceUSDPerMillionTokens / service.outputPriceUSDPerMillionTokens must be empty for service type '%s' under USD denomination (use service.outputPriceUSDPerSecond)", cfg.Service.Type)
 			}
@@ -2621,11 +2620,6 @@ func loadConfig(cfg *Config) error {
 			if err != nil {
 				return err
 			}
-			if isAudioType {
-				if err := requirePositiveAudioRate("service.outputPriceUSDPerSecond", normalized, cfg.Service.ModelType); err != nil {
-					return err
-				}
-			}
 			cfg.Service.OutputPriceUSDPerMillionTokens = normalized
 			cfg.Service.InputPriceUSDPerMillionTokens = "0"
 		} else if isEmbeddingType {
@@ -2637,7 +2631,7 @@ func loadConfig(cfg *Config) error {
 				return fmt.Errorf("invalid config: service.outputPriceUSDPerImage is only valid for image service types ('%s' / '%s'), got '%s'", constant.ServiceTypeTextToImage, constant.ServiceTypeImageEditing, cfg.Service.Type)
 			}
 			if cfg.Service.OutputPriceUSDPerSecond != "" {
-				return fmt.Errorf("invalid config: service.outputPriceUSDPerSecond is only valid for service types '%s' / '%s', got '%s'", constant.ServiceTypeVideoGeneration, constant.ServiceTypeAudioGeneration, cfg.Service.Type)
+				return fmt.Errorf("invalid config: service.outputPriceUSDPerSecond is only valid for service type '%s', got '%s'", constant.ServiceTypeVideoGeneration, cfg.Service.Type)
 			}
 			if cfg.Service.OutputPriceUSDPerMillionTokens != "" {
 				return fmt.Errorf("invalid config: service.outputPriceUSDPerMillionTokens must be empty for service type '%s' under USD denomination (embedding has no completion/output side to price)", cfg.Service.Type)
@@ -2661,7 +2655,7 @@ func loadConfig(cfg *Config) error {
 				if isVideoType || isAudioType {
 					return fmt.Errorf("invalid config: service.outputPriceUSDPerSecond is not valid alongside service.modelPricing (per-model entries carry the USD price instead)")
 				}
-				return fmt.Errorf("invalid config: service.outputPriceUSDPerSecond is only valid for service types '%s' / '%s', got '%s'", constant.ServiceTypeVideoGeneration, constant.ServiceTypeAudioGeneration, cfg.Service.Type)
+				return fmt.Errorf("invalid config: service.outputPriceUSDPerSecond is only valid for service type '%s', got '%s'", constant.ServiceTypeVideoGeneration, cfg.Service.Type)
 			}
 			// With multi-model pricing the per-model entries carry the USD prices and
 			// the service-level USD fields are derived (max-over-models) later in this

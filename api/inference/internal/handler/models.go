@@ -886,16 +886,6 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 		// as the image branch above.
 		obj.Pricing.Prompt = svc.InputPrice
 		obj.Pricing.Completion = "0"
-	case constant.ServiceTypeAudioGeneration:
-		// Audio bills generated seconds × OutputPrice and nothing for the script, so
-		// the rate goes under `audio` (the same field the multi-model path fills)
-		// and the per-token fields report 0. Falling through to the default published
-		// a per-SECOND rate as `completion`, a per-TOKEN field — which an
-		// OpenAI-compatible consumer reads as a price for one token, and which the 0G
-		// router does not price as audio at all.
-		obj.Pricing.Prompt = "0"
-		obj.Pricing.Completion = "0"
-		obj.Pricing.Audio = svc.OutputPrice
 	default:
 		obj.Pricing.Prompt = svc.InputPrice
 		obj.Pricing.Completion = svc.OutputPrice
@@ -971,7 +961,6 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 	var priceFeedOut *PriceFeedState
 	isImageType := svc.Type == constant.ServiceTypeTextToImage || svc.Type == constant.ServiceTypeImageEditing
 	isVideoType := svc.Type == constant.ServiceTypeVideoGeneration
-	isAudioType := svc.Type == constant.ServiceTypeAudioGeneration
 	isEmbeddingType := svc.Type == constant.ServiceTypeEmbedding
 	switch {
 	case isEmbeddingType && svc.InputPriceUSDPerMillionTokens != "":
@@ -1004,14 +993,6 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 		// about whether that quantity has a name.
 		if video, ok := h.derivePerUnitUSD("second", svc.OutputPriceUSDPerMillionTokens, ""); ok {
 			obj.PricingUSD = &ModelPricingUSD{Prompt: "0", Completion: "0", Video: video}
-		}
-	case isAudioType && svc.OutputPriceUSDPerMillionTokens != "":
-		// Single-model USD audio: service.outputPriceUSDPerSecond was normalized
-		// ×1e6 into the per-million field at config load, exactly as for video, so
-		// the same ÷1e6 derivation recovers the per-second figure. Surfaced under
-		// `audio`, mirroring the native branch and the multi-model USD audio path.
-		if audio, ok := h.derivePerUnitUSD("second", svc.OutputPriceUSDPerMillionTokens, ""); ok {
-			obj.PricingUSD = &ModelPricingUSD{Prompt: "0", Completion: "0", Audio: audio}
 		}
 	case svc.InputPriceUSDPerMillionTokens != "" && svc.OutputPriceUSDPerMillionTokens != "":
 		prompt, promptErr := pricefeed.USDPerMillionStringToPerToken(svc.InputPriceUSDPerMillionTokens)

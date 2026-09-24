@@ -2464,8 +2464,8 @@ priceFeed:
 	t.Setenv("CONFIG_FILE", configPath)
 	cfg := &Config{}
 	err := loadConfig(cfg)
-	if err == nil || !strings.Contains(err.Error(), "only valid for service types 'video-generation' / 'audio-generation'") {
-		t.Errorf("expected the generic per-second-types-only rejection, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "only valid for service type 'video-generation'") {
+		t.Errorf("expected the generic video-only rejection, got %v", err)
 	}
 	if err != nil && strings.Contains(err.Error(), "not valid alongside service.modelPricing") {
 		t.Errorf("chatbot must not get the video-specific 'alongside modelPricing' message, got %v", err)

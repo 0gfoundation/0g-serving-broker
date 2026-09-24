@@ -44,7 +44,9 @@ type SpeechRequest struct {
 	// ReferenceImage is one image URL or data: URI. Mutually exclusive with
 	// ReferenceAudio at the vendor.
 	ReferenceImage string `json:"reference_image"`
-	// Pitch and Loudness are multipliers like Speed, converted the same way.
+	// Pitch is a frequency MULTIPLIER (1.0 unchanged, 2.0 one octave up),
+	// converted to the vendor's semitone offset — see toSemitoneOffset. Loudness
+	// is a multiplier like Speed and converted the same way.
 	Pitch    *float64 `json:"pitch"`
 	Loudness *float64 `json:"loudness"`
 }
@@ -81,6 +83,17 @@ func (r SpeechRequest) Validate() error {
 			}
 		}
 	}
+	// Refused here, not left to the vendor: a vendor rejection of a bad format or
+	// rate may arrive as a non-zero code inside an HTTP 200, which this adaptor
+	// reports as 502 — a PROVIDER fault — so the router fails the request over to
+	// every other provider and marks each one failed. A 400 from here names the
+	// caller's mistake and costs nothing.
+	if f := strings.TrimSpace(r.ResponseFormat); f != "" && !vendorFormats[strings.ToLower(f)] {
+		return fmt.Errorf("response_format %q is not supported; use mp3, wav, pcm or opus", r.ResponseFormat)
+	}
+	if r.SampleRate != nil && !vendorSampleRates[*r.SampleRate] {
+		return fmt.Errorf("sample_rate %d is not supported; use one of 8000, 16000, 24000, 32000, 44100, 48000", *r.SampleRate)
+	}
 	if img := strings.TrimSpace(r.ReferenceImage); img != "" {
 		if !isAllowedReferenceScheme(img, "image") {
 			return fmt.Errorf("reference_image must be an http(s) URL or a data:image/ URI")
@@ -93,6 +106,14 @@ func (r SpeechRequest) Validate() error {
 	}
 	return nil
 }
+
+// vendorFormats are the response_format values this adaptor can serve: OpenAI's
+// names for the vendor's containers, plus the vendor's own "ogg_opus". OpenAI also
+// defines aac and flac, which Seed Audio does not produce.
+var vendorFormats = map[string]bool{"mp3": true, "wav": true, "pcm": true, "opus": true, "ogg_opus": true}
+
+// vendorSampleRates is the vendor's accepted sample_rate set (seedaudio.AudioConfig).
+var vendorSampleRates = map[int]bool{8000: true, 16000: true, 24000: true, 32000: true, 44100: true, 48000: true}
 
 // isDataURI reports whether a reference carries its bytes inline.
 func isDataURI(raw string) bool {
@@ -171,7 +192,14 @@ func ToCreateRequest(r SpeechRequest) seedaudio.CreateRequest {
 	// rejected upstream. That combination is not exotic: OpenAI's
 	// /v1/audio/speech makes `voice` a required parameter, so every
 	// image-guided request issued through an OpenAI SDK hit it.
-	if v := strings.TrimSpace(r.Voice); v != "" && len(r.ReferenceAudio) == 0 && strings.TrimSpace(r.ReferenceImage) == "" {
+	//
+	// And it is dropped for OpenAI's own preset names. The OpenAI SDK makes `voice`
+	// a REQUIRED argument, so every SDK caller sends one, and the natural value is
+	// an OpenAI preset ("alloy"). Those name OpenAI's voices, not Seed Audio
+	// speakers; forwarding one as a speaker id asks the vendor for a voice it does
+	// not have. Omitting it lets the model pick its default voice, which is what an
+	// SDK caller who had to type *something* meant.
+	if v := strings.TrimSpace(r.Voice); v != "" && len(r.ReferenceAudio) == 0 && strings.TrimSpace(r.ReferenceImage) == "" && !IsOpenAIPresetVoice(v) {
 		out.References = append(out.References, seedaudio.Reference{Speaker: v})
 	}
 
@@ -188,11 +216,26 @@ func ToCreateRequest(r SpeechRequest) seedaudio.CreateRequest {
 	}
 	cfg.SpeechRate = toRateOffset(r.Speed, -50, 100)
 	cfg.LoudnessRate = toRateOffset(r.Loudness, -50, 100)
-	cfg.PitchRate = toRateOffset(r.Pitch, -12, 12)
+	cfg.PitchRate = toSemitoneOffset(r.Pitch)
 	if cfg != (seedaudio.AudioConfig{}) {
 		out.AudioConfig = &cfg
 	}
 	return out
+}
+
+// openAIPresetVoices are the voice names OpenAI's /v1/audio/speech defines. None
+// is a Seed Audio speaker id; see ToCreateRequest for why they are dropped rather
+// than forwarded.
+var openAIPresetVoices = map[string]bool{
+	"alloy": true, "ash": true, "ballad": true, "cedar": true, "coral": true,
+	"echo": true, "fable": true, "marin": true, "nova": true, "onyx": true,
+	"sage": true, "shimmer": true, "verse": true,
+}
+
+// IsOpenAIPresetVoice reports whether v is one of OpenAI's preset voice names,
+// case-insensitively.
+func IsOpenAIPresetVoice(v string) bool {
+	return openAIPresetVoices[strings.ToLower(strings.TrimSpace(v))]
 }
 
 // audioReference routes a raw value to the field its scheme belongs in: a data:
@@ -226,11 +269,13 @@ func imageReference(raw string) seedaudio.Reference {
 // is the authority, and silently substituting wav would hand back audio in a
 // format the caller did not ask for.
 func toVendorFormat(f string) string {
-	switch strings.ToLower(strings.TrimSpace(f)) {
+	switch v := strings.ToLower(strings.TrimSpace(f)); v {
 	case "opus":
 		return "ogg_opus"
 	default:
-		return strings.TrimSpace(f)
+		// Lower-cased: the vendor's names are lower-case, and "MP3" passed through
+		// as-is would be refused upstream after routing and a reserve.
+		return v
 	}
 }
 
@@ -259,6 +304,39 @@ func toRateOffset(multiplier *float64, min, max int) *int {
 	}
 	if offset > max {
 		offset = max
+	}
+	if offset == 0 {
+		return nil
+	}
+	return &offset
+}
+
+// toSemitoneOffset converts a pitch MULTIPLIER into the vendor's semitone offset
+// in [-12, 12].
+//
+// Not toRateOffset: that maps a multiplier onto a PERCENT scale ((m-1)*100),
+// right for speech_rate and loudness_rate but wrong for pitch_rate, whose unit is
+// the semitone. Through the percent formula pitch 1.1 became +10 semitones —
+// nearly an octave for a 10% nudge — and everything outside 0.88-1.12 saturated
+// at the clamp. A frequency ratio m is 12*log2(m) semitones, so 2.0 is exactly +12
+// (one octave) and 0.5 exactly -12.
+//
+// Same omission rules as toRateOffset: nil for absent, 1.0, or nonsense input, so
+// the vendor applies its own default.
+func toSemitoneOffset(multiplier *float64) *int {
+	if multiplier == nil {
+		return nil
+	}
+	m := *multiplier
+	if math.IsNaN(m) || math.IsInf(m, 0) || m <= 0 || m == 1 {
+		return nil
+	}
+	offset := int(math.Round(12 * math.Log2(m)))
+	if offset < -12 {
+		offset = -12
+	}
+	if offset > 12 {
+		offset = 12
 	}
 	if offset == 0 {
 		return nil
