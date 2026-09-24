@@ -333,9 +333,10 @@ func (c *Ctrl) invalidateUpstreamSet(ctx context.Context, tag string) error {
 // adding one upstream would report rewrites of the others that never happened, which
 // corrupts the one mechanism built to catch a deceptive rewrite.
 //
-//   - providerIdentity when set. Already required alongside a per-model targetUrl, and
-//     it is the same lowercase-alphanumeric-with-hyphens shape the record's identity
-//     field takes.
+//   - providerIdentity when set. Config warns when a forwarder's per-model targetUrl
+//     lacks one (a decentralized engine usually has none and falls to the host rule
+//     below), and it is the same lowercase-alphanumeric-with-hyphens shape the
+//     record's identity field takes.
 //   - otherwise the URL's hostname. Measured across the 12 LIVE deployments (44 upstream
 //     entries): 5 have no providerIdentity, all 5 target an in-CVM container, and all 5
 //     hostnames (phala-inference-guard, 0gm-sglang, qwavity-sia-vllm, api, vllm) are

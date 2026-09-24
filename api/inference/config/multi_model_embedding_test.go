@@ -142,19 +142,21 @@ func TestMultiModelEmbedding_DecentralizedTargetsNeedDistinctRecordNames(t *test
 	}
 }
 
-// Every shape the controller's recorder refuses must be refused at load, checked
-// against the recorder itself (attest.UpstreamsFromCandidates + RenderUpstreamSet
-// over the raw candidates), not a restatement of its rules.
+// Shapes the controller's recorder refuses are refused at load, because load runs
+// the recorder itself (attest.UpstreamsFromCandidates + RenderUpstreamSet over the
+// raw candidates) rather than a restatement of its rules. A sample, not a census.
 func TestMultiModelEmbedding_DecentralizedConfigIsRecordable(t *testing.T) {
 	base := strings.Replace(decentralizedMultiEmbedding, "%s", "http://embed-06b:8000/v1", 1)
 	for _, tc := range []struct{ name, old, new, want string }{
 		{"trailing slash on a model target", `targetUrl: "http://embed-06b:8000/v1"`, `targetUrl: "http://embed-06b:8000/v1/"`, "slash"},
 		{"model target equals the service target with a trailing slash", `targetUrl: "http://embed-06b:8000/v1"`, `targetUrl: "http://embed-8b:8000/v1/"`, "embed-8b"},
 		{"one URL under two identities", `targetUrl: "http://embed-06b:8000/v1"`, "targetUrl: \"http://embed-8b:8000/v1\"\n      providerIdentity: \"small\"", "one destination has one identity"},
-		{"uppercase identity", `targetUrl: "http://embed-06b:8000/v1"`, "targetUrl: \"http://embed-06b:8000/v1\"\n      providerIdentity: \"Small\"", "invalid config"},
-		{"service target an IP literal", `targetUrl: "http://embed-8b:8000/v1"`, `targetUrl: "http://10.0.0.5:8000/v1"`, "cannot be a record name"},
+		{"uppercase identity", `targetUrl: "http://embed-06b:8000/v1"`, "targetUrl: \"http://embed-06b:8000/v1\"\n      providerIdentity: \"Small\"", `"Small"`},
+		{"query in a model target", `targetUrl: "http://embed-06b:8000/v1"`, `targetUrl: "http://embed-06b:8000/v1?k=v"`, "query"},
+		{"fragment in a model target", `targetUrl: "http://embed-06b:8000/v1"`, `targetUrl: "http://embed-06b:8000/v1#"`, "fragment"},
+		{"service target an IP literal", `targetUrl: "http://embed-8b:8000/v1"`, `targetUrl: "http://10.0.0.5:8000/v1"`, "no dots or IP literals"},
 		{"service identity shared by two engines", `  model: "qwen3-embedding-8b"`, "  model: \"qwen3-embedding-8b\"\n  providerIdentity: \"embed\"", `both derive the name "embed"`},
-		{"credentials in a model target", `targetUrl: "http://embed-06b:8000/v1"`, `targetUrl: "http://u:p@embed-06b:8000/v1"`, "invalid config"},
+		{"credentials in a model target", `targetUrl: "http://embed-06b:8000/v1"`, `targetUrl: "http://u:p@embed-06b:8000/v1"`, "must not carry credentials"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body := strings.Replace(base, tc.old, tc.new, 1)
@@ -189,5 +191,27 @@ service:
 `)
 	if err == nil || !strings.Contains(err.Error(), "must not set an output price") {
 		t.Fatalf("want an output-price refusal, got %v", err)
+	}
+}
+
+// service.targetUrl is the default model's engine, so it is held to the in-CVM rule
+// too. The second case is the centralized config that forgot providerType: it used
+// to be refused by the forwarder-only gate and must stay refused.
+func TestMultiModelEmbedding_DecentralizedServiceTargetStaysInCVM(t *testing.T) {
+	base := strings.Replace(decentralizedMultiEmbedding, "%s", "http://embed-06b:8000/v1", 1)
+	for _, target := range []string{"https://api.openai.com/v1", "https://dashscope.aliyuncs.com/compatible-mode/v1"} {
+		body := strings.Replace(base, `targetUrl: "http://embed-8b:8000/v1"`, `targetUrl: "`+target+`"`+"\n  providerIdentity: \"vendor\"", 1)
+		if _, err := loadYAML(t, body); err == nil || !strings.Contains(err.Error(), "service.targetUrl on a decentralized multi-model provider") {
+			t.Fatalf("%s: want a service.targetUrl refusal, got %v", target, err)
+		}
+	}
+}
+
+// A refused URL with credentials must not put the password in the error.
+func TestMultiModelEmbedding_CredentialsNotEchoed(t *testing.T) {
+	body := strings.Replace(decentralizedMultiEmbedding, "%s", "http://u:s3cret@embed-06b:8000/v1", 1)
+	_, err := loadYAML(t, body)
+	if err == nil || strings.Contains(err.Error(), "s3cret") {
+		t.Fatalf("want a refusal without the password, got %v", err)
 	}
 }

@@ -111,6 +111,11 @@ func validateDecentralizedModelTarget(targetURL string) error {
 	if err != nil || strings.ToLower(u.Scheme) != "http" || u.Hostname() == "" {
 		return fmt.Errorf("%q must be a plaintext http:// URL to an engine container in this CVM's compose (e.g. http://embed-sglang:8000/v1)", targetURL)
 	}
+	// Refused here, before anything echoes the URL: the recorder refuses it too,
+	// but its message quotes the URL whole, password included, into the crash log.
+	if u.User != nil {
+		return fmt.Errorf("%q must not carry credentials", u.Redacted())
+	}
 	if !attest.ValidUpstreamName(u.Hostname()) {
 		return fmt.Errorf("%q must name its engine by compose service name (lowercase alphanumeric, '-' or '_', no dots or IP literals, e.g. http://embed-sglang:8000/v1): a decentralized provider serves every model from engines in its own CVM", targetURL)
 	}
