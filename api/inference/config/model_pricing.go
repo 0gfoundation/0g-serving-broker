@@ -1395,15 +1395,17 @@ func validateModelPricing(cfg *Config) error {
 	// That is a shape check, the same one validateInEnclaveTarget relies on, and
 	// NOT proof the label is a service in this CVM's compose: nothing here reads
 	// the compose, and a label Docker's DNS does not know is passed to the host
-	// resolver, where a search domain could complete it off-box. What makes the
-	// destination checkable is the controller's upstream record
-	// (recordUpstreamSet), which names every engine URL in RTMR3 — so this also
-	// refuses any config that record could not express (see
+	// resolver, where a search domain could complete it off-box. The destination
+	// is checkable only when the controller records the upstream set
+	// (controller.recordUpstreamSet, off by default), which names every engine URL
+	// in RTMR3; with it off, this shape check is all there is. So this also
+	// refuses any config that record could not express, whether or not recording
+	// is on, so that turning it on never finds the set unrecordable (see
 	// validateDecentralizedModelTargets).
 	//
-	// A per-model targetUrl under targetSeparated is refused: there the remote
-	// TEE at targetTeeAddress signs, and there is one address, so a model routed
-	// anywhere else would be signed by a key the chain does not name for it.
+	// targetSeparated is refused: there the remote TEE at targetTeeAddress signs,
+	// and there is one address, so a model routed anywhere else would be signed
+	// by a key the chain does not name for it.
 	if !svc.IsForwarder() {
 		if err := validateDecentralizedModelTargets(svc); err != nil {
 			return err
@@ -1484,7 +1486,8 @@ func validateModelPricing(cfg *Config) error {
 			continue
 		}
 		// Forwarder-only: a decentralized provider has no routing proof to mislabel,
-		// and its in-CVM engines take no upstream key.
+		// and its in-CVM engines normally take no upstream key (one started with
+		// --api-key needs this entry's own additionalSecret; nothing warns).
 		if !svc.IsForwarder() {
 			continue
 		}
@@ -1630,6 +1633,13 @@ func UpstreamCandidates(svc *Service) []attest.UpstreamCandidate {
 // whose file targetUrl differs from the broker's TARGET_URL can pass here and be
 // refused there. Keep the file's service.targetUrl equal to TARGET_URL.
 func validateDecentralizedModelTargets(svc *Service) error {
+	// Under targetSeparated the remote TEE at targetTeeAddress signs, and there is
+	// one address and one remote target, so there is nothing per-model to route
+	// and the in-CVM rule below does not describe that target. Say so plainly
+	// rather than refusing it as a malformed engine URL.
+	if svc.TargetSeparated {
+		return fmt.Errorf("invalid config: service.modelPricing is not supported on a decentralized provider with targetSeparated (one remote TEE at targetTeeAddress signs every reply, so models cannot be routed to engines of their own)")
+	}
 	// service.targetUrl is the default model's engine and every entry without its
 	// own targetUrl, so it is held to the same rule. Without this a decentralized
 	// multi-model config could point it at a vendor API and have the replies
@@ -1642,9 +1652,6 @@ func validateDecentralizedModelTargets(svc *Service) error {
 		entry := &svc.ModelPricing[i]
 		if entry.TargetURL == "" {
 			continue
-		}
-		if svc.TargetSeparated {
-			return fmt.Errorf("invalid config: service.modelPricing[%d].targetUrl is not supported on a decentralized provider with targetSeparated (the one targetTeeAddress signs every model's responses) (model %q)", i, entry.Model)
 		}
 		if err := validateDecentralizedModelTarget(entry.TargetURL); err != nil {
 			return fmt.Errorf("invalid config: service.modelPricing[%d].targetUrl (model %q): %w", i, entry.Model, err)

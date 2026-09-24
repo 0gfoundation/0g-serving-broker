@@ -98,8 +98,8 @@ func validateInEnclaveTarget(targetURL string) error {
 	return nil
 }
 
-// validateDecentralizedModelTarget checks a decentralized provider's per-model
-// targetUrl: plaintext http:// to a bare label, meant to be an engine's compose
+// validateDecentralizedModelTarget checks a decentralized multi-model provider's
+// targetUrl (service-level and per-model): plaintext http:// to a bare label, meant to be an engine's compose
 // service name (only the shape is checked — see validateModelPricing). Stricter than validateInEnclaveTarget
 // on purpose: an IP literal is refused because a private address is not
 // necessarily inside the CVM (the host, a LAN neighbour), and because the
@@ -108,13 +108,17 @@ func validateInEnclaveTarget(targetURL string) error {
 // unreadable. See validateModelPricing for why the model may not leave the CVM.
 func validateDecentralizedModelTarget(targetURL string) error {
 	u, err := url.Parse(targetURL)
-	if err != nil || strings.ToLower(u.Scheme) != "http" || u.Hostname() == "" {
-		return fmt.Errorf("%q must be a plaintext http:// URL to an engine container in this CVM's compose (e.g. http://embed-sglang:8000/v1)", targetURL)
+	if err != nil {
+		// url.Parse's error quotes the input; do not repeat it, it may hold a password.
+		return fmt.Errorf("targetUrl does not parse as a URL (e.g. http://embed-sglang:8000/v1)")
 	}
-	// Refused here, before anything echoes the URL: the recorder refuses it too,
-	// but its message quotes the URL whole, password included, into the crash log.
+	// First, before any message echoes the URL: the recorder refuses credentials
+	// too, but its message quotes the URL whole, password included, into the crash log.
 	if u.User != nil {
 		return fmt.Errorf("%q must not carry credentials", u.Redacted())
+	}
+	if strings.ToLower(u.Scheme) != "http" || u.Hostname() == "" {
+		return fmt.Errorf("%q must be a plaintext http:// URL to an engine container in this CVM's compose (e.g. http://embed-sglang:8000/v1)", targetURL)
 	}
 	if !attest.ValidUpstreamName(u.Hostname()) {
 		return fmt.Errorf("%q must name its engine by compose service name (lowercase alphanumeric, '-' or '_', no dots or IP literals, e.g. http://embed-sglang:8000/v1): a decentralized provider serves every model from engines in its own CVM", targetURL)
