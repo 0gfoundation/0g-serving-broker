@@ -47,7 +47,7 @@ type Request struct {
 	// and should not be included in another settlement batch
 	Settling bool `gorm:"type:tinyint(1);not null;default:0" json:"settling"`
 	// ModelName stores the actual model requested for this inference (e.g., "qwen3-max").
-	// For multi-model centralized providers, this is the user's requested model.
+	// For multi-model providers, this is the user's requested model.
 	// For single-model providers, this is the configured ModelType.
 	ModelName string `gorm:"type:varchar(255);not null;default:''" json:"modelName"`
 	// IsWhitelisted indicates if this request is from a whitelisted user.

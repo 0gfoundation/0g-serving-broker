@@ -3,7 +3,6 @@ package ctrl
 import (
 	"context"
 	"fmt"
-	"net/url"
 	"os"
 	"time"
 
@@ -359,100 +358,11 @@ func (c *Ctrl) invalidateUpstreamSet(ctx context.Context, tag string) error {
 // cannot say which is which, so it must not claim it can. Measured zero occurrences —
 // in all 32 deployments providerIdentity is already one-to-one with the upstream URL.
 func upstreamsFromConfig(svc *config.Service) ([]attest.Upstream, error) {
-	type candidate struct {
-		url      string
-		identity string
-	}
-	// Ordered, so the refusal below names whichever URL config listed first rather than
-	// whichever the map iterated to.
-	var order []string
-	byURL := map[string]candidate{}
-
-	add := func(rawURL, identity, where string) error {
-		if rawURL == "" {
-			return nil
-		}
-		prev, seen := byURL[rawURL]
-		if !seen {
-			order = append(order, rawURL)
-			byURL[rawURL] = candidate{url: rawURL, identity: identity}
-			return nil
-		}
-		// One URL reached under two identities is a config that cannot say which provider
-		// serves it, and the record would have to pick one. Refused for the same reason a
-		// duplicate name is: the set would be a claim nobody made.
-		if prev.identity != identity {
-			return fmt.Errorf("%s names %s with providerIdentity %q, but it is already recorded with %q: one destination has one identity", where, rawURL, identity, prev.identity)
-		}
-		return nil
-	}
-
-	if err := add(svc.TargetURL, svc.ProviderIdentity, "service.targetUrl"); err != nil {
-		return nil, err
-	}
-	for i := range svc.ModelPricing {
-		e := &svc.ModelPricing[i]
-		// The entry's identity falling back to the service-level one. This restates
-		// config.Service.effectiveIdentityOf, which is unexported — and it is the real
-		// semantics rather than a defensive default: config only WARNS when an entry sets
-		// targetUrl without providerIdentity ("will use the service-level value for the
-		// other"), so an entry can reach here with an empty one.
-		//
-		// Measured zero occurrences across the 32 mainnet deployments, so this branch is
-		// unexercised in production. Naming it anyway, because the alternative is deriving
-		// the name from the host of a per-model vendor URL, which is a dotted FQDN and
-		// would be refused — turning a config config itself accepts into an unreadable set.
-		identity := e.ProviderIdentity
-		if identity == "" {
-			identity = svc.ProviderIdentity
-		}
-		where := fmt.Sprintf("service.modelPricing[%q]", e.Model)
-		if err := add(e.TargetURL, identity, where); err != nil {
-			return nil, err
-		}
-	}
-
-	members := make([]attest.Upstream, 0, len(order))
-	byName := map[string]string{}
-	for _, u := range order {
-		c := byURL[u]
-		name, err := upstreamName(c.url, c.identity)
-		if err != nil {
-			return nil, err
-		}
-		// Redundant for the OUTCOME, and kept for the message. RenderUpstreamSet parses its
-		// own output, and parseUpstreamSet refuses a name spelled twice — so deleting these
-		// three lines changes nothing a reader sees, and a mutation doing so fails no test.
-		//
-		// What it changes is what an operator is told. This names both URLs and the field
-		// to edit; the reader's refusal says a name appears twice, about a record the
-		// operator never wrote. The condition is a config mistake, so the message is the
-		// whole value.
-		if other, dup := byName[name]; dup {
-			return nil, fmt.Errorf("upstreams %s and %s both derive the name %q: give each a distinct service.providerIdentity or modelPricing[].providerIdentity so the record can name them apart", other, c.url, name)
-		}
-		byName[name] = c.url
-		members = append(members, attest.Upstream{Name: name, URL: c.url, Identity: c.identity})
-	}
-	// Not sorted here. RenderUpstreamSet sorts, and it is the only consumer that looks at
-	// anything but the length — a sort whose sole justification was a caller that logs
-	// both lists was dead weight, and a mutation removing it failed no test.
-	return members, nil
+	return attest.UpstreamsFromCandidates(config.UpstreamCandidates(svc))
 }
 
 // upstreamName derives the record's name for one destination. See upstreamsFromConfig
 // for why it may not depend on the rest of the set.
 func upstreamName(rawURL, identity string) (string, error) {
-	if identity != "" {
-		return identity, nil
-	}
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return "", fmt.Errorf("targetUrl %q does not parse, so no name can be derived for it: %w", rawURL, err)
-	}
-	host := u.Hostname()
-	if !attest.ValidUpstreamName(host) {
-		return "", fmt.Errorf("targetUrl %q has no providerIdentity and its host %q cannot be a record name (lowercase alphanumeric, dashes and underscores, 63 bytes max): set providerIdentity for this upstream", rawURL, host)
-	}
-	return host, nil
+	return attest.UpstreamName(rawURL, identity)
 }

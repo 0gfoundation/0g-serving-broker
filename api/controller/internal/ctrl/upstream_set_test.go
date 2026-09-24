@@ -621,10 +621,10 @@ func TestRecordIsAFunctionOfTheConfigNotItsOrder(t *testing.T) {
 }
 
 // A decentralized provider with one engine per model — the shape inference/config
-// admits for multi-model on a decentralized provider — must record as a readable set,
-// one member per engine, named after its compose service. Config refuses the shapes
-// this could not name (IP literals, two engines behind one host), so everything it
-// loads must pass here.
+// admits for multi-model on a decentralized provider — records as a readable set, one
+// member per engine, named after its compose service. (Config refuses at load any
+// decentralized multi-model config this derivation cannot record; the refusals are
+// tested in inference/config.)
 func TestDecentralizedMultiModelEnginesRecordAReadableSet(t *testing.T) {
 	svc, err := config.ServiceFromYAML([]byte(`
 service:

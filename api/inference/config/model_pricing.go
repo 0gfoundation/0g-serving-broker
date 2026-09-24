@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/0glabs/0g-serving-broker/common/attest"
 	"github.com/0glabs/0g-serving-broker/common/videospec"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 )
@@ -31,7 +32,7 @@ var ErrModelNotFound = errors.New("model not found")
 // models without enumerating every one.
 const ModelWildcard = "*"
 
-// ModelPricingEntry defines per-model pricing for centralized multi-model providers.
+// ModelPricingEntry defines per-model pricing for multi-model providers.
 // Each entry represents a model that the broker can serve with its own pricing.
 // Prices are expressed in the SERVICE's priceDenomination: NATIVE entries use
 // InputPrice/OutputPrice (neuron per token), USD entries use the USD-per-1M-token
@@ -1387,11 +1388,21 @@ func validateModelPricing(cfg *Config) error {
 	// signs responses as its own TEE's output, and a per-model targetUrl comes from
 	// the config file, which compose_hash does not measure (see applyTargetURLEnv).
 	// A routable one would let an unattested config line send a model's traffic to
-	// an external API and have the reply signed as TEE-computed. A bare compose
-	// service name can only resolve to a container on the CVM's own docker network.
+	// an external API and have the reply signed as TEE-computed, so the host must
+	// be a bare label (a compose service name), never an IP literal or a dotted
+	// name.
 	//
-	// TargetSeparated is refused outright: there the remote TEE at
-	// targetTeeAddress signs, and there is one address, so a model routed
+	// That is a shape check, the same one validateInEnclaveTarget relies on, and
+	// NOT proof the label is a service in this CVM's compose: nothing here reads
+	// the compose, and a label Docker's DNS does not know is passed to the host
+	// resolver, where a search domain could complete it off-box. What makes the
+	// destination checkable is the controller's upstream record
+	// (recordUpstreamSet), which names every engine URL in RTMR3 — so this also
+	// refuses any config that record could not express (see
+	// validateDecentralizedModelTargets).
+	//
+	// A per-model targetUrl under targetSeparated is refused: there the remote
+	// TEE at targetTeeAddress signs, and there is one address, so a model routed
 	// anywhere else would be signed by a key the chain does not name for it.
 	if !svc.IsForwarder() {
 		if err := validateDecentralizedModelTargets(svc); err != nil {
@@ -1467,16 +1478,14 @@ func validateModelPricing(cfg *Config) error {
 	// silent-mislabel / no-credential footgun. Warn loudly at load (mirroring the
 	// additionalSecret warning above) rather than surface it as a runtime proof
 	// mislabel or an upstream 401.
-	// Forwarder-only: on a decentralized provider there is no routing proof to
-	// mislabel and its in-CVM engines take no upstream key, so neither warning
-	// applies. (A per-model providerIdentity there only names the engine for
-	// reconciliation and the controller's upstream record.)
 	for i := range svc.ModelPricing {
 		entry := &svc.ModelPricing[i]
-		if !svc.IsForwarder() || (entry.TargetURL == "" && entry.ProviderIdentity == "") {
+		if entry.TargetURL == "" && entry.ProviderIdentity == "" {
 			continue
 		}
-		if (entry.TargetURL == "") != (entry.ProviderIdentity == "") {
+		// Forwarder-only: a decentralized provider has no routing proof to mislabel,
+		// and its engines are named by host in the controller's record.
+		if svc.IsForwarder() && (entry.TargetURL == "") != (entry.ProviderIdentity == "") {
 			log.Printf("[CONFIG] service.modelPricing model %q sets only one of {targetUrl, providerIdentity}; the TEE routing proof and reconciliation will use the service-level value for the other — set both for a genuine per-model upstream.", entry.Model)
 		}
 		if entry.TargetURL != "" && strings.TrimRight(entry.TargetURL, "/") != strings.TrimRight(svc.TargetURL, "/") && len(entry.AdditionalSecret) == 0 {
@@ -1583,31 +1592,36 @@ func validateModelPricing(cfg *Config) error {
 	return nil
 }
 
+// UpstreamCandidates lists the destinations svc permits, in config order, for the
+// controller's upstream record: service.targetUrl, then each modelPricing targetUrl.
+// Each entry is attributed to its own providerIdentity, falling back to the
+// service-level one — the real semantics, since config only WARNS when a forwarder
+// entry sets targetUrl without providerIdentity. Raw values: the controller reads
+// the config through ServiceFromYAML, which normalizes nothing, so this must not
+// either.
+func UpstreamCandidates(svc *Service) []attest.UpstreamCandidate {
+	out := []attest.UpstreamCandidate{{URL: svc.TargetURL, Identity: svc.ProviderIdentity, Where: "service.targetUrl"}}
+	for i := range svc.ModelPricing {
+		e := &svc.ModelPricing[i]
+		identity := e.ProviderIdentity
+		if identity == "" {
+			identity = svc.ProviderIdentity
+		}
+		out = append(out, attest.UpstreamCandidate{URL: e.TargetURL, Identity: identity, Where: fmt.Sprintf("service.modelPricing[%q]", e.Model)})
+	}
+	return out
+}
+
 // validateDecentralizedModelTargets applies validateModelPricing's decentralized
-// rules to every per-model targetUrl, and refuses two distinct destinations the
-// controller would record under one name (upstreamsFromConfig names a member by
-// its providerIdentity, else its host — so http://sglang:8000/v1 and
-// http://sglang:8001/v1 collide, and a colliding set is recorded as unreadable).
+// rules to every per-model targetUrl, then requires the whole config to be one the
+// controller can record: it derives the upstream set exactly as the controller does
+// (UpstreamCandidates → attest.UpstreamsFromCandidates) and renders it, so any shape
+// the recorder would refuse — two engines deriving one name, one URL under two
+// identities, an unnameable service target, an uppercase identity, a trailing slash,
+// credentials or a query in a URL — is refused here at load instead of leaving the
+// controller to record the set as unreadable. Runs before per-entry normalization on
+// purpose: the controller sees the raw config.
 func validateDecentralizedModelTargets(svc *Service) error {
-	names := map[string]string{} // record name -> URL
-	claim := func(rawURL, identity string) error {
-		name := identity
-		if name == "" {
-			if u, err := url.Parse(rawURL); err == nil {
-				name = u.Hostname()
-			}
-		}
-		if prev, dup := names[name]; dup && prev != rawURL {
-			return fmt.Errorf("invalid config: %s and %s would both be recorded as upstream %q: give each engine its own compose service name, or set a distinct modelPricing[].providerIdentity", prev, rawURL, name)
-		}
-		names[name] = rawURL
-		return nil
-	}
-	if svc.TargetURL != "" {
-		if err := claim(svc.TargetURL, svc.ProviderIdentity); err != nil {
-			return err
-		}
-	}
 	for i := range svc.ModelPricing {
 		entry := &svc.ModelPricing[i]
 		if entry.TargetURL == "" {
@@ -1619,13 +1633,13 @@ func validateDecentralizedModelTargets(svc *Service) error {
 		if err := validateDecentralizedModelTarget(entry.TargetURL); err != nil {
 			return fmt.Errorf("invalid config: service.modelPricing[%d].targetUrl (model %q): %w", i, entry.Model, err)
 		}
-		identity := entry.ProviderIdentity
-		if identity == "" {
-			identity = svc.ProviderIdentity
-		}
-		if err := claim(strings.TrimRight(entry.TargetURL, "/"), identity); err != nil {
-			return err
-		}
+	}
+	members, err := attest.UpstreamsFromCandidates(UpstreamCandidates(svc))
+	if err == nil {
+		_, err = attest.RenderUpstreamSet(members)
+	}
+	if err != nil {
+		return fmt.Errorf("invalid config: a decentralized multi-model provider's upstreams must be recordable by the controller: %w", err)
 	}
 	return nil
 }
@@ -1762,7 +1776,7 @@ func validateModelPricingEntry(i int, entry *ModelPricingEntry, serviceType stri
 // field. A decentralized provider's targetUrl is further confined to its own CVM
 // by validateModelPricing. Both empty is the common case and a no-op.
 func validateModelUpstream(i int, entry *ModelPricingEntry, serviceType string, isCentralized bool) error {
-	// Per-model upstream overrides are a chatbot-only feature. The video path
+	// Per-model upstream overrides are refused for video only. The video path
 	// (video.go / video_poll.go) builds its poll/content URLs from the SERVICE
 	// targetUrl and never threads the resolved model's EffectiveTargetURL /
 	// EffectiveProviderIdentity — so a per-model targetUrl here would poll the
@@ -1881,10 +1895,12 @@ func validateTokenModelEntry(i int, entry *ModelPricingEntry, serviceType string
 		if !isZeroOrEmptyPrice(entry.OutputPrice) || !isZeroOrEmptyPrice(entry.OutputPriceUSDPerMillionTokens) {
 			return fmt.Errorf("invalid config: service.modelPricing[%d] must not set an output price for service type '%s' (embedding has no completion/output side to price) (model '%s')", i, serviceType, entry.Model)
 		}
+		// Only this denomination's field: a stray field of the other one is left
+		// for the denomination check below to refuse.
 		if isUSD {
-			entry.OutputPrice, entry.OutputPriceUSDPerMillionTokens = "", "0"
+			entry.OutputPriceUSDPerMillionTokens = "0"
 		} else {
-			entry.OutputPrice, entry.OutputPriceUSDPerMillionTokens = "0", ""
+			entry.OutputPrice = "0"
 		}
 	}
 	if isUSD {

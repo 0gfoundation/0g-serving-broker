@@ -484,7 +484,7 @@ func (c *Ctrl) WhitelistMetricLabels(ctx *gin.Context, reqBody []byte, contentTy
 }
 
 // GetBillingPrices resolves the correct input and output prices for billing.
-// For centralized multi-model providers, reads the resolved model id from the
+// For multi-model providers, reads the resolved model id from the
 // gin.Context and returns model-specific prices (converting USD→wei at the live
 // rate when the service is USD-denominated). Otherwise falls back to on-chain
 // service prices.

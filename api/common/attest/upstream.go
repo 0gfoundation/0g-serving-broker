@@ -805,3 +805,84 @@ func (r *RunningState) UpstreamSetHash() (string, error) {
 // protocol and versions it, so changing the line format below cannot produce a hash a
 // reader of the old format would accept.
 const upstreamSetHashPrefix = "zg-upstream-set-v1\n"
+
+// UpstreamCandidate is one destination a service config permits, before naming:
+// the base URL and the providerIdentity it is attributed to ("" when none). Where
+// names the config field it came from, for error messages.
+type UpstreamCandidate struct {
+	URL, Identity, Where string
+}
+
+// UpstreamsFromCandidates collects the members of an upstream set from a config's
+// candidates, one per distinct URL, named by UpstreamName. It is the controller's
+// derivation (see upstreamsFromConfig there for the reasoning), kept here so the
+// inference config loader can refuse, at load, a config the controller could only
+// record as unreadable.
+func UpstreamsFromCandidates(cands []UpstreamCandidate) ([]Upstream, error) {
+	// Ordered, so the refusal below names whichever URL config listed first rather than
+	// whichever the map iterated to.
+	var order []string
+	byURL := map[string]UpstreamCandidate{}
+	for _, c := range cands {
+		if c.URL == "" {
+			continue
+		}
+		prev, seen := byURL[c.URL]
+		if !seen {
+			order = append(order, c.URL)
+			byURL[c.URL] = c
+			continue
+		}
+		// One URL reached under two identities is a config that cannot say which provider
+		// serves it, and the record would have to pick one. Refused for the same reason a
+		// duplicate name is: the set would be a claim nobody made.
+		if prev.Identity != c.Identity {
+			return nil, fmt.Errorf("%s names %s with providerIdentity %q, but it is already recorded with %q: one destination has one identity", c.Where, c.URL, c.Identity, prev.Identity)
+		}
+	}
+
+	members := make([]Upstream, 0, len(order))
+	byName := map[string]string{}
+	for _, u := range order {
+		c := byURL[u]
+		name, err := UpstreamName(c.URL, c.Identity)
+		if err != nil {
+			return nil, err
+		}
+		// Redundant for the OUTCOME, and kept for the message. RenderUpstreamSet parses its
+		// own output, and parseUpstreamSet refuses a name spelled twice — so deleting these
+		// three lines changes nothing a reader sees, and a mutation doing so fails no test.
+		//
+		// What it changes is what an operator is told. This names both URLs and the field
+		// to edit; the reader's refusal says a name appears twice, about a record the
+		// operator never wrote. The condition is a config mistake, so the message is the
+		// whole value.
+		if other, dup := byName[name]; dup {
+			return nil, fmt.Errorf("upstreams %s and %s both derive the name %q: give each a distinct service.providerIdentity or modelPricing[].providerIdentity so the record can name them apart", other, c.URL, name)
+		}
+		byName[name] = c.URL
+		members = append(members, Upstream{Name: name, URL: c.URL, Identity: c.Identity})
+	}
+	// Not sorted here. RenderUpstreamSet sorts, and it is the only consumer that looks at
+	// anything but the length — a sort whose sole justification was a caller that logs
+	// both lists was dead weight, and a mutation removing it failed no test.
+	return members, nil
+}
+
+// UpstreamName derives the record's name for one destination: its providerIdentity
+// when set, else its URL's hostname, else a refusal. It may not depend on the rest of
+// the set — see the controller's upstreamsFromConfig.
+func UpstreamName(rawURL, identity string) (string, error) {
+	if identity != "" {
+		return identity, nil
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", fmt.Errorf("targetUrl %q does not parse, so no name can be derived for it: %w", rawURL, err)
+	}
+	host := u.Hostname()
+	if !ValidUpstreamName(host) {
+		return "", fmt.Errorf("targetUrl %q has no providerIdentity and its host %q cannot be a record name (lowercase alphanumeric, dashes and underscores, 63 bytes max): set providerIdentity for this upstream", rawURL, host)
+	}
+	return host, nil
+}
