@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/0glabs/0g-serving-broker/common/attest"
 	"github.com/0glabs/0g-serving-broker/common/config"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"gopkg.in/yaml.v2"
@@ -97,24 +98,23 @@ func validateInEnclaveTarget(targetURL string) error {
 	return nil
 }
 
-// validateDecentralizedModelTarget is validateInEnclaveTarget's host rule for a
-// decentralized provider's per-model targetUrl: plaintext http:// to loopback, a
-// private address, or a bare compose service name. See validateModelPricing for
-// why a decentralized model may not leave the CVM.
+// validateDecentralizedModelTarget checks a decentralized provider's per-model
+// targetUrl: plaintext http:// to a bare compose service name, i.e. an engine
+// container the measured compose declares. Stricter than validateInEnclaveTarget
+// on purpose: an IP literal is refused because a private address is not
+// necessarily inside the CVM (the host, a LAN neighbour), and because the
+// controller names an identity-less upstream after its host, which must then be
+// a valid record name (attest.ValidUpstreamName) or the whole recorded set is
+// unreadable. See validateModelPricing for why the model may not leave the CVM.
 func validateDecentralizedModelTarget(targetURL string) error {
 	u, err := url.Parse(targetURL)
 	if err != nil || strings.ToLower(u.Scheme) != "http" || u.Hostname() == "" {
-		return fmt.Errorf("%q must be a plaintext http:// URL to an engine inside this CVM (e.g. http://embed-sglang:8000/v1)", targetURL)
+		return fmt.Errorf("%q must be a plaintext http:// URL to an engine container in this CVM's compose (e.g. http://embed-sglang:8000/v1)", targetURL)
 	}
-	host := u.Hostname()
-	if ip := net.ParseIP(host); ip != nil {
-		if ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() {
-			return nil
-		}
-	} else if !strings.Contains(host, ".") {
-		return nil
+	if !attest.ValidUpstreamName(u.Hostname()) {
+		return fmt.Errorf("%q must name its engine by compose service name (lowercase alphanumeric, '-' or '_', no dots or IP literals, e.g. http://embed-sglang:8000/v1): a decentralized provider serves every model from containers in its own CVM", targetURL)
 	}
-	return fmt.Errorf("%q names a host that routes off this CVM — a decentralized provider serves every model from its own enclave; use the engine's compose service name (e.g. http://embed-sglang:8000/v1)", targetURL)
+	return nil
 }
 
 // validUpstreamDomain matches a bare lowercase FQDN: dot-separated labels of

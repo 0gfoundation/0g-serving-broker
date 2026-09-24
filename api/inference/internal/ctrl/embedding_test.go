@@ -504,3 +504,30 @@ func TestSanitizeResponseBodyExcept_NoLeaksReturnsUnchanged(t *testing.T) {
 	assert.False(t, changed)
 	assert.Equal(t, body, out)
 }
+
+// A multi-upstream centralized embedding provider must sign the proof under the
+// provider that served the model (reqModel.Upstream), not the service-level one —
+// otherwise the proof names one vendor beside another vendor's TLS fingerprint.
+func TestHandleEmbeddingResponse_RoutingProofNamesTheModelsUpstream(t *testing.T) {
+	c := newChatbotTestCtrl(t, config.Service{ProviderType: constant.ProviderTypeCentralized, ProviderIdentity: "vendor-a"})
+	c.reconciliationDB = &mockReconciliationDB{}
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(w)
+	ctx.Request = httptest.NewRequest("POST", "/v1/proxy/embeddings", nil)
+	ctx.Set(CtxKeyUpstreamCertFingerprint, strings.Repeat("ab", 32))
+
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{},
+		Body:       io.NopCloser(bytes.NewReader([]byte(`{"object":"list","data":[],"usage":{"prompt_tokens":1,"total_tokens":1}}`))),
+	}
+	reqModel := model.Request{IsWhitelisted: true, ServiceName: "embedding", RequestHash: "h", Upstream: "vendor-b"}
+	require.NoError(t, c.handleEmbeddingResponse(ctx, resp, model.User{}, "0", []byte(`{"model":"b","input":"hi"}`), reqModel))
+
+	sig, err := c.GetChatSignature(w.Header().Get("ZG-Res-Key"))
+	require.NoError(t, err)
+	assert.Contains(t, sig.Text, "vendor-b")
+	assert.NotContains(t, sig.Text, "vendor-a")
+}

@@ -619,3 +619,41 @@ func TestRecordIsAFunctionOfTheConfigNotItsOrder(t *testing.T) {
 		t.Errorf("the same config recorded two ways:\n %q\n %q", ga, gb)
 	}
 }
+
+// A decentralized provider with one engine per model — the shape inference/config
+// admits for multi-model on a decentralized provider — must record as a readable set,
+// one member per engine, named after its compose service. Config refuses the shapes
+// this could not name (IP literals, two engines behind one host), so everything it
+// loads must pass here.
+func TestDecentralizedMultiModelEnginesRecordAReadableSet(t *testing.T) {
+	svc, err := config.ServiceFromYAML([]byte(`
+service:
+  targetUrl: http://embed-8b:8000/v1
+  type: embedding
+  model: a
+  modelPricing:
+    - model: a
+      inputPrice: "300"
+    - model: b
+      inputPrice: "100"
+      targetUrl: http://embed-06b:8000/v1
+`))
+	if err != nil {
+		t.Fatalf("ServiceFromYAML() = %v", err)
+	}
+	members, err := upstreamsFromConfig(svc)
+	if err != nil {
+		t.Fatalf("upstreamsFromConfig() = %v", err)
+	}
+	if _, err := attest.RenderUpstreamSet(members); err != nil {
+		t.Fatalf("RenderUpstreamSet() = %v", err)
+	}
+	got := map[string]string{}
+	for _, m := range members {
+		got[m.Name] = m.URL
+	}
+	want := map[string]string{"embed-8b": "http://embed-8b:8000/v1", "embed-06b": "http://embed-06b:8000/v1"}
+	if len(got) != len(want) || got["embed-8b"] != want["embed-8b"] || got["embed-06b"] != want["embed-06b"] {
+		t.Errorf("members = %v, want %v", got, want)
+	}
+}

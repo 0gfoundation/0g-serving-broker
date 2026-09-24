@@ -523,7 +523,7 @@ func (c *Ctrl) GetBillingPrices(ctx context.Context) (BillingPrices, error) {
 			return BillingPrices{InputPrice: entry.InputPrice, OutputPrice: entry.OutputPrice, Tiers: entry.Tiers, CacheTokenBilling: cache}, nil
 		}
 	}
-	// Fallback: on-chain prices (decentralized, single-model centralized, or the
+	// Fallback: on-chain prices (any single-model provider, or the
 	// invariant-violation cases above — always >= any per-model price). For USD
 	// services GetCachedService overlays the live max wei price.
 	svc, err := c.GetCachedService(ctx)

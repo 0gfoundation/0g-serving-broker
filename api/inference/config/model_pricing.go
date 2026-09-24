@@ -1383,28 +1383,19 @@ func validateModelPricing(cfg *Config) error {
 	}
 	// A decentralized provider fronting several models is several engines inside
 	// its own CVM (e.g. one sglang per model on a shared GPU). That is the whole
-	// case, so each per-model targetUrl must stay inside the enclave: the provider
+	// case, so each per-model targetUrl must name an engine container: the provider
 	// signs responses as its own TEE's output, and a per-model targetUrl comes from
 	// the config file, which compose_hash does not measure (see applyTargetURLEnv).
 	// A routable one would let an unattested config line send a model's traffic to
 	// an external API and have the reply signed as TEE-computed. A bare compose
-	// service name can only resolve to a container the measured compose declares.
+	// service name can only resolve to a container on the CVM's own docker network.
 	//
 	// TargetSeparated is refused outright: there the remote TEE at
 	// targetTeeAddress signs, and there is one address, so a model routed
 	// anywhere else would be signed by a key the chain does not name for it.
 	if !svc.IsForwarder() {
-		for i := range svc.ModelPricing {
-			entry := &svc.ModelPricing[i]
-			if entry.TargetURL == "" {
-				continue
-			}
-			if svc.TargetSeparated {
-				return fmt.Errorf("invalid config: service.modelPricing[%d].targetUrl is not supported on a decentralized provider with targetSeparated (the one targetTeeAddress signs every model's responses) (model %q)", i, entry.Model)
-			}
-			if err := validateDecentralizedModelTarget(entry.TargetURL); err != nil {
-				return fmt.Errorf("invalid config: service.modelPricing[%d].targetUrl (model %q): %w", i, entry.Model, err)
-			}
+		if err := validateDecentralizedModelTargets(svc); err != nil {
+			return err
 		}
 	}
 	// service.model is the default billed (and forwarded-upstream) model for
@@ -1476,8 +1467,10 @@ func validateModelPricing(cfg *Config) error {
 	// silent-mislabel / no-credential footgun. Warn loudly at load (mirroring the
 	// additionalSecret warning above) rather than surface it as a runtime proof
 	// mislabel or an upstream 401.
-	// Forwarder-only: a decentralized provider has no routing proof or upstream
-	// vendor to attribute, and its in-CVM engines take no upstream key.
+	// Forwarder-only: on a decentralized provider there is no routing proof to
+	// mislabel and its in-CVM engines take no upstream key, so neither warning
+	// applies. (A per-model providerIdentity there only names the engine for
+	// reconciliation and the controller's upstream record.)
 	for i := range svc.ModelPricing {
 		entry := &svc.ModelPricing[i]
 		if !svc.IsForwarder() || (entry.TargetURL == "" && entry.ProviderIdentity == "") {
@@ -1586,6 +1579,53 @@ func validateModelPricing(cfg *Config) error {
 	} else {
 		svc.InputPrice, svc.OutputPrice =
 			svc.MaxModelPricesNative(cfg.TieredPricing.Tiers)
+	}
+	return nil
+}
+
+// validateDecentralizedModelTargets applies validateModelPricing's decentralized
+// rules to every per-model targetUrl, and refuses two distinct destinations the
+// controller would record under one name (upstreamsFromConfig names a member by
+// its providerIdentity, else its host — so http://sglang:8000/v1 and
+// http://sglang:8001/v1 collide, and a colliding set is recorded as unreadable).
+func validateDecentralizedModelTargets(svc *Service) error {
+	names := map[string]string{} // record name -> URL
+	claim := func(rawURL, identity string) error {
+		name := identity
+		if name == "" {
+			if u, err := url.Parse(rawURL); err == nil {
+				name = u.Hostname()
+			}
+		}
+		if prev, dup := names[name]; dup && prev != rawURL {
+			return fmt.Errorf("invalid config: %s and %s would both be recorded as upstream %q: give each engine its own compose service name, or set a distinct modelPricing[].providerIdentity", prev, rawURL, name)
+		}
+		names[name] = rawURL
+		return nil
+	}
+	if svc.TargetURL != "" {
+		if err := claim(svc.TargetURL, svc.ProviderIdentity); err != nil {
+			return err
+		}
+	}
+	for i := range svc.ModelPricing {
+		entry := &svc.ModelPricing[i]
+		if entry.TargetURL == "" {
+			continue
+		}
+		if svc.TargetSeparated {
+			return fmt.Errorf("invalid config: service.modelPricing[%d].targetUrl is not supported on a decentralized provider with targetSeparated (the one targetTeeAddress signs every model's responses) (model %q)", i, entry.Model)
+		}
+		if err := validateDecentralizedModelTarget(entry.TargetURL); err != nil {
+			return fmt.Errorf("invalid config: service.modelPricing[%d].targetUrl (model %q): %w", i, entry.Model, err)
+		}
+		identity := entry.ProviderIdentity
+		if identity == "" {
+			identity = svc.ProviderIdentity
+		}
+		if err := claim(strings.TrimRight(entry.TargetURL, "/"), identity); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -1833,9 +1873,10 @@ func validateTokenModelEntry(i int, entry *ModelPricingEntry, serviceType string
 	}
 	// Embedding bills PromptTokens × InputPrice only (updateEmbeddingWithUsage),
 	// so an output price would be advertised and folded into the on-chain max
-	// while never charged. Refuse a non-zero one and pin the unused side to "0",
-	// the same carve-out the single-model embedding service gets in loadConfig.
-	// An explicit "0" passes, so re-validating a normalized entry is a no-op.
+	// while never charged. Refuse a non-zero one and pin the unused side to "0" —
+	// the rule loadConfig applies to a single-model USD embedding service, applied
+	// here in both denominations. An explicit "0" passes, so re-validating a
+	// normalized entry is a no-op.
 	if serviceType == constant.ServiceTypeEmbedding {
 		if !isZeroOrEmptyPrice(entry.OutputPrice) || !isZeroOrEmptyPrice(entry.OutputPriceUSDPerMillionTokens) {
 			return fmt.Errorf("invalid config: service.modelPricing[%d] must not set an output price for service type '%s' (embedding has no completion/output side to price) (model '%s')", i, serviceType, entry.Model)
