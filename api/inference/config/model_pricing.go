@@ -1370,18 +1370,42 @@ func validateModelPricing(cfg *Config) error {
 		return nil
 	}
 	svc := &cfg.Service
-	if !svc.IsForwarder() {
-		return fmt.Errorf("invalid config: service.modelPricing is only supported when providerType is 'centralized' or 'standard'")
-	}
 	// Per-model billing is wired only for the modalities whose request path
-	// resolves the request model before billing: chatbot + speech-to-text (token
-	// billing) and video-generation (per-effective-second billing). On other
-	// modalities the allowlist would never run and every request would silently
-	// fall back to the on-chain max price, so reject at load time.
+	// resolves the request model before billing: chatbot + speech-to-text +
+	// embedding (token billing) and video-generation (per-effective-second
+	// billing). On other modalities the allowlist would never run and every
+	// request would silently fall back to the on-chain max price, so reject at
+	// load time.
 	switch svc.Type {
-	case constant.ServiceTypeChatbot, constant.ServiceTypeSpeechToText, constant.ServiceTypeVideoGeneration:
+	case constant.ServiceTypeChatbot, constant.ServiceTypeSpeechToText, constant.ServiceTypeEmbedding, constant.ServiceTypeVideoGeneration:
 	default:
-		return fmt.Errorf("invalid config: service.modelPricing is only supported for service type '%s', '%s', or '%s', got '%s'", constant.ServiceTypeChatbot, constant.ServiceTypeSpeechToText, constant.ServiceTypeVideoGeneration, svc.Type)
+		return fmt.Errorf("invalid config: service.modelPricing is only supported for service type '%s', '%s', '%s', or '%s', got '%s'", constant.ServiceTypeChatbot, constant.ServiceTypeSpeechToText, constant.ServiceTypeEmbedding, constant.ServiceTypeVideoGeneration, svc.Type)
+	}
+	// A decentralized provider fronting several models is several engines inside
+	// its own CVM (e.g. one sglang per model on a shared GPU). That is the whole
+	// case, so each per-model targetUrl must stay inside the enclave: the provider
+	// signs responses as its own TEE's output, and a per-model targetUrl comes from
+	// the config file, which compose_hash does not measure (see applyTargetURLEnv).
+	// A routable one would let an unattested config line send a model's traffic to
+	// an external API and have the reply signed as TEE-computed. A bare compose
+	// service name can only resolve to a container the measured compose declares.
+	//
+	// TargetSeparated is refused outright: there the remote TEE at
+	// targetTeeAddress signs, and there is one address, so a model routed
+	// anywhere else would be signed by a key the chain does not name for it.
+	if !svc.IsForwarder() {
+		for i := range svc.ModelPricing {
+			entry := &svc.ModelPricing[i]
+			if entry.TargetURL == "" {
+				continue
+			}
+			if svc.TargetSeparated {
+				return fmt.Errorf("invalid config: service.modelPricing[%d].targetUrl is not supported on a decentralized provider with targetSeparated (the one targetTeeAddress signs every model's responses) (model %q)", i, entry.Model)
+			}
+			if err := validateDecentralizedModelTarget(entry.TargetURL); err != nil {
+				return fmt.Errorf("invalid config: service.modelPricing[%d].targetUrl (model %q): %w", i, entry.Model, err)
+			}
+		}
 	}
 	// service.model is the default billed (and forwarded-upstream) model for
 	// requests that omit the model field; it must be set.
@@ -1452,9 +1476,11 @@ func validateModelPricing(cfg *Config) error {
 	// silent-mislabel / no-credential footgun. Warn loudly at load (mirroring the
 	// additionalSecret warning above) rather than surface it as a runtime proof
 	// mislabel or an upstream 401.
+	// Forwarder-only: a decentralized provider has no routing proof or upstream
+	// vendor to attribute, and its in-CVM engines take no upstream key.
 	for i := range svc.ModelPricing {
 		entry := &svc.ModelPricing[i]
-		if entry.TargetURL == "" && entry.ProviderIdentity == "" {
+		if !svc.IsForwarder() || (entry.TargetURL == "" && entry.ProviderIdentity == "") {
 			continue
 		}
 		if (entry.TargetURL == "") != (entry.ProviderIdentity == "") {
@@ -1693,8 +1719,8 @@ func validateModelPricingEntry(i int, entry *ModelPricingEntry, serviceType stri
 // provider it must be HTTPS, mirroring the service-level rule, because the routing
 // proof binds resp.TLS which is only populated over TLS. ProviderIdentity is
 // normalized to a lowercase machine key in place, exactly like the service-level
-// field (modelPricing is forwarder-only, so this is never reached for a
-// decentralized provider). Both empty is the common case and a no-op.
+// field. A decentralized provider's targetUrl is further confined to its own CVM
+// by validateModelPricing. Both empty is the common case and a no-op.
 func validateModelUpstream(i int, entry *ModelPricingEntry, serviceType string, isCentralized bool) error {
 	// Per-model upstream overrides are a chatbot-only feature. The video path
 	// (video.go / video_poll.go) builds its poll/content URLs from the SERVICE
@@ -1804,6 +1830,21 @@ func validateVideoModelEntry(i int, entry *ModelPricingEntry, isUSD bool) error 
 func validateTokenModelEntry(i int, entry *ModelPricingEntry, serviceType string, isUSD bool) error {
 	if entry.OutputPriceUSDPerSecond != "" {
 		return fmt.Errorf("invalid config: service.modelPricing[%d].outputPriceUSDPerSecond is only valid for video-generation (model '%s')", i, entry.Model)
+	}
+	// Embedding bills PromptTokens × InputPrice only (updateEmbeddingWithUsage),
+	// so an output price would be advertised and folded into the on-chain max
+	// while never charged. Refuse a non-zero one and pin the unused side to "0",
+	// the same carve-out the single-model embedding service gets in loadConfig.
+	// An explicit "0" passes, so re-validating a normalized entry is a no-op.
+	if serviceType == constant.ServiceTypeEmbedding {
+		if !isZeroOrEmptyPrice(entry.OutputPrice) || !isZeroOrEmptyPrice(entry.OutputPriceUSDPerMillionTokens) {
+			return fmt.Errorf("invalid config: service.modelPricing[%d] must not set an output price for service type '%s' (embedding has no completion/output side to price) (model '%s')", i, serviceType, entry.Model)
+		}
+		if isUSD {
+			entry.OutputPrice, entry.OutputPriceUSDPerMillionTokens = "", "0"
+		} else {
+			entry.OutputPrice, entry.OutputPriceUSDPerMillionTokens = "0", ""
+		}
 	}
 	if isUSD {
 		if entry.InputPrice != "" || entry.OutputPrice != "" {

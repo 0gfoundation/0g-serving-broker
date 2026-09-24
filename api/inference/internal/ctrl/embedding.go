@@ -205,10 +205,9 @@ func (c *Ctrl) updateEmbeddingWithUsage(ctx *gin.Context, usage *EmbeddingUsage,
 	// correct tiered price") and is advertised for embedding in GET /v1/models
 	// the same as any other service (models.go's tiered_pricing population
 	// isn't gated by service type) — so it must be applied here too, not just
-	// in chatbot's updateAccountWithUsage. Embedding has no per-model tier
-	// table of its own (multi-model pricing isn't wired for this service
-	// type — see validateModelPricing), so effectiveTiers falls straight to
-	// the service-level config when enabled.
+	// in chatbot's updateAccountWithUsage. On a multi-model provider
+	// prices.Tiers is the resolved model's own table; effectiveTiers falls
+	// back to the service-level config when that is empty.
 	tiers := c.effectiveTiers(prices.Tiers)
 	inputPrice, rateClass, err := embeddingTieredInputPrice(tiers, prices.InputPrice, usage.PromptTokens)
 	if err != nil {
