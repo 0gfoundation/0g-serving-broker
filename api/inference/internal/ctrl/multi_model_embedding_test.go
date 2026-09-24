@@ -68,9 +68,9 @@ func TestPrepareHTTPRequest_MultiModelEmbeddingRoutesAndBillsPerModel(t *testing
 	}
 }
 
-// The fee a multi-model embedding request is charged uses the resolved model's own
-// tier table (updateEmbeddingWithUsage: GetBillingPrices → effectiveTiers →
-// embeddingTieredInputPrice), not the service-level one or another model's.
+// The price a multi-model embedding request is charged (embeddingInputPrice, the
+// per-token price updateEmbeddingWithUsage multiplies) uses the resolved model's
+// own tier table, not the service-level one or another model's.
 func TestMultiModelEmbedding_ChargesTheModelsOwnTiers(t *testing.T) {
 	svc := config.Service{
 		Type:              "embedding",
@@ -93,13 +93,9 @@ func TestMultiModelEmbedding_ChargesTheModelsOwnTiers(t *testing.T) {
 
 	fee := func(model string, promptTokens int) string {
 		t.Helper()
-		prices, err := c.GetBillingPrices(ginCtxWithResolvedModel(model))
+		price, _, err := c.embeddingInputPrice(ginCtxWithResolvedModel(model), promptTokens)
 		if err != nil {
-			t.Fatalf("GetBillingPrices(%s): %v", model, err)
-		}
-		price, _, err := embeddingTieredInputPrice(c.effectiveTiers(prices.Tiers), prices.InputPrice, promptTokens)
-		if err != nil {
-			t.Fatalf("embeddingTieredInputPrice(%s): %v", model, err)
+			t.Fatalf("embeddingInputPrice(%s): %v", model, err)
 		}
 		return price
 	}
