@@ -197,23 +197,9 @@ func (c *Ctrl) handleEmbeddingResponse(ctx *gin.Context, resp *http.Response, _ 
 // embedding has no completion/output side, so OutputPrice plays no part here,
 // the same input-only convention speech-to-text's duration mode follows.
 func (c *Ctrl) updateEmbeddingWithUsage(ctx *gin.Context, usage *EmbeddingUsage, requestHash string) error {
-	prices, err := c.GetBillingPrices(ctx)
+	inputPrice, rateClass, err := c.embeddingInputPrice(ctx, usage.PromptTokens)
 	if err != nil {
-		return errors.Wrap(err, "get billing prices for embedding billing")
-	}
-
-	// Tiered (input-length-based) pricing applies to every service type per
-	// TieredPricingConfig's contract ("all downstream fee calculations use the
-	// correct tiered price") and is advertised for embedding in GET /v1/models
-	// the same as any other service (models.go's tiered_pricing population
-	// isn't gated by service type) — so it must be applied here too, not just
-	// in chatbot's updateAccountWithUsage. On a multi-model provider
-	// prices.Tiers is the resolved model's own table; effectiveTiers falls
-	// back to the service-level config when that is empty.
-	tiers := c.effectiveTiers(prices.Tiers)
-	inputPrice, rateClass, err := embeddingTieredInputPrice(tiers, prices.InputPrice, usage.PromptTokens)
-	if err != nil {
-		return errors.Wrap(err, "apply tiered pricing for embedding")
+		return err
 	}
 
 	fee, err := util.Multiply(inputPrice, int64(usage.PromptTokens))
@@ -233,6 +219,32 @@ func (c *Ctrl) updateEmbeddingWithUsage(ctx *gin.Context, usage *EmbeddingUsage,
 
 	c.consumeTPMLimiter(ctx, usage.PromptTokens)
 	return nil
+}
+
+// embeddingInputPrice is the per-token input price updateEmbeddingWithUsage
+// charges for promptTokens, and the rate_class it records: the resolved model's
+// price with its tier applied. Split out so the price a request is actually
+// charged is testable without a DB.
+func (c *Ctrl) embeddingInputPrice(ctx *gin.Context, promptTokens int) (price, rateClass string, err error) {
+	prices, err := c.GetBillingPrices(ctx)
+	if err != nil {
+		return "", "", errors.Wrap(err, "get billing prices for embedding billing")
+	}
+
+	// Tiered (input-length-based) pricing applies to every service type per
+	// TieredPricingConfig's contract ("all downstream fee calculations use the
+	// correct tiered price") and is advertised for embedding in GET /v1/models
+	// the same as any other service (models.go's tiered_pricing population
+	// isn't gated by service type) — so it must be applied here too, not just
+	// in chatbot's updateAccountWithUsage. On a multi-model provider
+	// prices.Tiers is the resolved model's own table; effectiveTiers falls
+	// back to the service-level config when that is empty.
+	tiers := c.effectiveTiers(prices.Tiers)
+	price, rateClass, err = embeddingTieredInputPrice(tiers, prices.InputPrice, promptTokens)
+	if err != nil {
+		return "", "", errors.Wrap(err, "apply tiered pricing for embedding")
+	}
+	return price, rateClass, nil
 }
 
 // embeddingTieredInputPrice applies input-length tiered pricing (if any tiers
