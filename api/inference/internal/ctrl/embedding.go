@@ -108,7 +108,9 @@ func (c *Ctrl) handleEmbeddingResponse(ctx *gin.Context, resp *http.Response, _ 
 	switch {
 	case c.Service.IsCentralized():
 		fingerprint := ctx.GetString(CtxKeyUpstreamCertFingerprint)
-		if err := c.signCentralizedRoutingProof(reqBody, body, chatKey, fingerprint, ""); err != nil {
+		// reqModel.Upstream is the model's own providerIdentity on a multi-upstream
+		// provider ("" falls back to the service-level one), as chatbot/STT pass it.
+		if err := c.signCentralizedRoutingProof(reqBody, body, chatKey, fingerprint, reqModel.Upstream); err != nil {
 			c.logger.Errorf("routing proof not created for embedding %s: %v", chatKey, err)
 		}
 	case !c.Service.TargetSeparated:

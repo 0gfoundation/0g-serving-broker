@@ -548,8 +548,8 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 		isUSD := cfg.IsUSDDenominated()
 
 		// Per-user rate limits are provider-level (same for every served model);
-		// compute once and attach to each. Multi-model serves token-based
-		// modalities (chatbot / speech-to-text), so RPM + TPM apply.
+		// compute once and attach to each. RPM + TPM, which are what the token
+		// modalities (chatbot / speech-to-text / embedding) are limited by.
 		concurrencyLimits := h.modelsCtrl.GetConcurrencyLimitConfig()
 		var sharedLimits *ModelRateLimits
 		if concurrencyLimits.PerUserRPM > 0 || concurrencyLimits.PerUserTPM > 0 {

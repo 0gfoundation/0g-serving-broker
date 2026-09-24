@@ -82,15 +82,17 @@ service:
 
 // The trust boundary: a decentralized provider signs every model's reply as its own
 // TEE's output, and a per-model targetUrl is unmeasured config, so it may only name
-// an engine inside the CVM.
+// an engine container by compose service name. IP literals are refused too: a
+// private address can be off the CVM, and the controller cannot name one.
 func TestMultiModelEmbedding_DecentralizedTargetStaysInCVM(t *testing.T) {
 	for _, tc := range []struct {
 		target string
 		ok     bool
 	}{
 		{"http://embed-06b:8000/v1", true},
-		{"http://127.0.0.1:8001/v1", true},
-		{"http://10.0.0.5:8000/v1", true},
+		{"http://embed_06b:8000", true},
+		{"http://127.0.0.1:8001/v1", false},
+		{"http://10.0.0.5:8000/v1", false},
 		{"https://api.openai.com/v1", false},
 		{"http://api.openai.com/v1", false},
 		{"http://8.8.8.8:8000/v1", false},
@@ -123,5 +125,19 @@ func TestMultiModelEmbedding_RefusesOutputPrice(t *testing.T) {
 	_, err := loadYAML(t, body)
 	if err == nil || !strings.Contains(err.Error(), "must not set an output price") {
 		t.Fatalf("want an output-price refusal, got %v", err)
+	}
+}
+
+// Two engines behind one host on different ports would be recorded by the controller
+// under one name, making the whole upstream set unreadable — refuse at load, and
+// accept once a distinct providerIdentity names them apart.
+func TestMultiModelEmbedding_DecentralizedTargetsNeedDistinctRecordNames(t *testing.T) {
+	body := strings.Replace(decentralizedMultiEmbedding, "%s", "http://embed-8b:8001/v1", 1)
+	if _, err := loadYAML(t, body); err == nil || !strings.Contains(err.Error(), `recorded as upstream "embed-8b"`) {
+		t.Fatalf("want a record-name collision refusal, got %v", err)
+	}
+	body = strings.Replace(body, `      targetUrl: "http://embed-8b:8001/v1"`, "      targetUrl: \"http://embed-8b:8001/v1\"\n      providerIdentity: \"embed-small\"", 1)
+	if _, err := loadYAML(t, body); err != nil {
+		t.Fatalf("with a distinct providerIdentity: want load, got %v", err)
 	}
 }
