@@ -67,3 +67,49 @@ func TestPrepareHTTPRequest_MultiModelEmbeddingRoutesAndBillsPerModel(t *testing
 		t.Fatal("unlisted model: PrepareHTTPRequest = nil, want a refusal")
 	}
 }
+
+// The fee a multi-model embedding request is charged uses the resolved model's own
+// tier table (updateEmbeddingWithUsage: GetBillingPrices → effectiveTiers →
+// embeddingTieredInputPrice), not the service-level one or another model's.
+func TestMultiModelEmbedding_ChargesTheModelsOwnTiers(t *testing.T) {
+	svc := config.Service{
+		Type:              "embedding",
+		ProviderType:      "decentralized",
+		PriceDenomination: "NATIVE",
+		TargetURL:         "http://embed-a:8000/v1",
+		ModelType:         "a",
+		ModelPricing: []config.ModelPricingEntry{
+			{Model: "a", InputPrice: "300", OutputPrice: "0"},
+			{Model: "b", InputPrice: "100", OutputPrice: "0", Tiers: []config.PricingTier{
+				{MaxInputTokens: 1000, InputMultiplier: 1, OutputMultiplier: 1},
+				{MaxInputTokens: 0, InputMultiplier: 3, OutputMultiplier: 1},
+			}},
+		},
+	}
+	if err := svc.BuildModelPricingMap(); err != nil {
+		t.Fatalf("BuildModelPricingMap: %v", err)
+	}
+	c := &Ctrl{Service: svc, logger: testLogger(), whitelistUsers: make(map[string]struct{})}
+
+	fee := func(model string, promptTokens int) string {
+		t.Helper()
+		prices, err := c.GetBillingPrices(ginCtxWithResolvedModel(model))
+		if err != nil {
+			t.Fatalf("GetBillingPrices(%s): %v", model, err)
+		}
+		price, _, err := embeddingTieredInputPrice(c.effectiveTiers(prices.Tiers), prices.InputPrice, promptTokens)
+		if err != nil {
+			t.Fatalf("embeddingTieredInputPrice(%s): %v", model, err)
+		}
+		return price
+	}
+	if got := fee("b", 500); got != "100" {
+		t.Errorf("b short: per-token %s, want 100", got)
+	}
+	if got := fee("b", 5000); got != "300" {
+		t.Errorf("b long: per-token %s, want 300 (its own 3x tier)", got)
+	}
+	if got := fee("a", 5000); got != "300" {
+		t.Errorf("a long: per-token %s, want 300 (untiered)", got)
+	}
+}
