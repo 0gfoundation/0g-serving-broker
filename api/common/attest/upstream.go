@@ -851,7 +851,8 @@ func UpstreamsFromCandidates(cands []UpstreamCandidate) ([]Upstream, error) {
 		}
 		// Redundant for the OUTCOME, and kept for the message. RenderUpstreamSet parses its
 		// own output, and parseUpstreamSet refuses a name spelled twice — so deleting these
-		// three lines changes nothing a reader sees, and a mutation doing so fails no test.
+		// three lines changes nothing a reader of the record sees (inference/config's tests
+		// pin the message, since config load surfaces it to the operator).
 		//
 		// What it changes is what an operator is told. This names both URLs and the field
 		// to edit; the reader's refusal says a name appears twice, about a record the
