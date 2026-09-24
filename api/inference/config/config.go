@@ -97,6 +97,26 @@ func validateInEnclaveTarget(targetURL string) error {
 	return nil
 }
 
+// validateDecentralizedModelTarget is validateInEnclaveTarget's host rule for a
+// decentralized provider's per-model targetUrl: plaintext http:// to loopback, a
+// private address, or a bare compose service name. See validateModelPricing for
+// why a decentralized model may not leave the CVM.
+func validateDecentralizedModelTarget(targetURL string) error {
+	u, err := url.Parse(targetURL)
+	if err != nil || strings.ToLower(u.Scheme) != "http" || u.Hostname() == "" {
+		return fmt.Errorf("%q must be a plaintext http:// URL to an engine inside this CVM (e.g. http://embed-sglang:8000/v1)", targetURL)
+	}
+	host := u.Hostname()
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() {
+			return nil
+		}
+	} else if !strings.Contains(host, ".") {
+		return nil
+	}
+	return fmt.Errorf("%q names a host that routes off this CVM — a decentralized provider serves every model from its own enclave; use the engine's compose service name (e.g. http://embed-sglang:8000/v1)", targetURL)
+}
+
 // validUpstreamDomain matches a bare lowercase FQDN: dot-separated labels of
 // letters/digits/hyphens, at least two labels. Deliberately rejects anything with a
 // scheme, port, path, or userinfo — this value is published verbatim as
@@ -590,11 +610,12 @@ type Service struct {
 	// field must be left empty. See validate.
 	OutputPriceUSDPerSecond string `yaml:"outputPriceUSDPerSecond"`
 
-	// ModelPricing defines per-model pricing for centralized providers that serve multiple models.
+	// ModelPricing defines per-model pricing for a provider that serves multiple models.
 	// When configured, the broker validates requested models against this allowlist
 	// and bills at model-specific rates instead of the single on-chain price.
 	// On-chain registration uses max(model prices) as InputPrice/OutputPrice.
-	// Only used when ProviderType is "centralized".
+	// Any providerType; a decentralized provider's per-model targetUrl must stay
+	// inside its CVM (see validateModelPricing).
 	ModelPricing []ModelPricingEntry `yaml:"modelPricing"`
 
 	// modelPricingMap is a derived lookup map built during config validation.
@@ -2849,7 +2870,7 @@ func applyAndValidate(cfg *Config, raw map[string]interface{}) error {
 			}
 			cfg.Service.OutputPriceUSDPerMillionTokens = normalized
 			cfg.Service.InputPriceUSDPerMillionTokens = "0"
-		} else if isEmbeddingType {
+		} else if isEmbeddingType && !multiModelUSD {
 			// USD embedding service: inputPriceUSDPerMillionTokens is mandatory;
 			// outputPriceUSDPerMillionTokens must stay empty (there is nothing to
 			// price on the output side) and is normalized to "0" below, the same

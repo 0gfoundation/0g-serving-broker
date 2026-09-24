@@ -33,10 +33,13 @@ func TestConfigChangeRefusesContentTheBrokerCouldNotLoad(t *testing.T) {
 		content string
 		want    string
 	}{{
-		// The exact shape that took the live deployment down.
-		name:    "modelPricing without providerType",
-		content: "service:\n  model: m\n  type: chatbot\n  modelPricing:\n    - model: m\n      inputPrice: \"1\"\n      outputPrice: \"1\"\n",
-		want:    "providerType",
+		// The same kind of shape that took the live deployment down: modelPricing the
+		// loader refuses. That exact config (modelPricing with no providerType) loads
+		// now that decentralized providers may serve several models, so this uses a
+		// modality multi-model pricing is still refused on.
+		name:    "modelPricing on a modality that cannot resolve it",
+		content: "service:\n  model: m\n  type: text-to-image\n  modelPricing:\n    - model: m\n      inputPrice: \"1\"\n      outputPrice: \"1\"\n",
+		want:    "modelPricing is only supported for service type",
 	}, {
 		// A key the Service struct does not have. The old test asserted this was applied.
 		name:    "a key the loader does not know",

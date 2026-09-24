@@ -161,20 +161,20 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 		reqBody = modifiedBody
 	}
 
-	// Multi-model speech-to-text / video-generation: resolve the requested model
-	// for per-model billing. Both post multipart/form-data (or sometimes JSON),
-	// so we extract the model without rewriting the body — only record the
-	// resolved model so GetBillingPrices (and, for video, the per-model billing
-	// shape) can price it. Single-model providers keep billing at the configured
-	// on-chain price (resolvedModel unset).
+	// Multi-model speech-to-text / video-generation / embedding: resolve the
+	// requested model for per-model billing and routing. STT and video post
+	// multipart/form-data (or sometimes JSON) and embedding posts JSON; none of
+	// them rewrites the body (config refuses upstreamModel/aliases off the
+	// chatbot path), so only the resolved model is recorded — GetBillingPrices
+	// (and, for video, the per-model billing shape) prices it, and the
+	// per-model targetUrl swap below routes it. Single-model providers keep
+	// billing at the configured on-chain price (resolvedModel unset).
 	//
-	// Embedding and decisions are deliberately NOT in this list: multi-model
-	// pricing for them is rejected outright at config load (validateModelPricing,
-	// model_pricing.go) rather than supported here, so there is no resolution
-	// path to wire — an embedding service always bills at its single configured
-	// on-chain price. Revisit together if multi-model embedding billing is
-	// ever needed; adding one without the other would silently mis-bill.
-	if (svcType == "speech-to-text" || svcType == "video-generation") && c.Service.HasMultiModelPricing() && len(reqBody) > 0 {
+	// Decisions is deliberately NOT in this list: multi-model pricing for it is
+	// rejected outright at config load (validateModelPricing, model_pricing.go),
+	// so there is no resolution path to wire. Adding one without the other
+	// would silently mis-bill.
+	if (svcType == "speech-to-text" || svcType == "video-generation" || svcType == "embedding") && c.Service.HasMultiModelPricing() && len(reqBody) > 0 {
 		userAddr, _ := ctx.Get("userAddress")
 		userAddrStr, _ := userAddr.(string)
 		if err := c.ResolveModelForBilling(ctx, reqBody, ctx.Request.Header.Get("Content-Type"), userAddrStr); err != nil {
@@ -210,7 +210,7 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 	// model resolution so CtxKeyResolvedModel is set. No-op (base == service target)
 	// for single-upstream providers and any model without an override, so existing
 	// deployments are unaffected. Per-model targetUrl is only accepted by config
-	// validation on the multi-model modalities (chatbot/STT/video); on others
+	// validation on the multi-model modalities (chatbot/STT/embedding); on others
 	// EffectiveTargetURL returns the service target regardless.
 	{
 		resolvedModelVal, _ := ctx.Get(CtxKeyResolvedModel)
