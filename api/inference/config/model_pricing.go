@@ -1484,8 +1484,11 @@ func validateModelPricing(cfg *Config) error {
 			continue
 		}
 		// Forwarder-only: a decentralized provider has no routing proof to mislabel,
-		// and its engines are named by host in the controller's record.
-		if svc.IsForwarder() && (entry.TargetURL == "") != (entry.ProviderIdentity == "") {
+		// and its in-CVM engines take no upstream key.
+		if !svc.IsForwarder() {
+			continue
+		}
+		if (entry.TargetURL == "") != (entry.ProviderIdentity == "") {
 			log.Printf("[CONFIG] service.modelPricing model %q sets only one of {targetUrl, providerIdentity}; the TEE routing proof and reconciliation will use the service-level value for the other — set both for a genuine per-model upstream.", entry.Model)
 		}
 		if entry.TargetURL != "" && strings.TrimRight(entry.TargetURL, "/") != strings.TrimRight(svc.TargetURL, "/") && len(entry.AdditionalSecret) == 0 {
@@ -1596,9 +1599,9 @@ func validateModelPricing(cfg *Config) error {
 // controller's upstream record: service.targetUrl, then each modelPricing targetUrl.
 // Each entry is attributed to its own providerIdentity, falling back to the
 // service-level one — the real semantics, since config only WARNS when a forwarder
-// entry sets targetUrl without providerIdentity. Raw values: the controller reads
-// the config through ServiceFromYAML, which normalizes nothing, so this must not
-// either.
+// entry sets targetUrl without providerIdentity. Raw values: on the config-change
+// path the controller reads the config through ServiceFromYAML, which normalizes
+// nothing, so this must not either.
 func UpstreamCandidates(svc *Service) []attest.UpstreamCandidate {
 	out := []attest.UpstreamCandidate{{URL: svc.TargetURL, Identity: svc.ProviderIdentity, Where: "service.targetUrl"}}
 	for i := range svc.ModelPricing {
@@ -1620,8 +1623,21 @@ func UpstreamCandidates(svc *Service) []attest.UpstreamCandidate {
 // identities, an unnameable service target, an uppercase identity, a trailing slash,
 // credentials or a query in a URL — is refused here at load instead of leaving the
 // controller to record the set as unreadable. Runs before per-entry normalization on
-// purpose: the controller sees the raw config.
+// purpose: on the config-change path the controller sees the raw config.
+//
+// Evaluated in THIS process's environment, so TARGET_URL is whichever this process
+// has. The controller loads the same file with its own environment; a deployment
+// whose file targetUrl differs from the broker's TARGET_URL can pass here and be
+// refused there. Keep the file's service.targetUrl equal to TARGET_URL.
 func validateDecentralizedModelTargets(svc *Service) error {
+	// service.targetUrl is the default model's engine and every entry without its
+	// own targetUrl, so it is held to the same rule. Without this a decentralized
+	// multi-model config could point it at a vendor API and have the replies
+	// signed as TEE-computed — including the centralized config that merely
+	// forgot providerType, which the forwarder-only gate used to catch.
+	if err := validateDecentralizedModelTarget(svc.TargetURL); err != nil {
+		return fmt.Errorf("invalid config: service.targetUrl on a decentralized multi-model provider: %w", err)
+	}
 	for i := range svc.ModelPricing {
 		entry := &svc.ModelPricing[i]
 		if entry.TargetURL == "" {
