@@ -99,8 +99,8 @@ func validateInEnclaveTarget(targetURL string) error {
 }
 
 // validateDecentralizedModelTarget checks a decentralized provider's per-model
-// targetUrl: plaintext http:// to a bare compose service name, i.e. an engine
-// container the measured compose declares. Stricter than validateInEnclaveTarget
+// targetUrl: plaintext http:// to a bare label, meant to be an engine's compose
+// service name (only the shape is checked — see validateModelPricing). Stricter than validateInEnclaveTarget
 // on purpose: an IP literal is refused because a private address is not
 // necessarily inside the CVM (the host, a LAN neighbour), and because the
 // controller names an identity-less upstream after its host, which must then be
@@ -112,7 +112,7 @@ func validateDecentralizedModelTarget(targetURL string) error {
 		return fmt.Errorf("%q must be a plaintext http:// URL to an engine container in this CVM's compose (e.g. http://embed-sglang:8000/v1)", targetURL)
 	}
 	if !attest.ValidUpstreamName(u.Hostname()) {
-		return fmt.Errorf("%q must name its engine by compose service name (lowercase alphanumeric, '-' or '_', no dots or IP literals, e.g. http://embed-sglang:8000/v1): a decentralized provider serves every model from containers in its own CVM", targetURL)
+		return fmt.Errorf("%q must name its engine by compose service name (lowercase alphanumeric, '-' or '_', no dots or IP literals, e.g. http://embed-sglang:8000/v1): a decentralized provider serves every model from engines in its own CVM", targetURL)
 	}
 	return nil
 }

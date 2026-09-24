@@ -1498,7 +1498,7 @@ func (c *Ctrl) ImageCacheTTL() time.Duration {
 }
 
 // ValidateModelAllowlist checks that the requested model (JSON body) is in the
-// configured allowlist for centralized multi-model providers. Unlike
+// configured allowlist for multi-model providers. Unlike
 // EnforceConfiguredModel which overwrites the model field, this validates and
 // passes through the user's requested model, injecting the default model when
 // the request omits one. Stores the resolved model name in the gin.Context under

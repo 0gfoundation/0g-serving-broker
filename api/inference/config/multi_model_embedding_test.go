@@ -133,11 +133,61 @@ func TestMultiModelEmbedding_RefusesOutputPrice(t *testing.T) {
 // accept once a distinct providerIdentity names them apart.
 func TestMultiModelEmbedding_DecentralizedTargetsNeedDistinctRecordNames(t *testing.T) {
 	body := strings.Replace(decentralizedMultiEmbedding, "%s", "http://embed-8b:8001/v1", 1)
-	if _, err := loadYAML(t, body); err == nil || !strings.Contains(err.Error(), `recorded as upstream "embed-8b"`) {
+	if _, err := loadYAML(t, body); err == nil || !strings.Contains(err.Error(), `both derive the name "embed-8b"`) {
 		t.Fatalf("want a record-name collision refusal, got %v", err)
 	}
 	body = strings.Replace(body, `      targetUrl: "http://embed-8b:8001/v1"`, "      targetUrl: \"http://embed-8b:8001/v1\"\n      providerIdentity: \"embed-small\"", 1)
 	if _, err := loadYAML(t, body); err != nil {
 		t.Fatalf("with a distinct providerIdentity: want load, got %v", err)
+	}
+}
+
+// Every shape the controller's recorder refuses must be refused at load, checked
+// against the recorder itself (attest.UpstreamsFromCandidates + RenderUpstreamSet
+// over the raw candidates), not a restatement of its rules.
+func TestMultiModelEmbedding_DecentralizedConfigIsRecordable(t *testing.T) {
+	base := strings.Replace(decentralizedMultiEmbedding, "%s", "http://embed-06b:8000/v1", 1)
+	for _, tc := range []struct{ name, old, new, want string }{
+		{"trailing slash on a model target", `targetUrl: "http://embed-06b:8000/v1"`, `targetUrl: "http://embed-06b:8000/v1/"`, "slash"},
+		{"model target equals the service target with a trailing slash", `targetUrl: "http://embed-06b:8000/v1"`, `targetUrl: "http://embed-8b:8000/v1/"`, "embed-8b"},
+		{"one URL under two identities", `targetUrl: "http://embed-06b:8000/v1"`, "targetUrl: \"http://embed-8b:8000/v1\"\n      providerIdentity: \"small\"", "one destination has one identity"},
+		{"uppercase identity", `targetUrl: "http://embed-06b:8000/v1"`, "targetUrl: \"http://embed-06b:8000/v1\"\n      providerIdentity: \"Small\"", "invalid config"},
+		{"service target an IP literal", `targetUrl: "http://embed-8b:8000/v1"`, `targetUrl: "http://10.0.0.5:8000/v1"`, "cannot be a record name"},
+		{"service identity shared by two engines", `  model: "qwen3-embedding-8b"`, "  model: \"qwen3-embedding-8b\"\n  providerIdentity: \"embed\"", `both derive the name "embed"`},
+		{"credentials in a model target", `targetUrl: "http://embed-06b:8000/v1"`, `targetUrl: "http://u:p@embed-06b:8000/v1"`, "invalid config"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := strings.Replace(base, tc.old, tc.new, 1)
+			if body == base {
+				t.Fatalf("substitution %q matched nothing", tc.old)
+			}
+			if _, err := loadYAML(t, body); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("want a refusal mentioning %q, got %v", tc.want, err)
+			}
+		})
+	}
+	// Two models on one engine URL is one destination, not a collision.
+	body := strings.Replace(base, `targetUrl: "http://embed-06b:8000/v1"`, `targetUrl: "http://embed-8b:8000/v1"`, 1)
+	if _, err := loadYAML(t, body); err != nil {
+		t.Fatalf("two models on the service engine: want load, got %v", err)
+	}
+}
+
+// A native embedding entry's output price is refused like the USD one.
+func TestMultiModelEmbedding_RefusesNativeOutputPrice(t *testing.T) {
+	_, err := loadYAML(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "http://embed-8b:8000/v1"
+  type: "embedding"
+  model: "a"
+  verifiability: "TeeML"
+  modelPricing:
+    - model: "a"
+      inputPrice: "300"
+      outputPrice: "5"
+`)
+	if err == nil || !strings.Contains(err.Error(), "must not set an output price") {
+		t.Fatalf("want an output-price refusal, got %v", err)
 	}
 }
