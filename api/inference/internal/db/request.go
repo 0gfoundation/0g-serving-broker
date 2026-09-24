@@ -162,6 +162,29 @@ func (d *DB) ReserveRequestFee(requestHash, fee string) error {
 		Update("fee", fee).Error
 }
 
+// ReleaseUnbilledRequestReserve clears an in-flight reserve from a request row
+// that was never billed, and reports whether it cleared one.
+//
+// The guard is the point. It matches only a row still at output_count = 0 and
+// processed = false — i.e. one no billing write has reached — so a caller can run
+// it unconditionally once a request is over, without knowing how the request
+// ended: after a successful bill (which always writes a non-zero count) it
+// matches nothing and leaves the real fee alone. An unconditional reset, like
+// releaseRequestReserve's, would be correct only if every caller could tell billed
+// from unbilled, and the audio path has several exits that cannot.
+//
+// Update(column, value) for the same reason as ReserveRequestFee: a struct
+// Updates would skip the "0".
+func (d *DB) ReleaseUnbilledRequestReserve(requestHash string) (bool, error) {
+	if requestHash == "" {
+		return false, nil
+	}
+	res := d.db.Model(&model.Request{}).
+		Where("request_hash = ? AND output_count = ? AND processed = ?", requestHash, 0, false).
+		Update("fee", "0")
+	return res.RowsAffected > 0, res.Error
+}
+
 // UpdateRequestWithAccurateTokens updates the request with accurate token counts from LLM response
 // This replaces the estimated values with actual values provided by the LLM.
 // unit is the authoritative billing unit for the counts ("tokens"/"seconds"); cachedInputTokens

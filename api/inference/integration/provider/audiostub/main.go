@@ -102,8 +102,10 @@ func main() {
 		}
 
 		// An explicitly EMPTY duration omits the header, which is how a broken
-		// adaptor looks to the broker: it should fall back to the reserved ceiling
-		// and increment broker_audio_billing_fallback_total{source="reserve"}.
+		// adaptor looks to the broker: it should fall back to the vendor's ceiling
+		// and increment broker_audio_billing_fallback_total{source="ceiling"}. A
+		// duration above the ceiling (say ?duration=500) is clamped to it and counted
+		// as source="usage_over_ceiling".
 		duration := defaultDuration
 		if q.Has("duration") {
 			duration = q.Get("duration")

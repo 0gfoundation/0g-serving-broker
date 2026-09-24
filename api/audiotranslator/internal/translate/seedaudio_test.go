@@ -131,6 +131,54 @@ func TestReferenceRoutingByScheme(t *testing.T) {
 	}
 }
 
+// audio_data / image_data take RAW base64, per the vendor reference. The data:
+// prefix is not base64, so forwarding the whole URI handed the vendor a payload
+// that fails to decode from its first byte. Exact equality, not "non-empty": the
+// earlier test above passed while the prefix was being forwarded.
+func TestInlineReferencesForwardOnlyTheBase64Payload(t *testing.T) {
+	out := ToCreateRequest(SpeechRequest{
+		Input:          "@Audio1 hi",
+		ReferenceAudio: []string{"  DATA:audio/wav;BASE64,UklGRg==  "},
+	})
+	if got := out.References[0].AudioData; got != "UklGRg==" {
+		t.Errorf("audio_data = %q, want the bare payload %q", got, "UklGRg==")
+	}
+
+	img := ToCreateRequest(SpeechRequest{Input: "hi", ReferenceImage: "data:image/png;base64,iVBORw0KGgo="})
+	if got := img.References[0].ImageData; got != "iVBORw0KGgo=" {
+		t.Errorf("image_data = %q, want the bare payload %q", got, "iVBORw0KGgo=")
+	}
+	if img.References[0].ImageURL != "" {
+		t.Errorf("an inline image also populated image_url: %+v", img.References[0])
+	}
+}
+
+func TestInlineBase64(t *testing.T) {
+	tests := []struct {
+		raw    string
+		want   string
+		wantOK bool
+	}{
+		{raw: "data:audio/wav;base64,AAAA", want: "AAAA", wantOK: true},
+		// Parameters before the base64 marker are legal in a data: URI.
+		{raw: "data:audio/wav;rate=24000;base64,AAAA", want: "AAAA", wantOK: true},
+		// Only the FIRST comma separates metadata from payload.
+		{raw: "data:audio/wav;base64,AA,AA", want: "AA,AA", wantOK: true},
+
+		{raw: "data:audio/wav,%52%49%46%46", wantOK: false}, // percent-encoded, not base64
+		{raw: "data:audio/wav;base64", wantOK: false},       // no comma
+		{raw: "data:audio/wav;base64,", wantOK: false},      // empty payload
+		{raw: "data:audio/wav;base64x,AAAA", wantOK: false}, // marker must end the metadata
+		{raw: "https://example.com/a.wav", wantOK: false},   // not inline at all
+	}
+	for _, tt := range tests {
+		got, ok := inlineBase64(tt.raw)
+		if ok != tt.wantOK || got != tt.want {
+			t.Errorf("inlineBase64(%q) = (%q, %v), want (%q, %v)", tt.raw, got, ok, tt.want, tt.wantOK)
+		}
+	}
+}
+
 // opus is the one format whose name differs: OpenAI names the codec, the vendor
 // names the container. An unknown value passes through so the vendor's own
 // validation decides, rather than silently substituting wav and returning audio
@@ -171,6 +219,14 @@ func TestValidate(t *testing.T) {
 			ReferenceAudio: []string{"mm_file://someone-elses-upload"}}, wantErr: "must be an http(s) URL"},
 		{name: "a non-audio data URI", req: SpeechRequest{Input: "hi",
 			ReferenceAudio: []string{"data:image/png;base64,AAAA"}}, wantErr: "must be an http(s) URL"},
+		// A data: URI the translator cannot unwrap to raw base64 is refused here,
+		// not forwarded for the vendor to fail on after routing and a reserve.
+		{name: "a percent-encoded audio data URI", req: SpeechRequest{Input: "hi",
+			ReferenceAudio: []string{"data:audio/wav,RIFF"}}, wantErr: "not base64-encoded"},
+		{name: "an empty inline image", req: SpeechRequest{Input: "hi",
+			ReferenceImage: "data:image/png;base64,"}, wantErr: "not base64-encoded"},
+		{name: "an inline base64 image", req: SpeechRequest{Input: "hi",
+			ReferenceImage: "data:image/png;base64,iVBORw0KGgo="}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

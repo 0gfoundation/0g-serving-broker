@@ -143,6 +143,32 @@ func TestAccumulatePerWalletSTTSkipsTokens(t *testing.T) {
 	}
 }
 
+// TestAccumulatePerWalletAudioGenerationSkipsTokens is the output-side mirror of
+// the STT test above: audio-generation writes generated SECONDS into
+// output_count, and those must not be recorded as output tokens.
+func TestAccumulatePerWalletAudioGenerationSkipsTokens(t *testing.T) {
+	d := setupTestDB(t)
+	migrateUsageTables(t, d)
+
+	batch := []*model.Request{
+		{UserAddress: "0xAlice", ModelName: "seed-audio-1.0", RequestHash: "a1", InputCount: 0, OutputCount: 48},
+		{UserAddress: "0xAlice", ModelName: "seed-audio-1.0", RequestHash: "a2", InputCount: 0, OutputCount: 120},
+	}
+	for _, r := range batch {
+		seedRequest(t, d, r.UserAddress, r.ModelName, r.RequestHash, r.InputCount, r.OutputCount)
+	}
+	if err := d.AccumulateAndDeleteRequests(batch, AccumulateOptions{ServiceType: constant.ServiceTypeAudioGeneration, RecordPerWallet: true, FallbackModel: "seed-audio-1.0"}); err != nil {
+		t.Fatalf("accumulate audio: %v", err)
+	}
+	got := fetchUserDailyStat(t, d)["0xAlice|seed-audio-1.0"]
+	if got.RequestCount != 2 {
+		t.Errorf("audio request_count = %d, want 2", got.RequestCount)
+	}
+	if got.InputTokens != 0 || got.OutputTokens != 0 {
+		t.Errorf("audio tokens = (%d,%d), want (0,0) — generated seconds must not be recorded as tokens", got.InputTokens, got.OutputTokens)
+	}
+}
+
 // TestAccumulatePerWalletDisabled verifies that with recordPerWallet=false no
 // user_daily_stat rows are written (requests are still deleted).
 func TestAccumulatePerWalletDisabled(t *testing.T) {

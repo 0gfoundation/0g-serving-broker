@@ -32,8 +32,12 @@ type SpeechRequest struct {
 	// takes a percentage offset in [-50, 100]. See toSpeechRate.
 	Speed *float64 `json:"speed"`
 
-	MaxDuration *float64 `json:"max_duration"`
-	SampleRate  *int     `json:"sample_rate"`
+	// No MaxDuration. Seed Audio has no length parameter to map one onto, so the
+	// field was decoded and then dropped — a client asking for 10 seconds could
+	// still receive, and be billed for, the vendor's 120-second ceiling. Leaving it
+	// out of the struct makes that honest: the decoder is not strict, so a client
+	// still sending it is not refused, and nothing here pretends to act on it.
+	SampleRate *int `json:"sample_rate"`
 	// ReferenceAudio carries up to three https URLs or data: URIs for voice
 	// cloning, referenced from Input as @Audio1..@Audio3.
 	ReferenceAudio []string `json:"reference_audio"`
@@ -71,11 +75,60 @@ func (r SpeechRequest) Validate() error {
 		if !isAllowedReferenceScheme(ref, "audio") {
 			return fmt.Errorf("reference_audio[%d] must be an http(s) URL or a data:audio/ URI", i)
 		}
+		if isDataURI(ref) {
+			if _, ok := inlineBase64(ref); !ok {
+				return fmt.Errorf("reference_audio[%d] is a data: URI that is not base64-encoded; send data:audio/<type>;base64,<payload>", i)
+			}
+		}
 	}
-	if img := strings.TrimSpace(r.ReferenceImage); img != "" && !isAllowedReferenceScheme(img, "image") {
-		return fmt.Errorf("reference_image must be an http(s) URL or a data:image/ URI")
+	if img := strings.TrimSpace(r.ReferenceImage); img != "" {
+		if !isAllowedReferenceScheme(img, "image") {
+			return fmt.Errorf("reference_image must be an http(s) URL or a data:image/ URI")
+		}
+		if isDataURI(img) {
+			if _, ok := inlineBase64(img); !ok {
+				return fmt.Errorf("reference_image is a data: URI that is not base64-encoded; send data:image/<type>;base64,<payload>")
+			}
+		}
 	}
 	return nil
+}
+
+// isDataURI reports whether a reference carries its bytes inline.
+func isDataURI(raw string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(raw)), "data:")
+}
+
+// inlineBase64 returns the base64 payload of a `data:<type>;base64,<payload>` URI.
+//
+// The vendor's audio_data / image_data take RAW base64 — the reference describes
+// them as "Base64-encoded reference audio/image", and its examples carry no
+// data: prefix. Forwarding the whole URI sent the vendor a string whose first
+// bytes ("data:audio/wav;base64,") are not base64 at all. Only the part after the
+// first comma is the payload.
+//
+// ok=false for a data: URI with no comma, no ";base64" marker (percent-encoded
+// data: URIs are legal but carry no base64 to forward), or an empty payload.
+// Validate refuses all three before anything is sent, so the vendor never sees a
+// value this could not unwrap.
+func inlineBase64(raw string) (string, bool) {
+	v := strings.TrimSpace(raw)
+	if !isDataURI(v) {
+		return "", false
+	}
+	comma := strings.IndexByte(v, ',')
+	if comma < 0 {
+		return "", false
+	}
+	meta := strings.ToLower(v[len("data:"):comma])
+	if !strings.HasSuffix(meta, ";base64") {
+		return "", false
+	}
+	payload := v[comma+1:]
+	if payload == "" {
+		return "", false
+	}
+	return payload, true
 }
 
 // isAllowedReferenceScheme is the scheme allowlist both existing translators
@@ -143,20 +196,24 @@ func ToCreateRequest(r SpeechRequest) seedaudio.CreateRequest {
 }
 
 // audioReference routes a raw value to the field its scheme belongs in: a data:
-// URI carries the bytes inline, so it becomes audio_data; anything else is a URL
-// the vendor fetches. Validate has already refused every other scheme.
+// URI carries the bytes inline, so its base64 PAYLOAD becomes audio_data (see
+// inlineBase64 on why the prefix is stripped); anything else is a URL the vendor
+// fetches. Validate has already refused every other scheme and every data: URI
+// that is not base64.
 func audioReference(raw string) seedaudio.Reference {
 	v := strings.TrimSpace(raw)
-	if strings.HasPrefix(strings.ToLower(v), "data:") {
-		return seedaudio.Reference{AudioData: v}
+	if isDataURI(v) {
+		payload, _ := inlineBase64(v)
+		return seedaudio.Reference{AudioData: payload}
 	}
 	return seedaudio.Reference{AudioURL: v}
 }
 
 func imageReference(raw string) seedaudio.Reference {
 	v := strings.TrimSpace(raw)
-	if strings.HasPrefix(strings.ToLower(v), "data:") {
-		return seedaudio.Reference{ImageData: v}
+	if isDataURI(v) {
+		payload, _ := inlineBase64(v)
+		return seedaudio.Reference{ImageData: payload}
 	}
 	return seedaudio.Reference{ImageURL: v}
 }
@@ -240,12 +297,12 @@ func DecodeAudio(resp seedaudio.CreateResponse) ([]byte, error) {
 //
 // Falls back to `duration` only when original_duration is absent or unusable:
 // some charge is closer to right than none, and the broker's own fallback
-// (charging the reserved ceiling) is strictly worse for the caller.
+// (charging the vendor's ceiling) is strictly worse for the caller.
 //
 // The SOURCE is returned, not just the number, because that fallback is
 // otherwise invisible. It still populates the duration header, so the broker
 // takes its normal usage path and neither
-// broker_audio_billing_fallback_total{source="reserve"} nor the router's
+// broker_audio_billing_fallback_total{source="ceiling"} nor the router's
 // router_audio_billing_source_total moves off the healthy value — every
 // dashboard on both hops reads green while a speed-adjusted request is billed
 // for roughly half what it produced. A vendor-side change to original_duration
@@ -262,7 +319,7 @@ const (
 	// this under-bills exactly the requests that adjust speed.
 	DurationSourcePostProcessed DurationSource = "duration"
 	// DurationSourceNone: neither field was usable; the broker will bill the
-	// reserved ceiling, which over-bills.
+	// vendor's per-request ceiling, which over-bills.
 	DurationSourceNone DurationSource = "none"
 )
 

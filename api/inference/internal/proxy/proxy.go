@@ -888,6 +888,9 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	}
 
 	var expectedInputFee string
+	// audioInFlightReserve is written onto the request row at creation — see the
+	// audio-generation case and the CreateRequest call below.
+	var audioInFlightReserve string
 	switch svcType {
 	case "zgStorage", "chatbot", "speech-to-text", "embedding":
 		expectedInputFee = "0"
@@ -949,16 +952,22 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		// once the poll job exists — see ctrl.reserveInFlightVideoFee.
 		ctx.Set(ctrl.CtxKeyVideoReserveFee, reserveFee)
 	case "audio-generation":
-		// Same shape as video one case up — an audio create is asynchronous, so the
-		// final fee comes from what the vendor reports at completion and only the
-		// RESERVE is decided here. The model must be resolved first for the same
-		// reason: both the vendor rules and the price are per-model.
+		// Same shape as video one case up: the final fee comes from what the vendor
+		// reports, so only the RESERVE is decided here. The model must be resolved
+		// first for the same reason: both the vendor rules and the price are
+		// per-model.
 		//
-		// The difference is what the reserve means. common/audiospec returns a true
-		// upper bound (the vendor's hard output ceiling), not an estimate, so unlike
-		// VideoCreateReserve this cannot fail for any request-shaped reason and has no
-		// client-error sentinel to distinguish — every error reaching here is
-		// broker-side and belongs to the broker-fault alert.
+		// Unlike video the request is SYNCHRONOUS — the audio comes back in this
+		// response and handleAudioSpeechResponse bills it before ProcessHTTPRequest
+		// returns — but that does not remove the need for a reserve: the vendor
+		// charges us for whatever it generates, and the gate is the last point before
+		// it does.
+		//
+		// The reserve is a true upper bound (the vendor's hard output ceiling from
+		// common/audiospec), not an estimate, so unlike VideoCreateReserve this cannot
+		// fail for any request-shaped reason and has no client-error sentinel to
+		// distinguish — every error reaching here is broker-side and belongs to the
+		// broker-fault alert.
 		if p.ctrl.Service.HasMultiModelPricing() && len(reqBody) > 0 {
 			if err := p.ctrl.ResolveModelForBilling(ctx, reqBody, ctx.Request.Header.Get("Content-Type"), userAddress); err != nil {
 				ctx.Set("ignoreError", true)
@@ -971,10 +980,15 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 			p.handleBrokerError(ctx, err, "compute audio reserve")
 			return
 		}
-		// Feeds the balance gate only. Unlike video there is nothing to stage for a
-		// later poll: the response path bills synchronously, so no in-flight reserve
-		// is ever written to the row.
 		expectedInputFee = audioReserveFee
+		// ALSO written onto the row, not just fed to this request's gate. The gate
+		// adds the wallet's unsettled total (CalculateUnsettledFee: SUM(fee) over its
+		// unprocessed rows) to the estimate, so a reserve that lives only in this
+		// request's gate is invisible to every OTHER request from the same wallet. A
+		// generation takes tens of seconds; N concurrent requests would each pass
+		// against the same balance and together owe up to N ceilings. That was the
+		// state before this was written down.
+		audioInFlightReserve = audioReserveFee
 	default:
 		p.handleBrokerError(ctx, errors.New("unknown service type"), "prepare request extractor")
 		return
@@ -1019,9 +1033,24 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		p.handleBrokerError(ctx, err, "validate request")
 		return
 	}
+	// The audio reserve goes onto the row in the INSERT itself, so there is no
+	// window where the row exists without its hold — unlike video, whose reserve is
+	// stamped later because its poll job does not exist yet. This request's own gate
+	// already counted it, through expectedInputFee above.
+	if audioInFlightReserve != "" && audioInFlightReserve != "0" {
+		req.Fee = audioInFlightReserve
+	}
 	if err := p.ctrl.CreateRequest(req); err != nil {
 		p.handleBrokerError(ctx, err, "create request")
 		return
+	}
+	if req.Fee != "0" && svcType == "audio-generation" {
+		// Runs after ProcessHTTPRequest, by which point the synchronous response path
+		// has either billed the request or not. Covers every exit below — prepare
+		// and pricing failures, upstream errors and transport failures included — and
+		// is a no-op after a bill; see ctrl.ReleaseUnbilledAudioReserve for how it
+		// tells the two apart and what covers a crash.
+		defer p.ctrl.ReleaseUnbilledAudioReserve(req.RequestHash)
 	}
 
 	httpReq, err := p.ctrl.PrepareHTTPRequest(ctx, targetURL, reqBody, svcType)

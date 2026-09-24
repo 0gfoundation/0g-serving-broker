@@ -74,21 +74,27 @@ service:
           outputModalities: ["audio"]
         # A client discovers what it may legally send from this list, via
         # /v1/models — nothing downstream filters it, so an omission here is
-        # simply a capability the caller never learns about. Four were missing:
-        # the reference pair is the whole point of the modality's multipart
-        # shape (voice cloning), and pitch/loudness are accepted alongside
-        # speed. Keep this in step with the request fields the router
-        # documents (inference.AudioSpeechRequest).
+        # simply a capability the caller never learns about, and an extra entry
+        # is a promise nothing keeps. Keep it in step with the fields the adaptor
+        # actually maps (translate.SpeechRequest) and the router documents
+        # (inference.AudioSpeechRequest).
+        #
+        # The request is JSON only. Reference media travel INSIDE it, as
+        # http(s) URLs or base64 data: URIs — there is no multipart upload.
+        #
+        # No max_duration: Seed Audio has no length parameter, so the adaptor
+        # has nothing to map it onto. Advertising it told callers they could cap
+        # the length (and the bill) when they could not.
         supportedParameters:
           - input
           - voice
           - response_format
           - speed
-          - max_duration
           - sample_rate
           # Mutually exclusive with each other: up to 3 audio clips for voice
-          # cloning, OR one image. The vendor enforces that; advertising both
-          # is correct, since either is legal on its own.
+          # cloning, OR one image. The adaptor refuses the combination before
+          # forwarding; advertising both is correct, since either is legal on
+          # its own.
           - reference_audio
           - reference_image
           - pitch

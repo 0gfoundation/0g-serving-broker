@@ -1,13 +1,6 @@
 package ctrl
 
 import (
-	"bytes"
-	"encoding/json"
-	"io"
-	"mime"
-	"mime/multipart"
-	"strings"
-
 	"github.com/gin-gonic/gin"
 
 	"github.com/0glabs/0g-serving-broker/common/audiospec"
@@ -16,18 +9,33 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
 
-// maxRawAudioFieldBytes caps a raw request field this file will read. Same
-// purpose as its video counterpart: a create body is attacker-controlled, and
-// nothing here needs more than a few digits of it.
-const maxRawAudioFieldBytes = 256
+// unknownVendorAudioBillingSeconds is what the RESPONSE path bills when it has to
+// pick a figure itself — no usable duration in the response, or one above the
+// ceiling — and no vendor rules are recorded to supply the ceiling.
+//
+// It is Seed Audio's ceiling, the only audio vendor this broker speaks to, and it
+// is the same figure the 0G router bills in the same situation (its
+// audioFallbackSeconds / maxBillableAudioSeconds). That agreement is the reason
+// for the number: the router charges its user 120 seconds when the duration header
+// is missing, so a broker billing the router 1 second for the same request leaves
+// the two ledgers disagreeing by 119 seconds on every such request, and neither
+// side's reconciliation can tell which one is right.
+//
+// Deliberately NOT used by the reserve. Holding funds against a guessed ceiling is
+// what audiospec's "a guessed ceiling is a guessed hold" rule forbids, and the
+// reserve has an honest alternative — forward unreserved and meter it. The bill
+// has no such alternative: it must be SOME number, and 1 second (what this used to
+// floor to) is also a guess, just one that under-bills and disagrees with the
+// router.
+const unknownVendorAudioBillingSeconds = 120
 
 // AudioCreateReserve computes what to hold against a caller's balance for an
-// audio-generation create, BEFORE it is forwarded.
+// audio-generation request, BEFORE it is forwarded.
 //
-// The reason it exists is the same as VideoCreateReserve's: the create is billed
-// asynchronously, so the balance gate cannot wait for the real amount — by then
-// the audio is generated and the vendor has charged us. Whatever this returns is
-// the only thing standing between a caller and output they cannot pay for.
+// The request is synchronous — the audio comes back in the response — but the
+// balance gate still runs before the vendor is called, and the vendor charges us
+// for whatever it generates. Whatever this returns is the only thing standing
+// between a caller and output they cannot pay for.
 //
 // # Why this is so much shorter than VideoCreateReserve
 //
@@ -36,51 +44,38 @@ const maxRawAudioFieldBytes = 256
 // ONE, and it is a deployment misconfiguration rather than a property of the
 // request.
 //
-// That falls out of audiospec's contract, not from this function being simpler.
-// ReserveSeconds is total: the vendor publishes a hard per-request output
-// ceiling, so an absent, unreadable, negative or absurd max_duration all resolve
-// to the ceiling rather than to "unknowable". There is no audio counterpart to
-// videospec's SecondsVendorDecides (nothing to give up on) and none to
-// per_video_token's unpredictable unit count (the quantity is a duration this
-// vendor bounds, not a token count it computes).
+// That falls out of audiospec's contract. The reserve is the vendor's hard output
+// ceiling, for every request: there is no request field that lowers it (Seed Audio
+// takes no length parameter) and none that can make it unknowable. There is no
+// audio counterpart to videospec's SecondsVendorDecides and none to
+// per_video_token's unpredictable unit count.
 //
-// Two consequences worth stating, because both are easy to erode later:
+// A non-zero broker_audio_reserve_skipped_total is therefore always actionable.
+// One reason, one fix: record the vendor in common/audiospec.
 //
-//   - **A parse failure here is harmless.** rawAudioMaxDuration returning "" is
-//     not a degraded path — it resolves to the ceiling, which is the SAFE
-//     direction. Compare video, where failing to read `seconds` means no reserve
-//     at all. So this parser can afford to be strict; strictness costs
-//     over-holding, never under-holding.
-//   - **A non-zero broker_audio_reserve_skipped_total is always actionable.** One
-//     reason, one fix: record the vendor in common/audiospec.
-//
-// It computes an amount; it reserves nothing. Writing it down so concurrent
-// creates from one wallet see each other is a separate step, exactly as it is for
-// video.
+// It computes an amount; it does not write it down. proxy.go writes it onto the
+// request row at creation, so concurrent requests from one wallet see it, and
+// releases it through ReleaseUnbilledAudioReserve when the request is not billed.
 //
 // It returns an error only for a broker-side failure (pricing feed, broken
 // per-model config) — never for a bad request, because there is no audio request
-// this cannot price. That asymmetry with VideoCreateReserve's
-// ErrVideoSecondsOutOfRange is deliberate: a duration out of range is clamped to
-// the ceiling here rather than refused, since the vendor caps the output itself
-// and a clamp cannot move the bill away from what was produced.
+// this cannot price.
 //
 // The caller must have resolved the request model onto the context first
 // (ResolveModelForBilling): both the vendor rules and the price are per-model.
 func (c *Ctrl) AudioCreateReserve(ctx *gin.Context, reqBody []byte) (string, error) {
 	if len(reqBody) == 0 {
-		// Nothing for the upstream to generate; it rejects the create itself, so no
+		// Nothing for the upstream to generate; it rejects the request itself, so no
 		// audio is produced and no fee is owed.
 		return "0", nil
 	}
 
-	seconds := c.audioReservedSeconds(ctx, reqBody, ctx.Request.Header.Get("Content-Type"))
-	if seconds < 1 {
-		// audioReservedSeconds returns 0 only when no vendor rules are recorded, which
-		// is the one case this function cannot price. Reported and metered rather than
-		// guessed at.
+	seconds, ok := c.audioCeilingSeconds(ctx)
+	if !ok {
+		// No vendor rules recorded: the one case this function cannot price. Reported
+		// and metered rather than guessed at.
 		c.skipAudioReserve(monitor.AudioReserveSkipUnknownVendor, c.audioVendorName(ctx),
-			"audio create forwarded WITHOUT a reserve: no rules recorded for vendor %q, so the broker cannot tell how much audio this upstream can produce. This request is gated only by the minimum locked balance — record that vendor's output ceiling in common/audiospec",
+			"audio request forwarded WITHOUT a reserve: no rules recorded for vendor %q, so the broker cannot tell how much audio this upstream can produce. This request is gated only by the minimum locked balance — record that vendor's output ceiling in common/audiospec",
 			c.audioVendorName(ctx))
 		return "0", nil
 	}
@@ -102,6 +97,37 @@ func (c *Ctrl) AudioCreateReserve(ctx *gin.Context, reqBody []byte) (string, err
 	return fee.String(), nil
 }
 
+// ReleaseUnbilledAudioReserve clears the in-flight reserve proxy.go wrote onto an
+// audio request's row, if and only if the request was never billed.
+//
+// Called once the request is over, whatever happened to it: an upstream error, a
+// transport failure, a broker failure before forwarding, or a successful bill. The
+// guard in db.ReleaseUnbilledRequestReserve (output_count = 0) is what tells those
+// apart, so this needs no flag threaded from the response path: a bill always
+// writes at least one second, which turns this into a no-op, and anything that
+// did not bill leaves output_count at the zero it was created with.
+//
+// Without it, a failed request would keep its reserve counted against the wallet
+// until the zero-output prune deletes the row (config.ZeroOutputRequestPruneThreshold,
+// an hour) — a wallet retrying a failing request would lock out its own balance.
+// The same prune is the crash-safety net for this release: a broker that dies
+// between creating the row and reaching this leaves a zero-output row, which
+// settlement never includes (ListRequest's ExcludeZeroOutput) and the prune removes.
+//
+// Best-effort: failure here leaves the reserve to that prune, which is a temporary
+// over-hold, never an overcharge.
+func (c *Ctrl) ReleaseUnbilledAudioReserve(requestHash string) {
+	released, err := c.db.ReleaseUnbilledRequestReserve(requestHash)
+	if err != nil {
+		c.logger.Errorf("audio speech: failed to release the in-flight reserve for unbilled request %s; it stays counted against the wallet until the zero-output prune removes the row: %v",
+			requestHash, err)
+		return
+	}
+	if released {
+		c.logger.Infof("audio speech: released the in-flight reserve for unbilled request %s", requestHash)
+	}
+}
+
 // audioVendorName is the configured vendor for the request's resolved model, or ""
 // when none is set. Shared by the reserve and its skip reporting so the name in the
 // log is the one the lookup actually used.
@@ -115,26 +141,25 @@ func (c *Ctrl) audioVendorName(ctx *gin.Context) string {
 	return ""
 }
 
-// audioReservedSeconds reports the most output audio the configured vendor can bill
-// for this request — the bound the balance gate holds, and the fallback the response
-// path charges when the adaptor reports no duration.
+// audioCeilingSeconds is the configured vendor's per-request output ceiling — the
+// amount the balance gate reserves, and the most the response path will bill.
 //
-// ONE definition, called from both. An earlier version computed the same thing
-// twice: once inside AudioCreateReserve and once here. Two readings of one request
-// is exactly what common/audiospec exists to prevent, and having them inside a
-// single package made the duplication easier to miss, not harder.
+// ONE definition, called from both. Two readings of one bound is exactly what
+// common/audiospec exists to prevent, and having them inside a single package
+// makes the duplication easier to miss, not harder.
 //
-// Returns 0 when no vendor rules are recorded. Callers decide what that means:
-// the gate forwards unreserved and meters it, the response path floors at 1.
-func (c *Ctrl) audioReservedSeconds(ctx *gin.Context, reqBody []byte, contentType string) int64 {
+// ok is false when no vendor rules are recorded. Callers decide what that means:
+// the gate forwards unreserved and meters it; the response path bills
+// unknownVendorAudioBillingSeconds.
+func (c *Ctrl) audioCeilingSeconds(ctx *gin.Context) (int64, bool) {
 	spec, ok := audiospec.Get(audiospec.Vendor(c.audioVendorName(ctx)))
 	if !ok {
-		return 0
+		return 0, false
 	}
-	return spec.ReserveSeconds(rawAudioMaxDuration(reqBody, contentType))
+	return spec.MaxOutputSeconds(), true
 }
 
-// skipAudioReserve meters and reports a create going out unreserved. Throttled
+// skipAudioReserve meters and reports a request going out unreserved. Throttled
 // per (reason, vendor) exactly as skipVideoReserve is, and keyed on the
 // CONFIGURED vendor name rather than anything from the request: the throttle memo
 // is shared across reasons, so a caller-chosen key would let one client flush it
@@ -142,81 +167,4 @@ func (c *Ctrl) audioReservedSeconds(ctx *gin.Context, reqBody []byte, contentTyp
 func (c *Ctrl) skipAudioReserve(reason, vendorName, format string, args ...interface{}) {
 	monitor.RecordAudioReserveSkipped(reason)
 	c.logProofSkip(reason, vendorName, format, args...)
-}
-
-// rawAudioMaxDuration extracts "max_duration" from a create body as it was sent,
-// for the spec to interpret. "" means absent or unreadable, which every spec
-// resolves to its ceiling — see AudioCreateReserve on why that makes this
-// parser's strictness free.
-//
-// Both transports are read because both are first-class for this endpoint: the
-// JSON body is the ordinary case, and multipart is how a client supplies
-// reference audio as file parts (the OpenAI-native shape for audio input).
-func rawAudioMaxDuration(reqBody []byte, contentType string) string {
-	mediaType, params, err := mime.ParseMediaType(contentType)
-	if err == nil && params["boundary"] != "" && strings.HasPrefix(mediaType, "multipart/") {
-		return rawMultipartAudioMaxDuration(reqBody, params["boundary"])
-	}
-	return rawJSONAudioMaxDuration(reqBody)
-}
-
-// rawJSONAudioMaxDuration reads max_duration out of a JSON create body.
-//
-// Numbers only; a QUOTED value is ignored. That mirrors rawJSONVideoFields, and
-// the quote check is load-bearing there for a reason that also applies here:
-// unmarshalling a JSON string into a json.Number SUCCEEDS when its contents look
-// numeric, so without the check `"max_duration":"60"` would resolve to 60 while a
-// downstream decoding the same field into a json.Number inside a struct rejects
-// the request outright.
-//
-// The consequence differs though, and in our favour. For video, reading a
-// duration out of a request nobody will render was a real divergence. Here a
-// rejected spelling simply yields "" and reserves the ceiling — strictly more
-// than the request could ever cost. So this stays strict because agreeing with
-// the translator's reader is worth having, not because being wrong would be
-// expensive.
-func rawJSONAudioMaxDuration(reqBody []byte) string {
-	var body map[string]json.RawMessage
-	dec := json.NewDecoder(bytes.NewReader(reqBody))
-	dec.UseNumber()
-	if err := dec.Decode(&body); err != nil {
-		return ""
-	}
-	raw, present := body["max_duration"]
-	if !present || len(raw) == 0 || raw[0] == '"' {
-		return ""
-	}
-	var n json.Number
-	if json.Unmarshal(raw, &n) != nil || len(n) > maxRawAudioFieldBytes {
-		return ""
-	}
-	return n.String()
-}
-
-// rawMultipartAudioMaxDuration reads max_duration out of a multipart create body,
-// skipping file parts (a reference-audio upload is never this field to the
-// upstream's form reader either) and taking the FIRST value, matching
-// http.Request.FormValue.
-func rawMultipartAudioMaxDuration(reqBody []byte, boundary string) string {
-	reader := multipart.NewReader(bytes.NewReader(reqBody), boundary)
-	for {
-		part, err := reader.NextRawPart()
-		if err != nil {
-			// io.EOF, or a body that stops parsing partway. Either way the field was
-			// not found before that point, so it is absent.
-			return ""
-		}
-		if part.FileName() != "" || part.FormName() != "max_duration" {
-			part.Close()
-			continue
-		}
-		// One byte past the cap distinguishes "exactly at the cap" from "longer",
-		// so an oversized value is dropped rather than silently shortened.
-		val, _ := io.ReadAll(io.LimitReader(part, maxRawAudioFieldBytes+1))
-		part.Close()
-		if len(val) > maxRawAudioFieldBytes {
-			return ""
-		}
-		return string(val)
-	}
 }

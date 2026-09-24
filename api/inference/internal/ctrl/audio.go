@@ -1,10 +1,10 @@
 package ctrl
 
 import (
-	"encoding/json"
 	"io"
 	"math"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -39,22 +39,24 @@ const (
 )
 
 // audioQuantitySource names where the billable quantity came from, for the metric
-// and for the log line on the fallback path.
+// and for the log line on the paths that did not bill the reported figure.
+//
+// Values are the monitor package's bounded AudioBillingSource* labels, so the
+// metric's cardinality stays fixed and the two cannot drift apart.
 type audioQuantitySource string
 
 const (
-	// audioQuantityUsage: the adaptor reported a duration. The expected path.
-	audioQuantityUsage audioQuantitySource = "usage"
-	// audioQuantityReserve: it did not, so the held ceiling is charged. OVER-bills by
-	// construction, so it is metered rather than merely logged.
-	audioQuantityReserve audioQuantitySource = "reserve"
+	// audioQuantityUsage: the adaptor reported a duration within the ceiling. The
+	// expected path.
+	audioQuantityUsage audioQuantitySource = monitor.AudioBillingSourceUsage
+	// audioQuantityCeiling: it reported none usable, so the ceiling is charged.
+	// OVER-bills by construction, so it is metered rather than merely logged.
+	audioQuantityCeiling audioQuantitySource = monitor.AudioBillingSourceCeiling
+	// audioQuantityOverCeiling: it reported MORE than the vendor can produce, and
+	// the bill is clamped to the ceiling. Not an over-bill — the ceiling is the most
+	// the vendor charges — but the adaptor or vendor is reporting something false.
+	audioQuantityOverCeiling audioQuantitySource = monitor.AudioBillingSourceOverCeiling
 )
-
-// maxBillableAudioSeconds bounds a duration this path will accept from a response.
-// Far above any vendor's per-request ceiling (Seed Audio's is 120), so it only trips
-// on a garbage or hostile value — at which point falling through to the reserve is
-// correct, because the reserve is a number we chose.
-const maxBillableAudioSeconds = 24 * 3600
 
 // handleAudioSpeechResponse handles the audio-generation response.
 //
@@ -72,13 +74,18 @@ const maxBillableAudioSeconds = 24 * 3600
 //
 // Billing runs after the copy, matching every other modality here: content delivery
 // has never been gated on billing completing.
-func (c *Ctrl) handleAudioSpeechResponse(ctx *gin.Context, resp *http.Response, _ model.User, outputPrice string, reqBody []byte, reqModel model.Request) error {
+//
+// The row's in-flight reserve (written by proxy.go at creation) is overwritten by
+// the bill here. Every exit that does NOT reach that write leaves output_count at
+// zero, which is what lets proxy.go's deferred ReleaseUnbilledAudioReserve clear
+// the reserve without being told how this function ended.
+func (c *Ctrl) handleAudioSpeechResponse(ctx *gin.Context, resp *http.Response, _ model.User, outputPrice string, _ []byte, reqModel model.Request) error {
 	defer resp.Body.Close()
 
 	// Resolved before the copy for two reasons: a client write failure cannot then
 	// cost us the billing quantity, and the fee header is still writable — once the
 	// first body byte is flushed, headers are committed.
-	seconds, source := c.resolveAudioSpeechSeconds(ctx, resp.Header, reqBody)
+	seconds, source := c.resolveAudioSpeechSeconds(ctx, resp.Header)
 	monitor.RecordAudioBillingSource(string(source))
 
 	var fee string
@@ -116,47 +123,74 @@ func (c *Ctrl) handleAudioSpeechResponse(ctx *gin.Context, resp *http.Response, 
 }
 
 // resolveAudioSpeechSeconds reads the billable duration from the response header,
-// falling back to the reserved ceiling when the adaptor did not report one.
+// bounded by the vendor's per-request ceiling.
 //
-// The fallback OVER-bills by construction, so it is metered rather than merely
-// logged: broker_audio_billing_fallback_total{source="reserve"} is how an operator
-// learns the adaptor stopped populating the header, which is the real defect behind
-// it. It should never fire against Seed Audio — that vendor always reports a
-// duration — so any rate at all is a signal, not noise.
-func (c *Ctrl) resolveAudioSpeechSeconds(ctx *gin.Context, header http.Header, reqBody []byte) (int64, audioQuantitySource) {
-	if secs, ok := ceilPositiveAudioSeconds(json.Number(strings.TrimSpace(header.Get(AudioDurationHeader)))); ok {
+// The ceiling is the same audiospec figure the balance gate reserved, and it
+// bounds the bill in both directions it can go wrong:
+//
+//   - no usable duration: the ceiling is charged. This OVER-bills by construction,
+//     so it is metered: broker_audio_billing_fallback_total{source="ceiling"} is
+//     how an operator learns the adaptor stopped populating the header, which is
+//     the real defect behind it. Seed Audio always reports a duration, so any rate
+//     at all is a signal, not noise.
+//   - a duration ABOVE the ceiling: clamped to it, metered as
+//     source="usage_over_ceiling". The vendor cannot have produced more than its
+//     ceiling, and billing above the reserve would break the one property the
+//     reserve exists for — that the bill cannot exceed the hold. The previous
+//     bound here was 24 hours, which let a single bad header bill 720 times the
+//     reserve.
+//
+// With no vendor rules recorded there is no ceiling to read, and the bill still
+// has to be some number: unknownVendorAudioBillingSeconds, which is the figure the
+// 0G router bills in the same two situations. It used to floor at 1 second, which
+// under-billed and left the broker's ledger disagreeing with the router's.
+func (c *Ctrl) resolveAudioSpeechSeconds(ctx *gin.Context, header http.Header) (int64, audioQuantitySource) {
+	ceiling, known := c.audioCeilingSeconds(ctx)
+	if !known {
+		ceiling = unknownVendorAudioBillingSeconds
+	}
+
+	raw := strings.TrimSpace(header.Get(AudioDurationHeader))
+	secs, clamped, ok := parseAudioSeconds(raw, ceiling)
+	switch {
+	case ok && !clamped:
 		return secs, audioQuantityUsage
+	case ok && clamped:
+		c.logger.Warnf("audio speech: response reported %s=%q, above the %ds per-request ceiling; billing the ceiling. The vendor cannot produce more than that — check what the adaptor is reporting",
+			AudioDurationHeader, raw, ceiling)
+		return secs, audioQuantityOverCeiling
 	}
-	reserved := c.audioReservedSeconds(ctx, reqBody, ctx.Request.Header.Get("Content-Type"))
-	if reserved < 1 {
-		// Billing zero would read as a free request, which is the one answer that
-		// hides the problem instead of surfacing it.
-		reserved = 1
-	}
-	c.logger.Errorf("audio speech: response carried no usable %s; billing the reserved ceiling of %ds instead. This OVER-bills — check the adaptor is setting the header from the vendor's billing duration",
-		AudioDurationHeader, reserved)
-	return reserved, audioQuantityReserve
+	c.logger.Errorf("audio speech: response carried no usable %s; billing the %ds ceiling instead. This OVER-bills — check the adaptor is setting the header from the vendor's billing duration",
+		AudioDurationHeader, ceiling)
+	return ceiling, audioQuantityCeiling
 }
 
-// ceilPositiveAudioSeconds reads a duration into a positive whole-second count,
-// reporting whether it produced a usable one.
+// parseAudioSeconds reads a reported duration into a positive whole-second count
+// no greater than ceiling.
 //
-// json.Number, not float64, because a vendor may encode a duration as either an
-// integer or a float and json.Number tolerates both — Seed Audio reports
-// original_duration as a float, and a typed int field would reject it outright.
+// ok=false means there is no usable number: absent, unreadable, zero, negative,
+// NaN or infinite. clamped=true means there was one and it exceeded the ceiling,
+// so secs is the ceiling.
+//
+// The comparison against the ceiling happens on the FLOAT, before any conversion.
+// Converting first is implementation-defined past int64's range (MinInt64 on
+// amd64, a saturated MaxInt64 on arm64), so an absurd header would have turned
+// into a large NEGATIVE number on one architecture and slipped past a
+// `secs > ceiling` check it should have failed.
 //
 // Rounded UP: the fee is charged in whole seconds, so truncating would bill less
-// than was produced.
-func ceilPositiveAudioSeconds(n json.Number) (int64, bool) {
-	if n == "" {
-		return 0, false
+// than was produced. A value a hair above ceiling-1 rounds up to the ceiling,
+// which is still in bounds; only a value above the ceiling itself is clamped.
+func parseAudioSeconds(raw string, ceiling int64) (secs int64, clamped bool, ok bool) {
+	if raw == "" {
+		return 0, false, false
 	}
-	f, err := n.Float64()
-	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
-		return 0, false
+	f, err := strconv.ParseFloat(raw, 64)
+	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) || !(f > 0) {
+		return 0, false, false
 	}
-	if f <= 0 || f > maxBillableAudioSeconds {
-		return 0, false
+	if f > float64(ceiling) {
+		return ceiling, true, true
 	}
-	return int64(math.Ceil(f)), true
+	return int64(math.Ceil(f)), false, true
 }
