@@ -443,7 +443,7 @@ func (c *Ctrl) GetPriceFeedSnapshot() (snap pricefeed.Snapshot, stalenessThresho
 // next GetCachedService call re-reads from the contract.  Called by the
 // PriceUpdateProcessor after pushing a new price on-chain.
 func (c *Ctrl) InvalidateServiceCache() {
-	c.serviceCache.Delete("current_service")
+	c.serviceCache.Delete(serviceCacheKey)
 }
 
 // IsWhitelistedUser checks if the user address is in the whitelist.
