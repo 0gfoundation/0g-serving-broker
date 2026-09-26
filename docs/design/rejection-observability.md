@@ -112,6 +112,20 @@ should page on. Sustained `backend_overloaded` means the engine itself is full
 (queue or KV cache), typically from a few very long requests rather than many —
 look at the engine's running/queue/KV panels, not at the broker's concurrency caps.
 
+The guard also exports two gauges, registered only when it is enabled (a box
+without the guard exports neither, so `up == 0` never means "not configured"):
+
+```promql
+# enabled but unable to read the engine — it is admitting everything, unprotected
+broker_overload_guard_up == 0            # alert when sustained for a few minutes
+
+# currently shedding
+broker_overload_guard_shedding == 1
+```
+
+`up` drops to 0 on any failed scrape: sglang started without `--enable-metrics`,
+a wrong port, or a gauge renamed by an engine upgrade.
+
 Sustained `global_concurrency` means raise the cap or add capacity, not debug the
 broker. Note it counts unauthenticated traffic too — the cap runs before session
 validation.

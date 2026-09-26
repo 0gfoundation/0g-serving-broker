@@ -9,7 +9,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/0glabs/0g-serving-broker/inference/config"
+	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
 
 // A trimmed sglang /metrics payload with tp-ranked series, as TP=8 engines emit.
@@ -263,5 +266,48 @@ func TestTransitionLogging(t *testing.T) {
 	want := []string{"WARN shedding", "WARN scrape-failed (3 earlier state changes not logged)"}
 	if strings.Join(l.lines, "|") != strings.Join(want, "|") {
 		t.Fatalf("log lines = %q, want %q", l.lines, want)
+	}
+}
+
+// gaugeValue reads a gauge from the default registry — the one /metrics serves
+// — so the test sees what an operator's alert would.
+func gaugeValue(t *testing.T, name string) float64 {
+	t.Helper()
+	mfs, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() == name && len(mf.GetMetric()) == 1 {
+			return mf.GetMetric()[0].GetGauge().GetValue()
+		}
+	}
+	t.Fatalf("gauge %s not registered", name)
+	return 0
+}
+
+// broker_overload_guard_up is how an operator learns that an enabled guard is
+// not protecting anything (sglang without --enable-metrics, a renamed gauge);
+// _shedding is what dashboards plot. Both must follow each scrape.
+func TestPoll_UpdatesGauges(t *testing.T) {
+	monitor.PrometheusInit("overload-guard-gauge-test", "0x00000000000000000000000000000000000000bb")
+	monitor.EnableOverloadGuardMetrics()
+
+	status := http.StatusOK
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte("sglang:num_queue_reqs 27\nsglang:token_usage 0.99\n"))
+	}))
+	defer srv.Close()
+	g := newTestGuard(config.OverloadGuardConfig{MetricsURL: srv.URL, MaxQueueRequests: 5})
+
+	g.poll(context.Background())
+	if up, shed := gaugeValue(t, "broker_overload_guard_up"), gaugeValue(t, "broker_overload_guard_shedding"); up != 1 || shed != 1 {
+		t.Fatalf("after a saturated scrape up=%v shedding=%v, want 1/1", up, shed)
+	}
+	status = http.StatusNotFound
+	g.poll(context.Background())
+	if up, shed := gaugeValue(t, "broker_overload_guard_up"), gaugeValue(t, "broker_overload_guard_shedding"); up != 0 || shed != 0 {
+		t.Fatalf("after a failed scrape up=%v shedding=%v, want 0/0", up, shed)
 	}
 }
