@@ -786,6 +786,9 @@ func (c *Client) RunInContainer(ctx context.Context, containerName string, cmd [
 	if _, err := stdcopy.StdCopy(&out, &out, io.LimitReader(hj.Reader, 64<<10)); err != nil {
 		return 0, "", fmt.Errorf("reading the output of %v in %s: %w", cmd, containerName, err)
 	}
+	// Keep draining past the cap: a process blocked writing output never exits, and the
+	// caller holds a lock while it waits.
+	_, _ = io.Copy(io.Discard, hj.Reader)
 	for {
 		inspect, err := c.cli.ContainerExecInspect(ctx, execResp.ID)
 		if err != nil {

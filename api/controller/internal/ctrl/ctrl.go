@@ -24,6 +24,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/tee"
 	"github.com/0glabs/0g-serving-broker/controller/internal/attestproxy"
 	"github.com/0glabs/0g-serving-broker/controller/internal/docker"
+	"github.com/0glabs/0g-serving-broker/inference/cmd/validateconfig"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	"github.com/0glabs/0g-serving-broker/inference/contract"
 )
@@ -1433,6 +1434,11 @@ func (c *Ctrl) runningImagesAccept(ctx context.Context, content string) error {
 		}
 		if code != 0 {
 			return fmt.Errorf("%s's image refuses it (exit %d): %s", ct.role, code, out)
+		}
+		// Exit 0 alone is not enough: docker reports 0 for an exec whose code is null,
+		// e.g. one that never started. Only the applet's own confirmation counts.
+		if !strings.Contains(out, validateconfig.OK) {
+			return fmt.Errorf("%s's image did not confirm the config (output %q)", ct.role, out)
 		}
 	}
 	return nil

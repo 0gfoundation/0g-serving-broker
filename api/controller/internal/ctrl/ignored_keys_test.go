@@ -17,14 +17,19 @@ import (
 	"testing"
 
 	"github.com/0glabs/0g-serving-broker/controller/internal/docker"
+	"github.com/0glabs/0g-serving-broker/inference/cmd/validateconfig"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 )
 
 // validator behaviours for a fake container's 0g-validate-config
 const (
-	validates = "pass"
-	oldImage  = "old" // no such applet: exits non-zero and writes nothing
+	validates  = "pass"
+	oldImage   = "old"         // no such applet: exits non-zero and writes nothing
+	silentZero = "silent-zero" // exit 0 but no confirmation, like a null docker exit code
 )
+
+// wantContent, when set, is what the fake validator requires the staged candidate to be.
+var wantContent string
 
 type execResult struct {
 	code int
@@ -45,6 +50,7 @@ func splitImageDaemon(t *testing.T, cs ...guardContainer) *docker.Client {
 	t.Helper()
 	var mu sync.Mutex
 	execs := map[string]execResult{}
+	inspected := map[string]bool{}
 	n := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
@@ -73,9 +79,21 @@ func splitImageDaemon(t *testing.T, cs ...guardContainer) *docker.Client {
 					res = execResult{1, "0g-validate-config: applet not found"}
 				case strings.HasPrefix(ct.validator, "refuse:"):
 					res = execResult{1, strings.TrimPrefix(ct.validator, "refuse:")}
+				case ct.validator == silentZero:
+					res = execResult{0, ""} // exit 0 without the applet's confirmation
 				default:
-					if _, err := os.Stat(body.Cmd[2]); err != nil {
-						res = execResult{1, err.Error()} // the candidate must exist where the container reads it
+					// Validate what was actually staged: the pushed content, 0600.
+					info, err := os.Stat(body.Cmd[2])
+					data, _ := os.ReadFile(body.Cmd[2])
+					switch {
+					case err != nil:
+						res = execResult{1, err.Error()}
+					case info.Mode().Perm() != 0o600:
+						res = execResult{1, "candidate mode " + info.Mode().Perm().String()}
+					case wantContent != "" && string(data) != wantContent:
+						res = execResult{1, "candidate is not the pushed content"}
+					default:
+						res = execResult{0, validateconfig.OK}
 					}
 				}
 				n++
@@ -115,7 +133,10 @@ func splitImageDaemon(t *testing.T, cs ...guardContainer) *docker.Client {
 		case strings.Contains(r.URL.Path, "/exec/") && strings.HasSuffix(r.URL.Path, "/json"):
 			for id, res := range execs {
 				if strings.Contains(r.URL.Path, "/exec/"+id+"/") {
-					_ = json.NewEncoder(w).Encode(map[string]any{"ID": id, "Running": false, "ExitCode": res.code})
+					// Still running on the first inspect, so the caller's wait loop is exercised.
+					running := !inspected[id]
+					inspected[id] = true
+					_ = json.NewEncoder(w).Encode(map[string]any{"ID": id, "Running": running, "ExitCode": res.code})
 					return
 				}
 			}
@@ -274,7 +295,10 @@ func TestConfigChangeAsksTheRunningImagesWhenTheyDiffer(t *testing.T) {
 		{"the broker's image refuses the value", "refuse:futureFeature.threshold must be at most 1", validates, "futureFeature.threshold must be at most 1"},
 		{"the event service's image refuses it", validates, "refuse:unknown key", "the event service's image refuses it (exit 1): unknown key"},
 		{"an image from before the validator", oldImage, validates, "applet not found"},
+		{"exit 0 without the applet's confirmation", validates, silentZero, "did not confirm"},
 	}
+	wantContent = content
+	t.Cleanup(func() { wantContent = "" })
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
