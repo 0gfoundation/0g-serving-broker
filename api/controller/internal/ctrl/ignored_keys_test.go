@@ -135,9 +135,10 @@ func TestImageSwitchWarnsAboutIgnoredKeysOnDisk(t *testing.T) {
 		t.Errorf("no ignored keys on disk: warning = %q, want none", w)
 	}
 
-	// And it reaches the operator: the result UpdateImages returns carries it, on the
-	// failed path too (this fake cannot recreate the event container, and the handler
-	// reports the result either way).
+	// And it reaches the operator: every result UpdateImages returns carries it — here
+	// a failed one (this fake cannot recreate the event container), which the handler
+	// serialises like a successful one. Only the early refusals that change nothing
+	// return no result, and those log it.
 	c.config.ConfigFile = withFuture
 	result, _ := c.UpdateImages(context.Background(), testDigest)
 	if result == nil || !strings.Contains(result.Warning, `"futureFeature"`) {
