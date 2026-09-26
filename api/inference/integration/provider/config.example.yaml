@@ -80,10 +80,11 @@ service:
 #   perUserTPMBurst: 10000     # Max burst size for TPM (default: 0)
 #   perUserIPM: 10             # Max images per minute per user (default: 0 = disabled, text-to-image/image-editing)
 #   perUserIPMBurst: 5         # Max burst size for IPM (default: 0)
-# Optional: shed new inference requests with 503 + Retry-After while a self-hosted
+# Optional: shed new inference requests with 429 + Retry-After while a self-hosted
 # sglang engine reports itself saturated. The count-based caps above cannot see a
 # KV cache filled by a few long contexts; this reads the engine's own gauges.
-# Fails open: an unreachable or stale metrics endpoint sheds nothing.
+# Chatbot services with a single engine only; sglang needs --enable-metrics.
+# Fails open: a failed scrape or a stale sample sheds nothing.
 # overloadGuard:
 #   enabled: true
 #   metricsUrl: "http://sglang:8000/metrics"

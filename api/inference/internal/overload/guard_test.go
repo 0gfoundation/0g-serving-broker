@@ -131,12 +131,19 @@ func TestScrape(t *testing.T) {
 		t.Fatal("queue of 11 against a limit of 5 must shed after a scrape")
 	}
 
-	// A failed scrape keeps the old sample; it must not be replaced by zeros
-	// (which would admit) or kept forever (covered by the stale case in TestCheck).
+	// A failed scrape fails open at once: the last verdict is not acted on
+	// while the engine cannot confirm it.
 	status = http.StatusInternalServerError
 	g.poll(context.Background())
+	if shed, _ := g.Check(); shed {
+		t.Fatal("a failed scrape must stop shedding immediately")
+	}
+
+	// And a recovered endpoint re-arms it.
+	status = http.StatusOK
+	g.poll(context.Background())
 	if shed, _ := g.Check(); !shed {
-		t.Fatal("a failed scrape must not overwrite the last good sample")
+		t.Fatal("a successful scrape after a failure must re-arm the guard")
 	}
 
 	// An endpoint missing one gauge is refused rather than read as 0.

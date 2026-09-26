@@ -261,21 +261,30 @@ func (p *Proxy) SetOverloadGuard(g *overload.Guard) {
 	p.overloadGuard = g
 }
 
-// overloadErrorBody is the OpenAI error envelope. The router relays a provider
-// error body unchanged when it already has this shape, so the code and message
-// reach the end user instead of a generic "provider request failed".
-func overloadErrorBody(retryAfter int) gin.H {
-	return gin.H{"error": gin.H{
-		"message": fmt.Sprintf("The model is temporarily overloaded. Please retry in %d seconds.", retryAfter),
-		"type":    "server_error",
-		"code":    "model_overloaded",
-	}}
+// overloadErrorBody is the error envelope of the API family the path speaks.
+// The router relays a provider error body unchanged when it is already that
+// family's canonical envelope, so the message reaches the end user instead of a
+// generic "provider request failed" — and a client calling the broker directly
+// gets a shape its SDK understands. Anthropic's native signal for this is the
+// overloaded_error type, which its SDKs (and Claude Code) retry on their own.
+func overloadErrorBody(path string, retryAfter int) gin.H {
+	msg := fmt.Sprintf("The model is temporarily overloaded. Please retry in %d seconds.", retryAfter)
+	if strings.HasSuffix(path, "/messages") {
+		return gin.H{"type": "error", "error": gin.H{"type": "overloaded_error", "message": msg}}
+	}
+	return gin.H{"error": gin.H{"message": msg, "type": "server_error", "code": "model_overloaded"}}
 }
 
-// overloadGuardMiddleware rejects new inference requests with 503 while the
+// overloadGuardMiddleware rejects new inference requests with 429 while the
 // engine is saturated. Only POSTs are gated: GETs on this group (model list,
 // signature and image retrieval) do not load the engine, and refusing a
 // signature fetch would make a response that already completed unverifiable.
+//
+// 429, not 503: the 0G router counts a provider 5xx as a failure (three trip
+// its breaker and drop the endpoint until the next provider sync), while it
+// treats a 429 as capacity — skip the endpoint briefly if a sibling has room,
+// never mark it unhealthy — and relays Retry-After. A deliberate shed must not
+// read as the box being broken.
 func (p *Proxy) overloadGuardMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if c.Request.Method != http.MethodPost {
@@ -287,13 +296,16 @@ func (p *Proxy) overloadGuardMiddleware() gin.HandlerFunc {
 			c.Next()
 			return
 		}
-		// Shedding for capacity is expected behaviour, not a service error —
-		// same treatment as the global concurrency cap.
+		// Expected capacity shedding, kept out of ErrorCount like the global
+		// concurrency cap. Attributed to upstream, not client: the caller did
+		// nothing wrong, the engine is full — which is exactly what the upstream
+		// capacity alerts watch for.
 		c.Set("ignoreError", true)
+		c.Set(monitor.CtxKeyFailureSource, monitor.FailureSourceUpstream)
 		p.rejections.record(c, monitor.RejectionBackendOverloaded, "")
 		retryAfter := p.overloadGuard.RetryAfterSeconds()
 		c.Header("Retry-After", strconv.Itoa(retryAfter))
-		c.AbortWithStatusJSON(http.StatusServiceUnavailable, overloadErrorBody(retryAfter))
+		c.AbortWithStatusJSON(http.StatusTooManyRequests, overloadErrorBody(c.Request.URL.Path, retryAfter))
 	}
 }
 

@@ -1,5 +1,5 @@
 // Package overload sheds inference requests while the model engine behind the
-// broker is saturated, so a caller gets an immediate 503 with Retry-After
+// broker is saturated, so a caller gets an immediate 429 with Retry-After
 // instead of waiting for a first token that is minutes away.
 //
 // The broker's own admission gates count requests. That is the wrong unit when
@@ -100,11 +100,12 @@ func (g *Guard) Run(ctx context.Context) {
 func (g *Guard) poll(ctx context.Context) {
 	s, err := g.scrape(ctx)
 	if err != nil {
-		// Keep the previous sample: it ages out on its own (see Check), which is
-		// what makes a broken metrics endpoint fail open rather than pin the last
-		// verdict forever. Logged once per outage, not once per tick.
+		// Drop the previous sample rather than keep acting on it: a verdict the
+		// engine can no longer confirm is not evidence of saturation, so a broken
+		// endpoint admits from the next request on. Logged once per outage.
+		g.latest.Store(nil)
 		if !g.scrapeFailing.Swap(true) {
-			g.logger.Warnf("overload guard: metrics scrape failed, not shedding once the last sample goes stale: %v", err)
+			g.logger.Warnf("overload guard: metrics scrape failed, admitting all requests until it recovers: %v", err)
 		}
 		return
 	}
@@ -143,8 +144,9 @@ func (g *Guard) scrape(ctx context.Context) (*sample, error) {
 }
 
 // Check reports whether new requests should be shed, and why. It never sheds
-// on missing or stale data: an unreachable metrics endpoint is not evidence of
-// saturation, and the guard must not become a way for the box to reject
+// without a current sample: a failed scrape clears it (see poll), and a sample
+// older than three poll intervals — a poller that stopped, or a scrape still
+// hanging — is ignored. The guard must not become a way for the box to reject
 // traffic it could have served.
 func (g *Guard) Check() (overloaded bool, reason string) {
 	if g == nil {
