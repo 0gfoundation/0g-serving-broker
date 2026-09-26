@@ -2,9 +2,12 @@ package ctrl
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -23,6 +26,11 @@ const (
 	oldImage  = "old" // no such applet: exits non-zero and writes nothing
 )
 
+type execResult struct {
+	code int
+	out  string
+}
+
 type guardContainer struct {
 	id, name, digest string
 	validator        string // validates, oldImage, or "refuse:<reason>"
@@ -30,12 +38,13 @@ type guardContainer struct {
 
 // splitImageDaemon serves a broker, an event container and the controller with the
 // given digests — e.g. the state after `redeploy.sh --digest` hot-switched the broker —
-// and runs each container's 0g-validate-config as its validator field says, writing a
-// refusal reason to <file>.err as the real applet does.
+// and runs each container's 0g-validate-config as its validator field says: a refusal
+// reason comes back on the exec's output stream, as from the real applet (which cannot
+// write anything: the config volume is read-only in those containers).
 func splitImageDaemon(t *testing.T, cs ...guardContainer) *docker.Client {
 	t.Helper()
 	var mu sync.Mutex
-	execs := map[string]int{} // exec id -> exit code
+	execs := map[string]execResult{}
 	n := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
@@ -56,41 +65,57 @@ func splitImageDaemon(t *testing.T, cs ...guardContainer) *docker.Client {
 				if !strings.Contains(r.URL.Path, "/containers/"+ct.id+"/") {
 					continue
 				}
-				code := 0
+				res := execResult{}
 				switch {
-				case len(body.Cmd) != 3 || body.Cmd[1] != "0g-validate-config":
-					code = 2
+				case len(body.Cmd) != 3 || body.Cmd[0] != brokerBinary || body.Cmd[1] != "0g-validate-config":
+					res = execResult{2, "usage"}
 				case ct.validator == oldImage:
-					code = 1
+					res = execResult{1, "0g-validate-config: applet not found"}
 				case strings.HasPrefix(ct.validator, "refuse:"):
-					_ = os.WriteFile(body.Cmd[2]+".err", []byte(strings.TrimPrefix(ct.validator, "refuse:")), 0o600)
-					code = 1
+					res = execResult{1, strings.TrimPrefix(ct.validator, "refuse:")}
 				default:
 					if _, err := os.Stat(body.Cmd[2]); err != nil {
-						code = 1 // the candidate must exist where the container would read it
+						res = execResult{1, err.Error()} // the candidate must exist where the container reads it
 					}
 				}
 				n++
 				id := fmt.Sprintf("exec%d", n)
-				execs[id] = code
+				execs[id] = res
 				_ = json.NewEncoder(w).Encode(map[string]any{"Id": id})
 				return
 			}
 			w.WriteHeader(http.StatusNotFound)
 		case strings.Contains(r.URL.Path, "/exec/") && strings.HasSuffix(r.URL.Path, "/start"):
-			// Attached starts hijack the connection for output this path does not
-			// read; the controller must start detached and poll.
-			var body struct{ Detach bool }
-			_ = json.NewDecoder(r.Body).Decode(&body)
-			if !body.Detach {
-				w.WriteHeader(http.StatusBadRequest)
+			// An attached start: hijack, answer 101, then stream the output as docker's
+			// multiplexed frames (stderr) and close — the process has "exited".
+			var res execResult
+			for id, rr := range execs {
+				if strings.Contains(r.URL.Path, "/exec/"+id+"/") {
+					res = rr
+				}
+			}
+			_, _ = io.Copy(io.Discard, r.Body) // unread input would turn the close into a reset
+			conn, buf, err := w.(http.Hijacker).Hijack()
+			if err != nil {
 				return
 			}
-			w.WriteHeader(http.StatusOK)
+			defer conn.Close()
+			_, _ = buf.WriteString("HTTP/1.1 101 UPGRADED\r\nContent-Type: application/vnd.docker.multiplexed-stream\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n")
+			if res.out != "" {
+				hdr := make([]byte, 8)
+				hdr[0] = 2 // stderr
+				binary.BigEndian.PutUint32(hdr[4:], uint32(len(res.out)))
+				_, _ = buf.Write(hdr)
+				_, _ = buf.WriteString(res.out)
+			}
+			_ = buf.Flush()
+			if tc, ok := conn.(*net.TCPConn); ok {
+				_ = tc.CloseWrite() // EOF to the reader, without resetting the connection
+			}
 		case strings.Contains(r.URL.Path, "/exec/") && strings.HasSuffix(r.URL.Path, "/json"):
-			for id, code := range execs {
+			for id, res := range execs {
 				if strings.Contains(r.URL.Path, "/exec/"+id+"/") {
-					_ = json.NewEncoder(w).Encode(map[string]any{"ID": id, "Running": false, "ExitCode": code})
+					_ = json.NewEncoder(w).Encode(map[string]any{"ID": id, "Running": false, "ExitCode": res.code})
 					return
 				}
 			}
@@ -112,7 +137,9 @@ func splitImageDaemon(t *testing.T, cs ...guardContainer) *docker.Client {
 		}
 	}))
 	t.Cleanup(srv.Close)
-	c, err := docker.NewClient(config.ControllerConfig{Docker: config.DockerConfig{Host: srv.URL, APIVersion: "1.47"}})
+	// tcp://, not http://: an attached exec hijacks the connection, and the docker client
+	// dials the hijack by the host's scheme.
+	c, err := docker.NewClient(config.ControllerConfig{Docker: config.DockerConfig{Host: "tcp://" + strings.TrimPrefix(srv.URL, "http://"), APIVersion: "1.47"}})
 	if err != nil {
 		t.Fatalf("building docker client: %v", err)
 	}
@@ -147,7 +174,7 @@ func TestConfigChangeRefusesIgnoredKeysWhenTheBrokerRunsAnotherImage(t *testing.
 	if _, ok := err.(*InvalidConfigError); !ok {
 		t.Fatalf("ApplyCoreConfig() = %v, want an InvalidConfigError (400)", err)
 	}
-	for _, want := range []string{`"futureFeature"`, testDigest, prevDigest, "before 0g-validate-config"} {
+	for _, want := range []string{`"futureFeature"`, testDigest, prevDigest, "applet not found"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q should mention %q", err, want)
 		}
@@ -245,8 +272,8 @@ func TestConfigChangeAsksTheRunningImagesWhenTheyDiffer(t *testing.T) {
 	}{
 		{"both images accept it", validates, validates, ""},
 		{"the broker's image refuses the value", "refuse:futureFeature.threshold must be at most 1", validates, "futureFeature.threshold must be at most 1"},
-		{"the event service's image refuses it", validates, "refuse:unknown key", "the event service's image refuses it: unknown key"},
-		{"an image from before the validator", oldImage, validates, "before 0g-validate-config"},
+		{"the event service's image refuses it", validates, "refuse:unknown key", "the event service's image refuses it (exit 1): unknown key"},
+		{"an image from before the validator", oldImage, validates, "applet not found"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

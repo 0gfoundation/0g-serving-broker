@@ -235,8 +235,8 @@ func (h *Handler) UpdateCoreConfig(ctx *gin.Context) {
 // that needs a newer image — is reported to whoever pushed, not only buried in
 // the broker's log. The list is what the broker code compiled into this
 // controller ignores; a broker hot-switched to a newer image may read some of
-// them (ApplyCoreConfig accepts that case only once that image has already
-// loaded the same keys).
+// them (ApplyCoreConfig accepts that case only after that image validated the
+// content itself).
 func coreConfigUpdatedBody(content string) gin.H {
 	body := gin.H{"message": "config updated and containers restarted"}
 	// The config already passed ValidateConfigContent inside ApplyCoreConfig, so

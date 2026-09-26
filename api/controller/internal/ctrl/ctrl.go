@@ -1413,9 +1413,11 @@ const brokerBinary = "/usr/bin/broker"
 // runningImagesAccept asks the broker and event containers' own images whether they
 // load content, returning nil when both do, else why not.
 //
-// The candidate is written next to the config, on the volume every one of these
-// containers mounts at the same path (that is how the broker reads what the controller
-// writes), with the same 0600 permissions: it carries the same resolved secrets.
+// The candidate is staged next to the config, on the volume the containers mount (at
+// the same path on every generated deployment; where they do not, the image cannot read
+// it and the push is refused), 0600 because it carries the same resolved secrets. The
+// image's verdict comes back on the exec's output stream: the volume is read-only in
+// the broker and event containers.
 func (c *Ctrl) runningImagesAccept(ctx context.Context, content string) error {
 	sum := sha256.Sum256([]byte(content))
 	path := filepath.Join(filepath.Dir(c.config.ConfigFile), ".candidate-"+hex.EncodeToString(sum[:8])+".yaml")
@@ -1423,19 +1425,14 @@ func (c *Ctrl) runningImagesAccept(ctx context.Context, content string) error {
 		return fmt.Errorf("the candidate could not be staged for validation: %w", err)
 	}
 	defer os.Remove(path)
-	defer os.Remove(path + ".err")
 
 	for _, ct := range []struct{ name, role string }{{containerBroker, "the broker"}, {containerEvent, "the event service"}} {
-		_ = os.Remove(path + ".err")
-		code, err := c.dockerClient.RunInContainer(ctx, ct.name, []string{brokerBinary, "0g-validate-config", path})
+		code, out, err := c.dockerClient.RunInContainer(ctx, ct.name, []string{brokerBinary, "0g-validate-config", path})
 		if err != nil {
 			return fmt.Errorf("%s's image could not be asked to validate it: %w", ct.role, err)
 		}
 		if code != 0 {
-			if msg, rerr := os.ReadFile(path + ".err"); rerr == nil && len(msg) > 0 {
-				return fmt.Errorf("%s's image refuses it: %s", ct.role, msg)
-			}
-			return fmt.Errorf("%s's image could not validate it (exit %d; an image from before 0g-validate-config cannot)", ct.role, code)
+			return fmt.Errorf("%s's image refuses it (exit %d): %s", ct.role, code, out)
 		}
 	}
 	return nil

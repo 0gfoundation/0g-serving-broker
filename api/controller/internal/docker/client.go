@@ -1,6 +1,7 @@
 package docker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,7 @@ import (
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
+	"github.com/docker/docker/pkg/stdcopy"
 
 	dockerimage "github.com/0glabs/0g-serving-broker/common/docker"
 	"github.com/0glabs/0g-serving-broker/inference/config"
@@ -749,14 +751,15 @@ func (e *ContainerNotHealthyError) Error() string {
 }
 
 // RunInContainer runs cmd inside the named container (exact name) and waits for it to
-// exit, returning its exit code. Output is not captured: callers that need a message
-// have the command write it to a file they can read.
-func (c *Client) RunInContainer(ctx context.Context, containerName string, cmd []string) (int, error) {
+// exit, returning its exit code and combined output (capped at 64 KiB). The output is
+// read from the exec's own stream, not a file, so it works in containers whose
+// filesystem the command cannot write to (the config volume is read-only in the broker).
+func (c *Client) RunInContainer(ctx context.Context, containerName string, cmd []string) (int, string, error) {
 	// Exact name only — unlike GetContainerStatus, no substring fallback: running a
 	// command in a neighbour would answer for the wrong container.
 	containers, err := c.cli.ContainerList(ctx, container.ListOptions{All: true})
 	if err != nil {
-		return 0, err
+		return 0, "", err
 	}
 	var id string
 	for _, cont := range containers {
@@ -767,27 +770,34 @@ func (c *Client) RunInContainer(ctx context.Context, containerName string, cmd [
 		}
 	}
 	if id == "" {
-		return 0, &ContainerNotFoundError{Name: containerName}
+		return 0, "", &ContainerNotFoundError{Name: containerName}
 	}
-	execResp, err := c.cli.ContainerExecCreate(ctx, id, container.ExecOptions{Cmd: cmd})
+	execResp, err := c.cli.ContainerExecCreate(ctx, id, container.ExecOptions{Cmd: cmd, AttachStdout: true, AttachStderr: true})
 	if err != nil {
-		return 0, err
+		return 0, "", err
 	}
-	if err := c.cli.ContainerExecStart(ctx, execResp.ID, container.ExecStartOptions{Detach: true}); err != nil {
-		return 0, err
+	// Attaching starts the exec; the stream ends when the process exits.
+	hj, err := c.cli.ContainerExecAttach(ctx, execResp.ID, container.ExecAttachOptions{})
+	if err != nil {
+		return 0, "", err
+	}
+	defer hj.Close()
+	var out bytes.Buffer
+	if _, err := stdcopy.StdCopy(&out, &out, io.LimitReader(hj.Reader, 64<<10)); err != nil {
+		return 0, "", fmt.Errorf("reading the output of %v in %s: %w", cmd, containerName, err)
 	}
 	for {
 		inspect, err := c.cli.ContainerExecInspect(ctx, execResp.ID)
 		if err != nil {
-			return 0, err
+			return 0, "", err
 		}
 		if !inspect.Running {
-			return inspect.ExitCode, nil
+			return inspect.ExitCode, strings.TrimSpace(out.String()), nil
 		}
 		select {
 		case <-ctx.Done():
-			return 0, ctx.Err()
-		case <-time.After(100 * time.Millisecond):
+			return 0, "", ctx.Err()
+		case <-time.After(50 * time.Millisecond):
 		}
 	}
 }

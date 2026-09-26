@@ -15,8 +15,9 @@ import (
 )
 
 // Main validates the file named by the first argument. It exits 0 when the content
-// loads; otherwise it writes the reason to <file>.err, where the caller (which cannot
-// easily read an exec's output) picks it up, and exits 1.
+// loads; otherwise it prints the reason to stderr, which the caller reads from the
+// exec's stream, and exits 1. It writes nothing: the config volume is read-only in the
+// containers it runs in.
 func Main() {
 	if len(os.Args) != 2 {
 		fmt.Fprintln(os.Stderr, "usage: 0g-validate-config <config file>")
@@ -28,14 +29,11 @@ func Main() {
 	}
 }
 
-// run validates path and, on failure, leaves the reason in path+".err".
+// run reports whether the config at path loads.
 func run(path string) error {
 	data, err := os.ReadFile(path)
-	if err == nil {
-		err = config.ValidateConfigContent(data)
-	}
 	if err != nil {
-		_ = os.WriteFile(path+".err", []byte(err.Error()), 0o600)
+		return err
 	}
-	return err
+	return config.ValidateConfigContent(data)
 }

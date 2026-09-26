@@ -28,20 +28,17 @@ func TestRun(t *testing.T) {
 	if err := run(ok); err != nil {
 		t.Fatalf("run(valid, with an unknown key) = %v, want nil", err)
 	}
-	if _, err := os.Stat(ok + ".err"); !os.IsNotExist(err) {
-		t.Fatal("a passing validation must not leave an .err file")
-	}
 
 	bad := filepath.Join(dir, "bad.yaml")
 	if err := os.WriteFile(bad, []byte(validConfig+"nvGPU: notabool\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := run(bad); err == nil {
-		t.Fatal("run(invalid) = nil, want the load error")
+	if err := run(bad); err == nil || !strings.Contains(err.Error(), "cannot unmarshal") {
+		t.Fatalf("run(invalid) = %v, want the load error", err)
 	}
-	msg, err := os.ReadFile(bad + ".err")
-	if err != nil || !strings.Contains(string(msg), "cannot unmarshal") {
-		t.Fatalf(".err = %q (%v), want the reason for the caller to read", msg, err)
+	// It writes nothing next to the file: the config volume is read-only where it runs.
+	if left, _ := filepath.Glob(filepath.Join(dir, "*.err")); len(left) != 0 {
+		t.Fatalf("left %v behind", left)
 	}
 
 	if err := run(filepath.Join(dir, "missing.yaml")); err == nil {
