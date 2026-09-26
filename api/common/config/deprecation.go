@@ -118,7 +118,7 @@ func RawGet(raw map[string]interface{}, path ...string) (interface{}, bool) {
 //
 // If the raw value is a number, target is overwritten with value*unit and a
 // deprecation warning is emitted. Strings and missing keys are no-ops — the
-// new-style Duration value parsed by yaml.UnmarshalStrict is kept as-is.
+// new-style Duration value the loader already parsed is kept as-is.
 func MigrateIntegerSecondsDuration(raw map[string]interface{}, target *time.Duration, unit time.Duration, path ...string) {
 	v, ok := RawGet(raw, path...)
 	if !ok {

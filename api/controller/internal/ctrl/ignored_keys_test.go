@@ -3,41 +3,45 @@ package ctrl
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/0glabs/0g-serving-broker/controller/internal/docker"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 )
 
-// splitImageDaemon serves a broker and a controller running DIFFERENT digests — the
-// state after `redeploy.sh --digest` hot-switched the broker.
-func splitImageDaemon(t *testing.T, brokerDigest, controllerDigest string) *docker.Client {
+type guardContainer struct {
+	id, name, digest, state, startedAt string
+}
+
+// splitImageDaemon serves a broker, an event container and the controller with the
+// given digests and states — e.g. the state after `redeploy.sh --digest` hot-switched
+// the broker.
+func splitImageDaemon(t *testing.T, cs ...guardContainer) *docker.Client {
 	t.Helper()
-	images := map[string]string{
-		brokerID: imageRepo + "@" + brokerDigest,
-		selfID:   imageRepo + "@" + controllerDigest,
-	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/_ping"):
 			w.WriteHeader(http.StatusOK)
 		case strings.HasSuffix(r.URL.Path, "/containers/json"):
-			_ = json.NewEncoder(w).Encode([]map[string]any{
-				{"Id": brokerID, "Names": []string{"/" + containerBroker}},
-				{"Id": selfID, "Names": []string{"/" + containerController}},
-			})
+			list := make([]map[string]any, 0, len(cs))
+			for _, ct := range cs {
+				list = append(list, map[string]any{"Id": ct.id, "Names": []string{"/" + ct.name}})
+			}
+			_ = json.NewEncoder(w).Encode(list)
 		case strings.HasSuffix(r.URL.Path, "/json"):
-			for id, ref := range images {
-				if strings.Contains(r.URL.Path, "/containers/"+id+"/") {
+			for _, ct := range cs {
+				if strings.Contains(r.URL.Path, "/containers/"+ct.id+"/") {
 					_ = json.NewEncoder(w).Encode(map[string]any{
-						"Id": id, "Image": "sha256:" + strings.Repeat("e", 64),
-						"Config": map[string]any{"Image": ref},
-						"State":  map[string]any{"Status": "running"},
+						"Id": ct.id, "Image": "sha256:" + strings.Repeat("e", 64),
+						"Config": map[string]any{"Image": imageRepo + "@" + ct.digest},
+						"State":  map[string]any{"Status": ct.state, "StartedAt": ct.startedAt},
 					})
 					return
 				}
@@ -56,6 +60,14 @@ func splitImageDaemon(t *testing.T, brokerDigest, controllerDigest string) *dock
 	return c
 }
 
+func containers(brokerDigest, eventDigest, state, startedAt string) []guardContainer {
+	return []guardContainer{
+		{brokerID, containerBroker, brokerDigest, state, startedAt},
+		{eventID, containerEvent, eventDigest, state, startedAt},
+		{selfID, "0g-controller", prevDigest, "running", startedAt},
+	}
+}
+
 // With the broker on another image, the controller cannot know whether that broker
 // ignores keys its own code does not read, or is an older one that decodes strictly
 // and would crash-loop on the file after the change is in RTMR3. It refuses — before
@@ -69,7 +81,7 @@ func TestConfigChangeRefusesIgnoredKeysWhenTheBrokerRunsAnotherImage(t *testing.
 	}
 	l := &opLog{}
 	c := newChangeCtrl(t, l, nil, path, okPull)
-	c.dockerClient = splitImageDaemon(t, testDigest, prevDigest)
+	c.dockerClient = splitImageDaemon(t, containers(testDigest, prevDigest, "running", time.Now().Add(-time.Hour).Format(time.RFC3339Nano))...)
 
 	err := c.ApplyCoreConfig(context.Background(), "service:\n  model: after\nfutureFeature: 1\n")
 	if _, ok := err.(*InvalidConfigError); !ok {
@@ -137,11 +149,121 @@ func TestImageSwitchWarnsAboutIgnoredKeysOnDisk(t *testing.T) {
 
 	// And it reaches the operator: every result UpdateImages returns carries it — here
 	// a failed one (this fake cannot recreate the event container), which the handler
-	// serialises like a successful one. Only the early refusals that change nothing
-	// return no result, and those log it.
+	// serialises like a successful one. Refusals after the lock that return no result
+	// only log it; the digest-validation and change-in-progress refusals return before
+	// it is computed.
 	c.config.ConfigFile = withFuture
 	result, _ := c.UpdateImages(context.Background(), testDigest)
 	if result == nil || !strings.Contains(result.Warning, `"futureFeature"`) {
 		t.Fatalf("UpdateImages result = %+v, want the ignored-keys warning in it", result)
+	}
+}
+
+// The event container restarts onto the same file and decodes it with the same package,
+// so it must run the controller's image too.
+func TestConfigChangeRefusesIgnoredKeysWhenTheEventServiceRunsAnotherImage(t *testing.T) {
+	l := &opLog{}
+	c := newChangeCtrl(t, l, nil, filepath.Join(t.TempDir(), "config.yaml"), okPull)
+	c.dockerClient = splitImageDaemon(t, containers(prevDigest, testDigest, "running", time.Now().Add(-time.Hour).Format(time.RFC3339Nano))...)
+	err := c.checkIgnoredKeysAreSafe(context.Background(), "futureFeature: 1\n")
+	if err == nil || !strings.Contains(err.Error(), "the event service runs "+testDigest) {
+		t.Fatalf("checkIgnoredKeysAreSafe() = %v, want a refusal naming the event service's image", err)
+	}
+}
+
+// After pushing a key and then hot-switching the broker to the image that reads it, the
+// images differ — but the running containers have already loaded exactly those keys.
+// Pushes that keep (or adjust) them must go through; that is the whole point of the
+// workflow. Anything short of proof is still refused.
+func TestConfigChangeAcceptsIgnoredKeysTheRunningContainersAlreadyLoaded(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("service:\n  model: m\nfutureFeature:\n  threshold: 5\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	written := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(path, written, written); err != nil {
+		t.Fatal(err)
+	}
+	steady := time.Now().Add(-time.Hour).Format(time.RFC3339Nano)
+	const adjust = "service:\n  model: m\nfutureFeature:\n  threshold: 7\n"
+
+	cases := []struct {
+		name     string
+		state    string
+		started  string
+		content  string
+		wantPass bool
+	}{
+		{"steady on the file, same keys", "running", steady, adjust, true},
+		{"started before the file was written", "running", time.Now().Add(-3 * time.Hour).Format(time.RFC3339Nano), adjust, false},
+		{"up for only a few seconds (could be a restart loop)", "running", time.Now().Add(-5 * time.Second).Format(time.RFC3339Nano), adjust, false},
+		{"restarting", "restarting", steady, adjust, false},
+		{"a key the running file does not have", "running", steady, adjust + "otherFeature: 1\n", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			l := &opLog{}
+			c := newChangeCtrl(t, l, nil, path, okPull)
+			c.dockerClient = splitImageDaemon(t, containers(testDigest, testDigest, tc.state, tc.started)...)
+			err := c.checkIgnoredKeysAreSafe(context.Background(), tc.content)
+			if tc.wantPass && err != nil {
+				t.Fatalf("checkIgnoredKeysAreSafe() = %v, want accepted", err)
+			}
+			if !tc.wantPass && err == nil {
+				t.Fatal("checkIgnoredKeysAreSafe() = nil, want a refusal")
+			}
+		})
+	}
+}
+
+// If the controller cannot identify its own container, it cannot compare images and
+// fails closed — even with the broker and event service readable.
+func TestConfigChangeRefusesIgnoredKeysWithoutItsOwnDigest(t *testing.T) {
+	l := &opLog{}
+	c := newChangeCtrl(t, l, nil, filepath.Join(t.TempDir(), "config.yaml"), okPull)
+	cs := containers(prevDigest, prevDigest, "running", time.Now().Add(-time.Hour).Format(time.RFC3339Nano))
+	c.dockerClient = splitImageDaemon(t, cs[0], cs[1]) // no container matches our hostname
+	if err := c.checkIgnoredKeysAreSafe(context.Background(), "futureFeature: 1\n"); err == nil || !strings.Contains(err.Error(), "own image") {
+		t.Fatalf("checkIgnoredKeysAreSafe() = %v, want a refusal naming the controller's own image", err)
+	}
+}
+
+// Container lookup falls back to a substring match; a neighbour must never stand in for
+// the broker when comparing images.
+func TestConfigChangeRefusesIgnoredKeysWhenTheBrokerNameOnlyNearlyMatches(t *testing.T) {
+	l := &opLog{}
+	c := newChangeCtrl(t, l, nil, filepath.Join(t.TempDir(), "config.yaml"), okPull)
+	cs := containers(prevDigest, prevDigest, "running", time.Now().Add(-time.Hour).Format(time.RFC3339Nano))
+	cs[0].name = containerBroker + "-old"
+	c.dockerClient = splitImageDaemon(t, cs...)
+	if err := c.checkIgnoredKeysAreSafe(context.Background(), "futureFeature: 1\n"); err == nil || !strings.Contains(err.Error(), "resolved to container") {
+		t.Fatalf("checkIgnoredKeysAreSafe() = %v, want a refusal for the near-miss name", err)
+	}
+}
+
+// The guard runs under the change lock: while another change holds it, a push is
+// refused as in-progress before the guard even looks at the images.
+func TestConfigChangeGuardRunsUnderTheLock(t *testing.T) {
+	l := &opLog{}
+	c := newChangeCtrl(t, l, nil, filepath.Join(t.TempDir(), "config.yaml"), okPull)
+	c.dockerClient = fakeEmptyDaemon(t, l) // the guard would refuse with a 400 here
+	c.changing.Lock()
+	defer c.changing.Unlock()
+	if err := c.ApplyCoreConfig(context.Background(), "service:\n  model: m\nfutureFeature: 1\n"); !errors.Is(err, ErrChangeInProgress) {
+		t.Fatalf("ApplyCoreConfig() = %v, want ErrChangeInProgress (the guard must run after the lock)", err)
+	}
+}
+
+// An unreadable controller digest counts as "not the same image": the warning is given.
+func TestImageSwitchWarnsWhenItsOwnDigestIsUnreadable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("service:\n  model: m\nfutureFeature: 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	l := &opLog{}
+	c := newChangeCtrl(t, l, nil, path, okPull)
+	c.dockerClient = fakeEmptyDaemon(t, l)
+	if w := c.ignoredKeysImageWarning(context.Background(), prevDigest); !strings.Contains(w, `"futureFeature"`) {
+		t.Fatalf("warning = %q, want one naming the key", w)
 	}
 }
