@@ -134,9 +134,14 @@ func splitImageDaemon(t *testing.T, cs ...guardContainer) *docker.Client {
 			for id, res := range execs {
 				if strings.Contains(r.URL.Path, "/exec/"+id+"/") {
 					// Still running on the first inspect, so the caller's wait loop is exercised.
+					// Like docker, the exit code reads 0 until the process has exited.
 					running := !inspected[id]
 					inspected[id] = true
-					_ = json.NewEncoder(w).Encode(map[string]any{"ID": id, "Running": running, "ExitCode": res.code})
+					code := res.code
+					if running {
+						code = 0
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{"ID": id, "Running": running, "ExitCode": code})
 					return
 				}
 			}
