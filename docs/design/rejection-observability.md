@@ -112,8 +112,10 @@ should page on. Sustained `backend_overloaded` means the engine itself is full
 (queue or KV cache), typically from a few very long requests rather than many —
 look at the engine's running/queue/KV panels, not at the broker's concurrency caps.
 
-The guard also exports two gauges, registered only when it is enabled (a box
-without the guard exports neither, so `up == 0` never means "not configured"):
+The guard also exports two gauges, registered only when it is enabled and
+monitoring is on (a box without the guard exports neither, so a sustained
+`up == 0` never means "not configured"; right after start it reads 0 until the
+first scrape lands, which is immediate):
 
 ```promql
 # enabled but unable to read the engine — it is admitting everything, unprotected
