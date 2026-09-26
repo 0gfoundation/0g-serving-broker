@@ -42,11 +42,6 @@ func TestConfigChangeRefusesContentTheBrokerCouldNotLoad(t *testing.T) {
 		content: "service:\n  model: m\n  type: text-to-image\n  modelPricing:\n    - model: m\n      inputPrice: \"1\"\n      outputPrice: \"1\"\n",
 		want:    "modelPricing is only supported for service type",
 	}, {
-		// A key the Service struct does not have. The old test asserted this was applied.
-		name:    "a key the loader does not know",
-		content: "service:\n  name: whatever\n",
-		want:    "field name not found",
-	}, {
 		name:    "a value of the wrong type",
 		content: "service:\n  targetUrl:\n    nested: yes\n",
 		want:    "cannot unmarshal",
@@ -131,6 +126,33 @@ func TestConfigChangeStillAppliesWhatItCannotDescribe(t *testing.T) {
 	}
 	if len(sets) != 1 || sets[0] != upstreamSetInvalidated {
 		t.Errorf("recorded %q, want the invalidation %q", sets, upstreamSetInvalidated)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the config file: %v", err)
+	}
+	if string(got) != content {
+		t.Errorf("config file = %q, want the new content", got)
+	}
+}
+
+// A key the broker code does not know is ignored by the loader (config.decodeConfig), so
+// the controller applies it too — when the broker runs the controller's own image, which
+// is the case this fake daemon describes (every container resolves to the same digest).
+// This used to be refused, which made every new config key wait for a full redeploy of
+// the controller.
+func TestConfigChangeAppliesKeysTheBrokerIgnores(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("service:\n  model: before\n"), 0o644); err != nil {
+		t.Fatalf("seeding the config file: %v", err)
+	}
+	l := &opLog{}
+	c := newChangeCtrl(t, l, nil, path, okPull)
+
+	const content = "service:\n  model: after\n  futureKnob: 1\nfutureFeature:\n  enabled: true\n"
+	if err := c.ApplyCoreConfig(context.Background(), content); err != nil {
+		t.Fatalf("ApplyCoreConfig() = %v, want unknown keys applied when the broker runs the controller's image", err)
 	}
 	got, err := os.ReadFile(path)
 	if err != nil {

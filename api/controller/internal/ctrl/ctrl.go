@@ -146,6 +146,7 @@ var ErrChangeInProgress = errors.New("another image or config change is in progr
 // controller's own API.
 const (
 	containerBroker         = "0g-serving-provider-broker"
+	containerController     = "0g-controller"
 	containerEvent          = "0g-serving-provider-event"
 	containerIngress        = "broker-ingress"
 	containerPrometheusInit = "prometheus-init"
@@ -581,6 +582,17 @@ func (c *Ctrl) ApplyCoreConfig(ctx context.Context, configContent string) error 
 	// validation rule loadConfig runs, on a throwaway Config. A hand-picked subset would
 	// drift from what the broker enforces, which is how this hole opened.
 	if err := config.ValidateConfigContent([]byte(configContent)); err != nil {
+		return &InvalidConfigError{Err: err}
+	}
+
+	// Keys this controller's broker code does not know are ignored rather than refused
+	// (config.decodeConfig), which is only safe if the broker that will restart onto the
+	// file ignores them too. That holds when it runs the same image as this controller.
+	// A broker hot-switched to another digest may be an older one that still decodes
+	// strictly — and would crash-loop on the file after the change is already in RTMR3,
+	// the incident described above. Whether another digest is older or newer cannot be
+	// told from the digest, so refuse rather than guess.
+	if err := c.checkIgnoredKeysAreSafe(ctx, configContent); err != nil {
 		return &InvalidConfigError{Err: err}
 	}
 
@@ -1323,6 +1335,28 @@ func (c *Ctrl) CurrentKeyIdentity(ctx context.Context) (attestproxy.KeyIdentity,
 	return attestproxy.KeyIdentity{Digest: digest, UpstreamSetHash: c.boundUpstreamSetHash()}, nil
 }
 
+// checkIgnoredKeysAreSafe refuses content carrying keys this controller's broker code
+// would ignore, unless the broker runs the same image as the controller. See the call
+// site in ApplyCoreConfig for why.
+func (c *Ctrl) checkIgnoredKeysAreSafe(ctx context.Context, content string) error {
+	ignored, err := config.IgnoredConfigKeys([]byte(content))
+	if err != nil || len(ignored) == 0 {
+		return nil // no ignored keys (a decode error was already reported by ValidateConfigContent)
+	}
+	broker, err := c.RunningBrokerDigest(ctx)
+	if err == nil {
+		var own string
+		if own, err = c.containerDigest(ctx, containerController, "the controller"); err == nil {
+			if broker == own {
+				return nil
+			}
+			err = fmt.Errorf("the broker runs %s but this controller runs %s", broker, own)
+		}
+	}
+	return fmt.Errorf("the config has keys this controller's broker code does not read (%s), and %v, so it cannot confirm the broker will ignore rather than refuse them. Push the config while the broker runs the controller's image (before switching the image), or without these keys",
+		strings.Join(ignored, ", "), err)
+}
+
 // RunningBrokerDigest reports the digest of the image the broker container runs.
 //
 // The attestation proxy derives per-image keys from it, so it refuses anything it cannot pin
@@ -1330,24 +1364,31 @@ func (c *Ctrl) CurrentKeyIdentity(ctx context.Context) (attestproxy.KeyIdentity,
 // container at all. A key derived from a guess would still produce signatures that verify,
 // which is the one outcome worse than refusing to sign.
 func (c *Ctrl) RunningBrokerDigest(ctx context.Context) (string, error) {
-	status, err := c.dockerClient.GetContainerStatus(ctx, containerBroker)
+	return c.containerDigest(ctx, containerBroker, "the broker")
+}
+
+// containerDigest is RunningBrokerDigest for any managed container: the digest of the
+// image the named container runs, refusing anything it cannot pin down exactly. role
+// names the container in errors ("the broker").
+func (c *Ctrl) containerDigest(ctx context.Context, name, role string) (string, error) {
+	status, err := c.dockerClient.GetContainerStatus(ctx, name)
 	if err != nil {
-		return "", fmt.Errorf("reading the broker's image: %w", err)
+		return "", fmt.Errorf("reading %s's image: %w", role, err)
 	}
 	if status == nil {
-		return "", fmt.Errorf("no %s container", containerBroker)
+		return "", fmt.Errorf("no %s container", name)
 	}
 	// Container lookup falls back to a shortest-substring match, which is fine for a status
 	// endpoint and not for this: a neighbour's digest would key a signature the client
-	// attributes to the broker.
-	if status.Name != containerBroker {
-		return "", fmt.Errorf("%q resolved to container %q, not the broker", containerBroker, status.Name)
+	// attributes to that container.
+	if status.Name != name {
+		return "", fmt.Errorf("%q resolved to container %q, not %s", name, status.Name, role)
 	}
 	// A reference that pins a digest already names the image the container was created on,
 	// and no lookup can improve on it.
 	if _, digest, pinned := strings.Cut(status.Image, "@"); pinned {
 		if !imageDigestPattern.MatchString(digest) {
-			return "", fmt.Errorf("the broker runs %q, whose digest is malformed", status.Image)
+			return "", fmt.Errorf("%s runs %q, whose digest is malformed", role, status.Image)
 		}
 		return digest, nil
 	}
@@ -1361,7 +1402,7 @@ func (c *Ctrl) RunningBrokerDigest(ctx context.Context) (string, error) {
 	// from the image a reviewer approved while the unreviewed one answered, which is the
 	// exact substitution this whole arrangement exists to prevent.
 	if status.ImageID == "" {
-		return "", fmt.Errorf("the broker runs %q, which pins no digest, and the daemon reported no image ID", status.Image)
+		return "", fmt.Errorf("%s runs %q, which pins no digest, and the daemon reported no image ID", role, status.Image)
 	}
 	info, err := c.dockerClient.GetImageInfo(ctx, status.ImageID)
 	if err != nil {
