@@ -428,6 +428,9 @@ type ImageUpdateResult struct {
 	Digest            string                  `json:"digest"` // Image digest (e.g., sha256:abc123...)
 	UpdatedContainers []ContainerUpdateResult `json:"updatedContainers"`
 	Error             string                  `json:"error,omitempty"`
+	// Warning is a non-fatal note for the operator, e.g. that the config on disk
+	// carries keys an older target image may not accept.
+	Warning string `json:"warning,omitempty"`
 }
 
 // PullImage pulls an image from the registry and returns the image info.

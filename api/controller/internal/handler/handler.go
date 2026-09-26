@@ -227,20 +227,18 @@ func (h *Handler) UpdateCoreConfig(ctx *gin.Context) {
 }
 
 // coreConfigUpdatedBody is the success response for a config push. It lists the
-// keys that the broker code compiled into this controller ignores (see
-// config.IgnoredConfigKeys), so a typo — or a key that needs a newer image — is
-// reported to whoever pushed, not only buried in the broker's log.
-//
-// That is the version of the image pinned in the compose file, which is also
-// what the broker runs after a reboot. A broker hot-switched to a newer digest
-// may read keys listed here; the list is what the pinned version ignores.
+// keys the broker ignores (see config.IgnoredConfigKeys), so a typo — or a key
+// that needs a newer image — is reported to whoever pushed, not only buried in
+// the broker's log. ApplyCoreConfig only accepts ignored keys while the broker
+// runs the controller's own image, so this list is exactly what the running
+// broker ignores.
 func coreConfigUpdatedBody(content string) gin.H {
 	body := gin.H{"message": "config updated and containers restarted"}
 	// The config already passed ValidateConfigContent inside ApplyCoreConfig, so
 	// a decode error here is not expected; if it happens the push still stood.
 	if ignored, err := config.IgnoredConfigKeys([]byte(content)); err == nil && len(ignored) > 0 {
 		body["ignored_keys"] = ignored
-		body["warning"] = "the broker version this controller ships with (the compose-pinned image) ignores these keys: a typo, or a setting that only a newer broker image reads"
+		body["warning"] = "the running broker ignores these keys, so they have no effect yet: a typo, or a setting that only a newer broker image reads"
 	}
 	return body
 }

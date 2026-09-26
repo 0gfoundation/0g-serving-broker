@@ -2410,7 +2410,8 @@ var unknownFieldRe = regexp.MustCompile(`^line (\d+): field (.+) not found in ty
 
 // decodeConfig unmarshals config content, ignoring keys this broker version has
 // no field for and returning them, while still refusing every other problem
-// strict decoding catches (a wrong type, a duplicate key).
+// strict decoding catches (a wrong type, a duplicate known key, malformed YAML).
+// An unknown key is ignored however many times it appears.
 //
 // Why not strict: the controller validates a pushed config with the broker code
 // compiled into ITS image, and after a reboot the broker runs the image pinned in
@@ -2444,11 +2445,9 @@ func decodeConfig(data []byte, out interface{}) (ignored []string, err error) {
 	if len(rest) > 0 {
 		return nil, &yaml.TypeError{Errors: rest}
 	}
-	// Only unknown keys were wrong. Decode again without strict mode so the result
-	// does not depend on how far the strict pass got before recording them.
-	if err := yaml.Unmarshal(data, out); err != nil {
-		return nil, err
-	}
+	// Only unknown keys were wrong. yaml.v2 records type errors and keeps decoding
+	// (only syntax errors abort, and those are not a TypeError), so out already
+	// holds every known field.
 	return ignored, nil
 }
 

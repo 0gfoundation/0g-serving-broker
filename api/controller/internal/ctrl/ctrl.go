@@ -585,6 +585,11 @@ func (c *Ctrl) ApplyCoreConfig(ctx context.Context, configContent string) error 
 		return &InvalidConfigError{Err: err}
 	}
 
+	if !c.changing.TryLock() {
+		return ErrChangeInProgress
+	}
+	defer c.changing.Unlock()
+
 	// Keys this controller's broker code does not know are ignored rather than refused
 	// (config.decodeConfig), which is only safe if the broker that will restart onto the
 	// file ignores them too. That holds when it runs the same image as this controller.
@@ -592,14 +597,12 @@ func (c *Ctrl) ApplyCoreConfig(ctx context.Context, configContent string) error 
 	// strictly — and would crash-loop on the file after the change is already in RTMR3,
 	// the incident described above. Whether another digest is older or newer cannot be
 	// told from the digest, so refuse rather than guess.
+	//
+	// Under the lock, so no image change can swap the broker between this check and
+	// the write it guards.
 	if err := c.checkIgnoredKeysAreSafe(ctx, configContent); err != nil {
 		return &InvalidConfigError{Err: err}
 	}
-
-	if !c.changing.TryLock() {
-		return ErrChangeInProgress
-	}
-	defer c.changing.Unlock()
 
 	// Detached and bounded for the same reasons as UpdateImages.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), configChangeTimeout)
@@ -1014,6 +1017,17 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 	}
 	defer c.changing.Unlock()
 
+	// The config on disk may carry keys this controller's broker code ignores —
+	// pushing them ahead of the image that reads them is the intended workflow. The
+	// target is normally that newer image. But if it is an older one that still
+	// decodes strictly (a rollback past unknown-key tolerance), the broker will refuse
+	// to start on the file. Newer and older cannot be told apart from a digest, so
+	// this warns rather than refuses.
+	warning := c.ignoredKeysImageWarning(ctx, digest)
+	if warning != "" {
+		c.logger.Warnf("[UpdateImages] %s", warning)
+	}
+
 	// Detached from the caller's request, and bounded.
 	//
 	// Detached because a client disconnect must not abort an upgrade half way, and
@@ -1030,6 +1044,7 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 	ref := c.config.ImageRepo + "@" + digest
 
 	result := &docker.ImageUpdateResult{
+		Warning:           warning,
 		Image:             ref,
 		UpdatedContainers: make([]docker.ContainerUpdateResult, 0),
 	}
@@ -1355,6 +1370,25 @@ func (c *Ctrl) checkIgnoredKeysAreSafe(ctx context.Context, content string) erro
 	}
 	return fmt.Errorf("the config has keys this controller's broker code does not read (%s), and %v, so it cannot confirm the broker will ignore rather than refuse them. Push the config while the broker runs the controller's image (before switching the image), or without these keys",
 		strings.Join(ignored, ", "), err)
+}
+
+// ignoredKeysImageWarning returns a warning when the config on disk has keys this
+// controller's broker code ignores and target is not the controller's own image, or
+// "" otherwise. Best effort: an unreadable file or digest yields no warning, since the
+// upgrade itself does not depend on it.
+func (c *Ctrl) ignoredKeysImageWarning(ctx context.Context, target string) string {
+	data, err := os.ReadFile(c.config.ConfigFile)
+	if err != nil {
+		return ""
+	}
+	ignored, err := config.IgnoredConfigKeys(data)
+	if err != nil || len(ignored) == 0 {
+		return ""
+	}
+	if own, err := c.containerDigest(ctx, containerController, "the controller"); err == nil && own == target {
+		return ""
+	}
+	return fmt.Sprintf("the config on disk has keys this controller's broker code does not read (%s). The image being switched to is expected to read them; if it is instead an older image that decodes config strictly (before unknown-key tolerance), the broker will refuse to start on this config — remove those keys first", strings.Join(ignored, ", "))
 }
 
 // RunningBrokerDigest reports the digest of the image the broker container runs.
