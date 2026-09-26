@@ -128,6 +128,9 @@ func (g *Guard) poll(ctx context.Context) {
 		// endpoint admits from the next request on.
 		g.latest.Store(nil)
 		monitor.SetOverloadGuardState(false, false)
+		if ctx.Err() != nil {
+			return // shutting down: the scrape was cancelled, not broken
+		}
 		g.transition("scrape-failed", fmt.Sprintf("overload guard: metrics scrape failed, admitting all requests until it recovers: %v", err))
 		return
 	}
