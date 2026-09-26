@@ -1388,8 +1388,8 @@ type ProviderHttpConfig struct {
 // refused at load for anything but a chatbot service whose models all forward
 // to service.targetUrl.
 //
-// The count-based gates (concurrencyLimit, and a guard proxy in front of the
-// engine) cannot see this state: a handful of long contexts can fill the KV
+// The count-based gates (concurrencyLimit, and any request-counting proxy in
+// front of the engine such as phala-inference-guard) cannot see this state: a handful of long contexts can fill the KV
 // cache while the request count stays low, and every new request then queues
 // for minutes before failing on a timeout. This gate reads the engine's own
 // gauges and turns that wait into an immediate, explicit rejection.
@@ -1405,13 +1405,15 @@ type OverloadGuardConfig struct {
 	// queue (sglang:num_queue_reqs >= value). 0 disables this condition.
 	MaxQueueRequests int `yaml:"maxQueueRequests"`
 	// MaxTokenUsage sheds once the KV cache is at least this fraction full
-	// (sglang:token_usage >= value, 0-1]. 0 disables this condition.
+	// (sglang:token_usage >= value, value in (0, 1]). 0 disables this condition.
 	MaxTokenUsage float64 `yaml:"maxTokenUsage"`
 	// PollInterval is how often the endpoint is scraped (at least 1s); it also
 	// bounds each scrape and, times three, how old a sample may be before it is
 	// ignored. Write it with a unit ("5s"): a bare integer decodes as nanoseconds.
 	PollInterval time.Duration `yaml:"pollInterval"`
-	// RetryAfter is sent as the Retry-After header on a shed request.
+	// RetryAfter is sent as the Retry-After header on a shed request, 1s-60s:
+	// the OpenAI and Anthropic SDKs ignore a Retry-After above 60s and fall back
+	// to their own, much shorter, backoff.
 	RetryAfter time.Duration `yaml:"retryAfter"`
 }
 
@@ -2191,8 +2193,8 @@ func validateOverloadGuard(g *OverloadGuardConfig, svc *Service) error {
 	if g.PollInterval < time.Second {
 		return fmt.Errorf("invalid config: overloadGuard.pollInterval (%v) must be at least 1s (write it with a unit, e.g. \"5s\")", g.PollInterval)
 	}
-	if g.RetryAfter < time.Second {
-		return fmt.Errorf("invalid config: overloadGuard.retryAfter (%v) must be at least 1s", g.RetryAfter)
+	if g.RetryAfter < time.Second || g.RetryAfter > time.Minute {
+		return fmt.Errorf("invalid config: overloadGuard.retryAfter (%v) must be between 1s and 60s: SDK clients ignore a longer Retry-After and retry sooner", g.RetryAfter)
 	}
 	return nil
 }

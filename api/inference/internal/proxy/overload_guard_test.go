@@ -5,13 +5,18 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/0glabs/0g-serving-broker/inference/config"
+	constant "github.com/0glabs/0g-serving-broker/inference/const"
+	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
 	"github.com/0glabs/0g-serving-broker/inference/internal/overload"
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
@@ -185,3 +190,49 @@ type discardLogger struct{}
 
 func (discardLogger) Infof(string, ...interface{}) {}
 func (discardLogger) Warnf(string, ...interface{}) {}
+
+var promInitOnce sync.Once
+
+// The guard as production builds it: registered by New() on the service group,
+// behind TrackMetrics, in front of a handler. The tests above call the
+// middleware directly and so cannot notice it being dropped from New() or moved
+// ahead of TrackMetrics — both of which would leave an enabled guard silently
+// doing nothing, or its sheds invisible in the failure metrics.
+func TestOverloadGuard_RegisteredByNewBehindTrackMetrics(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	promInitOnce.Do(func() {
+		monitor.PrometheusInit("overload-guard-test", "0x00000000000000000000000000000000000000aa")
+	})
+	g, _ := armedGuard(t, "sglang:num_queue_reqs 27\nsglang:token_usage 0.99\n")
+	waitShedding(t, g, true)
+
+	engine := gin.New()
+	p := New(&ctrl.Ctrl{}, engine, nil, true, config.ConcurrencyLimitConfig{}, noopLogger{})
+	p.SetOverloadGuard(g)
+	reached := false
+	p.serviceGroup.POST("/chat/completions", func(c *gin.Context) {
+		reached = true
+		c.Status(http.StatusOK)
+	})
+
+	shed := monitor.RequestRejectedTotal.WithLabelValues(monitor.RejectionBackendOverloaded)
+	before := testutil.ToFloat64(shed)
+
+	w := httptest.NewRecorder()
+	engine.ServeHTTP(w, httptest.NewRequest(http.MethodPost, constant.ServicePrefix+"/chat/completions", strings.NewReader("{}")))
+
+	if reached {
+		t.Fatal("request reached the handler: the guard is not in New()'s chain")
+	}
+	if w.Code != http.StatusTooManyRequests || w.Header().Get("Retry-After") != "30" {
+		t.Fatalf("status=%d Retry-After=%q, want 429 / 30", w.Code, w.Header().Get("Retry-After"))
+	}
+	// Stamped by TrackMetrics' writer wrapper, so present only if TrackMetrics
+	// wraps the guard — this is what tells the router the engine is full.
+	if got := w.Header().Get(monitor.FailureSourceHeader); got != monitor.FailureSourceUpstream {
+		t.Fatalf("%s = %q, want %q (guard must sit behind TrackMetrics)", monitor.FailureSourceHeader, got, monitor.FailureSourceUpstream)
+	}
+	if got := testutil.ToFloat64(shed) - before; got != 1 {
+		t.Fatalf("broker_requests_rejected_total{reason=backend_overloaded} rose by %v, want 1", got)
+	}
+}
