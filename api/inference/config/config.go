@@ -1379,11 +1379,14 @@ type ProviderHttpConfig struct {
 	ResponseHeaderTimeoutMinutes int `yaml:"responseHeaderTimeoutMinutes,omitempty"`
 }
 
-// OverloadGuardConfig sheds new inference requests with 503 + Retry-After while
+// OverloadGuardConfig sheds new inference requests with 429 + Retry-After while
 // the model engine behind the broker reports itself saturated (see
-// internal/overload). Off by default. It is meant for a self-hosted sglang
-// engine, whose Prometheus endpoint publishes sglang:num_queue_reqs and
-// sglang:token_usage; any other target is refused at scrape time.
+// internal/overload). Off by default. It is meant for a single self-hosted
+// sglang engine started with --enable-metrics, whose Prometheus endpoint
+// publishes sglang:num_queue_reqs and sglang:token_usage; a scrape missing
+// either is treated as failed. One metricsUrl describes one engine, so it is
+// refused at load for anything but a chatbot service whose models all forward
+// to service.targetUrl.
 //
 // The count-based gates (concurrencyLimit, and a guard proxy in front of the
 // engine) cannot see this state: a handful of long contexts can fill the KV
@@ -1391,8 +1394,8 @@ type ProviderHttpConfig struct {
 // for minutes before failing on a timeout. This gate reads the engine's own
 // gauges and turns that wait into an immediate, explicit rejection.
 //
-// It fails open: when the endpoint is unreachable or its last sample is older
-// than three poll intervals, nothing is shed.
+// It fails open: when a scrape fails, or the last sample is older than three
+// poll intervals, nothing is shed.
 type OverloadGuardConfig struct {
 	Enabled bool `yaml:"enabled"`
 	// MetricsURL is the engine's Prometheus text endpoint, e.g.
@@ -1404,8 +1407,9 @@ type OverloadGuardConfig struct {
 	// MaxTokenUsage sheds once the KV cache is at least this fraction full
 	// (sglang:token_usage >= value, 0-1]. 0 disables this condition.
 	MaxTokenUsage float64 `yaml:"maxTokenUsage"`
-	// PollInterval is how often the endpoint is scraped; it also bounds each
-	// scrape and, times three, how old a sample may be before it is ignored.
+	// PollInterval is how often the endpoint is scraped (at least 1s); it also
+	// bounds each scrape and, times three, how old a sample may be before it is
+	// ignored. Write it with a unit ("5s"): a bare integer decodes as nanoseconds.
 	PollInterval time.Duration `yaml:"pollInterval"`
 	// RetryAfter is sent as the Retry-After header on a shed request.
 	RetryAfter time.Duration `yaml:"retryAfter"`
@@ -2155,9 +2159,19 @@ func normalizeYAMLValue(v interface{}) interface{} {
 // validateOverloadGuard refuses to boot on a guard that is enabled but could
 // never shed (no condition set) or could not be polled, rather than leaving an
 // operator believing the box is protected.
-func validateOverloadGuard(g *OverloadGuardConfig) error {
+func validateOverloadGuard(g *OverloadGuardConfig, svc *Service) error {
 	if !g.Enabled {
 		return nil
+	}
+	if svc.Type != constant.ServiceTypeChatbot {
+		return fmt.Errorf("invalid config: overloadGuard is only supported for service type '%s', got '%s'", constant.ServiceTypeChatbot, svc.Type)
+	}
+	// One metricsUrl describes one engine. A model forwarded elsewhere would be
+	// shed on another engine's saturation, and its own would go unseen.
+	for _, e := range svc.ModelPricing {
+		if e.TargetURL != "" && e.TargetURL != svc.TargetURL {
+			return fmt.Errorf("invalid config: overloadGuard watches a single engine, but modelPricing entry %q forwards to its own targetUrl", e.Model)
+		}
 	}
 	if g.MetricsURL == "" {
 		return fmt.Errorf("invalid config: overloadGuard.metricsUrl is required when overloadGuard.enabled is true")
@@ -2174,8 +2188,8 @@ func validateOverloadGuard(g *OverloadGuardConfig) error {
 	if g.MaxQueueRequests == 0 && g.MaxTokenUsage == 0 {
 		return fmt.Errorf("invalid config: overloadGuard is enabled but neither maxQueueRequests nor maxTokenUsage is set, so it would never shed")
 	}
-	if g.PollInterval <= 0 {
-		return fmt.Errorf("invalid config: overloadGuard.pollInterval (%v) must be positive", g.PollInterval)
+	if g.PollInterval < time.Second {
+		return fmt.Errorf("invalid config: overloadGuard.pollInterval (%v) must be at least 1s (write it with a unit, e.g. \"5s\")", g.PollInterval)
 	}
 	if g.RetryAfter < time.Second {
 		return fmt.Errorf("invalid config: overloadGuard.retryAfter (%v) must be at least 1s", g.RetryAfter)
@@ -2635,7 +2649,7 @@ func applyAndValidate(cfg *Config, raw map[string]interface{}) error {
 		return fmt.Errorf("invalid config: videoPoll.cleanupInterval (%v) must be positive", cfg.VideoPoll.CleanupInterval)
 	}
 
-	if err := validateOverloadGuard(&cfg.OverloadGuard); err != nil {
+	if err := validateOverloadGuard(&cfg.OverloadGuard, &cfg.Service); err != nil {
 		return err
 	}
 

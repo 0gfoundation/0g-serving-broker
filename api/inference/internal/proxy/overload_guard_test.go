@@ -48,10 +48,15 @@ type guardResult struct {
 	body       map[string]interface{}
 	reason     interface{}
 	ignore     interface{}
+	source     interface{}
 	reached    bool
 }
 
 func runThroughGuard(t *testing.T, g *overload.Guard, method string) guardResult {
+	return runThroughGuardAt(t, g, method, "/x")
+}
+
+func runThroughGuardAt(t *testing.T, g *overload.Guard, method, path string) guardResult {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	p := &Proxy{rejections: newTestAggregator(&captureLogger{})}
@@ -64,15 +69,16 @@ func runThroughGuard(t *testing.T, g *overload.Guard, method string) guardResult
 		c.Next()
 		res.reason, _ = c.Get(monitor.CtxKeyRejectionReason)
 		res.ignore, _ = c.Get("ignoreError")
+		res.source, _ = c.Get(monitor.CtxKeyFailureSource)
 	})
 	r.Use(p.overloadGuardMiddleware())
-	r.Any("/x", func(c *gin.Context) {
+	r.Any(path, func(c *gin.Context) {
 		res.reached = true
 		c.String(http.StatusOK, "ok")
 	})
 
 	w := httptest.NewRecorder()
-	r.ServeHTTP(w, httptest.NewRequest(method, "/x", nil))
+	r.ServeHTTP(w, httptest.NewRequest(method, path, nil))
 	res.status = w.Code
 	res.retryAfter = w.Header().Get("Retry-After")
 	_ = json.Unmarshal(w.Body.Bytes(), &res.body)
@@ -101,8 +107,10 @@ func TestOverloadGuardMiddleware_ShedsPostWhileSaturated(t *testing.T) {
 	if res.reached {
 		t.Fatal("a shed request must not reach the handler")
 	}
-	if res.status != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want 503", res.status)
+	// 429, not 503: the router trips its breaker on a provider 5xx but treats a
+	// 429 as capacity (brief skip, no health penalty) and relays Retry-After.
+	if res.status != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", res.status)
 	}
 	if res.retryAfter != "30" {
 		t.Fatalf("Retry-After = %q, want 30", res.retryAfter)
@@ -118,6 +126,25 @@ func TestOverloadGuardMiddleware_ShedsPostWhileSaturated(t *testing.T) {
 	}
 	if res.ignore != true {
 		t.Fatal("capacity shedding must be flagged ignoreError, like the global concurrency cap")
+	}
+	if res.source != monitor.FailureSourceUpstream {
+		t.Fatalf("failure source = %v, want upstream: the engine is full, the caller did nothing wrong", res.source)
+	}
+}
+
+// /v1/messages callers (Anthropic SDKs, Claude Code) get Anthropic's native
+// overload envelope, which the router also relays unchanged and the SDKs retry.
+func TestOverloadGuardMiddleware_AnthropicEnvelopeOnMessages(t *testing.T) {
+	g, _ := armedGuard(t, "sglang:num_queue_reqs 27\nsglang:token_usage 0.99\n")
+	waitShedding(t, g, true)
+
+	res := runThroughGuardAt(t, g, http.MethodPost, "/v1/proxy/v1/messages")
+	if res.status != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", res.status)
+	}
+	errObj, _ := res.body["error"].(map[string]interface{})
+	if res.body["type"] != "error" || errObj["type"] != "overloaded_error" || errObj["message"] == "" {
+		t.Fatalf("body = %v, want an Anthropic overloaded_error envelope", res.body)
 	}
 }
 
