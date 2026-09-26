@@ -4,28 +4,42 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
-	"time"
 
 	"github.com/0glabs/0g-serving-broker/controller/internal/docker"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 )
 
+// validator behaviours for a fake container's 0g-validate-config
+const (
+	validates = "pass"
+	oldImage  = "old" // no such applet: exits non-zero and writes nothing
+)
+
 type guardContainer struct {
-	id, name, digest, state, startedAt string
+	id, name, digest string
+	validator        string // validates, oldImage, or "refuse:<reason>"
 }
 
 // splitImageDaemon serves a broker, an event container and the controller with the
-// given digests and states — e.g. the state after `redeploy.sh --digest` hot-switched
-// the broker.
+// given digests — e.g. the state after `redeploy.sh --digest` hot-switched the broker —
+// and runs each container's 0g-validate-config as its validator field says, writing a
+// refusal reason to <file>.err as the real applet does.
 func splitImageDaemon(t *testing.T, cs ...guardContainer) *docker.Client {
 	t.Helper()
+	var mu sync.Mutex
+	execs := map[string]int{} // exec id -> exit code
+	n := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/_ping"):
 			w.WriteHeader(http.StatusOK)
@@ -35,13 +49,51 @@ func splitImageDaemon(t *testing.T, cs ...guardContainer) *docker.Client {
 				list = append(list, map[string]any{"Id": ct.id, "Names": []string{"/" + ct.name}})
 			}
 			_ = json.NewEncoder(w).Encode(list)
+		case strings.HasSuffix(r.URL.Path, "/exec") && r.Method == http.MethodPost:
+			var body struct{ Cmd []string }
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			for _, ct := range cs {
+				if !strings.Contains(r.URL.Path, "/containers/"+ct.id+"/") {
+					continue
+				}
+				code := 0
+				switch {
+				case len(body.Cmd) != 3 || body.Cmd[1] != "0g-validate-config":
+					code = 2
+				case ct.validator == oldImage:
+					code = 1
+				case strings.HasPrefix(ct.validator, "refuse:"):
+					_ = os.WriteFile(body.Cmd[2]+".err", []byte(strings.TrimPrefix(ct.validator, "refuse:")), 0o600)
+					code = 1
+				default:
+					if _, err := os.Stat(body.Cmd[2]); err != nil {
+						code = 1 // the candidate must exist where the container would read it
+					}
+				}
+				n++
+				id := fmt.Sprintf("exec%d", n)
+				execs[id] = code
+				_ = json.NewEncoder(w).Encode(map[string]any{"Id": id})
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+		case strings.Contains(r.URL.Path, "/exec/") && strings.HasSuffix(r.URL.Path, "/start"):
+			w.WriteHeader(http.StatusOK)
+		case strings.Contains(r.URL.Path, "/exec/") && strings.HasSuffix(r.URL.Path, "/json"):
+			for id, code := range execs {
+				if strings.Contains(r.URL.Path, "/exec/"+id+"/") {
+					_ = json.NewEncoder(w).Encode(map[string]any{"ID": id, "Running": false, "ExitCode": code})
+					return
+				}
+			}
+			w.WriteHeader(http.StatusNotFound)
 		case strings.HasSuffix(r.URL.Path, "/json"):
 			for _, ct := range cs {
 				if strings.Contains(r.URL.Path, "/containers/"+ct.id+"/") {
 					_ = json.NewEncoder(w).Encode(map[string]any{
 						"Id": ct.id, "Image": "sha256:" + strings.Repeat("e", 64),
 						"Config": map[string]any{"Image": imageRepo + "@" + ct.digest},
-						"State":  map[string]any{"Status": ct.state, "StartedAt": ct.startedAt},
+						"State":  map[string]any{"Status": "running"},
 					})
 					return
 				}
@@ -60,11 +112,11 @@ func splitImageDaemon(t *testing.T, cs ...guardContainer) *docker.Client {
 	return c
 }
 
-func containers(brokerDigest, eventDigest, state, startedAt string) []guardContainer {
+func containers(brokerDigest, eventDigest, brokerValidator, eventValidator string) []guardContainer {
 	return []guardContainer{
-		{brokerID, containerBroker, brokerDigest, state, startedAt},
-		{eventID, containerEvent, eventDigest, state, startedAt},
-		{selfID, "0g-controller", prevDigest, "running", startedAt},
+		{brokerID, containerBroker, brokerDigest, brokerValidator},
+		{eventID, containerEvent, eventDigest, eventValidator},
+		{selfID, "0g-controller", prevDigest, validates},
 	}
 }
 
@@ -81,13 +133,13 @@ func TestConfigChangeRefusesIgnoredKeysWhenTheBrokerRunsAnotherImage(t *testing.
 	}
 	l := &opLog{}
 	c := newChangeCtrl(t, l, nil, path, okPull)
-	c.dockerClient = splitImageDaemon(t, containers(testDigest, prevDigest, "running", time.Now().Add(-time.Hour).Format(time.RFC3339Nano))...)
+	c.dockerClient = splitImageDaemon(t, containers(testDigest, prevDigest, oldImage, validates)...)
 
 	err := c.ApplyCoreConfig(context.Background(), "service:\n  model: after\nfutureFeature: 1\n")
 	if _, ok := err.(*InvalidConfigError); !ok {
 		t.Fatalf("ApplyCoreConfig() = %v, want an InvalidConfigError (400)", err)
 	}
-	for _, want := range []string{`"futureFeature"`, testDigest, prevDigest, "before switching the image"} {
+	for _, want := range []string{`"futureFeature"`, testDigest, prevDigest, "before 0g-validate-config"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q should mention %q", err, want)
 		}
@@ -164,7 +216,7 @@ func TestImageSwitchWarnsAboutIgnoredKeysOnDisk(t *testing.T) {
 func TestConfigChangeRefusesIgnoredKeysWhenTheEventServiceRunsAnotherImage(t *testing.T) {
 	l := &opLog{}
 	c := newChangeCtrl(t, l, nil, filepath.Join(t.TempDir(), "config.yaml"), okPull)
-	c.dockerClient = splitImageDaemon(t, containers(prevDigest, testDigest, "running", time.Now().Add(-time.Hour).Format(time.RFC3339Nano))...)
+	c.dockerClient = splitImageDaemon(t, containers(prevDigest, testDigest, validates, oldImage)...)
 	err := c.checkIgnoredKeysAreSafe(context.Background(), "futureFeature: 1\n")
 	if err == nil || !strings.Contains(err.Error(), "the event service runs "+testDigest) {
 		t.Fatalf("checkIgnoredKeysAreSafe() = %v, want a refusal naming the event service's image", err)
@@ -172,45 +224,38 @@ func TestConfigChangeRefusesIgnoredKeysWhenTheEventServiceRunsAnotherImage(t *te
 }
 
 // After pushing a key and then hot-switching the broker to the image that reads it, the
-// images differ — but the running containers have already loaded exactly those keys.
-// Pushes that keep (or adjust) them must go through; that is the whole point of the
-// workflow. Anything short of proof is still refused.
-func TestConfigChangeAcceptsIgnoredKeysTheRunningContainersAlreadyLoaded(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(path, []byte("service:\n  model: m\nfutureFeature:\n  threshold: 5\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	written := time.Now().Add(-2 * time.Hour)
-	if err := os.Chtimes(path, written, written); err != nil {
-		t.Fatal(err)
-	}
-	steady := time.Now().Add(-time.Hour).Format(time.RFC3339Nano)
-	const adjust = "service:\n  model: m\nfutureFeature:\n  threshold: 7\n"
-
+// images differ. The controller then asks the running images themselves: their
+// validator judges the keys and the values with the code that will read them. Pushes
+// they accept go through — that is the workflow — and anything they refuse, or cannot
+// judge, does not.
+func TestConfigChangeAsksTheRunningImagesWhenTheyDiffer(t *testing.T) {
+	const content = "service:\n  model: m\nfutureFeature:\n  threshold: 7\n"
 	cases := []struct {
-		name     string
-		state    string
-		started  string
-		content  string
-		wantPass bool
+		name          string
+		broker, event string
+		wantErr       string // "" = accepted
 	}{
-		{"steady on the file, same keys", "running", steady, adjust, true},
-		{"started before the file was written", "running", time.Now().Add(-3 * time.Hour).Format(time.RFC3339Nano), adjust, false},
-		{"up for only a few seconds (could be a restart loop)", "running", time.Now().Add(-5 * time.Second).Format(time.RFC3339Nano), adjust, false},
-		{"restarting", "restarting", steady, adjust, false},
-		{"a key the running file does not have", "running", steady, adjust + "otherFeature: 1\n", false},
+		{"both images accept it", validates, validates, ""},
+		{"the broker's image refuses the value", "refuse:futureFeature.threshold must be at most 1", validates, "futureFeature.threshold must be at most 1"},
+		{"the event service's image refuses it", validates, "refuse:unknown key", "the event service's image refuses it: unknown key"},
+		{"an image from before the validator", oldImage, validates, "before 0g-validate-config"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
 			l := &opLog{}
-			c := newChangeCtrl(t, l, nil, path, okPull)
-			c.dockerClient = splitImageDaemon(t, containers(testDigest, testDigest, tc.state, tc.started)...)
-			err := c.checkIgnoredKeysAreSafe(context.Background(), tc.content)
-			if tc.wantPass && err != nil {
+			c := newChangeCtrl(t, l, nil, filepath.Join(dir, "config.yaml"), okPull)
+			c.dockerClient = splitImageDaemon(t, containers(testDigest, testDigest, tc.broker, tc.event)...)
+			err := c.checkIgnoredKeysAreSafe(context.Background(), content)
+			if tc.wantErr == "" && err != nil {
 				t.Fatalf("checkIgnoredKeysAreSafe() = %v, want accepted", err)
 			}
-			if !tc.wantPass && err == nil {
-				t.Fatal("checkIgnoredKeysAreSafe() = nil, want a refusal")
+			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Fatalf("checkIgnoredKeysAreSafe() = %v, want a refusal mentioning %q", err, tc.wantErr)
+			}
+			// The staged candidate carries resolved secrets: nothing may be left behind.
+			if left, _ := filepath.Glob(filepath.Join(dir, ".candidate-*")); len(left) != 0 {
+				t.Errorf("left behind %v", left)
 			}
 		})
 	}
@@ -221,7 +266,7 @@ func TestConfigChangeAcceptsIgnoredKeysTheRunningContainersAlreadyLoaded(t *test
 func TestConfigChangeRefusesIgnoredKeysWithoutItsOwnDigest(t *testing.T) {
 	l := &opLog{}
 	c := newChangeCtrl(t, l, nil, filepath.Join(t.TempDir(), "config.yaml"), okPull)
-	cs := containers(prevDigest, prevDigest, "running", time.Now().Add(-time.Hour).Format(time.RFC3339Nano))
+	cs := containers(prevDigest, prevDigest, oldImage, oldImage)
 	c.dockerClient = splitImageDaemon(t, cs[0], cs[1]) // no container matches our hostname
 	if err := c.checkIgnoredKeysAreSafe(context.Background(), "futureFeature: 1\n"); err == nil || !strings.Contains(err.Error(), "own image") {
 		t.Fatalf("checkIgnoredKeysAreSafe() = %v, want a refusal naming the controller's own image", err)
@@ -233,7 +278,7 @@ func TestConfigChangeRefusesIgnoredKeysWithoutItsOwnDigest(t *testing.T) {
 func TestConfigChangeRefusesIgnoredKeysWhenTheBrokerNameOnlyNearlyMatches(t *testing.T) {
 	l := &opLog{}
 	c := newChangeCtrl(t, l, nil, filepath.Join(t.TempDir(), "config.yaml"), okPull)
-	cs := containers(prevDigest, prevDigest, "running", time.Now().Add(-time.Hour).Format(time.RFC3339Nano))
+	cs := containers(prevDigest, prevDigest, oldImage, oldImage)
 	cs[0].name = containerBroker + "-old"
 	c.dockerClient = splitImageDaemon(t, cs...)
 	if err := c.checkIgnoredKeysAreSafe(context.Background(), "futureFeature: 1\n"); err == nil || !strings.Contains(err.Error(), "resolved to container") {

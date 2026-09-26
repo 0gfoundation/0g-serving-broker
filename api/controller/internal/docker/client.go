@@ -748,6 +748,55 @@ func (e *ContainerNotHealthyError) Error() string {
 	return "container " + e.Name + " is not healthy: " + e.State
 }
 
+// RunInContainer runs cmd inside the named container (exact name) and waits for it to
+// exit, returning its exit code. Output is not captured: callers that need a message
+// have the command write it to a file they can read.
+func (c *Client) RunInContainer(ctx context.Context, containerName string, cmd []string) (int, error) {
+	status, err := c.GetContainerStatus(ctx, containerName)
+	if err != nil {
+		return 0, err
+	}
+	if status == nil || status.Name != containerName {
+		return 0, &ContainerNotFoundError{Name: containerName}
+	}
+	containers, err := c.cli.ContainerList(ctx, container.ListOptions{All: true})
+	if err != nil {
+		return 0, err
+	}
+	var id string
+	for _, cont := range containers {
+		for _, n := range cont.Names {
+			if strings.TrimPrefix(n, "/") == containerName {
+				id = cont.ID
+			}
+		}
+	}
+	if id == "" {
+		return 0, &ContainerNotFoundError{Name: containerName}
+	}
+	execResp, err := c.cli.ContainerExecCreate(ctx, id, container.ExecOptions{Cmd: cmd})
+	if err != nil {
+		return 0, err
+	}
+	if err := c.cli.ContainerExecStart(ctx, execResp.ID, container.ExecStartOptions{Detach: true}); err != nil {
+		return 0, err
+	}
+	for {
+		inspect, err := c.cli.ContainerExecInspect(ctx, execResp.ID)
+		if err != nil {
+			return 0, err
+		}
+		if !inspect.Running {
+			return inspect.ExitCode, nil
+		}
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
 // ReloadNginx sends a reload signal to nginx in the specified container
 // This is useful when upstream containers are recreated and nginx needs to re-resolve DNS
 func (c *Client) ReloadNginx(ctx context.Context, containerName string) error {

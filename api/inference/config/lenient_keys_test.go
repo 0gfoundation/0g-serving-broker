@@ -127,3 +127,21 @@ func TestControllerSectionStillRefusesUnknownKeys(t *testing.T) {
 		t.Fatalf("known controller keys: %v", err)
 	}
 }
+
+// LoggerConfig is both controller.logger and the top-level logger. yaml.v2 names only
+// the type, so the strict set must exclude shared types, or the top-level logger would
+// silently become strict too.
+func TestSharedTypesAreNotStrictOutsideTheControllerSection(t *testing.T) {
+	if controllerSectionTypes["config.LoggerConfig"] {
+		t.Fatal("config.LoggerConfig is shared with the top-level logger and must not be in the strict set")
+	}
+	for _, want := range []string{"config.ControllerConfig", "config.DockerConfig"} {
+		if !controllerSectionTypes[want] {
+			t.Errorf("%s should be in the strict set", want)
+		}
+	}
+	ignored, err := IgnoredConfigKeys([]byte(minimalServiceConfig + "logger:\n  levell: debug\n"))
+	if err != nil || len(ignored) != 1 || ignored[0].Key != "levell" {
+		t.Fatalf("top-level logger typo: ignored=%v err=%v, want it ignored and reported", ignored, err)
+	}
+}
