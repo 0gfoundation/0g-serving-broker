@@ -105,3 +105,42 @@ func TestConfigChangeRefusesIgnoredKeysWhenItCannotCompareImages(t *testing.T) {
 		t.Fatal("checkIgnoredKeysAreSafe() = nil, want a refusal when the images cannot be compared")
 	}
 }
+
+// The reverse path: an image switch while the config on disk carries keys this
+// controller's code ignores. Switching to a newer image that reads them is the intended
+// workflow, so it is not refused — but a rollback to a strict pre-tolerance image would
+// crash-loop, and the operator is told so. The shared fake daemon reports every
+// container, the controller included, on prevDigest.
+func TestImageSwitchWarnsAboutIgnoredKeysOnDisk(t *testing.T) {
+	dir := t.TempDir()
+	withFuture := filepath.Join(dir, "future.yaml")
+	if err := os.WriteFile(withFuture, []byte("service:\n  model: m\nfutureFeature: 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	known := filepath.Join(dir, "known.yaml")
+	if err := os.WriteFile(known, []byte("service:\n  model: m\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	l := &opLog{}
+	c := newChangeCtrl(t, l, nil, withFuture, okPull)
+	if w := c.ignoredKeysImageWarning(context.Background(), testDigest); !strings.Contains(w, `"futureFeature"`) || !strings.Contains(w, "remove those keys first") {
+		t.Errorf("switching to another image with ignored keys on disk: warning = %q, want one naming the key", w)
+	}
+	if w := c.ignoredKeysImageWarning(context.Background(), prevDigest); w != "" {
+		t.Errorf("switching to the controller's own image: warning = %q, want none", w)
+	}
+	c.config.ConfigFile = known
+	if w := c.ignoredKeysImageWarning(context.Background(), testDigest); w != "" {
+		t.Errorf("no ignored keys on disk: warning = %q, want none", w)
+	}
+
+	// And it reaches the operator: the result UpdateImages returns carries it, on the
+	// failed path too (this fake cannot recreate the event container, and the handler
+	// reports the result either way).
+	c.config.ConfigFile = withFuture
+	result, _ := c.UpdateImages(context.Background(), testDigest)
+	if result == nil || !strings.Contains(result.Warning, `"futureFeature"`) {
+		t.Fatalf("UpdateImages result = %+v, want the ignored-keys warning in it", result)
+	}
+}
