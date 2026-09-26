@@ -2154,8 +2154,6 @@ func normalizeYAMLValue(v interface{}) interface{} {
 	}
 }
 
-// validatePriceFeedConfig validates (and normalizes with defaults) the price-feed
-// configuration. Only invoked when service.priceDenomination == "USD".
 // validateOverloadGuard refuses to boot on a guard that is enabled but could
 // never shed (no condition set) or could not be polled, rather than leaving an
 // operator believing the box is protected.
@@ -2169,7 +2167,9 @@ func validateOverloadGuard(g *OverloadGuardConfig, svc *Service) error {
 	// One metricsUrl describes one engine. A model forwarded elsewhere would be
 	// shed on another engine's saturation, and its own would go unseen.
 	for _, e := range svc.ModelPricing {
-		if e.TargetURL != "" && e.TargetURL != svc.TargetURL {
+		// Trailing-slash insensitive, as EffectiveAdditionalSecret compares the
+		// same two fields.
+		if e.TargetURL != "" && strings.TrimRight(e.TargetURL, "/") != strings.TrimRight(svc.TargetURL, "/") {
 			return fmt.Errorf("invalid config: overloadGuard watches a single engine, but modelPricing entry %q forwards to its own targetUrl", e.Model)
 		}
 	}
@@ -2197,6 +2197,8 @@ func validateOverloadGuard(g *OverloadGuardConfig, svc *Service) error {
 	return nil
 }
 
+// validatePriceFeedConfig validates (and normalizes with defaults) the price-feed
+// configuration. Only invoked when service.priceDenomination == "USD".
 func validatePriceFeedConfig(pf *PriceFeedConfig) error {
 	if len(pf.Sources) == 0 {
 		return fmt.Errorf("invalid config: priceFeed.sources must not be empty when priceDenomination is 'USD'")

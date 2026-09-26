@@ -99,15 +99,18 @@ first time the exclusion is expressible:
 
 ```promql
 # broker faults, excluding deliberate capacity shedding
-rate(broker_request_failures_total{source="broker", code!~"global_concurrency|backend_overloaded"}[5m])
+rate(broker_request_failures_total{source="broker", code!="global_concurrency"}[5m])
 
 # capacity pressure, tracked on its own
 rate(broker_requests_rejected_total{reason=~"global_concurrency|backend_overloaded"}[5m])
 ```
 
-Sustained `backend_overloaded` means the engine itself is full (queue or KV cache),
-typically from a few very long requests rather than many requests — look at the
-engine's running/queue/KV panels, not at the broker's concurrency caps.
+`backend_overloaded` is a 429 recorded under `source="upstream"`, not `broker`: the
+engine is full and the caller did nothing wrong. It therefore does count toward
+upstream-failure alerts, deliberately — a saturated engine is exactly what those
+should page on. Sustained `backend_overloaded` means the engine itself is full
+(queue or KV cache), typically from a few very long requests rather than many —
+look at the engine's running/queue/KV panels, not at the broker's concurrency caps.
 
 Sustained `global_concurrency` means raise the cap or add capacity, not debug the
 broker. Note it counts unauthenticated traffic too — the cap runs before session

@@ -265,11 +265,14 @@ func (p *Proxy) SetOverloadGuard(g *overload.Guard) {
 // The router relays a provider error body unchanged when it is already that
 // family's canonical envelope, so the message reaches the end user instead of a
 // generic "provider request failed" — and a client calling the broker directly
-// gets a shape its SDK understands. Anthropic's native signal for this is the
-// overloaded_error type, which its SDKs (and Claude Code) retry on their own.
+// gets a shape its SDK understands. On /messages that is Anthropic's
+// overloaded_error type; Anthropic itself pairs it with status 529, but its SDKs
+// (and Claude Code) retry a 429 just the same.
 func overloadErrorBody(path string, retryAfter int) gin.H {
 	msg := fmt.Sprintf("The model is temporarily overloaded. Please retry in %d seconds.", retryAfter)
-	if strings.HasSuffix(path, "/messages") {
+	// Trimmed like apiFormatForPath, so every path the rest of the broker treats
+	// as Anthropic gets the Anthropic envelope here too.
+	if strings.HasSuffix(strings.TrimRight(path, "/"), "/messages") {
 		return gin.H{"type": "error", "error": gin.H{"type": "overloaded_error", "message": msg}}
 	}
 	return gin.H{"error": gin.H{"message": msg, "type": "server_error", "code": "model_overloaded"}}
@@ -281,10 +284,13 @@ func overloadErrorBody(path string, retryAfter int) gin.H {
 // signature fetch would make a response that already completed unverifiable.
 //
 // 429, not 503: the 0G router counts a provider 5xx as a failure (three trip
-// its breaker and drop the endpoint until the next provider sync), while it
-// treats a 429 as capacity — skip the endpoint briefly if a sibling has room,
-// never mark it unhealthy — and relays Retry-After. A deliberate shed must not
-// read as the box being broken.
+// its breaker and drop the endpoint until the next provider sync). A 429 it
+// relays with Retry-After and, with router.throttle_window_seconds > 0 (5 on
+// mainnet and staging), treats as capacity: skip the endpoint briefly if a
+// sibling has room, never mark it unhealthy. With that window at 0 — its kill
+// switch — a 429 is counted as a failure too, so a 429 is the better of the two
+// statuses, not a guarantee. A deliberate shed must not read as the box being
+// broken.
 func (p *Proxy) overloadGuardMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if c.Request.Method != http.MethodPost {

@@ -138,13 +138,15 @@ func TestOverloadGuardMiddleware_AnthropicEnvelopeOnMessages(t *testing.T) {
 	g, _ := armedGuard(t, "sglang:num_queue_reqs 27\nsglang:token_usage 0.99\n")
 	waitShedding(t, g, true)
 
-	res := runThroughGuardAt(t, g, http.MethodPost, "/v1/proxy/v1/messages")
-	if res.status != http.StatusTooManyRequests {
-		t.Fatalf("status = %d, want 429", res.status)
-	}
-	errObj, _ := res.body["error"].(map[string]interface{})
-	if res.body["type"] != "error" || errObj["type"] != "overloaded_error" || errObj["message"] == "" {
-		t.Fatalf("body = %v, want an Anthropic overloaded_error envelope", res.body)
+	for _, path := range []string{"/v1/proxy/v1/messages", "/v1/proxy/messages/"} {
+		res := runThroughGuardAt(t, g, http.MethodPost, path)
+		if res.status != http.StatusTooManyRequests {
+			t.Fatalf("%s: status = %d, want 429", path, res.status)
+		}
+		errObj, _ := res.body["error"].(map[string]interface{})
+		if res.body["type"] != "error" || errObj["type"] != "overloaded_error" || errObj["message"] == "" {
+			t.Fatalf("%s: body = %v, want an Anthropic overloaded_error envelope", path, res.body)
+		}
 	}
 }
 
