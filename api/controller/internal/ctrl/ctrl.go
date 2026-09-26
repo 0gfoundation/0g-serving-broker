@@ -146,6 +146,7 @@ var ErrChangeInProgress = errors.New("another image or config change is in progr
 // controller's own API.
 const (
 	containerBroker         = "0g-serving-provider-broker"
+	containerController     = "0g-controller"
 	containerEvent          = "0g-serving-provider-event"
 	containerIngress        = "broker-ingress"
 	containerPrometheusInit = "prometheus-init"
@@ -606,6 +607,17 @@ func (c *Ctrl) ApplyCoreConfig(ctx context.Context, configContent string) error 
 	// validation rule loadConfig runs, on a throwaway Config. A hand-picked subset would
 	// drift from what the broker enforces, which is how this hole opened.
 	if err := config.ValidateConfigContent([]byte(configContent)); err != nil {
+		return &InvalidConfigError{Err: err}
+	}
+
+	// Keys this controller's broker code does not know are ignored rather than refused
+	// (config.decodeConfig), which is only safe if the broker that will restart onto the
+	// file ignores them too. That holds when it runs the same image as this controller.
+	// A broker hot-switched to another digest may be an older one that still decodes
+	// strictly — and would crash-loop on the file after the change is already in RTMR3,
+	// the incident described above. Whether another digest is older or newer cannot be
+	// told from the digest, so refuse rather than guess.
+	if err := c.checkIgnoredKeysAreSafe(ctx, configContent); err != nil {
 		return &InvalidConfigError{Err: err}
 	}
 
@@ -1413,6 +1425,28 @@ func (c *Ctrl) CurrentKeyIdentity(ctx context.Context) (attestproxy.KeyIdentity,
 		return attestproxy.KeyIdentity{}, err
 	}
 	return attestproxy.KeyIdentity{Digest: digest, UpstreamSetHash: c.boundUpstreamSetHash()}, nil
+}
+
+// checkIgnoredKeysAreSafe refuses content carrying keys this controller's broker code
+// would ignore, unless the broker runs the same image as the controller. See the call
+// site in ApplyCoreConfig for why.
+func (c *Ctrl) checkIgnoredKeysAreSafe(ctx context.Context, content string) error {
+	ignored, err := config.IgnoredConfigKeys([]byte(content))
+	if err != nil || len(ignored) == 0 {
+		return nil // no ignored keys (a decode error was already reported by ValidateConfigContent)
+	}
+	broker, err := c.RunningBrokerDigest(ctx)
+	if err == nil {
+		var own string
+		if own, err = c.containerDigest(ctx, containerController); err == nil {
+			if broker == own {
+				return nil
+			}
+			err = fmt.Errorf("the broker runs %s but this controller runs %s", broker, own)
+		}
+	}
+	return fmt.Errorf("the config has keys this controller's broker code does not read (%s), and %v, so it cannot confirm the broker will ignore rather than refuse them. Push the config while the broker runs the controller's image (before switching the image), or without these keys",
+		strings.Join(ignored, ", "), err)
 }
 
 // RunningBrokerDigest reports the digest of the image the broker container runs.
