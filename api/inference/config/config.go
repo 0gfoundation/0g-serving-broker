@@ -1405,7 +1405,7 @@ type OverloadGuardConfig struct {
 	// queue (sglang:num_queue_reqs >= value). 0 disables this condition.
 	MaxQueueRequests int `yaml:"maxQueueRequests"`
 	// MaxTokenUsage sheds once the KV cache is at least this fraction full
-	// (sglang:token_usage >= value, value in (0, 1]). 0 disables this condition.
+	// (sglang:token_usage >= value), within [0, 1]; 0 disables this condition.
 	MaxTokenUsage float64 `yaml:"maxTokenUsage"`
 	// PollInterval is how often the endpoint is scraped (at least 1s); it also
 	// bounds each scrape and, times three, how old a sample may be before it is

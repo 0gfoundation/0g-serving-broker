@@ -270,6 +270,32 @@ func TestTransitionLogging(t *testing.T) {
 	}
 }
 
+// A flip swallowed by the gap may be the last one. Once the gap has passed, the
+// log must say where the state settled, or its last line names a state the
+// guard left long ago (the incident shape: jitter at the threshold, then hours
+// of sustained saturation).
+func TestTransitionLogging_ReportsSettledState(t *testing.T) {
+	l := &recLogger{}
+	g := newTestGuard(config.OverloadGuardConfig{MaxQueueRequests: 5})
+	g.logger = l
+	t0 := time.Date(2026, 9, 24, 19, 0, 0, 0, time.UTC)
+	at := func(d time.Duration, state string) {
+		g.now = func() time.Time { return t0.Add(d) }
+		g.transition(state, state)
+	}
+	at(0, "shedding")               // logged
+	at(10*time.Second, "ok")        // suppressed
+	at(20*time.Second, "shedding")  // suppressed: this is where it settles
+	at(30*time.Second, "shedding")  // unchanged, still inside the gap
+	at(65*time.Second, "shedding")  // unchanged, gap passed: report it
+	at(130*time.Second, "shedding") // nothing new to say
+
+	want := []string{"WARN shedding", "WARN shedding (2 earlier state changes not logged)"}
+	if strings.Join(l.lines, "|") != strings.Join(want, "|") {
+		t.Fatalf("log lines = %q, want %q", l.lines, want)
+	}
+}
+
 // gaugeValue reads a gauge from the default registry — the one /metrics serves
 // — so the test sees what an operator's alert would.
 func gaugeValue(t *testing.T, name string) float64 {
