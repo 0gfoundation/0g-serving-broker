@@ -1,6 +1,7 @@
 package docker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,7 @@ import (
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
+	"github.com/docker/docker/pkg/stdcopy"
 
 	dockerimage "github.com/0glabs/0g-serving-broker/common/docker"
 	"github.com/0glabs/0g-serving-broker/inference/config"
@@ -307,6 +309,17 @@ func (c *Client) selfContainerID(ctx context.Context) (string, error) {
 	return selfID, nil
 }
 
+// SelfContainerStatus reports the status of the container this process runs in,
+// identified by hostname (see selfContainerID) rather than by a name the deployment
+// may not set.
+func (c *Client) SelfContainerStatus(ctx context.Context) (*ContainerStatus, error) {
+	id, err := c.selfContainerID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return c.inspectContainerStatus(ctx, id, "")
+}
+
 // shortIDLen is the length of the container ID prefix docker uses as a
 // container's default hostname.
 const shortIDLen = 12
@@ -428,6 +441,9 @@ type ImageUpdateResult struct {
 	Digest            string                  `json:"digest"` // Image digest (e.g., sha256:abc123...)
 	UpdatedContainers []ContainerUpdateResult `json:"updatedContainers"`
 	Error             string                  `json:"error,omitempty"`
+	// Warning is a non-fatal note for the operator, e.g. that the config on disk
+	// carries keys an older target image may not accept.
+	Warning string `json:"warning,omitempty"`
 }
 
 // PullImage pulls an image from the registry and returns the image info.
@@ -732,6 +748,61 @@ type ContainerNotHealthyError struct {
 
 func (e *ContainerNotHealthyError) Error() string {
 	return "container " + e.Name + " is not healthy: " + e.State
+}
+
+// RunInContainer runs cmd inside the named container (exact name) and waits for it to
+// exit, returning its exit code and combined output (capped at 64 KiB). The output is
+// read from the exec's own stream, not a file, so it works in containers whose
+// filesystem the command cannot write to (the config volume is read-only in the broker).
+func (c *Client) RunInContainer(ctx context.Context, containerName string, cmd []string) (int, string, error) {
+	// Exact name only — unlike GetContainerStatus, no substring fallback: running a
+	// command in a neighbour would answer for the wrong container.
+	containers, err := c.cli.ContainerList(ctx, container.ListOptions{All: true})
+	if err != nil {
+		return 0, "", err
+	}
+	var id string
+	for _, cont := range containers {
+		for _, n := range cont.Names {
+			if strings.TrimPrefix(n, "/") == containerName {
+				id = cont.ID
+			}
+		}
+	}
+	if id == "" {
+		return 0, "", &ContainerNotFoundError{Name: containerName}
+	}
+	execResp, err := c.cli.ContainerExecCreate(ctx, id, container.ExecOptions{Cmd: cmd, AttachStdout: true, AttachStderr: true})
+	if err != nil {
+		return 0, "", err
+	}
+	// Attaching starts the exec; the stream ends when the process exits.
+	hj, err := c.cli.ContainerExecAttach(ctx, execResp.ID, container.ExecAttachOptions{})
+	if err != nil {
+		return 0, "", err
+	}
+	defer hj.Close()
+	var out bytes.Buffer
+	if _, err := stdcopy.StdCopy(&out, &out, io.LimitReader(hj.Reader, 64<<10)); err != nil {
+		return 0, "", fmt.Errorf("reading the output of %v in %s: %w", cmd, containerName, err)
+	}
+	// Keep draining past the cap: a process blocked writing output never exits, and the
+	// caller holds a lock while it waits.
+	_, _ = io.Copy(io.Discard, hj.Reader)
+	for {
+		inspect, err := c.cli.ContainerExecInspect(ctx, execResp.ID)
+		if err != nil {
+			return 0, "", err
+		}
+		if !inspect.Running {
+			return inspect.ExitCode, strings.TrimSpace(out.String()), nil
+		}
+		select {
+		case <-ctx.Done():
+			return 0, "", ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
 }
 
 // ReloadNginx sends a reload signal to nginx in the specified container

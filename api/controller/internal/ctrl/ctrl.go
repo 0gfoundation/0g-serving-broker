@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -23,6 +24,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/tee"
 	"github.com/0glabs/0g-serving-broker/controller/internal/attestproxy"
 	"github.com/0glabs/0g-serving-broker/controller/internal/docker"
+	"github.com/0glabs/0g-serving-broker/inference/cmd/validateconfig"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	"github.com/0glabs/0g-serving-broker/inference/contract"
 )
@@ -593,6 +595,22 @@ func (c *Ctrl) ApplyCoreConfig(ctx context.Context, configContent string) error 
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), configChangeTimeout)
 	defer cancel()
 
+	// Keys this controller's broker code does not know are ignored rather than refused
+	// (config.decodeConfig), and their values are not validated by this code at all. That
+	// is only safe if the broker and event containers that restart onto the file load it.
+	// A container hot-switched to another digest may run an older image that decodes
+	// strictly, or a newer one that reads a key and rejects its value — either way it
+	// would crash-loop on the file after the change is already in RTMR3, the incident
+	// described above. So accept only what is known to load (see checkIgnoredKeysAreSafe)
+	// and refuse the rest.
+	//
+	// Under the lock, so no image change can swap the broker between this check and
+	// the write it guards; on the detached, bounded ctx, like every other docker call
+	// made while holding it.
+	if err := c.checkIgnoredKeysAreSafe(ctx, configContent); err != nil {
+		return &InvalidConfigError{Err: err}
+	}
+
 	sum := sha256.Sum256([]byte(configContent))
 	if err := c.emitter.EmitEvent(ctx, attest.EventConfigUpdate, []byte(hex.EncodeToString(sum[:]))); err != nil {
 		return fmt.Errorf("recording the config change in RTMR3: %w", err)
@@ -1013,11 +1031,23 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), upgradeTimeout)
 	defer cancel()
 
+	// The config on disk may carry keys this controller's broker code ignores —
+	// pushing them ahead of the image that reads them is the intended workflow. The
+	// target is normally that newer image. But if it is an older one that still
+	// decodes strictly (a rollback past unknown-key tolerance), the broker will refuse
+	// to start on the file. Newer and older cannot be told apart from a digest, so
+	// this warns rather than refuses.
+	warning := c.ignoredKeysImageWarning(ctx, digest)
+	if warning != "" {
+		c.logger.Warnf("[UpdateImages] %s", warning)
+	}
+
 	// The one reference this upgrade runs on. Built once so the record, the pull,
 	// the recreate and the contract sync cannot end up describing different images.
 	ref := c.config.ImageRepo + "@" + digest
 
 	result := &docker.ImageUpdateResult{
+		Warning:           warning,
 		Image:             ref,
 		UpdatedContainers: make([]docker.ContainerUpdateResult, 0),
 	}
@@ -1323,6 +1353,122 @@ func (c *Ctrl) CurrentKeyIdentity(ctx context.Context) (attestproxy.KeyIdentity,
 	return attestproxy.KeyIdentity{Digest: digest, UpstreamSetHash: c.boundUpstreamSetHash()}, nil
 }
 
+// checkIgnoredKeysAreSafe refuses content carrying keys this controller's broker code
+// would ignore, unless the broker and event containers that restart onto the file are
+// known to load it. See the call site in ApplyCoreConfig for why. They are known to when:
+//
+//   - both run the controller's own image — the same code, which ignores the keys and
+//     already passed ValidateConfigContent above; or
+//   - otherwise, both images accept the content when asked directly: the controller runs
+//     their own validator (the 0g-validate-config applet) inside each container. That
+//     judges the keys AND their values with the code that will actually read them — the
+//     state after pushing a key and then hot-switching the broker to the image that
+//     reads it, where further pushes adjusting that key must not be blocked. An image
+//     too old to have the applet cannot confirm anything and is refused.
+func (c *Ctrl) checkIgnoredKeysAreSafe(ctx context.Context, content string) error {
+	ignored, err := config.IgnoredConfigKeys([]byte(content))
+	if err != nil {
+		return err // ValidateConfigContent decoded the same bytes first, so not expected; fail closed
+	}
+	if len(ignored) == 0 {
+		return nil
+	}
+	why := c.sameImageAsController(ctx)
+	if why == nil {
+		return nil
+	}
+	refused := c.runningImagesAccept(ctx, content)
+	if refused == nil {
+		return nil
+	}
+	names := make([]string, len(ignored))
+	for i, k := range ignored {
+		names[i] = k.String()
+	}
+	return fmt.Errorf("the config has keys this controller's broker code does not read (%s); %v, and %v. Fix the content, or push it while the broker and event service run the controller's image",
+		strings.Join(names, ", "), why, refused)
+}
+
+// sameImageAsController returns nil when the broker and the event container both run
+// the controller's own image, else why not.
+func (c *Ctrl) sameImageAsController(ctx context.Context) error {
+	own, err := c.ownDigest(ctx)
+	if err != nil {
+		return err
+	}
+	for _, ct := range []struct{ name, role string }{{containerBroker, "the broker"}, {containerEvent, "the event service"}} {
+		d, err := c.containerDigest(ctx, ct.name, ct.role)
+		if err != nil {
+			return err
+		}
+		if d != own {
+			return fmt.Errorf("%s runs %s but this controller runs %s", ct.role, d, own)
+		}
+	}
+	return nil
+}
+
+// brokerBinary is the image's entrypoint binary, which carries every applet.
+const brokerBinary = "/usr/bin/broker"
+
+// runningImagesAccept asks the broker and event containers' own images whether they
+// load content, returning nil when both do, else why not.
+//
+// The candidate is staged next to the config, on the volume the containers mount (at
+// the same path on every generated deployment; where they do not, the image cannot read
+// it and the push is refused), 0600 because it carries the same resolved secrets. The
+// image's verdict comes back on the exec's output stream: the volume is read-only in
+// the broker and event containers.
+func (c *Ctrl) runningImagesAccept(ctx context.Context, content string) error {
+	sum := sha256.Sum256([]byte(content))
+	path := filepath.Join(filepath.Dir(c.config.ConfigFile), ".candidate-"+hex.EncodeToString(sum[:8])+".yaml")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		return fmt.Errorf("the candidate could not be staged for validation: %w", err)
+	}
+	defer os.Remove(path)
+
+	for _, ct := range []struct{ name, role string }{{containerBroker, "the broker"}, {containerEvent, "the event service"}} {
+		code, out, err := c.dockerClient.RunInContainer(ctx, ct.name, []string{brokerBinary, "0g-validate-config", path})
+		if err != nil {
+			return fmt.Errorf("%s's image could not be asked to validate it: %w", ct.role, err)
+		}
+		if code != 0 {
+			return fmt.Errorf("%s's image refuses it (exit %d): %s", ct.role, code, out)
+		}
+		// Exit 0 alone is not enough: docker reports 0 for an exec whose code is null,
+		// e.g. one that never started. Only the applet's own confirmation counts.
+		if !strings.Contains(out, validateconfig.OK) {
+			return fmt.Errorf("%s's image did not confirm the config (output %q)", ct.role, out)
+		}
+	}
+	return nil
+}
+
+// ignoredKeysImageWarning returns a warning when the config on disk has keys this
+// controller's broker code ignores and target is not the controller's own image, or
+// "" otherwise. Best effort, never failing the upgrade: an unreadable or undecodable
+// file yields no warning, while an unreadable controller digest counts as "not the same
+// image" and warns — the cautious reading.
+func (c *Ctrl) ignoredKeysImageWarning(ctx context.Context, target string) string {
+	data, err := os.ReadFile(c.config.ConfigFile)
+	if err != nil {
+		c.logger.Warnf("[UpdateImages] cannot read %s to check it for ignored keys: %v", c.config.ConfigFile, err)
+		return ""
+	}
+	ignored, err := config.IgnoredConfigKeys(data)
+	if err != nil || len(ignored) == 0 {
+		return ""
+	}
+	if own, err := c.ownDigest(ctx); err == nil && own == target {
+		return ""
+	}
+	names := make([]string, len(ignored))
+	for i, k := range ignored {
+		names[i] = k.String()
+	}
+	return fmt.Sprintf("the config on disk has keys this controller's broker code does not read (%s). The image being switched to is expected to read them; if it is instead an older image that decodes config strictly (before unknown-key tolerance), the broker will refuse to start on this config — remove those keys first", strings.Join(names, ", "))
+}
+
 // RunningBrokerDigest reports the digest of the image the broker container runs.
 //
 // The attestation proxy derives per-image keys from it, so it refuses anything it cannot pin
@@ -1330,24 +1476,48 @@ func (c *Ctrl) CurrentKeyIdentity(ctx context.Context) (attestproxy.KeyIdentity,
 // container at all. A key derived from a guess would still produce signatures that verify,
 // which is the one outcome worse than refusing to sign.
 func (c *Ctrl) RunningBrokerDigest(ctx context.Context) (string, error) {
-	status, err := c.dockerClient.GetContainerStatus(ctx, containerBroker)
+	return c.containerDigest(ctx, containerBroker, "the broker")
+}
+
+// containerDigest is RunningBrokerDigest for any managed container: the digest of the
+// image the named container runs, refusing anything it cannot pin down exactly. role
+// names the container in errors ("the broker").
+func (c *Ctrl) containerDigest(ctx context.Context, name, role string) (string, error) {
+	status, err := c.dockerClient.GetContainerStatus(ctx, name)
 	if err != nil {
-		return "", fmt.Errorf("reading the broker's image: %w", err)
+		return "", fmt.Errorf("reading %s's image: %w", role, err)
 	}
 	if status == nil {
-		return "", fmt.Errorf("no %s container", containerBroker)
+		return "", fmt.Errorf("no %s container", name)
 	}
 	// Container lookup falls back to a shortest-substring match, which is fine for a status
 	// endpoint and not for this: a neighbour's digest would key a signature the client
-	// attributes to the broker.
-	if status.Name != containerBroker {
-		return "", fmt.Errorf("%q resolved to container %q, not the broker", containerBroker, status.Name)
+	// attributes to that container.
+	if status.Name != name {
+		return "", fmt.Errorf("%q resolved to container %q, not %s", name, status.Name, role)
 	}
+	return c.statusDigest(ctx, status, role)
+}
+
+// ownDigest is the digest of the image the controller itself runs. Its container is
+// found by hostname, like every other place the controller identifies itself, rather
+// than by a container name the deployment may not set.
+func (c *Ctrl) ownDigest(ctx context.Context) (string, error) {
+	status, err := c.dockerClient.SelfContainerStatus(ctx)
+	if err != nil {
+		return "", fmt.Errorf("reading the controller's own image: %w", err)
+	}
+	return c.statusDigest(ctx, status, "the controller")
+}
+
+// statusDigest resolves an inspected container to the digest of the image it runs,
+// refusing anything it cannot pin down exactly. role names it in errors.
+func (c *Ctrl) statusDigest(ctx context.Context, status *docker.ContainerStatus, role string) (string, error) {
 	// A reference that pins a digest already names the image the container was created on,
 	// and no lookup can improve on it.
 	if _, digest, pinned := strings.Cut(status.Image, "@"); pinned {
 		if !imageDigestPattern.MatchString(digest) {
-			return "", fmt.Errorf("the broker runs %q, whose digest is malformed", status.Image)
+			return "", fmt.Errorf("%s runs %q, whose digest is malformed", role, status.Image)
 		}
 		return digest, nil
 	}
@@ -1361,7 +1531,7 @@ func (c *Ctrl) RunningBrokerDigest(ctx context.Context) (string, error) {
 	// from the image a reviewer approved while the unreviewed one answered, which is the
 	// exact substitution this whole arrangement exists to prevent.
 	if status.ImageID == "" {
-		return "", fmt.Errorf("the broker runs %q, which pins no digest, and the daemon reported no image ID", status.Image)
+		return "", fmt.Errorf("%s runs %q, which pins no digest, and the daemon reported no image ID", role, status.Image)
 	}
 	info, err := c.dockerClient.GetImageInfo(ctx, status.ImageID)
 	if err != nil {

@@ -12,6 +12,7 @@ import (
 	fineTuningServer "github.com/0glabs/0g-serving-broker/fine-tuning/cmd/server"
 	providerEvent "github.com/0glabs/0g-serving-broker/inference/cmd/event"
 	providerServer "github.com/0glabs/0g-serving-broker/inference/cmd/server"
+	validateConfig "github.com/0glabs/0g-serving-broker/inference/cmd/validateconfig"
 	videoTranslatorServer "github.com/0glabs/0g-serving-broker/videotranslator/cmd/server"
 )
 
@@ -21,6 +22,7 @@ func main() {
 		"0g-inference-event":            providerEvent.Main,
 		"0g-fine-tuning-server":         fineTuningServer.Main,
 		"0g-controller":                 controllerServer.Main,
+		"0g-validate-config":            validateConfig.Main,
 		"0g-dashscope-video-translator": videoTranslatorServer.Main,
 		"0g-minimax-video-translator":   videoTranslatorServer.MiniMaxMain,
 		"0g-seedance-video-translator":  videoTranslatorServer.SeedanceMain,
