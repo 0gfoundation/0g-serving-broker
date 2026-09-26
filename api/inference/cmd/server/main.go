@@ -349,8 +349,7 @@ func Main() {
 	}
 
 	proxy := proxy.New(ctrl, engine, config.AllowOrigins, config.Monitor.Enable, config.ConcurrencyLimit, logger)
-	if guard := overload.New(config.OverloadGuard, logger); guard != nil {
-		go guard.Run(ctx)
+	if guard := overload.Start(ctx, config.OverloadGuard, logger); guard != nil {
 		proxy.SetOverloadGuard(guard)
 		logger.Infof("overload guard enabled: %s, maxQueueRequests=%d maxTokenUsage=%v",
 			config.OverloadGuard.MetricsURL, config.OverloadGuard.MaxQueueRequests, config.OverloadGuard.MaxTokenUsage)

@@ -59,6 +59,26 @@ overloadGuard:
   metricsUrl: "sglang:8000/metrics"
   maxQueueRequests: 5
 `, "absolute http(s) URL"},
+		{"non-http scheme", `
+overloadGuard:
+  enabled: true
+  metricsUrl: "ftp://sglang:8000/metrics"
+  maxQueueRequests: 5
+`, "absolute http(s) URL"},
+		{"negative token usage", `
+overloadGuard:
+  enabled: true
+  metricsUrl: "http://sglang:8000/metrics"
+  maxQueueRequests: 5
+  maxTokenUsage: -0.5
+`, "within [0, 1]"},
+		{"retry-after beyond what SDKs honour", `
+overloadGuard:
+  enabled: true
+  metricsUrl: "http://sglang:8000/metrics"
+  maxQueueRequests: 5
+  retryAfter: 90s
+`, "between 1s and 60s"},
 		{"no condition can ever shed", `
 overloadGuard:
   enabled: true
@@ -83,7 +103,7 @@ overloadGuard:
   metricsUrl: "http://sglang:8000/metrics"
   maxQueueRequests: 5
   retryAfter: 500ms
-`, "at least 1s"},
+`, "between 1s and 60s"},
 		{"zero poll interval", `
 overloadGuard:
   enabled: true

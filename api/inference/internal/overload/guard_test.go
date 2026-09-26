@@ -2,6 +2,7 @@ package overload
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -74,6 +75,8 @@ func TestCheck(t *testing.T) {
 			&sample{at: now.Add(-16 * time.Second), queueRequests: 27}, false},
 		{"fresh enough sample counts", config.OverloadGuardConfig{MaxQueueRequests: 5},
 			&sample{at: now.Add(-14 * time.Second), queueRequests: 27}, true},
+		{"exactly three intervals old still counts", config.OverloadGuardConfig{MaxQueueRequests: 5},
+			&sample{at: now.Add(-15 * time.Second), queueRequests: 27}, true},
 		{"queue at the limit sheds", config.OverloadGuardConfig{MaxQueueRequests: 5},
 			&sample{at: now, queueRequests: 5}, true},
 		{"queue below the limit admits", config.OverloadGuardConfig{MaxQueueRequests: 5},
@@ -157,3 +160,108 @@ type discardLogger struct{}
 
 func (discardLogger) Infof(string, ...interface{}) {}
 func (discardLogger) Warnf(string, ...interface{}) {}
+
+func TestParseGauges_SkipsNaN(t *testing.T) {
+	// A NaN first would otherwise stick as the maximum (every comparison with
+	// NaN is false) and disarm the condition for good.
+	got, err := parseGauges(strings.NewReader("sglang:token_usage NaN\nsglang:token_usage 0.97\n"), metricTokenUsage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got[metricTokenUsage] != 0.97 {
+		t.Fatalf("token usage = %v, want 0.97 with the NaN series skipped", got[metricTokenUsage])
+	}
+}
+
+func saturatedServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("sglang:num_queue_reqs 27\nsglang:token_usage 0.99\n"))
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// Start is main's whole wiring. A long poll interval means only Run's
+// immediate first scrape can arm it within the deadline.
+func TestStart(t *testing.T) {
+	if Start(context.Background(), config.OverloadGuardConfig{}, discardLogger{}) != nil {
+		t.Fatal("disabled config must start nothing")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	g := Start(ctx, config.OverloadGuardConfig{
+		Enabled: true, MetricsURL: saturatedServer(t).URL, MaxQueueRequests: 5,
+		PollInterval: time.Hour, RetryAfter: 30 * time.Second,
+	}, discardLogger{})
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if shed, _ := g.Check(); shed {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("guard not armed by the first scrape: Run must poll immediately, not after one interval")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// A metrics endpoint that accepts the connection and never answers must not
+// wedge the poller: the scrape is bounded by the poll interval.
+func TestPoll_HungEndpointIsBounded(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	g := newTestGuard(config.OverloadGuardConfig{MetricsURL: srv.URL, MaxQueueRequests: 5, PollInterval: time.Second})
+	done := make(chan struct{})
+	go func() { g.poll(context.Background()); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("poll against a hung endpoint did not return: the scrape has no timeout")
+	}
+	if shed, _ := g.Check(); shed {
+		t.Fatal("a timed-out scrape must fail open")
+	}
+}
+
+type recLogger struct{ lines []string }
+
+func (l *recLogger) Infof(f string, a ...interface{}) {
+	l.lines = append(l.lines, "INFO "+fmt.Sprintf(f, a...))
+}
+func (l *recLogger) Warnf(f string, a ...interface{}) {
+	l.lines = append(l.lines, "WARN "+fmt.Sprintf(f, a...))
+}
+
+// Load at a threshold flips the verdict every poll; the log must stay at about
+// one line a minute and still say that it was oscillating.
+func TestTransitionLogging(t *testing.T) {
+	l := &recLogger{}
+	g := newTestGuard(config.OverloadGuardConfig{MaxQueueRequests: 5})
+	g.logger = l
+	t0 := time.Date(2026, 9, 24, 19, 0, 0, 0, time.UTC)
+	at := func(d time.Duration, state string) {
+		g.now = func() time.Time { return t0.Add(d) }
+		g.transition(state, state)
+	}
+	at(0, "ok")             // healthy start: not logged
+	at(5*time.Second, "ok") // no change
+	at(10*time.Second, "shedding")
+	at(15*time.Second, "ok")       // within the gap: suppressed
+	at(20*time.Second, "shedding") // suppressed
+	at(25*time.Second, "ok")       // suppressed
+	at(80*time.Second, "scrape-failed")
+
+	want := []string{"WARN shedding", "WARN scrape-failed (3 earlier state changes not logged)"}
+	if strings.Join(l.lines, "|") != strings.Join(want, "|") {
+		t.Fatalf("log lines = %q, want %q", l.lines, want)
+	}
+}
