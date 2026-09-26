@@ -23,6 +23,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
+	"github.com/0glabs/0g-serving-broker/inference/internal/overload"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
@@ -54,6 +55,9 @@ type Proxy struct {
 	// unbounded under a flood) with a Prometheus counter plus a bounded
 	// periodic summary log. See rejection.go.
 	rejections *rejectionAggregator
+
+	// overloadGuard is nil unless overloadGuard.enabled; see SetOverloadGuard.
+	overloadGuard *overload.Guard
 }
 
 func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonitor bool, concurrencyConfig config.ConcurrencyLimitConfig, logger log.Logger) *Proxy {
@@ -220,6 +224,10 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 	// preventing queue buildup that degrades throughput.
 	p.serviceGroup.Use(p.globalConcurrencyMiddleware())
 
+	// Shed while the engine itself reports saturation. After the global cap so a
+	// request that would be refused for count anyway is attributed to that gate.
+	p.serviceGroup.Use(p.overloadGuardMiddleware())
+
 	// Apply request size limit middleware (32MB)
 	p.serviceGroup.Use(middleware.RequestSizeLimitMiddleware(middleware.MaxRequestSize))
 
@@ -245,6 +253,48 @@ func (p *Proxy) globalConcurrencyMiddleware() gin.HandlerFunc {
 	return middleware.ConcurrencyLimitMiddleware(p.concurrencyLimiter, func(c *gin.Context) {
 		p.rejections.record(c, monitor.RejectionGlobalConcurrency, "")
 	})
+}
+
+// SetOverloadGuard installs the engine-saturation gate. Call before serving;
+// the middleware is registered in New and consults whatever is set here.
+func (p *Proxy) SetOverloadGuard(g *overload.Guard) {
+	p.overloadGuard = g
+}
+
+// overloadErrorBody is the OpenAI error envelope. The router relays a provider
+// error body unchanged when it already has this shape, so the code and message
+// reach the end user instead of a generic "provider request failed".
+func overloadErrorBody(retryAfter int) gin.H {
+	return gin.H{"error": gin.H{
+		"message": fmt.Sprintf("The model is temporarily overloaded. Please retry in %d seconds.", retryAfter),
+		"type":    "server_error",
+		"code":    "model_overloaded",
+	}}
+}
+
+// overloadGuardMiddleware rejects new inference requests with 503 while the
+// engine is saturated. Only POSTs are gated: GETs on this group (model list,
+// signature and image retrieval) do not load the engine, and refusing a
+// signature fetch would make a response that already completed unverifiable.
+func (p *Proxy) overloadGuardMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if c.Request.Method != http.MethodPost {
+			c.Next()
+			return
+		}
+		overloaded, _ := p.overloadGuard.Check()
+		if !overloaded {
+			c.Next()
+			return
+		}
+		// Shedding for capacity is expected behaviour, not a service error —
+		// same treatment as the global concurrency cap.
+		c.Set("ignoreError", true)
+		p.rejections.record(c, monitor.RejectionBackendOverloaded, "")
+		retryAfter := p.overloadGuard.RetryAfterSeconds()
+		c.Header("Retry-After", strconv.Itoa(retryAfter))
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, overloadErrorBody(retryAfter))
+	}
 }
 
 // buildPerUserOverrides converts the operator-supplied per-address override
