@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -290,17 +291,20 @@ func gaugeValue(t *testing.T, name string) float64 {
 // not protecting anything (sglang without --enable-metrics, a renamed gauge);
 // _shedding is what dashboards plot. Both must follow each scrape.
 func TestPoll_UpdatesGauges(t *testing.T) {
-	monitor.PrometheusInit("overload-guard-gauge-test", "0x00000000000000000000000000000000000000bb")
-	monitor.EnableOverloadGuardMetrics()
-
-	status := http.StatusOK
+	status, body := http.StatusOK, "sglang:num_queue_reqs 0\nsglang:token_usage 0.5\n"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(status)
-		_, _ = w.Write([]byte("sglang:num_queue_reqs 27\nsglang:token_usage 0.99\n"))
+		_, _ = w.Write([]byte(body))
 	}))
 	defer srv.Close()
 	g := newTestGuard(config.OverloadGuardConfig{MetricsURL: srv.URL, MaxQueueRequests: 5})
 
+	// Healthy first, so a gauge that merely mirrored "scrape succeeded" fails.
+	g.poll(context.Background())
+	if up, shed := gaugeValue(t, "broker_overload_guard_up"), gaugeValue(t, "broker_overload_guard_shedding"); up != 1 || shed != 0 {
+		t.Fatalf("after a healthy scrape up=%v shedding=%v, want 1/0", up, shed)
+	}
+	body = "sglang:num_queue_reqs 27\nsglang:token_usage 0.99\n"
 	g.poll(context.Background())
 	if up, shed := gaugeValue(t, "broker_overload_guard_up"), gaugeValue(t, "broker_overload_guard_shedding"); up != 1 || shed != 1 {
 		t.Fatalf("after a saturated scrape up=%v shedding=%v, want 1/1", up, shed)
@@ -310,4 +314,14 @@ func TestPoll_UpdatesGauges(t *testing.T) {
 	if up, shed := gaugeValue(t, "broker_overload_guard_up"), gaugeValue(t, "broker_overload_guard_shedding"); up != 0 || shed != 0 {
 		t.Fatalf("after a failed scrape up=%v shedding=%v, want 0/0", up, shed)
 	}
+}
+
+// TestMain initialises the default registry and the guard gauges once, before
+// any test starts a poller: PrometheusInit may run only once per process
+// (-count=N would re-register), and registering the gauges while a poller from
+// an earlier test is still writing them is a data race.
+func TestMain(m *testing.M) {
+	monitor.PrometheusInit("overload-guard-test", "0x00000000000000000000000000000000000000bb")
+	monitor.EnableOverloadGuardMetrics()
+	os.Exit(m.Run())
 }
