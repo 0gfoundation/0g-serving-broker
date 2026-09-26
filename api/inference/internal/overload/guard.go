@@ -146,10 +146,16 @@ func (g *Guard) poll(ctx context.Context) {
 
 // transition logs a state change, at most once per minLogGap. Changes inside
 // the gap are counted and reported with the next line, so the log still shows
-// that the verdict was oscillating. Reaching "ok" on the very first scrape is
-// the expected start and is not logged.
+// that the verdict was oscillating. If the state then settles, the next poll
+// after the gap logs where it settled — otherwise the last line in the log
+// could name a state the guard left hours ago. Reaching "ok" on the very first
+// scrape is the expected start and is not logged.
 func (g *Guard) transition(state, msg string) {
+	now := g.now()
 	if state == g.state {
+		if g.suppressed > 0 && now.Sub(g.lastLog) >= minLogGap {
+			g.emit(now, state, msg)
+		}
 		return
 	}
 	first := g.state == ""
@@ -157,11 +163,14 @@ func (g *Guard) transition(state, msg string) {
 	if first && state == "ok" {
 		return
 	}
-	now := g.now()
 	if !first && now.Sub(g.lastLog) < minLogGap {
 		g.suppressed++
 		return
 	}
+	g.emit(now, state, msg)
+}
+
+func (g *Guard) emit(now time.Time, state, msg string) {
 	if g.suppressed > 0 {
 		msg = fmt.Sprintf("%s (%d earlier state changes not logged)", msg, g.suppressed)
 		g.suppressed = 0
