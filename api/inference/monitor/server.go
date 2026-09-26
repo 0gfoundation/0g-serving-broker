@@ -268,6 +268,7 @@ func PrometheusInit(serverName, providerAddress string) {
 		panic("provider address must be a 0x-prefixed 40-hex-char address, got: " + providerAddress)
 	}
 	constLabels := prometheus.Labels{"server": serverName, "provider_address": providerAddress}
+	promConstLabels = constLabels
 
 	RequestCount = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -495,6 +496,50 @@ func PrometheusInit(serverName, providerAddress string) {
 	prometheus.MustRegister(RoutingProofSkippedTotal)
 	prometheus.MustRegister(RequestRejectedTotal)
 	prometheus.MustRegister(FailureCount)
+}
+
+// promConstLabels are the const labels PrometheusInit stamped on every series,
+// kept for metrics registered later. Nil when monitoring is disabled.
+var promConstLabels prometheus.Labels
+
+var overloadGuardUp, overloadGuardShedding prometheus.Gauge
+
+// EnableOverloadGuardMetrics registers the overload guard's two gauges. Call it
+// once, after PrometheusInit, and only when the guard is enabled: a box without
+// the guard must not export an "up = 0" that reads as a guard that broke. No-op
+// when monitoring is disabled.
+func EnableOverloadGuardMetrics() {
+	if promConstLabels == nil || overloadGuardUp != nil {
+		return
+	}
+	overloadGuardUp = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name:        "broker_overload_guard_up",
+		Help:        "1 when the overload guard's last metrics scrape succeeded, 0 when it failed (the guard then admits everything). Alert on 0 sustained: the engine is unprotected.",
+		ConstLabels: promConstLabels,
+	})
+	overloadGuardShedding = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name:        "broker_overload_guard_shedding",
+		Help:        "1 while the overload guard is shedding new inference requests because the engine reports saturation, else 0.",
+		ConstLabels: promConstLabels,
+	})
+	prometheus.MustRegister(overloadGuardUp, overloadGuardShedding)
+}
+
+// SetOverloadGuardState records the guard's state after a scrape. Safe to call
+// when EnableOverloadGuardMetrics was not (no-op).
+func SetOverloadGuardState(up, shedding bool) {
+	if overloadGuardUp == nil {
+		return
+	}
+	overloadGuardUp.Set(boolToFloat(up))
+	overloadGuardShedding.Set(boolToFloat(shedding))
+}
+
+func boolToFloat(b bool) float64 {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // StartDAUUpdater starts a background goroutine that periodically queries the database

@@ -262,10 +262,12 @@ func (p *Proxy) SetOverloadGuard(g *overload.Guard) {
 }
 
 // overloadErrorBody is the error envelope of the API family the path speaks.
-// The router relays a provider error body unchanged when it is already that
-// family's canonical envelope, so the message reaches the end user instead of a
-// generic "provider request failed" — and a client calling the broker directly
-// gets a shape its SDK understands. On /messages that is Anthropic's
+// The router first retries a shed request on another provider if it has one;
+// when it has none, it passes this status, Retry-After and body through
+// unchanged (the body is already that family's canonical envelope), so the
+// caller sees "temporarily overloaded" instead of a generic "provider request
+// failed" — and a client calling the broker directly gets a shape its SDK
+// understands. On /messages that is Anthropic's
 // overloaded_error type; Anthropic itself pairs it with status 529, but its SDKs
 // (and Claude Code) retry a 429 just the same.
 func overloadErrorBody(path string, retryAfter int) gin.H {
@@ -289,7 +291,8 @@ func overloadErrorBody(path string, retryAfter int) gin.H {
 // mainnet and staging), treats as capacity: skip the endpoint briefly if a
 // sibling has room, never mark it unhealthy. With that window at 0 — its kill
 // switch — a 429 is counted as a failure too, so a 429 is the better of the two
-// statuses, not a guarantee. A deliberate shed must not read as the box being
+// statuses, not a guarantee. Either way the router tries another provider for
+// the model first, when there is one. A deliberate shed must not read as the box being
 // broken.
 func (p *Proxy) overloadGuardMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {

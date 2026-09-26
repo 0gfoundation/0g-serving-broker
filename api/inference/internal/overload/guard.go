@@ -6,8 +6,8 @@
 // a few very long contexts are what fills the engine: on 2026-09-24 a
 // self-hosted glm-5.3 ran only 2-5 requests while its KV cache sat at 90-100%
 // for about four hours, ~27 requests queued behind them, and every new request
-// waited out the router's 5-minute header timeout before failing with a generic
-// 502. The engine's own gauges said so the whole time; this reads them.
+// waited out the 0G router's 5-minute response-header timeout before failing.
+// The engine's own gauges said so the whole time; this reads them.
 package overload
 
 import (
@@ -15,6 +15,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -22,6 +23,7 @@ import (
 	"time"
 
 	"github.com/0glabs/0g-serving-broker/inference/config"
+	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
 
 // The two sglang gauges the guard reads. Engines with tensor parallelism can
@@ -36,6 +38,11 @@ const (
 // endpoint is tens of KB; the bound only matters if the URL points somewhere
 // unexpected.
 const maxMetricsBytes = 4 << 20
+
+// minLogGap spaces out state-change log lines. Load that hovers at a threshold
+// flips the verdict every poll — shedding empties the queue, admitting refills
+// it — and one line per flip would be thousands a day.
+const minLogGap = time.Minute
 
 // Logger is the subset of the broker logger the guard uses.
 type Logger interface {
@@ -57,9 +64,12 @@ type Guard struct {
 	logger Logger
 	now    func() time.Time
 
-	latest        atomic.Pointer[sample]
-	overloaded    atomic.Bool // last reported state, for transition logging only
-	scrapeFailing atomic.Bool // same, for the metrics endpoint itself
+	latest atomic.Pointer[sample]
+
+	// Poller-only state (touched only from Run's goroutine), for transition logging.
+	state      string // "" before the first scrape, then "ok", "shedding" or "scrape-failed"
+	lastLog    time.Time
+	suppressed int
 }
 
 // New returns nil when the guard is disabled, so callers can hold the result
@@ -76,6 +86,19 @@ func New(cfg config.OverloadGuardConfig, logger Logger) *Guard {
 		logger: logger,
 		now:    time.Now,
 	}
+}
+
+// Start builds the guard, registers its gauges and starts polling. It returns
+// nil when the guard is disabled. This is the whole of the wiring main does, in
+// one place a test can reach.
+func Start(ctx context.Context, cfg config.OverloadGuardConfig, logger Logger) *Guard {
+	g := New(cfg, logger)
+	if g == nil {
+		return nil
+	}
+	monitor.EnableOverloadGuardMetrics()
+	go g.Run(ctx)
+	return g
 }
 
 // Run polls until ctx is cancelled. It scrapes once immediately so the guard is
@@ -102,17 +125,50 @@ func (g *Guard) poll(ctx context.Context) {
 	if err != nil {
 		// Drop the previous sample rather than keep acting on it: a verdict the
 		// engine can no longer confirm is not evidence of saturation, so a broken
-		// endpoint admits from the next request on. Logged once per outage.
+		// endpoint admits from the next request on.
 		g.latest.Store(nil)
-		if !g.scrapeFailing.Swap(true) {
-			g.logger.Warnf("overload guard: metrics scrape failed, admitting all requests until it recovers: %v", err)
-		}
+		monitor.SetOverloadGuardState(false, false)
+		g.transition("scrape-failed", fmt.Sprintf("overload guard: metrics scrape failed, admitting all requests until it recovers: %v", err))
 		return
 	}
-	if g.scrapeFailing.Swap(false) {
-		g.logger.Infof("overload guard: metrics scrape recovered")
-	}
 	g.latest.Store(s)
+	reason := g.verdict(s)
+	monitor.SetOverloadGuardState(true, reason != "")
+	if reason != "" {
+		g.transition("shedding", "overload guard: engine saturated ("+reason+"), shedding new inference requests with 429")
+	} else {
+		g.transition("ok", "overload guard: engine not saturated, admitting requests")
+	}
+}
+
+// transition logs a state change, at most once per minLogGap. Changes inside
+// the gap are counted and reported with the next line, so the log still shows
+// that the verdict was oscillating. Reaching "ok" on the very first scrape is
+// the expected start and is not logged.
+func (g *Guard) transition(state, msg string) {
+	if state == g.state {
+		return
+	}
+	first := g.state == ""
+	g.state = state
+	if first && state == "ok" {
+		return
+	}
+	now := g.now()
+	if !first && now.Sub(g.lastLog) < minLogGap {
+		g.suppressed++
+		return
+	}
+	if g.suppressed > 0 {
+		msg = fmt.Sprintf("%s (%d earlier state changes not logged)", msg, g.suppressed)
+		g.suppressed = 0
+	}
+	g.lastLog = now
+	if state == "ok" {
+		g.logger.Infof("%s", msg)
+	} else {
+		g.logger.Warnf("%s", msg)
+	}
 }
 
 func (g *Guard) scrape(ctx context.Context) (*sample, error) {
@@ -126,6 +182,7 @@ func (g *Guard) scrape(ctx context.Context) (*sample, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxMetricsBytes)) // keep the connection reusable
 		return nil, fmt.Errorf("metrics endpoint returned %d", resp.StatusCode)
 	}
 	values, err := parseGauges(io.LimitReader(resp.Body, maxMetricsBytes), metricQueueRequests, metricTokenUsage)
@@ -143,27 +200,31 @@ func (g *Guard) scrape(ctx context.Context) (*sample, error) {
 	return &sample{at: g.now(), queueRequests: queue, tokenUsage: usage}, nil
 }
 
+// verdict returns why s is saturated, or "" when it is not.
+func (g *Guard) verdict(s *sample) string {
+	switch {
+	case g.cfg.MaxQueueRequests > 0 && s.queueRequests >= float64(g.cfg.MaxQueueRequests):
+		return fmt.Sprintf("%.0f requests queued (limit %d)", s.queueRequests, g.cfg.MaxQueueRequests)
+	case g.cfg.MaxTokenUsage > 0 && s.tokenUsage >= g.cfg.MaxTokenUsage:
+		return fmt.Sprintf("KV cache %.0f%% used (limit %.0f%%)", s.tokenUsage*100, g.cfg.MaxTokenUsage*100)
+	}
+	return ""
+}
+
 // Check reports whether new requests should be shed, and why. It never sheds
 // without a current sample: a failed scrape clears it (see poll), and a sample
-// older than three poll intervals — a poller that stopped, or a scrape still
-// hanging — is ignored. The guard must not become a way for the box to reject
-// traffic it could have served.
+// older than three poll intervals — a poller that has stopped; the HTTP timeout
+// already bounds a single scrape — is ignored. The guard must not become a way
+// for the box to reject traffic it could have served.
 func (g *Guard) Check() (overloaded bool, reason string) {
 	if g == nil {
 		return false, ""
 	}
 	s := g.latest.Load()
 	if s == nil || g.now().Sub(s.at) > 3*g.cfg.PollInterval {
-		g.noteTransition(false, "")
 		return false, ""
 	}
-	switch {
-	case g.cfg.MaxQueueRequests > 0 && s.queueRequests >= float64(g.cfg.MaxQueueRequests):
-		reason = fmt.Sprintf("%.0f requests queued (limit %d)", s.queueRequests, g.cfg.MaxQueueRequests)
-	case g.cfg.MaxTokenUsage > 0 && s.tokenUsage >= g.cfg.MaxTokenUsage:
-		reason = fmt.Sprintf("KV cache %.0f%% used (limit %.0f%%)", s.tokenUsage*100, g.cfg.MaxTokenUsage*100)
-	}
-	g.noteTransition(reason != "", reason)
+	reason = g.verdict(s)
 	return reason != "", reason
 }
 
@@ -175,22 +236,10 @@ func (g *Guard) RetryAfterSeconds() int {
 	return int(g.cfg.RetryAfter / time.Second)
 }
 
-// noteTransition logs only when the verdict flips, so a saturated box emits
-// two lines per episode instead of one per shed request.
-func (g *Guard) noteTransition(now bool, reason string) {
-	if g.overloaded.Swap(now) == now {
-		return
-	}
-	if now {
-		g.logger.Warnf("overload guard: engine saturated (%s), shedding new inference requests with 429", reason)
-	} else {
-		g.logger.Infof("overload guard: engine no longer saturated, admitting requests")
-	}
-}
-
 // parseGauges reads Prometheus text exposition and returns, for each wanted
 // metric name, the maximum value across its series. Names that never appear
-// are absent from the result.
+// are absent from the result, and NaN values are skipped: NaN compares false
+// against everything, so a NaN maximum would silently disarm the condition.
 func parseGauges(r io.Reader, names ...string) (map[string]float64, error) {
 	want := make(map[string]bool, len(names))
 	for _, n := range names {
@@ -225,7 +274,7 @@ func parseGauges(r io.Reader, names ...string) (map[string]float64, error) {
 			continue
 		}
 		v, err := strconv.ParseFloat(fields[0], 64)
-		if err != nil {
+		if err != nil || math.IsNaN(v) {
 			continue
 		}
 		if cur, ok := out[name]; !ok || v > cur {
