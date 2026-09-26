@@ -129,7 +129,7 @@ func TestOverloadGuard_SingleEngineOnly(t *testing.T) {
 	}
 
 	sameTarget := base
-	sameTarget.ModelPricing = []ModelPricingEntry{{Model: "a", TargetURL: base.TargetURL}, {Model: "b"}}
+	sameTarget.ModelPricing = []ModelPricingEntry{{Model: "a", TargetURL: base.TargetURL}, {Model: "b"}, {Model: "c", TargetURL: base.TargetURL + "/"}}
 	if err := validateOverloadGuard(&g, &sameTarget); err != nil {
 		t.Fatalf("entries that inherit or repeat service.targetUrl are the same engine: %v", err)
 	}

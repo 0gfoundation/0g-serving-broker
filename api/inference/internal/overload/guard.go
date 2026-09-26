@@ -182,7 +182,7 @@ func (g *Guard) noteTransition(now bool, reason string) {
 		return
 	}
 	if now {
-		g.logger.Warnf("overload guard: engine saturated (%s), shedding new inference requests with 503", reason)
+		g.logger.Warnf("overload guard: engine saturated (%s), shedding new inference requests with 429", reason)
 	} else {
 		g.logger.Infof("overload guard: engine no longer saturated, admitting requests")
 	}
