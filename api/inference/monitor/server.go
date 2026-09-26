@@ -229,6 +229,12 @@ const (
 	// distinct from RejectionConcurrency above, which is the PER-USER one. Both
 	// shed for capacity; only this one is broker-wide.
 	RejectionGlobalConcurrency = "global_concurrency"
+
+	// RejectionBackendOverloaded is the overload guard: the model engine's own
+	// gauges (queue depth / KV usage) say it is saturated. Unlike the two
+	// concurrency caps it does not count requests, so it fires even when very
+	// few are in flight.
+	RejectionBackendOverloaded = "backend_overloaded"
 )
 
 // CtxKeyRejectionReason is the gin context key under which a request handler
