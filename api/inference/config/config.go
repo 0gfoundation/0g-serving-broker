@@ -2459,13 +2459,33 @@ func decodeConfig(data []byte, out interface{}) (ignored []IgnoredKey, err error
 	return ignored, nil
 }
 
-// controllerSectionTypes are the Go types of every mapping under the controller
+// controllerSectionTypes are the Go types of the mappings under the controller
 // section, where decodeConfig keeps refusing unknown keys. Tolerating them there buys
 // nothing — the controller is only ever updated by a redeploy, never ahead of its
 // config — and costs something, because several of its settings fail open when a
 // typo drops them (an empty allowedIPs admits every address; a dropped
 // recordUpstreamSet stops recording the upstream set).
-var controllerSectionTypes = structTypesUnder(reflect.TypeOf(ControllerConfig{}))
+//
+// Only types that appear nowhere else: yaml.v2 names the Go type in its error, not
+// the path, so a type shared with another section (LoggerConfig is both
+// controller.logger and the top-level logger) would make that section strict too.
+var controllerSectionTypes = func() map[string]bool {
+	under := structTypesUnder(reflect.TypeOf(ControllerConfig{}))
+	elsewhere := map[string]bool{}
+	top := reflect.TypeOf(Config{})
+	for i := 0; i < top.NumField(); i++ {
+		if top.Field(i).Name == "Controller" {
+			continue
+		}
+		for t := range structTypesUnder(top.Field(i).Type) {
+			elsewhere[t] = true
+		}
+	}
+	for t := range elsewhere {
+		delete(under, t)
+	}
+	return under
+}()
 
 // structTypesUnder returns the String() of t and of every struct type reachable
 // from its fields, through pointers, slices, arrays and maps — the names yaml.v2
