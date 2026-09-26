@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math/big"
@@ -2342,22 +2343,23 @@ func applyTargetURLEnv(cfg *Config) {
 //
 // # Why this is faithful for Service, and only for Service
 //
-// The loader's pipeline is UnmarshalStrict, then migrateDeprecated, then the
+// The loader's pipeline is decodeConfig, then migrateDeprecated, then the
 // TARGET_URL and DATABASE_DSN precedences. Of those, migrateDeprecated touches
 // Interval, RevenueTransfer, LoRA, Async, ProviderHttp, Database, Event, ZK and
 // Network — and no Service field; GetConfig's defaults likewise set none. So for
-// Service, strict-unmarshalling into a zero Config and applying the same TARGET_URL
+// Service, decoding into a zero Config and applying the same TARGET_URL
 // precedence is what the loader does, not an approximation of it.
 //
 // That is why this returns *Service rather than *Config. A *Config from here would be
 // missing every default and every migration, and a caller reaching for another section
 // would get a value the running process does not have.
 //
-// Strict, like the loader: a key the broker will refuse must be refused here too, or
-// the controller would derive a set from content the broker cannot even parse.
+// Decoded exactly as the loader decodes (decodeConfig): content the broker refuses is
+// refused here too, and a key the broker would ignore is ignored here too, or the
+// controller would derive a set from content the broker reads differently.
 func ServiceFromYAML(data []byte) (*Service, error) {
 	var cfg Config
-	if err := yaml.UnmarshalStrict(data, &cfg); err != nil {
+	if _, err := decodeConfig(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parsing config content: %w", err)
 	}
 	applyTargetURLEnv(&cfg)
@@ -2391,11 +2393,71 @@ func loadConfig(cfg *Config) error {
 	// migrateDeprecated.
 	raw := config.RawYAMLKeys(data)
 
-	if err := yaml.UnmarshalStrict(data, cfg); err != nil {
+	ignored, err := decodeConfig(data, cfg)
+	if err != nil {
 		return err
+	}
+	for _, k := range ignored {
+		log.Printf("[CONFIG-IGNORED] unknown key %s: this broker version does not read it, so the setting has no effect (a typo, or a key for a newer broker)", k)
 	}
 
 	return applyAndValidate(cfg, raw)
+}
+
+// unknownFieldRe matches the one kind of yaml.v2 strict-mode error decodeConfig
+// tolerates: a key with no field behind it.
+var unknownFieldRe = regexp.MustCompile(`^line (\d+): field (.+) not found in type (.+)$`)
+
+// decodeConfig unmarshals config content, ignoring keys this broker version has
+// no field for and returning them, while still refusing every other problem
+// strict decoding catches (a wrong type, a duplicate key).
+//
+// Why not strict: the controller validates a pushed config with the broker code
+// compiled into ITS image, and after a reboot the broker runs the image pinned in
+// the compose file — both can be older than the config. Strict decoding turned
+// every new config key into a hard failure there: the controller refused the
+// push, and a broker that fell back to an older image refused to start, so adding
+// a key meant a full CVM redeploy first. Ignoring the key instead means an older
+// binary simply lacks the feature, and a newer one (hot-switched by digest, or
+// the next redeploy) picks it up.
+//
+// The cost is that a misspelled key is ignored rather than refused. It is not
+// silent: loadConfig logs every ignored key, and the controller returns them in
+// its PUT /v1/config/core response.
+func decodeConfig(data []byte, out interface{}) (ignored []string, err error) {
+	err = yaml.UnmarshalStrict(data, out)
+	if err == nil {
+		return nil, nil
+	}
+	var te *yaml.TypeError
+	if !errors.As(err, &te) {
+		return nil, err
+	}
+	var rest []string
+	for _, msg := range te.Errors {
+		if m := unknownFieldRe.FindStringSubmatch(msg); m != nil {
+			ignored = append(ignored, fmt.Sprintf("%q (line %s, in %s)", m[2], m[1], m[3]))
+			continue
+		}
+		rest = append(rest, msg)
+	}
+	if len(rest) > 0 {
+		return nil, &yaml.TypeError{Errors: rest}
+	}
+	// Only unknown keys were wrong. Decode again without strict mode so the result
+	// does not depend on how far the strict pass got before recording them.
+	if err := yaml.Unmarshal(data, out); err != nil {
+		return nil, err
+	}
+	return ignored, nil
+}
+
+// IgnoredConfigKeys lists the keys in content that this broker version would
+// ignore, in the form "\"key\" (line N, in type)". It returns the decode error
+// for content that would not load at all. Used by the controller to report
+// ignored keys back to whoever pushed the config.
+func IgnoredConfigKeys(data []byte) ([]string, error) {
+	return decodeConfig(data, defaultConfig())
 }
 
 // applyAndValidate is everything loadConfig does after the bytes are parsed: the
@@ -3000,10 +3062,13 @@ func applyAndValidate(cfg *Config, raw map[string]interface{}) error {
 //
 // The candidate is validated on a throwaway Config: nothing here touches the singleton
 // the running process is using.
+//
+// Keys this version does not know are ignored, exactly as loadConfig ignores them
+// (see decodeConfig); IgnoredConfigKeys lists them.
 func ValidateConfigContent(data []byte) error {
 	cfg := defaultConfig()
 	raw := config.RawYAMLKeys(data)
-	if err := yaml.UnmarshalStrict(data, cfg); err != nil {
+	if _, err := decodeConfig(data, cfg); err != nil {
 		return err
 	}
 	return applyAndValidate(cfg, raw)

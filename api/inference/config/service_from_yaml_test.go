@@ -100,19 +100,18 @@ service:
 	}
 }
 
-// Strict, like the loader.
+// Refuses what the loader refuses.
 //
-// The controller uses this on content it is about to write, and the broker will read that
-// content with UnmarshalStrict at its next start. Accepting a key the broker refuses
-// would let the controller derive a set from content the broker cannot even parse — and
-// report it as the deployment's bound.
-func TestServiceFromYAMLIsStrictLikeTheLoader(t *testing.T) {
+// The controller uses this on content it is about to write, and the broker decodes that
+// content with the same decodeConfig at its next start. Accepting content the broker
+// refuses would let the controller derive a set from content the broker cannot even
+// parse — and report it as the deployment's bound. (Unknown keys are the one thing both
+// ignore rather than refuse; see TestUnknownKeysAreIgnoredNotRefused.)
+func TestServiceFromYAMLRefusesWhatTheLoaderRefuses(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		content string
 	}{
-		{"a key the Service struct does not have", "service:\n  name: whatever\n"},
-		{"a key no struct has", "notASection:\n  x: 1\n"},
 		{"a value of the wrong type", "service:\n  targetUrl:\n    nested: yes\n"},
 		{"not YAML at all", "\tthis: is: not: yaml\n"},
 	} {
