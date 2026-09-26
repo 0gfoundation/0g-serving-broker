@@ -307,6 +307,17 @@ func (c *Client) selfContainerID(ctx context.Context) (string, error) {
 	return selfID, nil
 }
 
+// SelfContainerStatus reports the status of the container this process runs in,
+// identified by hostname (see selfContainerID) rather than by a name the deployment
+// may not set.
+func (c *Client) SelfContainerStatus(ctx context.Context) (*ContainerStatus, error) {
+	id, err := c.selfContainerID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return c.inspectContainerStatus(ctx, id, "")
+}
+
 // shortIDLen is the length of the container ID prefix docker uses as a
 // container's default hostname.
 const shortIDLen = 12
