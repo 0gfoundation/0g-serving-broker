@@ -78,6 +78,14 @@ func splitImageDaemon(t *testing.T, cs ...guardContainer) *docker.Client {
 			}
 			w.WriteHeader(http.StatusNotFound)
 		case strings.Contains(r.URL.Path, "/exec/") && strings.HasSuffix(r.URL.Path, "/start"):
+			// Attached starts hijack the connection for output this path does not
+			// read; the controller must start detached and poll.
+			var body struct{ Detach bool }
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if !body.Detach {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
 			w.WriteHeader(http.StatusOK)
 		case strings.Contains(r.URL.Path, "/exec/") && strings.HasSuffix(r.URL.Path, "/json"):
 			for id, code := range execs {

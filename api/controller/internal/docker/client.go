@@ -752,13 +752,8 @@ func (e *ContainerNotHealthyError) Error() string {
 // exit, returning its exit code. Output is not captured: callers that need a message
 // have the command write it to a file they can read.
 func (c *Client) RunInContainer(ctx context.Context, containerName string, cmd []string) (int, error) {
-	status, err := c.GetContainerStatus(ctx, containerName)
-	if err != nil {
-		return 0, err
-	}
-	if status == nil || status.Name != containerName {
-		return 0, &ContainerNotFoundError{Name: containerName}
-	}
+	// Exact name only — unlike GetContainerStatus, no substring fallback: running a
+	// command in a neighbour would answer for the wrong container.
 	containers, err := c.cli.ContainerList(ctx, container.ListOptions{All: true})
 	if err != nil {
 		return 0, err
