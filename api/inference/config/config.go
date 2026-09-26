@@ -9,8 +9,10 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"reflect"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -2214,7 +2216,7 @@ func migrateDeprecated(cfg *Config, raw map[string]interface{}) error {
 	// Interval / RevenueTransfer.Interval kept their yaml keys but flipped
 	// from int (implicit seconds) to time.Duration. When the raw yaml value
 	// is a number, migrate it to seconds; otherwise the new-style string
-	// value already parsed by UnmarshalStrict is correct.
+	// value already parsed by decodeConfig is correct.
 	config.MigrateIntegerSecondsDuration(raw, &cfg.Interval.AutoSettleBufferTime, time.Second, "interval", "autoSettleBufferTime")
 	config.MigrateIntegerSecondsDuration(raw, &cfg.Interval.ForceSettlementProcessor, time.Second, "interval", "forceSettlementProcessor")
 	config.MigrateIntegerSecondsDuration(raw, &cfg.Interval.SettlementProcessor, time.Second, "interval", "settlementProcessor")
@@ -2424,8 +2426,9 @@ var unknownFieldRe = regexp.MustCompile(`^line (\d+): field (.+) not found in ty
 //
 // The cost is that a misspelled key is ignored rather than refused. It is not
 // silent: loadConfig logs every ignored key, and the controller returns them in
-// its PUT /v1/config/core response.
-func decodeConfig(data []byte, out interface{}) (ignored []string, err error) {
+// its PUT /v1/config/core response. Keys under the controller section are the
+// exception and are still refused (see controllerSectionTypes).
+func decodeConfig(data []byte, out interface{}) (ignored []IgnoredKey, err error) {
 	err = yaml.UnmarshalStrict(data, out)
 	if err == nil {
 		return nil, nil
@@ -2437,7 +2440,12 @@ func decodeConfig(data []byte, out interface{}) (ignored []string, err error) {
 	var rest []string
 	for _, msg := range te.Errors {
 		if m := unknownFieldRe.FindStringSubmatch(msg); m != nil {
-			ignored = append(ignored, fmt.Sprintf("%q (line %s, in %s)", m[2], m[1], m[3]))
+			if controllerSectionTypes[m[3]] {
+				rest = append(rest, msg+" (the controller section is still decoded strictly: only a redeploy updates the controller, so an unknown key there can only be a typo, and some of its settings fail open when dropped)")
+				continue
+			}
+			line, _ := strconv.Atoi(m[1])
+			ignored = append(ignored, IgnoredKey{Key: m[2], In: m[3], Line: line})
 			continue
 		}
 		rest = append(rest, msg)
@@ -2446,16 +2454,60 @@ func decodeConfig(data []byte, out interface{}) (ignored []string, err error) {
 		return nil, &yaml.TypeError{Errors: rest}
 	}
 	// Only unknown keys were wrong. yaml.v2 records type errors and keeps decoding
-	// (only syntax errors abort, and those are not a TypeError), so out already
-	// holds every known field.
+	// (errors that abort decoding are never a TypeError), so out already holds every
+	// known field.
 	return ignored, nil
 }
 
+// controllerSectionTypes are the Go types of every mapping under the controller
+// section, where decodeConfig keeps refusing unknown keys. Tolerating them there buys
+// nothing — the controller is only ever updated by a redeploy, never ahead of its
+// config — and costs something, because several of its settings fail open when a
+// typo drops them (an empty allowedIPs admits every address; a dropped
+// recordUpstreamSet stops recording the upstream set).
+var controllerSectionTypes = structTypesUnder(reflect.TypeOf(ControllerConfig{}))
+
+// structTypesUnder returns the String() of t and of every struct type reachable
+// from its fields, through pointers, slices, arrays and maps — the names yaml.v2
+// puts in "field X not found in type T".
+func structTypesUnder(t reflect.Type) map[string]bool {
+	seen := map[string]bool{}
+	var walk func(reflect.Type)
+	walk = func(t reflect.Type) {
+		for t.Kind() == reflect.Ptr || t.Kind() == reflect.Slice || t.Kind() == reflect.Array || t.Kind() == reflect.Map {
+			t = t.Elem()
+		}
+		if t.Kind() != reflect.Struct || seen[t.String()] {
+			return
+		}
+		seen[t.String()] = true
+		for i := 0; i < t.NumField(); i++ {
+			walk(t.Field(i).Type)
+		}
+	}
+	walk(t)
+	return seen
+}
+
+// IgnoredKey is a config key this broker version has no field for.
+type IgnoredKey struct {
+	Key string // the key as written
+	// In is the Go type of the mapping the key sits in. It identifies where the key
+	// is (two sections may each carry an unknown "foo"); it is not meant for display,
+	// since an anonymous section struct prints as its whole literal.
+	In   string
+	Line int
+}
+
+// String is the display form, e.g. "futureFeature" (line 12).
+func (k IgnoredKey) String() string {
+	return fmt.Sprintf("%q (line %d)", k.Key, k.Line)
+}
+
 // IgnoredConfigKeys lists the keys in content that this broker version would
-// ignore, in the form "\"key\" (line N, in type)". It returns the decode error
-// for content that would not load at all. Used by the controller to report
-// ignored keys back to whoever pushed the config.
-func IgnoredConfigKeys(data []byte) ([]string, error) {
+// ignore. It returns the decode error for content that would not load at all.
+// Used by the controller to report ignored keys back to whoever pushed the config.
+func IgnoredConfigKeys(data []byte) ([]IgnoredKey, error) {
 	return decodeConfig(data, defaultConfig())
 }
 

@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"errors"
 	"net/http"
 
@@ -13,11 +14,14 @@ import (
 // Handler handles HTTP requests for the controller
 type Handler struct {
 	ctrl *ctrl.Ctrl
+	// applyCoreConfig is ctrl.ApplyCoreConfig, held separately so the PUT
+	// /v1/config/core response can be tested without a docker daemon.
+	applyCoreConfig func(context.Context, string) error
 }
 
 // NewHandler creates a new handler
 func NewHandler(c *ctrl.Ctrl) *Handler {
-	return &Handler{ctrl: c}
+	return &Handler{ctrl: c, applyCoreConfig: c.ApplyCoreConfig}
 }
 
 // RegisterRoutes registers all routes on the given router group
@@ -210,7 +214,7 @@ func (h *Handler) UpdateCoreConfig(ctx *gin.Context) {
 		return
 	}
 
-	if err := h.ctrl.ApplyCoreConfig(ctx, req.Config); err != nil {
+	if err := h.applyCoreConfig(ctx, req.Config); err != nil {
 		if _, ok := err.(*ctrl.InvalidConfigError); ok {
 			ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
@@ -229,16 +233,21 @@ func (h *Handler) UpdateCoreConfig(ctx *gin.Context) {
 // coreConfigUpdatedBody is the success response for a config push. It lists the
 // keys the broker ignores (see config.IgnoredConfigKeys), so a typo — or a key
 // that needs a newer image — is reported to whoever pushed, not only buried in
-// the broker's log. ApplyCoreConfig only accepts ignored keys while the broker
-// runs the controller's own image, so this list is exactly what the running
-// broker ignores.
+// the broker's log. The list is what the broker code compiled into this
+// controller ignores; a broker hot-switched to a newer image may read some of
+// them (ApplyCoreConfig accepts that case only once that image has already
+// loaded the same keys).
 func coreConfigUpdatedBody(content string) gin.H {
 	body := gin.H{"message": "config updated and containers restarted"}
 	// The config already passed ValidateConfigContent inside ApplyCoreConfig, so
 	// a decode error here is not expected; if it happens the push still stood.
 	if ignored, err := config.IgnoredConfigKeys([]byte(content)); err == nil && len(ignored) > 0 {
-		body["ignored_keys"] = ignored
-		body["warning"] = "the running broker ignores these keys, so they have no effect yet: a typo, or a setting that only a newer broker image reads"
+		keys := make([]string, len(ignored))
+		for i, k := range ignored {
+			keys[i] = k.String()
+		}
+		body["ignoredKeys"] = keys
+		body["warning"] = "this controller's broker code does not read these keys: a typo, or a setting that only a newer broker image reads (it has no effect on a broker that ignores it)"
 	}
 	return body
 }

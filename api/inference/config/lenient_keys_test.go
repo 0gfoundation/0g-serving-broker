@@ -30,7 +30,11 @@ func TestUnknownKeysAreIgnoredNotRefused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := strings.Join(ignored, "|")
+	var shown []string
+	for _, k := range ignored {
+		shown = append(shown, k.String())
+	}
+	got := strings.Join(shown, "|")
 	for _, want := range []string{`"futureFeature"`, `"futureServiceKnob"`} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("ignored keys %q do not name %s", ignored, want)
@@ -71,8 +75,8 @@ func TestOtherDecodeErrorsStillRefused(t *testing.T) {
 	}
 }
 
-// The broker's own load path: it starts, keeps every known value (the lenient
-// re-decode must neither drop nor duplicate anything), and logs what it ignored.
+// The broker's own load path: it starts, keeps every known value (decoding past the
+// unknown keys must neither drop nor duplicate anything), and logs what it ignored.
 func TestLoadConfig_IgnoresAndLogsUnknownKeys(t *testing.T) {
 	var buf bytes.Buffer
 	orig := log.Writer()
@@ -90,7 +94,7 @@ allowOrigins: ["https://a.example", "https://b.example"]
 		t.Errorf("chatCacheExpiration = %v, want 7m", cfg.ChatCacheExpiration)
 	}
 	if len(cfg.AllowOrigins) != 2 {
-		t.Errorf("allowOrigins = %q, want exactly the 2 configured (re-decode must not append)", cfg.AllowOrigins)
+		t.Errorf("allowOrigins = %q, want exactly the 2 configured", cfg.AllowOrigins)
 	}
 	if cfg.Service.ModelType != "test" {
 		t.Errorf("service.model = %q, want the configured value", cfg.Service.ModelType)
@@ -100,5 +104,26 @@ allowOrigins: ["https://a.example", "https://b.example"]
 		if !strings.Contains(logged, want) {
 			t.Fatalf("log %q is missing %s", logged, want)
 		}
+	}
+}
+
+// The controller section stays strict: the controller is only updated by a redeploy,
+// so tolerance buys nothing there, and some of its settings fail open when a typo
+// drops them (an empty allowedIPs admits every address).
+func TestControllerSectionStillRefusesUnknownKeys(t *testing.T) {
+	for name, extra := range map[string]string{
+		"top of the section": "controller:\n  allowedIP: [\"10.0.0.1\"]\n",
+		"nested sub-section": "controller:\n  docker:\n    hosst: unix:///x\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := ValidateConfigContent([]byte(minimalServiceConfig + extra))
+			if err == nil || !strings.Contains(err.Error(), "controller section is still decoded strictly") {
+				t.Fatalf("ValidateConfigContent() = %v, want the controller-section refusal", err)
+			}
+		})
+	}
+	// A known controller key is of course fine.
+	if err := ValidateConfigContent([]byte(minimalServiceConfig + "controller:\n  docker:\n    host: unix:///x\n")); err != nil {
+		t.Fatalf("known controller keys: %v", err)
 	}
 }
