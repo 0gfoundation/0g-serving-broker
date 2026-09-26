@@ -27,6 +27,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/internal/event"
 	"github.com/0glabs/0g-serving-broker/inference/internal/handler"
 	lorapkg "github.com/0glabs/0g-serving-broker/inference/internal/lora"
+	"github.com/0glabs/0g-serving-broker/inference/internal/overload"
 	"github.com/0glabs/0g-serving-broker/inference/internal/pricefeed"
 	"github.com/0glabs/0g-serving-broker/inference/internal/proxy"
 )
@@ -348,6 +349,11 @@ func Main() {
 	}
 
 	proxy := proxy.New(ctrl, engine, config.AllowOrigins, config.Monitor.Enable, config.ConcurrencyLimit, logger)
+	if guard := overload.Start(ctx, config.OverloadGuard, logger); guard != nil {
+		proxy.SetOverloadGuard(guard)
+		logger.Infof("overload guard enabled: %s, maxQueueRequests=%d maxTokenUsage=%v",
+			config.OverloadGuard.MetricsURL, config.OverloadGuard.MaxQueueRequests, config.OverloadGuard.MaxTokenUsage)
+	}
 	if err := proxy.Start(); err != nil {
 		panic(err)
 	}

@@ -80,6 +80,18 @@ service:
 #   perUserTPMBurst: 10000     # Max burst size for TPM (default: 0)
 #   perUserIPM: 10             # Max images per minute per user (default: 0 = disabled, text-to-image/image-editing)
 #   perUserIPMBurst: 5         # Max burst size for IPM (default: 0)
+# Optional: shed new inference requests with 429 + Retry-After while a self-hosted
+# sglang engine reports itself saturated. The count-based caps above cannot see a
+# KV cache filled by a few long contexts; this reads the engine's own gauges.
+# Chatbot services with a single engine only; sglang needs --enable-metrics.
+# Fails open: a failed scrape or a stale sample sheds nothing.
+# overloadGuard:
+#   enabled: true
+#   metricsUrl: "http://sglang:8000/metrics"
+#   maxQueueRequests: 5      # shed when sglang:num_queue_reqs >= 5 (0 = ignore)
+#   maxTokenUsage: 0.95      # shed when sglang:token_usage >= 0.95 (0 = ignore)
+#   pollInterval: "5s"       # scrape interval; samples older than 3x are ignored (default: 5s)
+#   retryAfter: "30s"        # Retry-After on a shed request (default: 30s)
 # Optional: HTTP client timeouts for broker→provider communication.
 # Tune based on GPU speed and model complexity (e.g., image generation may need longer timeouts).
 # providerHttp:

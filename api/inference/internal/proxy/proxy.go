@@ -23,6 +23,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
+	"github.com/0glabs/0g-serving-broker/inference/internal/overload"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
@@ -54,6 +55,9 @@ type Proxy struct {
 	// unbounded under a flood) with a Prometheus counter plus a bounded
 	// periodic summary log. See rejection.go.
 	rejections *rejectionAggregator
+
+	// overloadGuard is nil unless overloadGuard.enabled; see SetOverloadGuard.
+	overloadGuard *overload.Guard
 }
 
 func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonitor bool, concurrencyConfig config.ConcurrencyLimitConfig, logger log.Logger) *Proxy {
@@ -220,6 +224,10 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 	// preventing queue buildup that degrades throughput.
 	p.serviceGroup.Use(p.globalConcurrencyMiddleware())
 
+	// Shed while the engine itself reports saturation. After the global cap so a
+	// request that would be refused for count anyway is attributed to that gate.
+	p.serviceGroup.Use(p.overloadGuardMiddleware())
+
 	// Apply request size limit middleware (32MB)
 	p.serviceGroup.Use(middleware.RequestSizeLimitMiddleware(middleware.MaxRequestSize))
 
@@ -245,6 +253,69 @@ func (p *Proxy) globalConcurrencyMiddleware() gin.HandlerFunc {
 	return middleware.ConcurrencyLimitMiddleware(p.concurrencyLimiter, func(c *gin.Context) {
 		p.rejections.record(c, monitor.RejectionGlobalConcurrency, "")
 	})
+}
+
+// SetOverloadGuard installs the engine-saturation gate. Call before serving;
+// the middleware is registered in New and consults whatever is set here.
+func (p *Proxy) SetOverloadGuard(g *overload.Guard) {
+	p.overloadGuard = g
+}
+
+// overloadErrorBody is the error envelope of the API family the path speaks.
+// The router first retries a shed request on another provider if it has one;
+// when it has none, it passes this status, Retry-After and body through
+// unchanged (the body is already that family's canonical envelope), so the
+// caller sees "temporarily overloaded" instead of a generic "provider request
+// failed" — and a client calling the broker directly gets a shape its SDK
+// understands. On /messages that is Anthropic's
+// overloaded_error type; Anthropic itself pairs it with status 529, but its SDKs
+// (and Claude Code) retry a 429 just the same.
+func overloadErrorBody(path string, retryAfter int) gin.H {
+	msg := fmt.Sprintf("The model is temporarily overloaded. Please retry in %d seconds.", retryAfter)
+	// Trimmed like apiFormatForPath, so every path the rest of the broker treats
+	// as Anthropic gets the Anthropic envelope here too.
+	if strings.HasSuffix(strings.TrimRight(path, "/"), "/messages") {
+		return gin.H{"type": "error", "error": gin.H{"type": "overloaded_error", "message": msg}}
+	}
+	return gin.H{"error": gin.H{"message": msg, "type": "server_error", "code": "model_overloaded"}}
+}
+
+// overloadGuardMiddleware rejects new inference requests with 429 while the
+// engine is saturated. Only POSTs are gated: GETs on this group (model list,
+// signature and image retrieval) do not load the engine, and refusing a
+// signature fetch would make a response that already completed unverifiable.
+//
+// 429, not 503: the 0G router counts a provider 5xx as a failure (three trip
+// its breaker and drop the endpoint until the next provider sync). A 429 it
+// relays with Retry-After and, with router.throttle_window_seconds > 0 (5 on
+// mainnet and staging), treats as capacity: skip the endpoint briefly if a
+// sibling has room, never mark it unhealthy. With that window at 0 — its kill
+// switch — a 429 is counted as a failure too, so a 429 is the better of the two
+// statuses, not a guarantee. Either way the router tries another provider for
+// the model first, when there is one. A deliberate shed must not read as the box being
+// broken.
+func (p *Proxy) overloadGuardMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if c.Request.Method != http.MethodPost {
+			c.Next()
+			return
+		}
+		overloaded, _ := p.overloadGuard.Check()
+		if !overloaded {
+			c.Next()
+			return
+		}
+		// Expected capacity shedding, kept out of ErrorCount like the global
+		// concurrency cap. Attributed to upstream, not client: the caller did
+		// nothing wrong, the engine is full — which is exactly what the upstream
+		// capacity alerts watch for.
+		c.Set("ignoreError", true)
+		c.Set(monitor.CtxKeyFailureSource, monitor.FailureSourceUpstream)
+		p.rejections.record(c, monitor.RejectionBackendOverloaded, "")
+		retryAfter := p.overloadGuard.RetryAfterSeconds()
+		c.Header("Retry-After", strconv.Itoa(retryAfter))
+		c.AbortWithStatusJSON(http.StatusTooManyRequests, overloadErrorBody(c.Request.URL.Path, retryAfter))
+	}
 }
 
 // buildPerUserOverrides converts the operator-supplied per-address override

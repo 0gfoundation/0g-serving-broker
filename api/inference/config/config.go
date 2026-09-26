@@ -1186,6 +1186,7 @@ type Config struct {
 	VideoPoll           VideoPollConfig         `yaml:"videoPoll"`
 	ProviderHttp        ProviderHttpConfig      `yaml:"providerHttp"`
 	ConcurrencyLimit    ConcurrencyLimitConfig  `yaml:"concurrencyLimit"`
+	OverloadGuard       OverloadGuardConfig     `yaml:"overloadGuard"`
 	UserUsageStats      UserUsageStatsConfig    `yaml:"userUsageStats"`
 	Reconciliation      ReconciliationConfig    `yaml:"reconciliation"`
 	// AllowTokenBilledSpeechToText opens the billing path for token-billed
@@ -1376,6 +1377,44 @@ type ProviderHttpConfig struct {
 	ResponseHeaderTimeout time.Duration `yaml:"responseHeaderTimeout"`
 	// Deprecated: use ResponseHeaderTimeout. Removed after config.DeprecationRemovalDate.
 	ResponseHeaderTimeoutMinutes int `yaml:"responseHeaderTimeoutMinutes,omitempty"`
+}
+
+// OverloadGuardConfig sheds new inference requests with 429 + Retry-After while
+// the model engine behind the broker reports itself saturated (see
+// internal/overload). Off by default. It is meant for a single self-hosted
+// sglang engine started with --enable-metrics, whose Prometheus endpoint
+// publishes sglang:num_queue_reqs and sglang:token_usage; a scrape missing
+// either is treated as failed. One metricsUrl describes one engine, so it is
+// refused at load for anything but a chatbot service whose models all forward
+// to service.targetUrl.
+//
+// The count-based gates (concurrencyLimit, and any request-counting proxy in
+// front of the engine such as phala-inference-guard) cannot see this state: a handful of long contexts can fill the KV
+// cache while the request count stays low, and every new request then queues
+// for minutes before failing on a timeout. This gate reads the engine's own
+// gauges and turns that wait into an immediate, explicit rejection.
+//
+// It fails open: when a scrape fails, or the last sample is older than three
+// poll intervals, nothing is shed.
+type OverloadGuardConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// MetricsURL is the engine's Prometheus text endpoint, e.g.
+	// http://sglang:8000/metrics.
+	MetricsURL string `yaml:"metricsUrl"`
+	// MaxQueueRequests sheds once this many requests are waiting in the engine's
+	// queue (sglang:num_queue_reqs >= value). 0 disables this condition.
+	MaxQueueRequests int `yaml:"maxQueueRequests"`
+	// MaxTokenUsage sheds once the KV cache is at least this fraction full
+	// (sglang:token_usage >= value), within [0, 1]; 0 disables this condition.
+	MaxTokenUsage float64 `yaml:"maxTokenUsage"`
+	// PollInterval is how often the endpoint is scraped (at least 1s); it also
+	// bounds each scrape and, times three, how old a sample may be before it is
+	// ignored. Write it with a unit ("5s"): a bare integer decodes as nanoseconds.
+	PollInterval time.Duration `yaml:"pollInterval"`
+	// RetryAfter is sent as the Retry-After header on a shed request, 1s-60s:
+	// the OpenAI and Anthropic SDKs ignore a Retry-After above 60s and fall back
+	// to their own, much shorter, backoff.
+	RetryAfter time.Duration `yaml:"retryAfter"`
 }
 
 type LogPathsConfig struct {
@@ -2117,6 +2156,49 @@ func normalizeYAMLValue(v interface{}) interface{} {
 	}
 }
 
+// validateOverloadGuard refuses to boot on a guard that is enabled but could
+// never shed (no condition set) or could not be polled, rather than leaving an
+// operator believing the box is protected.
+func validateOverloadGuard(g *OverloadGuardConfig, svc *Service) error {
+	if !g.Enabled {
+		return nil
+	}
+	if svc.Type != constant.ServiceTypeChatbot {
+		return fmt.Errorf("invalid config: overloadGuard is only supported for service type '%s', got '%s'", constant.ServiceTypeChatbot, svc.Type)
+	}
+	// One metricsUrl describes one engine. A model forwarded elsewhere would be
+	// shed on another engine's saturation, and its own would go unseen.
+	for _, e := range svc.ModelPricing {
+		// Trailing-slash insensitive, as EffectiveAdditionalSecret compares the
+		// same two fields.
+		if e.TargetURL != "" && strings.TrimRight(e.TargetURL, "/") != strings.TrimRight(svc.TargetURL, "/") {
+			return fmt.Errorf("invalid config: overloadGuard watches a single engine, but modelPricing entry %q forwards to its own targetUrl", e.Model)
+		}
+	}
+	if g.MetricsURL == "" {
+		return fmt.Errorf("invalid config: overloadGuard.metricsUrl is required when overloadGuard.enabled is true")
+	}
+	if u, err := url.Parse(g.MetricsURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("invalid config: overloadGuard.metricsUrl %q must be an absolute http(s) URL", g.MetricsURL)
+	}
+	if g.MaxQueueRequests < 0 {
+		return fmt.Errorf("invalid config: overloadGuard.maxQueueRequests (%d) must not be negative", g.MaxQueueRequests)
+	}
+	if g.MaxTokenUsage < 0 || g.MaxTokenUsage > 1 {
+		return fmt.Errorf("invalid config: overloadGuard.maxTokenUsage (%v) must be within [0, 1]", g.MaxTokenUsage)
+	}
+	if g.MaxQueueRequests == 0 && g.MaxTokenUsage == 0 {
+		return fmt.Errorf("invalid config: overloadGuard is enabled but neither maxQueueRequests nor maxTokenUsage is set, so it would never shed")
+	}
+	if g.PollInterval < time.Second {
+		return fmt.Errorf("invalid config: overloadGuard.pollInterval (%v) must be at least 1s (write it with a unit, e.g. \"5s\")", g.PollInterval)
+	}
+	if g.RetryAfter < time.Second || g.RetryAfter > time.Minute {
+		return fmt.Errorf("invalid config: overloadGuard.retryAfter (%v) must be between 1s and 60s: SDK clients ignore a longer Retry-After and retry sooner", g.RetryAfter)
+	}
+	return nil
+}
+
 // validatePriceFeedConfig validates (and normalizes with defaults) the price-feed
 // configuration. Only invoked when service.priceDenomination == "USD".
 func validatePriceFeedConfig(pf *PriceFeedConfig) error {
@@ -2569,6 +2651,10 @@ func applyAndValidate(cfg *Config, raw map[string]interface{}) error {
 	}
 	if cfg.VideoPoll.CleanupInterval <= 0 {
 		return fmt.Errorf("invalid config: videoPoll.cleanupInterval (%v) must be positive", cfg.VideoPoll.CleanupInterval)
+	}
+
+	if err := validateOverloadGuard(&cfg.OverloadGuard, &cfg.Service); err != nil {
+		return err
 	}
 
 	// Token-billed STT startup gate. Until #530 lands a per-row billing-unit
@@ -3156,6 +3242,10 @@ func defaultConfig() *Config {
 		ProviderHttp: ProviderHttpConfig{
 			TotalTimeout:          15 * time.Minute,
 			ResponseHeaderTimeout: 15 * time.Minute,
+		},
+		OverloadGuard: OverloadGuardConfig{
+			PollInterval: 5 * time.Second,
+			RetryAfter:   30 * time.Second,
 		},
 	}
 }

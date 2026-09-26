@@ -207,7 +207,7 @@ const CtxKeyFailureSource = "failureSource"
 
 // Rejection reason label values for RequestRejectedTotal. These are the only
 // strings ever passed to RecordRejection, keeping the metric's cardinality
-// bounded. Group: admission gates (rate/tpm/ipm/concurrency/global_concurrency/model_mismatch/model_expired),
+// bounded. Group: admission gates (rate/tpm/ipm/concurrency/global_concurrency/backend_overloaded/model_mismatch/model_expired),
 // billing gates (insufficient_balance/not_acknowledged/account_not_exist), and
 // the upstream_error catch-all for validation failures whose specific cause
 // isn't classified. Every constant here has a live emit site — a reason is not
@@ -229,6 +229,12 @@ const (
 	// distinct from RejectionConcurrency above, which is the PER-USER one. Both
 	// shed for capacity; only this one is broker-wide.
 	RejectionGlobalConcurrency = "global_concurrency"
+
+	// RejectionBackendOverloaded is the overload guard: the model engine's own
+	// gauges (queue depth / KV usage) say it is saturated. Unlike the two
+	// concurrency caps it does not count requests, so it fires even when very
+	// few are in flight.
+	RejectionBackendOverloaded = "backend_overloaded"
 )
 
 // CtxKeyRejectionReason is the gin context key under which a request handler
@@ -262,6 +268,7 @@ func PrometheusInit(serverName, providerAddress string) {
 		panic("provider address must be a 0x-prefixed 40-hex-char address, got: " + providerAddress)
 	}
 	constLabels := prometheus.Labels{"server": serverName, "provider_address": providerAddress}
+	promConstLabels = constLabels
 
 	RequestCount = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -462,7 +469,7 @@ func PrometheusInit(serverName, providerAddress string) {
 	RequestRejectedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_requests_rejected_total",
-			Help:        "Total number of requests rejected before reaching the upstream, labeled by reason (rate_limit, tpm_limit, ipm_limit, concurrency, global_concurrency, model_mismatch, model_expired, insufficient_balance, not_acknowledged, account_not_exist, upstream_error). global_concurrency is the broker-wide capacity cap and is the only reason an UNAUTHENTICATED caller can drive: it aborts ahead of session validation, so it carries no user attribution.",
+			Help:        "Total number of requests rejected before reaching the upstream, labeled by reason (rate_limit, tpm_limit, ipm_limit, concurrency, global_concurrency, backend_overloaded, model_mismatch, model_expired, insufficient_balance, not_acknowledged, account_not_exist, upstream_error). global_concurrency (the broker-wide capacity cap) and backend_overloaded (the engine reports itself saturated) are the reasons an UNAUTHENTICATED caller can drive: both abort ahead of session validation, so they carry no user attribution.",
 			ConstLabels: constLabels,
 		},
 		[]string{"reason"},
@@ -489,6 +496,50 @@ func PrometheusInit(serverName, providerAddress string) {
 	prometheus.MustRegister(RoutingProofSkippedTotal)
 	prometheus.MustRegister(RequestRejectedTotal)
 	prometheus.MustRegister(FailureCount)
+}
+
+// promConstLabels are the const labels PrometheusInit stamped on every series,
+// kept for metrics registered later. Nil when monitoring is disabled.
+var promConstLabels prometheus.Labels
+
+var overloadGuardUp, overloadGuardShedding prometheus.Gauge
+
+// EnableOverloadGuardMetrics registers the overload guard's two gauges. Call it
+// once, after PrometheusInit, and only when the guard is enabled: a box without
+// the guard must not export an "up = 0" that reads as a guard that broke. No-op
+// when monitoring is disabled.
+func EnableOverloadGuardMetrics() {
+	if promConstLabels == nil || overloadGuardUp != nil {
+		return
+	}
+	overloadGuardUp = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name:        "broker_overload_guard_up",
+		Help:        "1 when the overload guard's last metrics scrape succeeded, 0 when it failed (the guard then admits everything). Alert on 0 sustained: the engine is unprotected.",
+		ConstLabels: promConstLabels,
+	})
+	overloadGuardShedding = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name:        "broker_overload_guard_shedding",
+		Help:        "1 while the overload guard is shedding new inference requests because the engine reports saturation, else 0.",
+		ConstLabels: promConstLabels,
+	})
+	prometheus.MustRegister(overloadGuardUp, overloadGuardShedding)
+}
+
+// SetOverloadGuardState records the guard's state after a scrape. Safe to call
+// when EnableOverloadGuardMetrics was not (no-op).
+func SetOverloadGuardState(up, shedding bool) {
+	if overloadGuardUp == nil {
+		return
+	}
+	overloadGuardUp.Set(boolToFloat(up))
+	overloadGuardShedding.Set(boolToFloat(shedding))
+}
+
+func boolToFloat(b bool) float64 {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // StartDAUUpdater starts a background goroutine that periodically queries the database

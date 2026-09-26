@@ -16,6 +16,9 @@ POST /chat/completions
   ├─ global concurrency cap        → reject (global_concurrency)
   │     runs FIRST, as middleware, before the session is even validated,
   │     so it resolves no user address and attributes to none
+  ├─ engine saturation (overloadGuard) → reject (backend_overloaded)
+  │     POST only, same pre-session position; reads the engine's own
+  │     queue / KV gauges instead of counting requests
   ├─ per-user RPM limit            → reject (rate_limit)
   ├─ per-user TPM limit            → reject (tpm_limit)
   ├─ per-user IPM limit            → reject (ipm_limit)
@@ -50,6 +53,7 @@ broker_requests_rejected_total{reason="tpm_limit"}
 broker_requests_rejected_total{reason="ipm_limit"}
 broker_requests_rejected_total{reason="concurrency"}        # per-user concurrency cap
 broker_requests_rejected_total{reason="global_concurrency"} # broker-wide maxGlobalConcurrent cap
+broker_requests_rejected_total{reason="backend_overloaded"} # overloadGuard: engine queue / KV saturated
 broker_requests_rejected_total{reason="model_expired"}      # model past its retirement date
 broker_requests_rejected_total{reason="model_mismatch"}
 broker_requests_rejected_total{reason="insufficient_balance"}
@@ -98,8 +102,31 @@ first time the exclusion is expressible:
 rate(broker_request_failures_total{source="broker", code!="global_concurrency"}[5m])
 
 # capacity pressure, tracked on its own
-rate(broker_requests_rejected_total{reason="global_concurrency"}[5m])
+rate(broker_requests_rejected_total{reason=~"global_concurrency|backend_overloaded"}[5m])
 ```
+
+`backend_overloaded` is a 429 recorded under `source="upstream"`, not `broker`: the
+engine is full and the caller did nothing wrong. It therefore does count toward
+upstream-failure alerts, deliberately — a saturated engine is exactly what those
+should page on. Sustained `backend_overloaded` means the engine itself is full
+(queue or KV cache), typically from a few very long requests rather than many —
+look at the engine's running/queue/KV panels, not at the broker's concurrency caps.
+
+The guard also exports two gauges, registered only when it is enabled and
+monitoring is on (a box without the guard exports neither, so a sustained
+`up == 0` never means "not configured"; right after start it reads 0 until the
+first scrape lands, which is immediate):
+
+```promql
+# enabled but unable to read the engine — it is admitting everything, unprotected
+broker_overload_guard_up == 0            # alert when sustained for a few minutes
+
+# currently shedding
+broker_overload_guard_shedding == 1
+```
+
+`up` drops to 0 on any failed scrape: sglang started without `--enable-metrics`,
+a wrong port, or a gauge renamed by an engine upgrade.
 
 Sustained `global_concurrency` means raise the cap or add capacity, not debug the
 broker. Note it counts unauthenticated traffic too — the cap runs before session
