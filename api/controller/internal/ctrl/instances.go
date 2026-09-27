@@ -321,9 +321,11 @@ type instancePlan struct {
 	// stop is every instance broker and event that exists, events first, all of which
 	// must be down before the record whether or not the instance can be upgraded.
 	stop []string
-	// running is which of stop were running, and the only ones a recovery before the
-	// record starts again. Not "all of stop": one left stopped on an old image by an
-	// earlier failed upgrade must stay down, and one an operator stopped stays stopped.
+	// running is which of stop were running, and the only ones a recovery (before the
+	// record, or after an aborted primary recreate) starts again. Not "all of stop": one
+	// left stopped on an old image by an earlier failed upgrade must stay down. A
+	// completed upgrade recreates every upgradable instance and starts it, stopped or
+	// not, as it does the primary.
 	running map[string]bool
 	// noIngress names the instances whose declared ingress is gone.
 	noIngress map[string]bool
@@ -349,7 +351,7 @@ func (c *Ctrl) planInstances(ctx context.Context) (*instancePlan, error) {
 			}
 			if status == nil {
 				complete = false
-				plan.gone = append(plan.gone, fmt.Errorf("instance %q: container %s is gone and cannot be recreated in-band; redeploy to restore it", in.Name, name))
+				plan.gone = append(plan.gone, fmt.Errorf("instance %q: container %s is gone and cannot be recreated in-band, so the whole instance is left down (its other containers stopped); redeploy to restore it", in.Name, name))
 				continue
 			}
 			if name == in.Broker {
@@ -412,19 +414,22 @@ func (c *Ctrl) upgradeInstance(ctx context.Context, in Instance, ref string, noI
 		result.UpdatedContainers = append(result.UpdatedContainers, *r)
 	}
 	if err != nil {
-		return fmt.Errorf("recreating %s: %w", in.Broker, err)
+		// Created but not started still means the broker container is on ref, and then
+		// the event is moved too, for the reason the health case below gives. Failed
+		// before the create, the old broker is still in place and both stay as they are.
+		brokerErr := fmt.Errorf("recreating %s: %w", in.Broker, err)
+		if r == nil || r.NewContainerID == "" {
+			return brokerErr
+		}
+		return errors.Join(brokerErr, c.recreateInstanceEvent(ctx, in, ref, result))
 	}
 	// A broker that does not come up healthy still gets its event moved onto ref, and
 	// the health failure is reported after. Left on the old image, the event would make
 	// every later config change for this instance refuse (checkOnRef) — and the fix for
 	// a broker that will not start on a new image is usually exactly that config change.
 	healthErr := c.dockerClient.WaitForHealthy(ctx, in.Broker, 2*time.Minute)
-	r, err = c.dockerClient.RecreateContainer(ctx, in.Event, ref)
-	if r != nil {
-		result.UpdatedContainers = append(result.UpdatedContainers, *r)
-	}
-	if err != nil {
-		return errors.Join(healthErr, fmt.Errorf("recreating %s: %w", in.Event, err))
+	if err := c.recreateInstanceEvent(ctx, in, ref, result); err != nil {
+		return errors.Join(healthErr, err)
 	}
 	if healthErr != nil {
 		return fmt.Errorf("%s did not become healthy on the new image (fix its config with PUT /v1/config/core?instance=%s): %w", in.Broker, in.Name, healthErr)
@@ -533,4 +538,15 @@ func (c *Ctrl) restartOnRef(ctx context.Context, plan *instancePlan) {
 			c.logger.Errorf("[UpdateImages] Could not restart %s after the aborted upgrade: %v", name, err)
 		}
 	}
+}
+
+func (c *Ctrl) recreateInstanceEvent(ctx context.Context, in Instance, ref string, result *docker.ImageUpdateResult) error {
+	r, err := c.dockerClient.RecreateContainer(ctx, in.Event, ref)
+	if r != nil {
+		result.UpdatedContainers = append(result.UpdatedContainers, *r)
+	}
+	if err != nil {
+		return fmt.Errorf("recreating %s: %w", in.Event, err)
+	}
+	return nil
 }

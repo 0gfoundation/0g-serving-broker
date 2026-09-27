@@ -1085,7 +1085,7 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 	}
 	// The extra instances, inspected before anything is touched: which can be upgraded,
 	// which containers must be stopped, which were running. See planInstances for why a
-	// gone container is reported and a mismatched name refused.
+	// container with no exact match is reported as gone rather than refused.
 	plan, err := c.planInstances(ctx)
 	if err != nil {
 		return nil, err
@@ -1227,8 +1227,14 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 		// handler reports result.Error, not the returned error, when the result
 		// is non-nil — and "RTMR3 is left overstating" is the half an operator
 		// has to act on.
-		err = c.abortImageChange(ctx, err)
-		c.restartOnRef(ctx, plan)
+		aborted := c.abortImageChange(ctx, err)
+		// Only when the record was put back: abortImageChange returns cause itself
+		// exactly then. Otherwise the ledger still names ref, and starting any
+		// old-image instance would be the state the record's invariant forbids.
+		if aborted == err {
+			c.restartOnRef(ctx, plan)
+		}
+		err = aborted
 		result.Success = false
 		result.Error = "failed to recreate broker container: " + err.Error()
 		return result, err
