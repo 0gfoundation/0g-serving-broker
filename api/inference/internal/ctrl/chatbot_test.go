@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"math/big"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/gin-gonic/gin"
 	"github.com/patrickmn/go-cache"
 
 	teeutil "github.com/0glabs/0g-serving-broker/common/tee"
@@ -457,6 +459,50 @@ func TestZGResKeyCondition(t *testing.T) {
 			gotResKey := !svc.TargetSeparated || svc.IsCentralized()
 			if gotResKey != tt.wantResKey {
 				t.Errorf("ZG-Res-Key should be set = %v, got %v", tt.wantResKey, gotResKey)
+			}
+		})
+	}
+}
+
+// A decentralized TargetSeparated provider must forward the upstream id: it is
+// the only key the remote TEE's signature can be fetched under. Every other
+// shape keeps the broker-issued id (#184).
+func TestResponseIDRewrite(t *testing.T) {
+	tests := []struct {
+		name            string
+		providerType    string
+		targetSeparated bool
+		e2eeSealed      bool
+		keepUpstream    bool
+	}{
+		{"decentralized same network", "decentralized", false, false, false},
+		{"decentralized separate target", "decentralized", true, false, true},
+		{"decentralized separate target, sealed", "decentralized", true, true, false},
+		{"centralized", "centralized", true, false, false},
+		{"standard", "standard", true, false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := newChatbotTestCtrl(t, config.Service{ProviderType: tt.providerType, TargetSeparated: tt.targetSeparated})
+			body := []byte(`{"id":"req_300d7255ee21cd41","choices":[{"message":{"content":"hi"}}]}`)
+
+			out, _ := ctrl.sanitizeResponseBody(body, ctrl.responseIDRewrite("k1", tt.e2eeSealed))
+			var got struct{ ID string }
+			if err := json.Unmarshal(out, &got); err != nil {
+				t.Fatal(err)
+			}
+			want := "chatcmpl-k1"
+			if tt.keepUpstream {
+				want = "req_300d7255ee21cd41"
+			}
+			if got.ID != want {
+				t.Errorf("id = %q, want %q", got.ID, want)
+			}
+
+			ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			line, _ := ctrl.sanitizeStreamLine(ginCtx, "data: "+string(body)+"\n", ctrl.responseIDRewrite("k1", tt.e2eeSealed))
+			if !strings.Contains(line, `"id":"`+want+`"`) {
+				t.Errorf("stream line %q does not carry id %q", line, want)
 			}
 		})
 	}
