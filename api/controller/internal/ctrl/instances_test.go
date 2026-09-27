@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -41,21 +42,23 @@ func TestParseInstances(t *testing.T) {
 		raw               string
 		recordUpstreamSet bool
 	}{
-		"not json":                          {raw: "laya"},
-		"unknown field":                     {raw: one(`"name":"x",` + ok + `,"image":"evil"`)},
-		"upper-case name":                   {raw: one(`"name":"Laya",` + ok)},
-		"name with a space":                 {raw: one(`"name":"la ya",` + ok)},
-		"no broker":                         {raw: one(`"name":"x","event":"e1","configFile":"/c1/config.yaml"`)},
-		"broker is the primary's":           {raw: one(`"name":"x","broker":"0g-serving-provider-broker","event":"e1","configFile":"/c1/config.yaml"`)},
-		"ingress is the primary's":          {raw: one(`"name":"x",` + ok + `,"ingress":"broker-ingress"`)},
-		"broker and event are one":          {raw: one(`"name":"x","broker":"b1","event":"b1","configFile":"/c1/config.yaml"`)},
-		"relative config":                   {raw: one(`"name":"x","broker":"b1","event":"e1","configFile":"c1/config.yaml"`)},
-		"unclean config":                    {raw: one(`"name":"x","broker":"b1","event":"e1","configFile":"/c1/../config/config.yaml"`)},
-		"config is the primary's":           {raw: one(`"name":"x","broker":"b1","event":"e1","configFile":"/etc/config/config.yaml"`)},
-		"name declared twice":               {raw: "[{" + `"name":"x",` + ok + "},{" + `"name":"x","broker":"b2","event":"e2","configFile":"/c2/config.yaml"` + "}]"},
-		"container shared by two":           {raw: "[{" + `"name":"x",` + ok + "},{" + `"name":"y","broker":"b1","event":"e2","configFile":"/c2/config.yaml"` + "}]"},
-		"config shared by two":              {raw: "[{" + `"name":"x",` + ok + "},{" + `"name":"y","broker":"b2","event":"e2","configFile":"/c1/config.yaml"` + "}]"},
-		"alongside a recorded upstream set": {raw: one(`"name":"x",` + ok), recordUpstreamSet: true},
+		"not json":                             {raw: "laya"},
+		"unknown field":                        {raw: one(`"name":"x",` + ok + `,"image":"evil"`)},
+		"upper-case name":                      {raw: one(`"name":"Laya",` + ok)},
+		"name with a space":                    {raw: one(`"name":"la ya",` + ok)},
+		"no broker":                            {raw: one(`"name":"x","event":"e1","configFile":"/c1/config.yaml"`)},
+		"broker is the primary's":              {raw: one(`"name":"x","broker":"0g-serving-provider-broker","event":"e1","configFile":"/c1/config.yaml"`)},
+		"ingress is the primary's":             {raw: one(`"name":"x",` + ok + `,"ingress":"broker-ingress"`)},
+		"broker and event are one":             {raw: one(`"name":"x","broker":"b1","event":"b1","configFile":"/c1/config.yaml"`)},
+		"relative config":                      {raw: one(`"name":"x","broker":"b1","event":"e1","configFile":"c1/config.yaml"`)},
+		"unclean config":                       {raw: one(`"name":"x","broker":"b1","event":"e1","configFile":"/c1/../config/config.yaml"`)},
+		"config is the primary's":              {raw: one(`"name":"x","broker":"b1","event":"e1","configFile":"/etc/config/config.yaml"`)},
+		"name declared twice":                  {raw: "[{" + `"name":"x",` + ok + "},{" + `"name":"x","broker":"b2","event":"e2","configFile":"/c2/config.yaml"` + "}]"},
+		"container shared by two":              {raw: "[{" + `"name":"x",` + ok + "},{" + `"name":"y","broker":"b1","event":"e2","configFile":"/c2/config.yaml"` + "}]"},
+		"config shared by two":                 {raw: "[{" + `"name":"x",` + ok + "},{" + `"name":"y","broker":"b2","event":"e2","configFile":"/c1/config.yaml"` + "}]"},
+		"alongside a recorded upstream set":    {raw: one(`"name":"x",` + ok), recordUpstreamSet: true},
+		"contains the primary broker's name":   {raw: one(`"name":"x","broker":"0g-serving-provider-broker-x","event":"e1","configFile":"/c1/config.yaml"`)},
+		"one instance's name inside another's": {raw: "[{" + `"name":"x",` + ok + "},{" + `"name":"y","broker":"b1x","event":"e2","configFile":"/c2/config.yaml"` + "}]"},
 	}
 	for name, tc := range refused {
 		t.Run(name, func(t *testing.T) {
@@ -91,17 +94,22 @@ func TestInstanceAliasesResolve(t *testing.T) {
 	}
 }
 
-// A daemon holding the primary pair, the controller itself and one extra instance,
-// logging every write by container NAME. The primary event's create fails, which is
-// the same stopping point the single-instance tests use: past everything asserted and
-// short of the contract sync, which would need a chain.
-// daemonFaults shapes fakeInstanceDaemon: creates or stops that fail by container
-// name, containers absent from the list, and per-container images (default prevRef).
+// daemonFaults shapes fakeFaultyDaemon, a daemon holding the primary pair, the
+// controller itself and one extra instance, logging every write by container NAME:
+// creates or stops that fail by name, containers absent from the list, neighbours
+// added to it (whose names contain an instance's), and per-container images (default
+// prevRef) and states (default running).
+//
+// The instance tests fail the primary event's create, the same stopping point the
+// single-instance tests use: past everything asserted and short of the contract sync,
+// which would need a chain.
 type daemonFaults struct {
 	failCreate map[string]bool
 	failStop   map[string]bool
 	missing    map[string]bool
+	extra      []string
 	image      map[string]string
+	state      map[string]string
 }
 
 func fakeInstanceDaemon(t *testing.T, l *opLog, failCreate map[string]bool) *docker.Client {
@@ -120,6 +128,9 @@ func fakeFaultyDaemon(t *testing.T, l *opLog, f daemonFaults) *docker.Client {
 		"dddd" + strings.Repeat("4", 60): "laya-broker",
 		"eeee" + strings.Repeat("5", 60): "laya-event",
 		"ffff" + strings.Repeat("6", 60): "laya-ingress",
+	}
+	for i, n := range f.extra {
+		names[fmt.Sprintf("%04d", i)+strings.Repeat("7", 60)] = n
 	}
 	nameOf := func(path, suffix string) string {
 		parts := strings.Split(strings.TrimSuffix(path, suffix), "/")
@@ -175,9 +186,12 @@ func fakeFaultyDaemon(t *testing.T, l *opLog, f daemonFaults) *docker.Client {
 			w.WriteHeader(http.StatusNoContent)
 		case strings.HasSuffix(r.URL.Path, "/json"):
 			n := nameOf(r.URL.Path, "/json")
-			img := prevRef
+			img, state := prevRef, "running"
 			if v, ok := f.image[n]; ok {
 				img = v
+			}
+			if v, ok := f.state[n]; ok {
+				state = v
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"Id":          brokerID,
@@ -185,7 +199,7 @@ func fakeFaultyDaemon(t *testing.T, l *opLog, f daemonFaults) *docker.Client {
 				"RepoDigests": []string{imageRepo + "@" + testDigest},
 				"Created":     "2026-01-01T00:00:00Z",
 				"Config":      map[string]any{"Image": img},
-				"State":       map[string]any{"Status": "running"},
+				"State":       map[string]any{"Status": state},
 				"NetworkSettings": map[string]any{
 					"Networks": map[string]any{"default": map[string]any{}},
 				},
@@ -352,8 +366,10 @@ func TestInstanceConfigRefusals(t *testing.T) {
 	c := newInstanceCtrl(t, l, nil, filepath.Join(dir, "config.yaml"), laya, nil)
 
 	var invalid *InvalidInstanceError
-	if err := c.ApplyInstanceConfig(context.Background(), "nope", "service:\n  model: x\n"); !errors.As(err, &invalid) {
-		t.Errorf("ApplyInstanceConfig(unknown) = %v, want InvalidInstanceError", err)
+	for _, name := range []string{"nope", ""} {
+		if err := c.ApplyInstanceConfig(context.Background(), name, "service:\n  model: x\n"); !errors.As(err, &invalid) {
+			t.Errorf("ApplyInstanceConfig(%q) = %v, want InvalidInstanceError", name, err)
+		}
 	}
 	if _, err := c.GetInstanceConfig("nope"); !errors.As(err, &invalid) {
 		t.Errorf("GetInstanceConfig(unknown) = %v, want InvalidInstanceError", err)
@@ -443,7 +459,8 @@ func TestInstanceOffTheRecordedImageIsNotStarted(t *testing.T) {
 // name containing it. The instance routes refuse instead of acting on that neighbour.
 func TestInstanceRoutesNeedTheExactContainer(t *testing.T) {
 	l := &opLog{}
-	c := newFaultyInstanceCtrl(t, l, nil, "", "", daemonFaults{missing: map[string]bool{"laya-event": true}})
+	// laya-event-db is the neighbour docker's lookup would settle on.
+	c := newFaultyInstanceCtrl(t, l, nil, "", "", daemonFaults{missing: map[string]bool{"laya-event": true}, extra: []string{"laya-event-db"}})
 
 	for alias, call := range map[string]func() error{
 		"stop":    func() error { return c.StopContainer(context.Background(), "laya-event") },
@@ -457,5 +474,94 @@ func TestInstanceRoutesNeedTheExactContainer(t *testing.T) {
 	}
 	if ops := l.all(); len(ops) != 0 {
 		t.Errorf("ops = %v, want nothing touched", ops)
+	}
+}
+
+// A container left stopped on an old image by an earlier failed upgrade is not brought
+// back by the recovery paths either, which start only what this call found running.
+func TestRecoveryDoesNotStartAStaleInstance(t *testing.T) {
+	for name, tc := range map[string]struct {
+		emitErr  error
+		failStop string
+	}{
+		"failed stop":   {failStop: containerEvent},
+		"failed record": {emitErr: errors.New("dstack.sock: connection refused")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			l := &opLog{}
+			f := daemonFaults{
+				image: map[string]string{"laya-broker": imageRepo + "@sha256:" + strings.Repeat("7", 64)},
+				state: map[string]string{"laya-broker": "exited"},
+			}
+			if tc.failStop != "" {
+				f.failStop = map[string]bool{tc.failStop: true}
+			}
+			c := newFaultyInstanceCtrl(t, l, tc.emitErr, "", "", f)
+			if _, err := c.UpdateImages(context.Background(), testDigest); err == nil {
+				t.Fatal("UpdateImages() = nil, want an error")
+			}
+			if l.indexOf("start laya-broker") >= 0 {
+				t.Errorf("ops = %v, want the stale broker left down", l.all())
+			}
+			if l.indexOf("start laya-event") < 0 {
+				t.Errorf("ops = %v, want the running event started again", l.all())
+			}
+		})
+	}
+}
+
+// A gone instance container cannot hold a key, so it does not block the upgrade: the
+// primary goes ahead, the rest of the instance is stopped and left alone, and the
+// report says what to do.
+func TestUpgradeGoesAheadPastAGoneInstanceContainer(t *testing.T) {
+	l := &opLog{}
+	c := newFaultyInstanceCtrl(t, l, nil, "", "", daemonFaults{
+		missing:    map[string]bool{"laya-event": true},
+		failCreate: map[string]bool{containerEvent: true},
+	})
+
+	result, err := c.UpdateImages(context.Background(), testDigest)
+	if err == nil || !strings.Contains(err.Error(), "laya-event is gone") || !strings.Contains(result.Error, "laya-event is gone") {
+		t.Fatalf("UpdateImages() = %+v, %v; want the gone container reported", result, err)
+	}
+	emit := l.indexOf("emit " + attest.EventImageUpdate)
+	if i := l.indexOf("stop laya-broker"); i < 0 || i > emit {
+		t.Errorf("ops = %v, want the instance broker stopped before the record", l.all())
+	}
+	if l.indexOf("create "+containerBroker) < 0 {
+		t.Errorf("ops = %v, want the primary upgraded", l.all())
+	}
+	if l.indexOf("create laya-broker") >= 0 {
+		t.Errorf("ops = %v, want the incomplete instance left alone", l.all())
+	}
+}
+
+// A declared ingress that resolves to a DIFFERENT container is refused before anything is
+// touched; one that is simply gone is reported after the instance is upgraded.
+func TestInstanceIngressIsCheckedBeforeTheRecord(t *testing.T) {
+	l := &opLog{}
+	c := newFaultyInstanceCtrl(t, l, nil, "", "", daemonFaults{
+		missing: map[string]bool{"laya-ingress": true},
+		extra:   []string{"proj-laya-ingress-1"},
+	})
+	var ambiguous *AmbiguousContainerError
+	if _, err := c.UpdateImages(context.Background(), testDigest); !errors.As(err, &ambiguous) {
+		t.Fatalf("UpdateImages() = %v, want AmbiguousContainerError", err)
+	}
+	if ops := l.all(); len(ops) != 0 {
+		t.Errorf("ops = %v, want nothing touched", ops)
+	}
+
+	l = &opLog{}
+	c = newFaultyInstanceCtrl(t, l, nil, "", "", daemonFaults{
+		missing:    map[string]bool{"laya-ingress": true},
+		failCreate: map[string]bool{containerEvent: true},
+	})
+	result, err := c.UpdateImages(context.Background(), testDigest)
+	if err == nil || !strings.Contains(result.Error, "ingress laya-ingress is gone") {
+		t.Fatalf("UpdateImages() = %+v, %v; want the gone ingress reported", result, err)
+	}
+	if l.indexOf("create laya-event") < 0 {
+		t.Errorf("ops = %v, want the instance upgraded all the same", l.all())
 	}
 }

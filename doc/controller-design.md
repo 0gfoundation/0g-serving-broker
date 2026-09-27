@@ -288,7 +288,28 @@ What each instance gets:
   down rather than on the old image.
 - `GET|PUT /v1/config/core?instance=<name>` reads and writes its config file, recorded
   as `zg-instance-config-update`, restarting only that instance.
-- Container aliases `<name>-broker`, `<name>-event`, `<name>-ingress`.
+- Container aliases `<name>-broker`, `<name>-event`, `<name>-ingress`. Every
+  instance container must exist under its exact `container_name`: docker's lookup
+  falls back to substring matches, so an instance route or upgrade that finds a
+  different container refuses; one whose container is simply gone reports it
+  (redeploy to restore) without blocking the primary's upgrade.
+- Starting an instance's broker or event — its start/restart routes, or the restart a
+  config change does — requires it to run the primary broker's digest. A recreate
+  that failed before removing the old container leaves it stopped on the old image
+  while the record names the new one; it stays down until the next upgrade.
+
+Things to know before relying on it:
+
+- **Readers first.** A reader older than this change refuses a log containing
+  `zg-instance-config-update` (unknown `zg-` event), so update verifiers before the
+  first `PUT ?instance=` on any CVM.
+- **One trust domain.** All instances share the signing and E2EE keys. A verifier of
+  the primary provider sees `ConfigSHA256` only; an instance's config changes show in
+  `InstanceConfigSHA256`, and one who relies on "no config change" should check both.
+- **Outage window.** The instances are upgraded after the primary broker is recreated
+  and before its event and ingress are, so the primary stays unreachable for as long
+  as the instances take (each up to the 2-minute health wait). That order is what
+  keeps a later primary failure from stranding an instance half-upgraded.
 
 ---
 
