@@ -138,7 +138,11 @@ func TestHandleChargingStreamResponse_SealsFrames(t *testing.T) {
 	}
 
 	out := w.Body.String()
-	if strings.Contains(out, "delta") || strings.Contains(out, "hel") {
+	// Look for the plaintext as JSON (quoted), never as a bare substring: the sealed
+	// frames carry random base64url ciphertext, which contains "hel" by chance about
+	// once in a thousand runs. A quote cannot occur in base64url, so these can only
+	// match a plaintext frame.
+	if strings.Contains(out, `"delta"`) || strings.Contains(out, `"hel"`) {
 		t.Fatalf("plaintext stream leaked to client: %s", out)
 	}
 
