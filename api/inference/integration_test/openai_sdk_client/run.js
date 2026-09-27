@@ -73,9 +73,12 @@ async function main() {
       if (!completion.usage || completion.usage.total_tokens !== 12) {
         throw new Error(`unexpected usage: ${JSON.stringify(completion.usage)}`);
       }
-      // #184: the upstream's own id must never leak to the client.
-      if (!completion.id || !completion.id.startsWith("chatcmpl-") || completion.id === "chatcmpl-001") {
-        throw new Error(`expected upstream id rewritten, got ${completion.id}`);
+      // This scenario runs against a decentralized TargetSeparated provider, which keeps
+      // the upstream id: the remote TEE signs under it (responseIDRewrite). Providers
+      // the broker signs for get a broker-issued id instead (#184; see the headers
+      // scenario's Go test).
+      if (completion.id !== "chatcmpl-001") {
+        throw new Error(`expected the upstream id kept, got ${completion.id}`);
       }
       return { content, usage: completion.usage, id: completion.id };
     },

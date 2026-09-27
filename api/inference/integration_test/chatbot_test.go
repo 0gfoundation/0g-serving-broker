@@ -138,12 +138,12 @@ func TestChatbotFlow_NonStream(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("parse response: %v", err)
 	}
-	// The broker rewrites the upstream id to its own chatcmpl-<chatKey> so the
-	// upstream id format cannot fingerprint the provider (#184). The original
-	// upstream id ("chatcmpl-001") must NOT leak through.
-	id, _ := resp["id"].(string)
-	if id == "chatcmpl-001" || !strings.HasPrefix(id, "chatcmpl-") {
-		t.Errorf("expected upstream id rewritten to a broker chatcmpl- id, got %v", resp["id"])
+	// A decentralized TargetSeparated provider keeps the upstream id: the remote TEE
+	// signs under it, the broker sets no ZG-Res-Key, and /signature/{id} is forwarded
+	// upstream by that id (responseIDRewrite, 66767599). Every other shape still gets
+	// the broker-issued id (#184) — see TestCentralizedProvider_NonStream.
+	if resp["id"] != "chatcmpl-001" {
+		t.Errorf("expected the upstream id kept for a decentralized TargetSeparated provider, got %v", resp["id"])
 	}
 
 	// Verify billing headers
