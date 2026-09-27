@@ -817,8 +817,15 @@ func TestOpenAISDK_ResponseHeaders_ZGResKey(t *testing.T) {
 	if !res.OK {
 		t.Fatalf("headers scenario failed: %s (%s)", res.Error, res.ErrType)
 	}
-	if zgResKey, _ := res.Result["zgResKey"].(string); zgResKey == "" {
+	zgResKey, _ := res.Result["zgResKey"].(string)
+	if zgResKey == "" {
 		t.Error("expected the SDK's raw response (.withResponse()) to expose a non-empty ZG-Res-Key header")
+	}
+	// A centralized provider is signed by the broker under chatKey, so the upstream id
+	// is replaced by the broker-issued one (#184) — the counterpart of the nonstream
+	// scenario, where a decentralized TargetSeparated provider keeps it.
+	if id, _ := res.Result["id"].(string); id != "chatcmpl-"+zgResKey {
+		t.Errorf("id = %q, want the broker-issued chatcmpl-%s", id, zgResKey)
 	}
 }
 
