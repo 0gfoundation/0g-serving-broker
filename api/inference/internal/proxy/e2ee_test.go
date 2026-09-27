@@ -201,3 +201,43 @@ func TestProxyE2EESpeechRouteScopingUsesTheDispatcherPath(t *testing.T) {
 		})
 	}
 }
+
+// A decentralized TargetSeparated provider forwards /signature/ upstream, where
+// the remote TEE signs. A sealed reply is signed HERE instead, under the chatKey
+// returned as ZG-Res-Key, so that lookup must be answered from the broker cache:
+// forwarded, the upstream knows no such id and the client fails the request.
+func TestSignatureRouteServesBrokerSignedChatKeyOnSeparatedProvider(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, tt := range []struct {
+		name     string
+		svc      config.Service
+		seeded   bool
+		wantHere bool
+	}{
+		{"separated, broker-signed (sealed) chatKey", config.Service{ProviderType: "decentralized", TargetSeparated: true}, true, true},
+		{"separated, upstream id goes upstream", config.Service{ProviderType: "decentralized", TargetSeparated: true}, false, false},
+		{"same network, cache is authoritative", config.Service{ProviderType: "decentralized"}, false, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			c := &ctrl.Ctrl{Service: tt.svc}
+			c.SetLoggerForTest(noopLogger{})
+			c.SeedChatSignatureForTest("other", ctrl.ChatSignature{Text: "x"})
+			if tt.seeded {
+				c.SeedChatSignatureForTest("3f1c2e", ctrl.ChatSignature{Text: "zg-sig-v1/e2ee-ct:a:b"})
+			}
+			p := &Proxy{ctrl: c, logger: noopLogger{}}
+
+			w := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(w)
+			ctx.Request = httptest.NewRequest(http.MethodGet, constant.ServicePrefix+"/signature/3f1c2e", nil)
+			ctx.Params = gin.Params{{Key: "any", Value: "/signature/3f1c2e"}}
+
+			if got := p.handleSignatureRoute(ctx, "/signature/3f1c2e"); got != tt.wantHere {
+				t.Fatalf("handled here = %v, want %v", got, tt.wantHere)
+			}
+			if tt.seeded && (w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "e2ee-ct")) {
+				t.Fatalf("got %d %s, want the cached §8 signature", w.Code, w.Body.String())
+			}
+		})
+	}
+}

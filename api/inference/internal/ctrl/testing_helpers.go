@@ -57,6 +57,15 @@ func (c *Ctrl) StoreTestImage(chatKey string, images [][]byte) error {
 	return c.imageStore.store(chatKey, images)
 }
 
+// SeedChatSignatureForTest caches sig under chatKey the way the signing paths
+// do, so proxy tests can drive the /signature/ lookup without a full request.
+func (c *Ctrl) SeedChatSignatureForTest(chatKey string, sig ChatSignature) {
+	if c.svcCache == nil {
+		c.svcCache = cache.New(time.Minute, time.Minute)
+	}
+	c.svcCache.Set(c.chatCacheKey(chatKey), sig, time.Minute)
+}
+
 // SetLoggerForTest injects a logger so tests in other packages can drive request
 // paths that log. The chat-profile proxy tests never needed it because they fail
 // before the first log line; the speech route-scoping test reaches the successful
