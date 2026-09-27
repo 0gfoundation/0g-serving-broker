@@ -632,7 +632,7 @@ func (c *Ctrl) ApplyCoreConfig(ctx context.Context, configContent string) error 
 	// the write it guards; on the detached, bounded ctx, like every other docker call
 	// made while holding it.
 	if err := c.checkIgnoredKeysAreSafe(ctx, configContent, primaryTargets); err != nil {
-		return &InvalidConfigError{Err: err}
+		return &UnconfirmedConfigError{Err: err}
 	}
 
 	sum := sha256.Sum256([]byte(configContent))
@@ -890,6 +890,18 @@ func (e *InvalidContainerError) Error() string {
 // InvalidConfigError is returned when the config content is not valid YAML
 type InvalidConfigError struct {
 	Err error
+}
+
+// UnconfirmedConfigError refuses content that decodes but that the controller cannot
+// confirm the containers restarting onto it will load (see checkIgnoredKeysAreSafe) —
+// the content may be fine; what failed is the confirmation. Reported as 400, like
+// InvalidConfigError, because nothing was recorded and the caller must act.
+type UnconfirmedConfigError struct {
+	Err error
+}
+
+func (e *UnconfirmedConfigError) Error() string {
+	return "config not applied, it could not be confirmed safe: " + e.Err.Error()
 }
 
 func (e *InvalidConfigError) Error() string {
@@ -1518,7 +1530,10 @@ func (c *Ctrl) runningImagesAccept(ctx context.Context, content string, targets 
 	for _, t := range targets {
 		code, out, err := c.dockerClient.RunInContainer(ctx, t.name, []string{brokerBinary, "0g-validate-config", "-"}, []byte(content))
 		if err != nil {
-			return fmt.Errorf("%s's image could not be asked to validate it: %w", t.role, err)
+			// Typically the container is not running — e.g. crash-looping on a value its
+			// image rejects — and docker cannot exec into it. Content without the ignored
+			// keys needs no confirmation, so that is the way back.
+			return fmt.Errorf("%s's image could not be asked to validate it (%v); if it is down, push the config without these keys to bring it back, then add them again", t.role, err)
 		}
 		if code != 0 {
 			return fmt.Errorf("%s's image refuses it (exit %d): %s", t.role, code, out)
@@ -1564,7 +1579,7 @@ func (c *Ctrl) ignoredKeysImageWarning(ctx context.Context, target string) strin
 	if own, err := c.ownDigest(ctx); err == nil && own == target {
 		return ""
 	}
-	return fmt.Sprintf("a config on disk has keys this controller's broker code does not read (%s). The image being switched to is expected to read them; if it is instead an older image that decodes config strictly (before unknown-key tolerance), those containers will refuse to start — remove those keys first", strings.Join(names, ", "))
+	return fmt.Sprintf("a config on disk has keys this controller's broker code does not read (%s). The image being switched to is expected to read them, but no image that reads them has validated their values yet; if it rejects one, or is an older image that decodes config strictly (before unknown-key tolerance), those containers will refuse to start. Check first with: docker run --rm -i <that image> 0g-validate-config - < config.yaml", strings.Join(names, ", "))
 }
 
 // RunningBrokerDigest reports the digest of the image the broker container runs.

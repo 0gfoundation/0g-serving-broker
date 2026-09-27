@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/0glabs/0g-serving-broker/controller/internal/docker"
 	"github.com/0glabs/0g-serving-broker/inference/cmd/validateconfig"
@@ -26,6 +27,8 @@ const (
 	validates  = "pass"
 	oldImage   = "old"         // no such applet: exits non-zero and writes nothing
 	silentZero = "silent-zero" // exit 0 but no confirmation, like a null docker exit code
+	notRunning = "not-running" // docker refuses the exec: the container is down or restarting
+	hangs      = "hangs"       // the stream never ends
 )
 
 // wantContent, when set, is what the fake validator requires on its stdin.
@@ -100,6 +103,11 @@ func splitImageDaemon(t *testing.T, cs ...guardContainer) *docker.Client {
 				if !strings.Contains(r.URL.Path, "/containers/"+ct.id+"/") {
 					continue
 				}
+				if ct.validator == notRunning {
+					w.WriteHeader(http.StatusConflict)
+					_ = json.NewEncoder(w).Encode(map[string]any{"message": "container " + ct.id + " is restarting, wait until the container is running"})
+					return
+				}
 				n++
 				id := fmt.Sprintf("exec%d", n)
 				pending[id] = pendingExec{validator: ct.validator, cmd: body.Cmd, stdin: body.AttachStdin}
@@ -126,6 +134,10 @@ func splitImageDaemon(t *testing.T, cs ...guardContainer) *docker.Client {
 			defer conn.Close()
 			_, _ = buf.WriteString("HTTP/1.1 101 UPGRADED\r\nContent-Type: application/vnd.docker.multiplexed-stream\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n")
 			_ = buf.Flush()
+			if pe.validator == hangs {
+				<-r.Context().Done() // never answer; the client must give up on its own
+				return
+			}
 			input, _ := io.ReadAll(buf) // until the client's CloseWrite
 			res := decide(pe, input)
 			execs[id] = res
@@ -207,8 +219,8 @@ func TestConfigChangeRefusesIgnoredKeysWhenTheBrokerRunsAnotherImage(t *testing.
 	c.dockerClient = splitImageDaemon(t, containers(testDigest, prevDigest, oldImage, validates)...)
 
 	err := c.ApplyCoreConfig(context.Background(), "service:\n  model: after\nfutureFeature: 1\n")
-	if _, ok := err.(*InvalidConfigError); !ok {
-		t.Fatalf("ApplyCoreConfig() = %v, want an InvalidConfigError (400)", err)
+	if _, ok := err.(*UnconfirmedConfigError); !ok {
+		t.Fatalf("ApplyCoreConfig() = %v, want an UnconfirmedConfigError (400)", err)
 	}
 	for _, want := range []string{`"futureFeature"`, testDigest, prevDigest, "applet not found"} {
 		if !strings.Contains(err.Error(), want) {
@@ -259,7 +271,7 @@ func TestImageSwitchWarnsAboutIgnoredKeysOnDisk(t *testing.T) {
 
 	l := &opLog{}
 	c := newChangeCtrl(t, l, nil, withFuture, okPull)
-	if w := c.ignoredKeysImageWarning(context.Background(), testDigest); !strings.Contains(w, `"futureFeature"`) || !strings.Contains(w, "remove those keys first") {
+	if w := c.ignoredKeysImageWarning(context.Background(), testDigest); !strings.Contains(w, `"futureFeature"`) || !strings.Contains(w, "0g-validate-config - < config.yaml") {
 		t.Errorf("switching to another image with ignored keys on disk: warning = %q, want one naming the key", w)
 	}
 	if w := c.ignoredKeysImageWarning(context.Background(), prevDigest); w != "" {
@@ -419,8 +431,8 @@ func TestInstanceConfigChangeIsGuardedToo(t *testing.T) {
 				guardContainer{selfID, "0g-controller", prevDigest, validates},
 			)
 			err := c.ApplyInstanceConfig(context.Background(), "b2", "service:\n  model: after\nfutureFeature: 1\n")
-			var invalid *InvalidConfigError
-			if !errors.As(err, &invalid) || !strings.Contains(err.Error(), tc.wantErr) {
+			var unconfirmed *UnconfirmedConfigError
+			if !errors.As(err, &unconfirmed) || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("ApplyInstanceConfig() = %v, want a 400 mentioning %q", err, tc.wantErr)
 			}
 			if ops := l.all(); len(ops) != 0 {
@@ -450,5 +462,38 @@ func TestImageSwitchWarnsAboutIgnoredKeysInAnInstanceConfig(t *testing.T) {
 	c.instances = []Instance{{Name: "b2", Broker: "b2-broker", Event: "b2-event", ConfigFile: inst}}
 	if w := c.ignoredKeysImageWarning(context.Background(), testDigest); !strings.Contains(w, `"instanceFeature"`) || !strings.Contains(w, inst) {
 		t.Fatalf("warning = %q, want it to name the instance config's key and file", w)
+	}
+}
+
+// A container that is not running cannot be asked, and docker refuses the exec. That
+// is the crash-looping-on-a-bad-value case, so the refusal must say the way back: the
+// content without the ignored keys needs no confirmation.
+func TestUnconfirmableWhileDownSaysHowToRecover(t *testing.T) {
+	l := &opLog{}
+	c := newChangeCtrl(t, l, nil, filepath.Join(t.TempDir(), "config.yaml"), okPull)
+	c.dockerClient = splitImageDaemon(t, containers(testDigest, testDigest, notRunning, validates)...)
+	err := c.checkIgnoredKeysAreSafe(context.Background(), "futureFeature: 1\n", primaryTargets)
+	if err == nil || !strings.Contains(err.Error(), "push the config without these keys") {
+		t.Fatalf("checkIgnoredKeysAreSafe() = %v, want the recovery hint", err)
+	}
+}
+
+// The exec stream's I/O is bounded by ctx: a peer that never ends the stream must not
+// hold the change lock forever.
+func TestValidationDoesNotHangOnAStreamThatNeverEnds(t *testing.T) {
+	l := &opLog{}
+	c := newChangeCtrl(t, l, nil, filepath.Join(t.TempDir(), "config.yaml"), okPull)
+	c.dockerClient = splitImageDaemon(t, containers(testDigest, testDigest, hangs, validates)...)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- c.checkIgnoredKeysAreSafe(ctx, "futureFeature: 1\n", primaryTargets) }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a validation that never answered must not count as accepted")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("checkIgnoredKeysAreSafe did not return after its ctx expired")
 	}
 }
