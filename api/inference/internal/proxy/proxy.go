@@ -1172,6 +1172,16 @@ func (p *Proxy) handleSignatureRoute(ctx *gin.Context, targetRoute string) bool 
 		ctx.JSON(http.StatusOK, sig)
 		return true
 	}
+
+	// Decentralized TargetSeparated: the remote TEE signs, so the lookup normally
+	// goes upstream. A sealed E2EE reply is the exception — the broker signs its
+	// §8 binding and caches it under the chatKey it returned as ZG-Res-Key — so
+	// serve a cache hit here. Forwarding that chatKey upstream finds nothing
+	// (Redpill: 404 "receipt id not found"), and the client fails the request.
+	if sig, err := p.ctrl.GetChatSignature(chatID); err == nil {
+		ctx.JSON(http.StatusOK, sig)
+		return true
+	}
 	return false
 }
 
