@@ -1083,12 +1083,12 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 	if err := c.verifyExactContainer(ctx, eventName); err != nil {
 		return nil, err
 	}
-	for _, in := range c.instances {
-		for _, name := range []string{in.Broker, in.Event} {
-			if err := c.verifyExactContainer(ctx, name); err != nil {
-				return nil, fmt.Errorf("instance %q: %w", in.Name, err)
-			}
-		}
+	// The extra instances, inspected before anything is touched: which can be upgraded,
+	// which containers must be stopped, which were running. See planInstances for why a
+	// gone container is reported and a mismatched name refused.
+	plan, err := c.planInstances(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	// The address the broker's signing key will have once it runs ref, derived before anything
@@ -1138,22 +1138,20 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 	// Every extra instance first, and all of it before the record: the record must not
 	// exist while ANY broker is alive that is not on ref, and these sign under the same
 	// key as the primary.
-	for _, in := range c.instances {
-		for _, name := range []string{in.Event, in.Broker} {
-			if err := c.dockerClient.StopContainer(ctx, name); err != nil {
-				if _, ok := err.(*docker.ContainerNotFoundError); !ok {
-					c.startAfterFailedStop(ctx)
-					result.Success = false
-					result.Error = "failed to stop " + name + ": " + err.Error()
-					return result, err
-				}
+	for _, name := range plan.stop {
+		if err := c.dockerClient.StopContainer(ctx, name); err != nil {
+			if _, ok := err.(*docker.ContainerNotFoundError); !ok {
+				c.restartRunning(ctx, plan, "a failed stop")
+				result.Success = false
+				result.Error = "failed to stop " + name + ": " + err.Error()
+				return result, err
 			}
 		}
 	}
 	if err := c.dockerClient.StopContainer(ctx, eventName); err != nil {
 		// Log error but continue - container might not exist
 		if _, ok := err.(*docker.ContainerNotFoundError); !ok {
-			c.startAfterFailedStop(ctx)
+			c.restartRunning(ctx, plan, "a failed stop")
 			result.Success = false
 			result.Error = "failed to stop event container: " + err.Error()
 			return result, err
@@ -1163,7 +1161,7 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 	// Then stop broker
 	if err := c.dockerClient.StopContainer(ctx, brokerName); err != nil {
 		if _, ok := err.(*docker.ContainerNotFoundError); !ok {
-			c.startAfterFailedStop(ctx)
+			c.restartRunning(ctx, plan, "a failed stop")
 			result.Success = false
 			result.Error = "failed to stop broker container: " + err.Error()
 			return result, err
@@ -1207,11 +1205,12 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 		// one leaves settlement and event processing down while the broker answers
 		// requests — an outage in the half nobody is watching, reported as an error that
 		// mentions only RTMR3.
-		for _, name := range append([]string{brokerName, eventName}, c.instanceContainers()...) {
+		for _, name := range []string{brokerName, eventName} {
 			if startErr := c.dockerClient.StartContainer(startCtx, name); startErr != nil {
 				c.logger.Errorf("[UpdateImages] Could not restart %s after failing to record the change: %v", name, startErr)
 			}
 		}
+		c.restartRunning(ctx, plan, "failing to record the change")
 		result.Success = false
 		result.Error = "failed to record the image change in RTMR3: " + err.Error()
 		return result, fmt.Errorf("recording the image change to %s in RTMR3: %w", ref, err)
@@ -1246,7 +1245,7 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 	// and on the old image; the start paths refuse it (checkInstanceOnRef) so it stays
 	// down, which is the direction the record allows. The failure is reported with
 	// whatever the primary's own outcome is, on every return below.
-	instErr := c.upgradeInstances(ctx, ref, result)
+	instErr := c.upgradeInstances(ctx, ref, plan, result)
 	withInst := func(res *docker.ImageUpdateResult, err error) (*docker.ImageUpdateResult, error) {
 		if instErr == nil {
 			return res, err
@@ -1416,24 +1415,31 @@ func (c *Ctrl) CurrentKeyIdentity(ctx context.Context) (attestproxy.KeyIdentity,
 // container at all. A key derived from a guess would still produce signatures that verify,
 // which is the one outcome worse than refusing to sign.
 func (c *Ctrl) RunningBrokerDigest(ctx context.Context) (string, error) {
-	status, err := c.dockerClient.GetContainerStatus(ctx, containerBroker)
+	return c.containerDigest(ctx, containerBroker)
+}
+
+// containerDigest is RunningBrokerDigest for any container, by exact name. The extra
+// instances are held to the primary's digest through it (checkOnRef), and resolving
+// both sides with one function is what keeps that comparison like for like.
+func (c *Ctrl) containerDigest(ctx context.Context, name string) (string, error) {
+	status, err := c.dockerClient.GetContainerStatus(ctx, name)
 	if err != nil {
-		return "", fmt.Errorf("reading the broker's image: %w", err)
+		return "", fmt.Errorf("reading %s's image: %w", name, err)
 	}
 	if status == nil {
-		return "", fmt.Errorf("no %s container", containerBroker)
+		return "", fmt.Errorf("no %s container", name)
 	}
 	// Container lookup falls back to a shortest-substring match, which is fine for a status
 	// endpoint and not for this: a neighbour's digest would key a signature the client
 	// attributes to the broker.
-	if status.Name != containerBroker {
-		return "", fmt.Errorf("%q resolved to container %q, not the broker", containerBroker, status.Name)
+	if status.Name != name {
+		return "", fmt.Errorf("%q resolved to container %q, not the one asked for", name, status.Name)
 	}
 	// A reference that pins a digest already names the image the container was created on,
 	// and no lookup can improve on it.
 	if _, digest, pinned := strings.Cut(status.Image, "@"); pinned {
 		if !imageDigestPattern.MatchString(digest) {
-			return "", fmt.Errorf("the broker runs %q, whose digest is malformed", status.Image)
+			return "", fmt.Errorf("%s runs %q, whose digest is malformed", name, status.Image)
 		}
 		return digest, nil
 	}
@@ -1447,7 +1453,7 @@ func (c *Ctrl) RunningBrokerDigest(ctx context.Context) (string, error) {
 	// from the image a reviewer approved while the unreviewed one answered, which is the
 	// exact substitution this whole arrangement exists to prevent.
 	if status.ImageID == "" {
-		return "", fmt.Errorf("the broker runs %q, which pins no digest, and the daemon reported no image ID", status.Image)
+		return "", fmt.Errorf("%s runs %q, which pins no digest, and the daemon reported no image ID", name, status.Image)
 	}
 	info, err := c.dockerClient.GetImageInfo(ctx, status.ImageID)
 	if err != nil {

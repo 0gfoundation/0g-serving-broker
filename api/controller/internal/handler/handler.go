@@ -189,7 +189,9 @@ func (h *Handler) RestartContainer(ctx *gin.Context) {
 func (h *Handler) GetCoreConfig(ctx *gin.Context) {
 	var content string
 	var err error
-	if instance := ctx.Query("instance"); instance != "" {
+	// GetQuery, not Query: a present-but-empty ?instance= (an unset $NAME in a script)
+	// must be refused as an unknown instance, never fall through to the primary.
+	if instance, ok := ctx.GetQuery("instance"); ok {
 		content, err = h.ctrl.GetInstanceConfig(instance)
 	} else {
 		content, err = h.ctrl.GetCoreConfig()
@@ -222,7 +224,9 @@ func (h *Handler) UpdateCoreConfig(ctx *gin.Context) {
 	}
 
 	var err error
-	if instance := ctx.Query("instance"); instance != "" {
+	// GetQuery for the reason GetCoreConfig gives: an empty ?instance= would otherwise
+	// write another provider's config over the primary's, and it would validate.
+	if instance, ok := ctx.GetQuery("instance"); ok {
 		err = h.ctrl.ApplyInstanceConfig(ctx, instance, req.Config)
 	} else {
 		err = h.ctrl.ApplyCoreConfig(ctx, req.Config)

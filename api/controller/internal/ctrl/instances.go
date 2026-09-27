@@ -128,6 +128,32 @@ func parseInstances(raw, primaryConfigFile string, recordUpstreamSet bool) ([]In
 		}
 		files[in.ConfigFile] = true
 	}
+	// No name may contain another. Docker's lookup falls back to the shortest name
+	// CONTAINING the one asked for, so with "0g-serving-provider-broker-x" declared, a
+	// missing primary broker would resolve to it on every path that does not insist on
+	// the exact name. Only the fixed names are exempt among themselves (prometheus is
+	// part of prometheus-init), since they predate this and are not a caller's choice.
+	all := make([]string, 0, len(taken))
+	for name := range taken {
+		all = append(all, name)
+	}
+	isFixed := func(n string) bool {
+		switch n {
+		case containerBroker, containerEvent, containerIngress, containerPrometheusInit, containerPrometheus:
+			return true
+		}
+		return false
+	}
+	for _, a := range all {
+		for _, b := range all {
+			if a == b || (isFixed(a) && isFixed(b)) {
+				continue
+			}
+			if strings.Contains(a, b) {
+				return nil, fmt.Errorf("%s: container name %q contains %q (%s), and docker's name lookup would confuse them", InstancesEnvVar, a, b, taken[b])
+			}
+		}
+	}
 	return list, nil
 }
 
@@ -218,7 +244,8 @@ func (c *Ctrl) ApplyInstanceConfig(ctx context.Context, name, content string) er
 
 	// Before the record: the restarts below START a stopped container, so they are held
 	// to what the start route is held to.
-	if err := c.checkInstanceStartable(ctx, in); err != nil {
+	haveIngress, err := c.checkInstanceStartable(ctx, in)
+	if err != nil {
 		return err
 	}
 
@@ -238,7 +265,7 @@ func (c *Ctrl) ApplyInstanceConfig(ctx context.Context, name, content string) er
 	if err := c.dockerClient.RestartContainer(ctx, in.Event); err != nil {
 		return fmt.Errorf("failed to restart %s: %w", in.Event, err)
 	}
-	if in.Ingress != "" {
+	if haveIngress {
 		return c.restartIngress(ctx, in.Ingress)
 	}
 	return nil
@@ -266,39 +293,109 @@ func (c *Ctrl) abortInstanceConfigChange(ctx context.Context, in Instance, cause
 	return cause
 }
 
-// instanceContainers lists every extra broker and event container, brokers first.
-func (c *Ctrl) instanceContainers() []string {
-	var out []string
-	for _, in := range c.instances {
-		out = append(out, in.Broker)
+// exactStatus is a container's status when it resolves by its exact name, nil when
+// no container matches at all, and AmbiguousContainerError when a DIFFERENT one does —
+// docker's lookup falls back to the shortest name containing the one asked for, and
+// that neighbour is the container nothing here may act on.
+func (c *Ctrl) exactStatus(ctx context.Context, name string) (*docker.ContainerStatus, error) {
+	status, err := c.dockerClient.GetContainerStatus(ctx, name)
+	if err != nil {
+		return nil, fmt.Errorf("looking up container %s: %w", name, err)
 	}
-	for _, in := range c.instances {
-		out = append(out, in.Event)
+	if status == nil {
+		return nil, nil
 	}
-	return out
+	if status.Name != name {
+		return nil, &AmbiguousContainerError{Want: name, Got: status.Name}
+	}
+	return status, nil
 }
 
-// startAfterFailedStop brings back the extra instances an upgrade stopped before one
-// of them refused to stop. Nothing has been recorded or recreated yet, so the ledger
-// still names the image they run and leaving them down would only be an outage.
-func (c *Ctrl) startAfterFailedStop(ctx context.Context) {
+// instancePlan is what an upgrade finds about the extra instances before touching any.
+type instancePlan struct {
+	// upgrade are the instances whose broker and event both exist.
+	upgrade []Instance
+	// stop is every instance broker and event that exists, events first, all of which
+	// must be down before the record whether or not the instance can be upgraded.
+	stop []string
+	// running is which of stop were running, and the only ones a recovery before the
+	// record starts again. Not "all of stop": one left stopped on an old image by an
+	// earlier failed upgrade must stay down, and one an operator stopped stays stopped.
+	running map[string]bool
+	// noIngress names the instances whose declared ingress is gone.
+	noIngress map[string]bool
+	// gone reports each instance that cannot be upgraded because a container is gone.
+	gone []error
+}
+
+// planInstances inspects every extra instance without changing anything.
+//
+// A container that is simply GONE is reported rather than refused: it holds no key and
+// runs no image, and refusing would let one failed instance recreate freeze every later
+// upgrade, the primary's included. A name that resolves to a DIFFERENT container is
+// refused, because acting on it is acting on the wrong service.
+func (c *Ctrl) planInstances(ctx context.Context) (*instancePlan, error) {
+	plan := &instancePlan{running: map[string]bool{}, noIngress: map[string]bool{}}
+	var brokers []string
+	for _, in := range c.instances {
+		complete := true
+		for _, name := range []string{in.Event, in.Broker} {
+			status, err := c.exactStatus(ctx, name)
+			if err != nil {
+				return nil, fmt.Errorf("instance %q: %w", in.Name, err)
+			}
+			if status == nil {
+				complete = false
+				plan.gone = append(plan.gone, fmt.Errorf("instance %q: container %s is gone and cannot be recreated in-band; redeploy to restore it", in.Name, name))
+				continue
+			}
+			if name == in.Broker {
+				brokers = append(brokers, name)
+			} else {
+				plan.stop = append(plan.stop, name)
+			}
+			plan.running[name] = status.State == "running"
+		}
+		if in.Ingress != "" {
+			status, err := c.exactStatus(ctx, in.Ingress)
+			if err != nil {
+				return nil, fmt.Errorf("instance %q: %w", in.Name, err)
+			}
+			plan.noIngress[in.Name] = status == nil
+		}
+		if complete {
+			plan.upgrade = append(plan.upgrade, in)
+		}
+	}
+	plan.stop = append(plan.stop, brokers...)
+	return plan, nil
+}
+
+// restartRunning starts the instance containers that were running when the upgrade
+// began, brokers first. Used only before the record: nothing has changed, so the
+// ledger still names the image they run and leaving them down would be an outage.
+func (c *Ctrl) restartRunning(ctx context.Context, plan *instancePlan, why string) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), restoreTimeout)
 	defer cancel()
-	for _, name := range c.instanceContainers() {
+	for i := len(plan.stop) - 1; i >= 0; i-- {
+		name := plan.stop[i]
+		if !plan.running[name] {
+			continue
+		}
 		if err := c.dockerClient.StartContainer(ctx, name); err != nil {
-			c.logger.Errorf("[UpdateImages] Could not restart %s after a failed stop: %v", name, err)
+			c.logger.Errorf("[UpdateImages] Could not restart %s after %s: %v", name, why, err)
 		}
 	}
 }
 
-// upgradeInstances moves every extra instance onto ref: broker, health, event, ingress.
-// Called by UpdateImages after the record and after the primary broker is on ref, with
-// every extra container already stopped. One instance failing does not stop the next;
-// the failures come back joined.
-func (c *Ctrl) upgradeInstances(ctx context.Context, ref string, result *docker.ImageUpdateResult) error {
-	var errs []error
-	for _, in := range c.instances {
-		if err := c.upgradeInstance(ctx, in, ref, result); err != nil {
+// upgradeInstances moves every upgradable instance onto ref: broker, health, event,
+// ingress. Called by UpdateImages after the record and after the primary broker is on
+// ref, with every instance container already stopped. One instance failing does not
+// stop the next; the failures come back joined with the instances that were gone.
+func (c *Ctrl) upgradeInstances(ctx context.Context, ref string, plan *instancePlan, result *docker.ImageUpdateResult) error {
+	errs := append([]error(nil), plan.gone...)
+	for _, in := range plan.upgrade {
+		if err := c.upgradeInstance(ctx, in, ref, plan.noIngress[in.Name], result); err != nil {
 			c.logger.Errorf("[UpdateImages] Instance %q: %v", in.Name, err)
 			errs = append(errs, fmt.Errorf("instance %q: %w", in.Name, err))
 		}
@@ -306,7 +403,7 @@ func (c *Ctrl) upgradeInstances(ctx context.Context, ref string, result *docker.
 	return errors.Join(errs...)
 }
 
-func (c *Ctrl) upgradeInstance(ctx context.Context, in Instance, ref string, result *docker.ImageUpdateResult) error {
+func (c *Ctrl) upgradeInstance(ctx context.Context, in Instance, ref string, noIngress bool, result *docker.ImageUpdateResult) error {
 	r, err := c.dockerClient.RecreateContainer(ctx, in.Broker, ref)
 	if r != nil {
 		result.UpdatedContainers = append(result.UpdatedContainers, *r)
@@ -325,8 +422,8 @@ func (c *Ctrl) upgradeInstance(ctx context.Context, in Instance, ref string, res
 		return fmt.Errorf("recreating %s: %w", in.Event, err)
 	}
 	if in.Ingress != "" {
-		if err := c.verifyExactContainer(ctx, in.Ingress); err != nil {
-			return fmt.Errorf("%w — the new image runs, but its ingress cannot be restarted to reach it", err)
+		if noIngress {
+			return fmt.Errorf("its ingress %s is gone: the new image runs, but nothing outside the CVM reaches it until a redeploy restores the ingress", in.Ingress)
 		}
 		if err := c.restartIngress(ctx, in.Ingress); err != nil {
 			return fmt.Errorf("%w — the new image runs, but nothing outside the CVM reaches it until this is done", err)
@@ -335,25 +432,26 @@ func (c *Ctrl) upgradeInstance(ctx context.Context, in Instance, ref string, res
 	return nil
 }
 
-// checkInstanceStartable holds an instance to what starting it requires: every declared
-// container resolves by its exact name, and the broker and event are on the image the
-// ledger names.
-func (c *Ctrl) checkInstanceStartable(ctx context.Context, in Instance) error {
-	names := []string{in.Broker, in.Event}
-	if in.Ingress != "" {
-		names = append(names, in.Ingress)
-	}
-	for _, name := range names {
-		if err := c.verifyExactContainer(ctx, name); err != nil {
-			return fmt.Errorf("instance %q: %w", in.Name, err)
-		}
-	}
+// checkInstanceStartable holds an instance to what starting it requires: its broker and
+// event resolve by their exact names and are on the image the ledger names, and its
+// ingress is either exactly there or absent. Reports whether the ingress is there.
+func (c *Ctrl) checkInstanceStartable(ctx context.Context, in Instance) (bool, error) {
 	for _, name := range []string{in.Broker, in.Event} {
+		if err := c.verifyExactContainer(ctx, name); err != nil {
+			return false, fmt.Errorf("instance %q: %w", in.Name, err)
+		}
 		if err := c.checkOnRef(ctx, name); err != nil {
-			return fmt.Errorf("instance %q: %w", in.Name, err)
+			return false, fmt.Errorf("instance %q: %w", in.Name, err)
 		}
 	}
-	return nil
+	if in.Ingress == "" {
+		return false, nil
+	}
+	status, err := c.exactStatus(ctx, in.Ingress)
+	if err != nil {
+		return false, fmt.Errorf("instance %q: %w", in.Name, err)
+	}
+	return status != nil, nil
 }
 
 // checkInstanceExact refuses an alias of an extra instance whose container does not
@@ -388,22 +486,21 @@ func (c *Ctrl) checkInstanceOnRef(ctx context.Context, alias string) error {
 	return nil
 }
 
-// checkOnRef requires container name to be pinned to the digest the primary broker runs,
-// which is the image every key and record on this controller is derived from.
+// checkOnRef requires container name to run the digest the primary broker runs, which
+// is the image every key and record on this controller is derived from. Both sides are
+// resolved the same way (containerDigest), so a tag-named deployment compares the
+// images actually running rather than failing on a reference with no digest in it.
 func (c *Ctrl) checkOnRef(ctx context.Context, name string) error {
 	want, err := c.RunningBrokerDigest(ctx)
 	if err != nil {
 		return fmt.Errorf("refusing to start %s: %w", name, err)
 	}
-	status, err := c.dockerClient.GetContainerStatus(ctx, name)
+	got, err := c.containerDigest(ctx, name)
 	if err != nil {
-		return fmt.Errorf("refusing to start %s: reading its image: %w", name, err)
+		return fmt.Errorf("refusing to start %s: %w", name, err)
 	}
-	if status == nil || status.Name != name {
-		return &AmbiguousContainerError{Want: name}
-	}
-	if _, got, pinned := strings.Cut(status.Image, "@"); !pinned || got != want {
-		return fmt.Errorf("refusing to start %s: it is on %q, but the broker (and the ledger) is on %s — upgrade to that digest instead", name, status.Image, want)
+	if got != want {
+		return fmt.Errorf("refusing to start %s: it runs %s, but the broker (and the ledger) is on %s — upgrade to that digest instead", name, got, want)
 	}
 	return nil
 }
