@@ -43,8 +43,13 @@ func TestUpdateCoreConfigResponse(t *testing.T) {
 		t.Fatalf("status=%d body=%v, want a plain 200 when nothing is ignored", code, body)
 	}
 
-	refuse := func(context.Context, string) error { return &ctrl.InvalidConfigError{Err: errors.New("nope")} }
-	if code, _ := put(t, refuse, "service:\n  model: x\n"); code != http.StatusBadRequest {
-		t.Fatalf("refusal status = %d, want 400", code)
+	for name, e := range map[string]error{
+		"invalid":     &ctrl.InvalidConfigError{Err: errors.New("nope")},
+		"unconfirmed": &ctrl.UnconfirmedConfigError{Err: errors.New("the broker is down")},
+	} {
+		refuse := func(context.Context, string) error { return e }
+		if code, body := put(t, refuse, "service:\n  model: x\n"); code != http.StatusBadRequest {
+			t.Fatalf("%s refusal: status = %d (%v), want 400", name, code, body)
+		}
 	}
 }

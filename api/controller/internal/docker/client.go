@@ -782,6 +782,14 @@ func (c *Client) RunInContainer(ctx context.Context, containerName string, cmd [
 		return 0, "", err
 	}
 	defer hj.Close()
+	// The stream I/O below is not governed by ctx on its own. Bound it: a peer that never
+	// ends the stream (no half-close support on the path) must not hold the caller's lock
+	// forever. Closing the connection on cancellation covers a ctx without a deadline.
+	if d, ok := ctx.Deadline(); ok {
+		_ = hj.Conn.SetDeadline(d)
+	}
+	stop := context.AfterFunc(ctx, func() { hj.Close() })
+	defer stop()
 	if _, err := hj.Conn.Write(stdin); err != nil {
 		return 0, "", fmt.Errorf("writing the input of %v in %s: %w", cmd, containerName, err)
 	}

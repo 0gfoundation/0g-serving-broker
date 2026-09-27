@@ -246,6 +246,11 @@ func (h *Handler) UpdateCoreConfig(ctx *gin.Context) {
 			ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
+		var unconfirmed *ctrl.UnconfirmedConfigError
+		if errors.As(err, &unconfirmed) {
+			ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 		if errors.Is(err, ctrl.ErrChangeInProgress) {
 			ctx.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 			return

@@ -251,7 +251,7 @@ func (c *Ctrl) ApplyInstanceConfig(ctx context.Context, name, content string) er
 	// and runs the primary's digest, which need not be the controller's (see
 	// checkIgnoredKeysAreSafe and the call site in ApplyCoreConfig).
 	if err := c.checkIgnoredKeysAreSafe(ctx, content, instanceTargets(in)); err != nil {
-		return &InvalidConfigError{Err: err}
+		return &UnconfirmedConfigError{Err: err}
 	}
 
 	// Before the record: the restarts below START a stopped container, so they are held
