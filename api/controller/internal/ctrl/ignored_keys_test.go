@@ -28,12 +28,37 @@ const (
 	silentZero = "silent-zero" // exit 0 but no confirmation, like a null docker exit code
 )
 
-// wantContent, when set, is what the fake validator requires the staged candidate to be.
+// wantContent, when set, is what the fake validator requires on its stdin.
 var wantContent string
 
 type execResult struct {
 	code int
 	out  string
+}
+
+type pendingExec struct {
+	validator string
+	cmd       []string
+	stdin     bool
+}
+
+// decide is the fake 0g-validate-config: what a container with that validator answers
+// for this command and input.
+func decide(pe pendingExec, input []byte) execResult {
+	switch {
+	case len(pe.cmd) != 3 || pe.cmd[0] != brokerBinary || pe.cmd[1] != "0g-validate-config" || pe.cmd[2] != "-" || !pe.stdin:
+		return execResult{2, "usage"}
+	case pe.validator == oldImage:
+		return execResult{1, "0g-validate-config: applet not found"}
+	case strings.HasPrefix(pe.validator, "refuse:"):
+		return execResult{1, strings.TrimPrefix(pe.validator, "refuse:")}
+	case pe.validator == silentZero:
+		return execResult{0, ""} // exit 0 without the applet's confirmation
+	case wantContent != "" && string(input) != wantContent:
+		return execResult{1, "stdin is not the pushed content"}
+	default:
+		return execResult{0, validateconfig.OK}
+	}
 }
 
 type guardContainer struct {
@@ -50,6 +75,7 @@ func splitImageDaemon(t *testing.T, cs ...guardContainer) *docker.Client {
 	t.Helper()
 	var mu sync.Mutex
 	execs := map[string]execResult{}
+	pending := map[string]pendingExec{}
 	inspected := map[string]bool{}
 	n := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -65,51 +91,31 @@ func splitImageDaemon(t *testing.T, cs ...guardContainer) *docker.Client {
 			}
 			_ = json.NewEncoder(w).Encode(list)
 		case strings.HasSuffix(r.URL.Path, "/exec") && r.Method == http.MethodPost:
-			var body struct{ Cmd []string }
+			var body struct {
+				Cmd         []string
+				AttachStdin bool
+			}
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			for _, ct := range cs {
 				if !strings.Contains(r.URL.Path, "/containers/"+ct.id+"/") {
 					continue
 				}
-				res := execResult{}
-				switch {
-				case len(body.Cmd) != 3 || body.Cmd[0] != brokerBinary || body.Cmd[1] != "0g-validate-config":
-					res = execResult{2, "usage"}
-				case ct.validator == oldImage:
-					res = execResult{1, "0g-validate-config: applet not found"}
-				case strings.HasPrefix(ct.validator, "refuse:"):
-					res = execResult{1, strings.TrimPrefix(ct.validator, "refuse:")}
-				case ct.validator == silentZero:
-					res = execResult{0, ""} // exit 0 without the applet's confirmation
-				default:
-					// Validate what was actually staged: the pushed content, 0600.
-					info, err := os.Stat(body.Cmd[2])
-					data, _ := os.ReadFile(body.Cmd[2])
-					switch {
-					case err != nil:
-						res = execResult{1, err.Error()}
-					case info.Mode().Perm() != 0o600:
-						res = execResult{1, "candidate mode " + info.Mode().Perm().String()}
-					case wantContent != "" && string(data) != wantContent:
-						res = execResult{1, "candidate is not the pushed content"}
-					default:
-						res = execResult{0, validateconfig.OK}
-					}
-				}
 				n++
 				id := fmt.Sprintf("exec%d", n)
-				execs[id] = res
+				pending[id] = pendingExec{validator: ct.validator, cmd: body.Cmd, stdin: body.AttachStdin}
 				_ = json.NewEncoder(w).Encode(map[string]any{"Id": id})
 				return
 			}
 			w.WriteHeader(http.StatusNotFound)
 		case strings.Contains(r.URL.Path, "/exec/") && strings.HasSuffix(r.URL.Path, "/start"):
-			// An attached start: hijack, answer 101, then stream the output as docker's
+			// An attached start: hijack, answer 101, read the candidate from stdin until the
+			// client closes its side, run the fake validator, stream the output as docker's
 			// multiplexed frames (stderr) and close — the process has "exited".
-			var res execResult
-			for id, rr := range execs {
-				if strings.Contains(r.URL.Path, "/exec/"+id+"/") {
-					res = rr
+			var id string
+			var pe pendingExec
+			for eid, p := range pending {
+				if strings.Contains(r.URL.Path, "/exec/"+eid+"/") {
+					id, pe = eid, p
 				}
 			}
 			_, _ = io.Copy(io.Discard, r.Body) // unread input would turn the close into a reset
@@ -119,6 +125,10 @@ func splitImageDaemon(t *testing.T, cs ...guardContainer) *docker.Client {
 			}
 			defer conn.Close()
 			_, _ = buf.WriteString("HTTP/1.1 101 UPGRADED\r\nContent-Type: application/vnd.docker.multiplexed-stream\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n")
+			_ = buf.Flush()
+			input, _ := io.ReadAll(buf) // until the client's CloseWrite
+			res := decide(pe, input)
+			execs[id] = res
 			if res.out != "" {
 				hdr := make([]byte, 8)
 				hdr[0] = 2 // stderr
@@ -214,7 +224,7 @@ func TestConfigChangeRefusesIgnoredKeysWhenTheBrokerRunsAnotherImage(t *testing.
 
 	// The same broker/controller split does not block a config with only known keys:
 	// the guard is about ignored keys, not about hot-switched images in general.
-	if err := c.checkIgnoredKeysAreSafe(context.Background(), "service:\n  model: after\n"); err != nil {
+	if err := c.checkIgnoredKeysAreSafe(context.Background(), "service:\n  model: after\n", primaryTargets); err != nil {
 		t.Errorf("known keys only: checkIgnoredKeysAreSafe() = %v, want nil", err)
 	}
 }
@@ -226,7 +236,7 @@ func TestConfigChangeRefusesIgnoredKeysWhenItCannotCompareImages(t *testing.T) {
 	c := newChangeCtrl(t, l, nil, filepath.Join(t.TempDir(), "config.yaml"), okPull)
 	c.dockerClient = fakeEmptyDaemon(t, l) // no broker, no controller container
 
-	if err := c.checkIgnoredKeysAreSafe(context.Background(), "futureFeature: 1\n"); err == nil {
+	if err := c.checkIgnoredKeysAreSafe(context.Background(), "futureFeature: 1\n", primaryTargets); err == nil {
 		t.Fatal("checkIgnoredKeysAreSafe() = nil, want a refusal when the images cannot be compared")
 	}
 }
@@ -278,7 +288,7 @@ func TestConfigChangeRefusesIgnoredKeysWhenTheEventServiceRunsAnotherImage(t *te
 	l := &opLog{}
 	c := newChangeCtrl(t, l, nil, filepath.Join(t.TempDir(), "config.yaml"), okPull)
 	c.dockerClient = splitImageDaemon(t, containers(prevDigest, testDigest, validates, oldImage)...)
-	err := c.checkIgnoredKeysAreSafe(context.Background(), "futureFeature: 1\n")
+	err := c.checkIgnoredKeysAreSafe(context.Background(), "futureFeature: 1\n", primaryTargets)
 	if err == nil || !strings.Contains(err.Error(), "the event service runs "+testDigest) {
 		t.Fatalf("checkIgnoredKeysAreSafe() = %v, want a refusal naming the event service's image", err)
 	}
@@ -310,16 +320,16 @@ func TestConfigChangeAsksTheRunningImagesWhenTheyDiffer(t *testing.T) {
 			l := &opLog{}
 			c := newChangeCtrl(t, l, nil, filepath.Join(dir, "config.yaml"), okPull)
 			c.dockerClient = splitImageDaemon(t, containers(testDigest, testDigest, tc.broker, tc.event)...)
-			err := c.checkIgnoredKeysAreSafe(context.Background(), content)
+			err := c.checkIgnoredKeysAreSafe(context.Background(), content, primaryTargets)
 			if tc.wantErr == "" && err != nil {
 				t.Fatalf("checkIgnoredKeysAreSafe() = %v, want accepted", err)
 			}
 			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
 				t.Fatalf("checkIgnoredKeysAreSafe() = %v, want a refusal mentioning %q", err, tc.wantErr)
 			}
-			// The staged candidate carries resolved secrets: nothing may be left behind.
+			// The candidate carries resolved secrets: nothing may be staged on disk.
 			if left, _ := filepath.Glob(filepath.Join(dir, ".candidate-*")); len(left) != 0 {
-				t.Errorf("left behind %v", left)
+				t.Errorf("staged %v on disk", left)
 			}
 		})
 	}
@@ -332,7 +342,7 @@ func TestConfigChangeRefusesIgnoredKeysWithoutItsOwnDigest(t *testing.T) {
 	c := newChangeCtrl(t, l, nil, filepath.Join(t.TempDir(), "config.yaml"), okPull)
 	cs := containers(prevDigest, prevDigest, oldImage, oldImage)
 	c.dockerClient = splitImageDaemon(t, cs[0], cs[1]) // no container matches our hostname
-	if err := c.checkIgnoredKeysAreSafe(context.Background(), "futureFeature: 1\n"); err == nil || !strings.Contains(err.Error(), "own image") {
+	if err := c.checkIgnoredKeysAreSafe(context.Background(), "futureFeature: 1\n", primaryTargets); err == nil || !strings.Contains(err.Error(), "own image") {
 		t.Fatalf("checkIgnoredKeysAreSafe() = %v, want a refusal naming the controller's own image", err)
 	}
 }
@@ -345,7 +355,7 @@ func TestConfigChangeRefusesIgnoredKeysWhenTheBrokerNameOnlyNearlyMatches(t *tes
 	cs := containers(prevDigest, prevDigest, oldImage, oldImage)
 	cs[0].name = containerBroker + "-old"
 	c.dockerClient = splitImageDaemon(t, cs...)
-	if err := c.checkIgnoredKeysAreSafe(context.Background(), "futureFeature: 1\n"); err == nil || !strings.Contains(err.Error(), "resolved to container") {
+	if err := c.checkIgnoredKeysAreSafe(context.Background(), "futureFeature: 1\n", primaryTargets); err == nil || !strings.Contains(err.Error(), "resolved to container") {
 		t.Fatalf("checkIgnoredKeysAreSafe() = %v, want a refusal for the near-miss name", err)
 	}
 }
@@ -374,5 +384,71 @@ func TestImageSwitchWarnsWhenItsOwnDigestIsUnreadable(t *testing.T) {
 	c.dockerClient = fakeEmptyDaemon(t, l)
 	if w := c.ignoredKeysImageWarning(context.Background(), prevDigest); !strings.Contains(w, `"futureFeature"`) {
 		t.Fatalf("warning = %q, want one naming the key", w)
+	}
+}
+
+const (
+	instBrokerID = "dddd444444444444444444444444444444444444444444444444444444444444"
+	instEventID  = "eeee555555555555555555555555555555555555555555555555555555555555"
+)
+
+// An extra instance's pair restarts onto its own config and runs the primary's digest,
+// which need not be the controller's — so PUT /v1/config/core?instance= is guarded the
+// same way, against that instance's containers, before anything is recorded.
+func TestInstanceConfigChangeIsGuardedToo(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "instance.yaml")
+	const before = "service:\n  model: before\n"
+	if err := os.WriteFile(path, []byte(before), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name      string
+		validator string
+		wantErr   string
+	}{
+		{"the instance's image refuses it", "refuse:futureFeature is not valid here", "instance b2's broker's image refuses it"},
+		{"the instance's image predates the validator", oldImage, "applet not found"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := &opLog{}
+			c := newChangeCtrl(t, l, nil, filepath.Join(t.TempDir(), "config.yaml"), okPull)
+			c.instances = []Instance{{Name: "b2", Broker: "b2-broker", Event: "b2-event", ConfigFile: path}}
+			c.dockerClient = splitImageDaemon(t,
+				guardContainer{instBrokerID, "b2-broker", testDigest, tc.validator},
+				guardContainer{instEventID, "b2-event", testDigest, validates},
+				guardContainer{selfID, "0g-controller", prevDigest, validates},
+			)
+			err := c.ApplyInstanceConfig(context.Background(), "b2", "service:\n  model: after\nfutureFeature: 1\n")
+			var invalid *InvalidConfigError
+			if !errors.As(err, &invalid) || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("ApplyInstanceConfig() = %v, want a 400 mentioning %q", err, tc.wantErr)
+			}
+			if ops := l.all(); len(ops) != 0 {
+				t.Errorf("ops = %v, want nothing recorded", ops)
+			}
+			if got, _ := os.ReadFile(path); string(got) != before {
+				t.Errorf("instance config = %q, want it untouched", got)
+			}
+		})
+	}
+}
+
+// The image-switch warning covers extra instances' configs too: their pairs restart onto
+// the switched image as well.
+func TestImageSwitchWarnsAboutIgnoredKeysInAnInstanceConfig(t *testing.T) {
+	dir := t.TempDir()
+	primary := filepath.Join(dir, "config.yaml")
+	inst := filepath.Join(dir, "instance.yaml")
+	if err := os.WriteFile(primary, []byte("service:\n  model: m\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(inst, []byte("service:\n  model: m\ninstanceFeature: 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	l := &opLog{}
+	c := newChangeCtrl(t, l, nil, primary, okPull)
+	c.instances = []Instance{{Name: "b2", Broker: "b2-broker", Event: "b2-event", ConfigFile: inst}}
+	if w := c.ignoredKeysImageWarning(context.Background(), testDigest); !strings.Contains(w, `"instanceFeature"`) || !strings.Contains(w, inst) {
+		t.Fatalf("warning = %q, want it to name the instance config's key and file", w)
 	}
 }

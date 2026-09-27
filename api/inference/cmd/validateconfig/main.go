@@ -9,6 +9,7 @@ package validateconfig
 
 import (
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/0glabs/0g-serving-broker/inference/config"
@@ -19,13 +20,14 @@ import (
 // null as 0) cannot pass for an acceptance.
 const OK = "0g-validate-config: ok"
 
-// Main validates the file named by the first argument. It prints OK and exits 0 when
-// the content loads; otherwise it prints the reason to stderr, which the caller reads
-// from the exec's stream, and exits 1 (2 on a usage error). It writes nothing: the
-// config volume is read-only in the containers it runs in.
+// Main validates the config named by the first argument — a file, or "-" for stdin,
+// which is how the controller passes a candidate (no file to stage, and no path it
+// would have to know inside the container). It prints OK and exits 0 when the content
+// loads; otherwise it prints the reason to stderr, which the caller reads from the
+// exec's stream, and exits 1 (2 on a usage error). It writes nothing.
 func Main() {
 	if len(os.Args) != 2 {
-		fmt.Fprintln(os.Stderr, "usage: 0g-validate-config <config file>")
+		fmt.Fprintln(os.Stderr, "usage: 0g-validate-config <config file | ->")
 		os.Exit(2)
 	}
 	if err := run(os.Args[1]); err != nil {
@@ -35,9 +37,15 @@ func Main() {
 	fmt.Println(OK)
 }
 
-// run reports whether the config at path loads.
+// run reports whether the config at path ("-" = stdin) loads.
 func run(path string) error {
-	data, err := os.ReadFile(path)
+	var data []byte
+	var err error
+	if path == "-" {
+		data, err = io.ReadAll(os.Stdin)
+	} else {
+		data, err = os.ReadFile(path)
+	}
 	if err != nil {
 		return err
 	}

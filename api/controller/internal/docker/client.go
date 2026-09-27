@@ -750,11 +750,11 @@ func (e *ContainerNotHealthyError) Error() string {
 	return "container " + e.Name + " is not healthy: " + e.State
 }
 
-// RunInContainer runs cmd inside the named container (exact name) and waits for it to
-// exit, returning its exit code and combined output (capped at 64 KiB). The output is
-// read from the exec's own stream, not a file, so it works in containers whose
-// filesystem the command cannot write to (the config volume is read-only in the broker).
-func (c *Client) RunInContainer(ctx context.Context, containerName string, cmd []string) (int, string, error) {
+// RunInContainer runs cmd inside the named container (exact name) with stdin as its
+// standard input and waits for it to exit, returning its exit code and combined output
+// (capped at 64 KiB). Input and output go over the exec's own stream, not files, so
+// nothing depends on where — or whether writably — a volume is mounted inside.
+func (c *Client) RunInContainer(ctx context.Context, containerName string, cmd []string, stdin []byte) (int, string, error) {
 	// Exact name only — unlike GetContainerStatus, no substring fallback: running a
 	// command in a neighbour would answer for the wrong container.
 	containers, err := c.cli.ContainerList(ctx, container.ListOptions{All: true})
@@ -772,7 +772,7 @@ func (c *Client) RunInContainer(ctx context.Context, containerName string, cmd [
 	if id == "" {
 		return 0, "", &ContainerNotFoundError{Name: containerName}
 	}
-	execResp, err := c.cli.ContainerExecCreate(ctx, id, container.ExecOptions{Cmd: cmd, AttachStdout: true, AttachStderr: true})
+	execResp, err := c.cli.ContainerExecCreate(ctx, id, container.ExecOptions{Cmd: cmd, AttachStdin: true, AttachStdout: true, AttachStderr: true})
 	if err != nil {
 		return 0, "", err
 	}
@@ -782,6 +782,12 @@ func (c *Client) RunInContainer(ctx context.Context, containerName string, cmd [
 		return 0, "", err
 	}
 	defer hj.Close()
+	if _, err := hj.Conn.Write(stdin); err != nil {
+		return 0, "", fmt.Errorf("writing the input of %v in %s: %w", cmd, containerName, err)
+	}
+	if err := hj.CloseWrite(); err != nil {
+		return 0, "", fmt.Errorf("closing the input of %v in %s: %w", cmd, containerName, err)
+	}
 	var out bytes.Buffer
 	if _, err := stdcopy.StdCopy(&out, &out, io.LimitReader(hj.Reader, 64<<10)); err != nil {
 		return 0, "", fmt.Errorf("reading the output of %v in %s: %w", cmd, containerName, err)
