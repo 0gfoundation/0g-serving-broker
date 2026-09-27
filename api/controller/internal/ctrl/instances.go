@@ -216,6 +216,12 @@ func (c *Ctrl) ApplyInstanceConfig(ctx context.Context, name, content string) er
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), configChangeTimeout)
 	defer cancel()
 
+	// Before the record: the restarts below START a stopped container, so they are held
+	// to what the start route is held to.
+	if err := c.checkInstanceStartable(ctx, in); err != nil {
+		return err
+	}
+
 	sum := sha256.Sum256([]byte(content))
 	if err := c.emitter.EmitEvent(ctx, attest.EventInstanceConfigUpdate, []byte(in.Name+" "+hex.EncodeToString(sum[:]))); err != nil {
 		return fmt.Errorf("recording the config change of instance %q in RTMR3: %w", in.Name, err)
@@ -319,9 +325,85 @@ func (c *Ctrl) upgradeInstance(ctx context.Context, in Instance, ref string, res
 		return fmt.Errorf("recreating %s: %w", in.Event, err)
 	}
 	if in.Ingress != "" {
+		if err := c.verifyExactContainer(ctx, in.Ingress); err != nil {
+			return fmt.Errorf("%w — the new image runs, but its ingress cannot be restarted to reach it", err)
+		}
 		if err := c.restartIngress(ctx, in.Ingress); err != nil {
 			return fmt.Errorf("%w — the new image runs, but nothing outside the CVM reaches it until this is done", err)
 		}
+	}
+	return nil
+}
+
+// checkInstanceStartable holds an instance to what starting it requires: every declared
+// container resolves by its exact name, and the broker and event are on the image the
+// ledger names.
+func (c *Ctrl) checkInstanceStartable(ctx context.Context, in Instance) error {
+	names := []string{in.Broker, in.Event}
+	if in.Ingress != "" {
+		names = append(names, in.Ingress)
+	}
+	for _, name := range names {
+		if err := c.verifyExactContainer(ctx, name); err != nil {
+			return fmt.Errorf("instance %q: %w", in.Name, err)
+		}
+	}
+	for _, name := range []string{in.Broker, in.Event} {
+		if err := c.checkOnRef(ctx, name); err != nil {
+			return fmt.Errorf("instance %q: %w", in.Name, err)
+		}
+	}
+	return nil
+}
+
+// checkInstanceExact refuses an alias of an extra instance whose container does not
+// resolve by its exact name. Docker lookup falls back to the shortest name CONTAINING
+// the one asked for, and for an instance whose container is gone that is somebody
+// else's container. The primary's aliases are left as they were.
+func (c *Ctrl) checkInstanceExact(ctx context.Context, alias string) error {
+	name := c.instanceContainer(alias)
+	if name == "" {
+		return nil
+	}
+	return c.verifyExactContainer(ctx, name)
+}
+
+// checkInstanceOnRef is checkInstanceExact plus, for an instance's broker or event, the
+// rule that starting it must not bring up an image the ledger does not name.
+//
+// The case it exists for: an upgrade whose recreate of an instance failed BEFORE the
+// old container was removed leaves that container stopped on the old image, while the
+// record already names the new one. Starting it then — by this route, by a config
+// change's restart — would put exactly the broker the record's invariant forbids back
+// in service, signing under the new image's key.
+func (c *Ctrl) checkInstanceOnRef(ctx context.Context, alias string) error {
+	if err := c.checkInstanceExact(ctx, alias); err != nil {
+		return err
+	}
+	for _, in := range c.instances {
+		if alias == in.Name+"-broker" || alias == in.Name+"-event" {
+			return c.checkOnRef(ctx, c.instanceContainer(alias))
+		}
+	}
+	return nil
+}
+
+// checkOnRef requires container name to be pinned to the digest the primary broker runs,
+// which is the image every key and record on this controller is derived from.
+func (c *Ctrl) checkOnRef(ctx context.Context, name string) error {
+	want, err := c.RunningBrokerDigest(ctx)
+	if err != nil {
+		return fmt.Errorf("refusing to start %s: %w", name, err)
+	}
+	status, err := c.dockerClient.GetContainerStatus(ctx, name)
+	if err != nil {
+		return fmt.Errorf("refusing to start %s: reading its image: %w", name, err)
+	}
+	if status == nil || status.Name != name {
+		return &AmbiguousContainerError{Want: name}
+	}
+	if _, got, pinned := strings.Cut(status.Image, "@"); !pinned || got != want {
+		return fmt.Errorf("refusing to start %s: it is on %q, but the broker (and the ledger) is on %s — upgrade to that digest instead", name, status.Image, want)
 	}
 	return nil
 }

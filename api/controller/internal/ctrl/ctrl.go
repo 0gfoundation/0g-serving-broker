@@ -506,6 +506,10 @@ func (c *Ctrl) StartContainer(ctx context.Context, alias string) error {
 	}
 	defer c.changing.Unlock()
 
+	if err := c.checkInstanceOnRef(ctx, alias); err != nil {
+		return err
+	}
+
 	return c.dockerClient.StartContainer(ctx, containerName)
 }
 
@@ -526,6 +530,10 @@ func (c *Ctrl) StopContainer(ctx context.Context, alias string) error {
 	}
 	defer c.changing.Unlock()
 
+	if err := c.checkInstanceExact(ctx, alias); err != nil {
+		return err
+	}
+
 	return c.dockerClient.StopContainer(ctx, containerName)
 }
 
@@ -545,6 +553,10 @@ func (c *Ctrl) RestartContainer(ctx context.Context, alias string) error {
 		return ErrChangeInProgress
 	}
 	defer c.changing.Unlock()
+
+	if err := c.checkInstanceOnRef(ctx, alias); err != nil {
+		return err
+	}
 
 	return c.dockerClient.RestartContainer(ctx, containerName)
 }
@@ -1230,16 +1242,25 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 	// The extra instances, now that the record names ref and the primary broker is on
 	// it. Each one is carried all the way — broker, health, event, ingress — before the
 	// primary continues, so a later failure on the primary's side cannot strand them
-	// half-upgraded. A failure leaves that instance down rather than on the old image,
-	// which is the direction the record allows, and is reported once the primary has
-	// finished rather than aborting it.
+	// half-upgraded. A failure can leave an instance's old container in place, stopped
+	// and on the old image; the start paths refuse it (checkInstanceOnRef) so it stays
+	// down, which is the direction the record allows. The failure is reported with
+	// whatever the primary's own outcome is, on every return below.
 	instErr := c.upgradeInstances(ctx, ref, result)
+	withInst := func(res *docker.ImageUpdateResult, err error) (*docker.ImageUpdateResult, error) {
+		if instErr == nil {
+			return res, err
+		}
+		res.Success = false
+		res.Error += "; and " + instErr.Error()
+		return res, errors.Join(err, instErr)
+	}
 
 	// Wait for broker to become healthy before starting event
 	if err := c.dockerClient.WaitForHealthy(ctx, brokerName, 2*time.Minute); err != nil {
 		result.Success = false
 		result.Error = "broker container failed to become healthy: " + err.Error()
-		return result, err
+		return withInst(result, err)
 	}
 
 	// Reload ingress container (to re-resolve broker's new IP)
@@ -1262,7 +1283,7 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 	if err != nil {
 		result.Success = false
 		result.Error = "failed to recreate event container: " + err.Error()
-		return result, err
+		return withInst(result, err)
 	}
 
 	// Before the contract write, because this is what restores traffic: the proxy in
@@ -1274,7 +1295,7 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 		// operation did not finish" is exactly this.
 		result.Success = false
 		result.Error = err.Error() + " — the new image is running and recorded, but nothing outside the CVM can reach it until this is done"
-		return result, err
+		return withInst(result, err)
 	}
 
 	// Step 4: Sync service in the contract with new image digest
@@ -1291,7 +1312,7 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 	if err := c.SyncService(ctx, c.config.ImageRepo, imageInfo.Digest); err != nil {
 		result.Success = false
 		result.Error = "failed to sync service: " + err.Error()
-		return result, errors.Join(err, instErr)
+		return withInst(result, err)
 	}
 
 	if instErr != nil {
