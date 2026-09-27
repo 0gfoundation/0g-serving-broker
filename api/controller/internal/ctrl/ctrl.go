@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -632,7 +631,7 @@ func (c *Ctrl) ApplyCoreConfig(ctx context.Context, configContent string) error 
 	// Under the lock, so no image change can swap the broker between this check and
 	// the write it guards; on the detached, bounded ctx, like every other docker call
 	// made while holding it.
-	if err := c.checkIgnoredKeysAreSafe(ctx, configContent); err != nil {
+	if err := c.checkIgnoredKeysAreSafe(ctx, configContent, primaryTargets); err != nil {
 		return &InvalidConfigError{Err: err}
 	}
 
@@ -1445,19 +1444,27 @@ func (c *Ctrl) CurrentKeyIdentity(ctx context.Context) (attestproxy.KeyIdentity,
 	return attestproxy.KeyIdentity{Digest: digest, UpstreamSetHash: c.boundUpstreamSetHash()}, nil
 }
 
+// target is a container that restarts onto a config file and decodes it: role names it
+// in errors.
+type target struct{ name, role string }
+
+// primaryTargets restart onto the primary config (ApplyCoreConfig); an extra instance's
+// pair restarts onto its own (see instanceTargets).
+var primaryTargets = []target{{containerBroker, "the broker"}, {containerEvent, "the event service"}}
+
 // checkIgnoredKeysAreSafe refuses content carrying keys this controller's broker code
-// would ignore, unless the broker and event containers that restart onto the file are
-// known to load it. See the call site in ApplyCoreConfig for why. They are known to when:
+// would ignore, unless every target that restarts onto the file is known to load it.
+// See the call site in ApplyCoreConfig for why. They are known to when:
 //
-//   - both run the controller's own image — the same code, which ignores the keys and
-//     already passed ValidateConfigContent above; or
-//   - otherwise, both images accept the content when asked directly: the controller runs
-//     their own validator (the 0g-validate-config applet) inside each container. That
-//     judges the keys AND their values with the code that will actually read them — the
-//     state after pushing a key and then hot-switching the broker to the image that
-//     reads it, where further pushes adjusting that key must not be blocked. An image
-//     too old to have the applet cannot confirm anything and is refused.
-func (c *Ctrl) checkIgnoredKeysAreSafe(ctx context.Context, content string) error {
+//   - all run the controller's own image — the same code, which ignores the keys and
+//     already passed ValidateConfigContent; or
+//   - otherwise, each target's own image accepts the content when asked directly: the
+//     controller runs that image's validator (the 0g-validate-config applet) inside the
+//     container. That judges the keys AND their values with the code that will actually
+//     read them — the state after pushing a key and then hot-switching the broker to the
+//     image that reads it, where further pushes adjusting that key must not be blocked.
+//     An image too old to have the applet cannot confirm anything and is refused.
+func (c *Ctrl) checkIgnoredKeysAreSafe(ctx context.Context, content string, targets []target) error {
 	ignored, err := config.IgnoredConfigKeys([]byte(content))
 	if err != nil {
 		return err // ValidateConfigContent decoded the same bytes first, so not expected; fail closed
@@ -1465,11 +1472,11 @@ func (c *Ctrl) checkIgnoredKeysAreSafe(ctx context.Context, content string) erro
 	if len(ignored) == 0 {
 		return nil
 	}
-	why := c.sameImageAsController(ctx)
+	why := c.sameImageAsController(ctx, targets)
 	if why == nil {
 		return nil
 	}
-	refused := c.runningImagesAccept(ctx, content)
+	refused := c.runningImagesAccept(ctx, content, targets)
 	if refused == nil {
 		return nil
 	}
@@ -1477,24 +1484,24 @@ func (c *Ctrl) checkIgnoredKeysAreSafe(ctx context.Context, content string) erro
 	for i, k := range ignored {
 		names[i] = k.String()
 	}
-	return fmt.Errorf("the config has keys this controller's broker code does not read (%s); %v, and %v. Fix the content, or push it while the broker and event service run the controller's image",
+	return fmt.Errorf("the config has keys this controller's broker code does not read (%s); %v, and %v. Fix the content, or push it while those containers run the controller's image",
 		strings.Join(names, ", "), why, refused)
 }
 
-// sameImageAsController returns nil when the broker and the event container both run
-// the controller's own image, else why not.
-func (c *Ctrl) sameImageAsController(ctx context.Context) error {
+// sameImageAsController returns nil when every target runs the controller's own image,
+// else why not.
+func (c *Ctrl) sameImageAsController(ctx context.Context, targets []target) error {
 	own, err := c.ownDigest(ctx)
 	if err != nil {
 		return err
 	}
-	for _, ct := range []struct{ name, role string }{{containerBroker, "the broker"}, {containerEvent, "the event service"}} {
-		d, err := c.containerDigest(ctx, ct.name)
+	for _, t := range targets {
+		d, err := c.containerDigest(ctx, t.name)
 		if err != nil {
 			return err
 		}
 		if d != own {
-			return fmt.Errorf("%s runs %s but this controller runs %s", ct.role, d, own)
+			return fmt.Errorf("%s runs %s but this controller runs %s", t.role, d, own)
 		}
 	}
 	return nil
@@ -1503,62 +1510,61 @@ func (c *Ctrl) sameImageAsController(ctx context.Context) error {
 // brokerBinary is the image's entrypoint binary, which carries every applet.
 const brokerBinary = "/usr/bin/broker"
 
-// runningImagesAccept asks the broker and event containers' own images whether they
-// load content, returning nil when both do, else why not.
-//
-// The candidate is staged next to the config, on the volume the containers mount (at
-// the same path on every generated deployment; where they do not, the image cannot read
-// it and the push is refused), 0600 because it carries the same resolved secrets. The
-// image's verdict comes back on the exec's output stream: the volume is read-only in
-// the broker and event containers.
-func (c *Ctrl) runningImagesAccept(ctx context.Context, content string) error {
-	sum := sha256.Sum256([]byte(content))
-	path := filepath.Join(filepath.Dir(c.config.ConfigFile), ".candidate-"+hex.EncodeToString(sum[:8])+".yaml")
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		return fmt.Errorf("the candidate could not be staged for validation: %w", err)
-	}
-	defer os.Remove(path)
-
-	for _, ct := range []struct{ name, role string }{{containerBroker, "the broker"}, {containerEvent, "the event service"}} {
-		code, out, err := c.dockerClient.RunInContainer(ctx, ct.name, []string{brokerBinary, "0g-validate-config", path})
+// runningImagesAccept asks each target's own image whether it loads content, returning
+// nil when all do, else why not. The content goes in on the exec's stdin and the verdict
+// comes back on its output: nothing is staged on disk (the candidate carries resolved
+// secrets), and nothing depends on where the config volume is mounted inside.
+func (c *Ctrl) runningImagesAccept(ctx context.Context, content string, targets []target) error {
+	for _, t := range targets {
+		code, out, err := c.dockerClient.RunInContainer(ctx, t.name, []string{brokerBinary, "0g-validate-config", "-"}, []byte(content))
 		if err != nil {
-			return fmt.Errorf("%s's image could not be asked to validate it: %w", ct.role, err)
+			return fmt.Errorf("%s's image could not be asked to validate it: %w", t.role, err)
 		}
 		if code != 0 {
-			return fmt.Errorf("%s's image refuses it (exit %d): %s", ct.role, code, out)
+			return fmt.Errorf("%s's image refuses it (exit %d): %s", t.role, code, out)
 		}
 		// Exit 0 alone is not enough: docker reports 0 for an exec whose code is null,
 		// e.g. one that never started. Only the applet's own confirmation counts.
 		if !strings.Contains(out, validateconfig.OK) {
-			return fmt.Errorf("%s's image did not confirm the config (output %q)", ct.role, out)
+			return fmt.Errorf("%s's image did not confirm the config (output %q)", t.role, out)
 		}
 	}
 	return nil
 }
 
-// ignoredKeysImageWarning returns a warning when the config on disk has keys this
-// controller's broker code ignores and target is not the controller's own image, or
-// "" otherwise. Best effort, never failing the upgrade: an unreadable or undecodable
-// file yields no warning, while an unreadable controller digest counts as "not the same
-// image" and warns — the cautious reading.
+// ignoredKeysImageWarning returns a warning when a config on disk (the primary's, or an
+// extra instance's — both restart onto the switched image) has keys this controller's
+// broker code ignores and target is not the controller's own image, or "" otherwise.
+// Best effort, never failing the upgrade: an unreadable or undecodable file yields no
+// warning, while an unreadable controller digest counts as "not the same image" and
+// warns — the cautious reading.
 func (c *Ctrl) ignoredKeysImageWarning(ctx context.Context, target string) string {
-	data, err := os.ReadFile(c.config.ConfigFile)
-	if err != nil {
-		c.logger.Warnf("[UpdateImages] cannot read %s to check it for ignored keys: %v", c.config.ConfigFile, err)
-		return ""
+	files := []string{c.config.ConfigFile}
+	for _, in := range c.instances {
+		files = append(files, in.ConfigFile)
 	}
-	ignored, err := config.IgnoredConfigKeys(data)
-	if err != nil || len(ignored) == 0 {
+	var names []string
+	for _, f := range files {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			c.logger.Warnf("[UpdateImages] cannot read %s to check it for ignored keys: %v", f, err)
+			continue
+		}
+		ignored, err := config.IgnoredConfigKeys(data)
+		if err != nil {
+			continue
+		}
+		for _, k := range ignored {
+			names = append(names, k.String()+" in "+f)
+		}
+	}
+	if len(names) == 0 {
 		return ""
 	}
 	if own, err := c.ownDigest(ctx); err == nil && own == target {
 		return ""
 	}
-	names := make([]string, len(ignored))
-	for i, k := range ignored {
-		names[i] = k.String()
-	}
-	return fmt.Sprintf("the config on disk has keys this controller's broker code does not read (%s). The image being switched to is expected to read them; if it is instead an older image that decodes config strictly (before unknown-key tolerance), the broker will refuse to start on this config — remove those keys first", strings.Join(names, ", "))
+	return fmt.Sprintf("a config on disk has keys this controller's broker code does not read (%s). The image being switched to is expected to read them; if it is instead an older image that decodes config strictly (before unknown-key tolerance), those containers will refuse to start — remove those keys first", strings.Join(names, ", "))
 }
 
 // RunningBrokerDigest reports the digest of the image the broker container runs.

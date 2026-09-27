@@ -45,3 +45,29 @@ func TestRun(t *testing.T) {
 		t.Fatal("run(missing file) = nil, want an error")
 	}
 }
+
+// "-" reads the candidate from stdin — how the controller passes it, so nothing is
+// staged on disk and no in-container path has to be known.
+func TestRunFromStdin(t *testing.T) {
+	for name, tc := range map[string]struct {
+		content string
+		wantErr bool
+	}{
+		"valid":   {validConfig + "futureFeature: 1\n", false},
+		"invalid": {validConfig + "nvGPU: notabool\n", true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r, w, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			orig := os.Stdin
+			os.Stdin = r
+			t.Cleanup(func() { os.Stdin = orig })
+			go func() { _, _ = w.WriteString(tc.content); _ = w.Close() }()
+			if err := run("-"); (err != nil) != tc.wantErr {
+				t.Fatalf("run(-) = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}

@@ -55,6 +55,11 @@ type Instance struct {
 	ConfigFile string `json:"configFile"`
 }
 
+// instanceTargets are the containers that restart onto an extra instance's config.
+func instanceTargets(in Instance) []target {
+	return []target{{in.Broker, "instance " + in.Name + "'s broker"}, {in.Event, "instance " + in.Name + "'s event service"}}
+}
+
 // instanceNamePattern keeps a name usable inside an alias and a record payload: no
 // spaces (the record separates name and hash with one), nothing a path would split.
 var instanceNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,30}$`)
@@ -241,6 +246,13 @@ func (c *Ctrl) ApplyInstanceConfig(ctx context.Context, name, content string) er
 
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), configChangeTimeout)
 	defer cancel()
+
+	// Before the record, like the primary's: the instance's pair restarts onto this file
+	// and runs the primary's digest, which need not be the controller's (see
+	// checkIgnoredKeysAreSafe and the call site in ApplyCoreConfig).
+	if err := c.checkIgnoredKeysAreSafe(ctx, content, instanceTargets(in)); err != nil {
+		return &InvalidConfigError{Err: err}
+	}
 
 	// Before the record: the restarts below START a stopped container, so they are held
 	// to what the start route is held to.
