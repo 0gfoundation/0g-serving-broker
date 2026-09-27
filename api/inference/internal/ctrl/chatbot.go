@@ -204,6 +204,23 @@ func (c *Ctrl) handleChatbotResponse(ctx *gin.Context, resp *http.Response, acco
 	}
 }
 
+// responseIDRewrite is the id the client-facing chat body gets in place of the
+// upstream's (#184), or "" to keep the upstream id.
+//
+// A decentralized TargetSeparated provider keeps it: the remote TEE signs, the
+// broker sets no ZG-Res-Key, and the only handle anyone has on that signature is
+// the upstream's own id — the router falls back to the body id and the broker
+// forwards /signature/{id} upstream. Rewritten, that id names nothing upstream
+// and every response fails verification (Redpill: 404 "receipt id not found").
+// Standard (also TargetSeparated) has no signature to fetch, and a sealed E2EE
+// reply is signed here under chatKey, so both still get the broker-issued id.
+func (c *Ctrl) responseIDRewrite(chatKey string, e2eeSealed bool) string {
+	if c.Service.TargetSeparated && !c.Service.IsForwarder() && !e2eeSealed {
+		return ""
+	}
+	return "chatcmpl-" + chatKey
+}
+
 func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, account model.User, outputPrice string, reqBody []byte, reqModel model.Request) error {
 	defer resp.Body.Close()
 
@@ -243,8 +260,9 @@ func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, acc
 
 	clientBody = c.rewriteResponseModel(ctx, clientBody)
 	// Strip upstream identity/cost/fingerprint fields and rewrite the upstream id
-	// to a broker-issued one before forwarding (#184).
-	if sanitized, changed := c.sanitizeResponseBody(clientBody, "chatcmpl-"+chatKey); changed {
+	// to a broker-issued one before forwarding (#184) — unless a remote TEE signs
+	// under that id (see responseIDRewrite).
+	if sanitized, changed := c.sanitizeResponseBody(clientBody, c.responseIDRewrite(chatKey, e2eeSealed)); changed {
 		clientBody = sanitized
 	}
 
@@ -393,7 +411,7 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 			// upstream identity/cost leak fields (#184). The raw line is captured in
 			// rawBody (via TeeReader) for billing; the sanitized line is accumulated
 			// in clientBody so the signature attests what the client receives.
-			clientLine, forward := c.sanitizeStreamLine(ctx, line, "chatcmpl-"+chatKey)
+			clientLine, forward := c.sanitizeStreamLine(ctx, line, c.responseIDRewrite(chatKey, e2eeSealed))
 			if forward {
 				clientBody.WriteString(clientLine)
 			}
