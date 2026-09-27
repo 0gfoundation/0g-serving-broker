@@ -712,6 +712,11 @@ func TestResolveRefusesUnreadableInstanceConfigRecords(t *testing.T) {
 			{Event: EventInstanceConfigUpdate, Payload: []byte("laya " + configSum)},
 			{Event: EventInstanceConfigUpdate, Payload: []byte("laya unknown")},
 		},
+		// A good record for ANOTHER instance repairs nothing.
+		"unknown, then another instance's good record": {
+			{Event: EventInstanceConfigUpdate, Payload: []byte("laya unknown")},
+			{Event: EventInstanceConfigUpdate, Payload: []byte("other " + configSum)},
+		},
 		"no instance named": {{Event: EventInstanceConfigUpdate, Payload: []byte(configSum)}},
 		"empty instance":    {{Event: EventInstanceConfigUpdate, Payload: []byte(" " + configSum)}},
 	}

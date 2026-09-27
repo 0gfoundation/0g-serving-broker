@@ -95,8 +95,23 @@ func TestInstanceAliasesResolve(t *testing.T) {
 // logging every write by container NAME. The primary event's create fails, which is
 // the same stopping point the single-instance tests use: past everything asserted and
 // short of the contract sync, which would need a chain.
+// daemonFaults shapes fakeInstanceDaemon: creates or stops that fail by container
+// name, containers absent from the list, and per-container images (default prevRef).
+type daemonFaults struct {
+	failCreate map[string]bool
+	failStop   map[string]bool
+	missing    map[string]bool
+	image      map[string]string
+}
+
 func fakeInstanceDaemon(t *testing.T, l *opLog, failCreate map[string]bool) *docker.Client {
 	t.Helper()
+	return fakeFaultyDaemon(t, l, daemonFaults{failCreate: failCreate})
+}
+
+func fakeFaultyDaemon(t *testing.T, l *opLog, f daemonFaults) *docker.Client {
+	t.Helper()
+	failCreate := f.failCreate
 
 	names := map[string]string{
 		brokerID:                         containerBroker,
@@ -124,7 +139,9 @@ func fakeInstanceDaemon(t *testing.T, l *opLog, failCreate map[string]bool) *doc
 		case strings.HasSuffix(r.URL.Path, "/containers/json"):
 			var list []map[string]any
 			for id, n := range names {
-				list = append(list, map[string]any{"Id": id, "Names": []string{"/" + n}})
+				if !f.missing[n] {
+					list = append(list, map[string]any{"Id": id, "Names": []string{"/" + n}})
+				}
 			}
 			_ = json.NewEncoder(w).Encode(list)
 		case strings.HasSuffix(r.URL.Path, "/containers/create"):
@@ -138,7 +155,14 @@ func fakeInstanceDaemon(t *testing.T, l *opLog, failCreate map[string]bool) *doc
 			l.add("create " + n)
 			_ = json.NewEncoder(w).Encode(map[string]any{"Id": "abcd" + strings.Repeat("0", 60)})
 		case strings.HasSuffix(r.URL.Path, "/stop"):
-			l.add("stop " + nameOf(r.URL.Path, "/stop"))
+			n := nameOf(r.URL.Path, "/stop")
+			if f.failStop[n] {
+				l.add("stop " + n + " refused")
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]any{"message": "device busy"})
+				return
+			}
+			l.add("stop " + n)
 			w.WriteHeader(http.StatusNoContent)
 		case strings.HasSuffix(r.URL.Path, "/restart"):
 			l.add("restart " + nameOf(r.URL.Path, "/restart"))
@@ -150,12 +174,17 @@ func fakeInstanceDaemon(t *testing.T, l *opLog, failCreate map[string]bool) *doc
 			l.add("remove " + nameOf(r.URL.Path, ""))
 			w.WriteHeader(http.StatusNoContent)
 		case strings.HasSuffix(r.URL.Path, "/json"):
+			n := nameOf(r.URL.Path, "/json")
+			img := prevRef
+			if v, ok := f.image[n]; ok {
+				img = v
+			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"Id":          brokerID,
-				"Name":        "/" + nameOf(r.URL.Path, "/json"),
+				"Name":        "/" + n,
 				"RepoDigests": []string{imageRepo + "@" + testDigest},
 				"Created":     "2026-01-01T00:00:00Z",
-				"Config":      map[string]any{"Image": prevRef},
+				"Config":      map[string]any{"Image": img},
 				"State":       map[string]any{"Status": "running"},
 				"NetworkSettings": map[string]any{
 					"Networks": map[string]any{"default": map[string]any{}},
@@ -179,11 +208,16 @@ func fakeInstanceDaemon(t *testing.T, l *opLog, failCreate map[string]bool) *doc
 
 func newInstanceCtrl(t *testing.T, l *opLog, emitErr error, primaryConfig, layaConfig string, failCreate map[string]bool) *Ctrl {
 	t.Helper()
+	return newFaultyInstanceCtrl(t, l, emitErr, primaryConfig, layaConfig, daemonFaults{failCreate: failCreate})
+}
+
+func newFaultyInstanceCtrl(t *testing.T, l *opLog, emitErr error, primaryConfig, layaConfig string, f daemonFaults) *Ctrl {
+	t.Helper()
 	t.Cleanup(docker.SetHostnameForTests(selfHost))
 	t.Setenv(attestproxy.SocketEnvVar, "/var/run/zg-tee/tee.sock")
 	return &Ctrl{
 		config:       config.ControllerConfig{ImageRepo: imageRepo, ConfigFile: primaryConfig},
-		dockerClient: fakeInstanceDaemon(t, l, failCreate),
+		dockerClient: fakeFaultyDaemon(t, l, f),
 		emitter:      &fakeEmitter{log: l, err: emitErr},
 		deriver:      &fakeDeriver{log: l},
 		logger:       testLogger(t),
@@ -231,9 +265,13 @@ func TestUpgradeFinishesThePrimaryWhenAnInstanceFails(t *testing.T) {
 	l := &opLog{}
 	c := newInstanceCtrl(t, l, nil, "", "", map[string]bool{"laya-broker": true, containerEvent: true})
 
-	_, err := c.UpdateImages(context.Background(), testDigest)
+	result, err := c.UpdateImages(context.Background(), testDigest)
 	if err == nil {
 		t.Fatal("UpdateImages() = nil, want an error")
+	}
+	// Both halves reach the caller: the handler reports result.Error, not err.
+	if !strings.Contains(err.Error(), "laya-broker") || result == nil || !strings.Contains(result.Error, "laya-broker") {
+		t.Errorf("UpdateImages() = %+v, %v; want the instance failure in both the error and result.Error", result, err)
 	}
 	if l.indexOf("create "+containerEvent) < 0 {
 		t.Errorf("ops = %v, want the primary to carry on to its event after the instance failed", l.all())
@@ -252,7 +290,7 @@ func TestFailedRecordRestartsTheExtraInstance(t *testing.T) {
 	if _, err := c.UpdateImages(context.Background(), testDigest); err == nil {
 		t.Fatal("UpdateImages() = nil, want an error")
 	}
-	for _, want := range []string{"start laya-broker", "start laya-event", "start " + containerBroker} {
+	for _, want := range []string{"start laya-broker", "start laya-event", "start " + containerBroker, "start " + containerEvent} {
 		if l.indexOf(want) < 0 {
 			t.Errorf("ops = %v, want %q", l.all(), want)
 		}
@@ -348,5 +386,76 @@ func TestFailedInstanceConfigWriteRestoresTheRecord(t *testing.T) {
 	}
 	if l.indexOf("restart") >= 0 {
 		t.Errorf("ops = %v, want nothing restarted", ops)
+	}
+}
+
+// A stop that fails before the record brings back whatever this call already stopped,
+// and records nothing.
+func TestFailedInstanceStopRestartsWhatWasStopped(t *testing.T) {
+	l := &opLog{}
+	c := newFaultyInstanceCtrl(t, l, nil, "", "", daemonFaults{failStop: map[string]bool{"laya-broker": true}})
+
+	if _, err := c.UpdateImages(context.Background(), testDigest); err == nil {
+		t.Fatal("UpdateImages() = nil, want the failed stop reported")
+	}
+	if l.indexOf("start laya-event") < 0 {
+		t.Errorf("ops = %v, want the already-stopped event started again", l.all())
+	}
+	for _, never := range []string{"emit", "create", "stop " + containerBroker} {
+		if l.indexOf(never) >= 0 {
+			t.Errorf("ops = %v, want no %q", l.all(), never)
+		}
+	}
+}
+
+// An instance container left on another image — what a recreate that failed before the
+// removal leaves behind — cannot be started through the controller, by the container
+// routes or by a config change's restart.
+func TestInstanceOffTheRecordedImageIsNotStarted(t *testing.T) {
+	dir := t.TempDir()
+	laya := filepath.Join(dir, "laya.yaml")
+	if err := os.WriteFile(laya, []byte("service:\n  model: before\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stale := imageRepo + "@sha256:" + strings.Repeat("7", 64)
+	l := &opLog{}
+	c := newFaultyInstanceCtrl(t, l, nil, filepath.Join(dir, "config.yaml"), laya, daemonFaults{image: map[string]string{"laya-broker": stale}})
+
+	for _, call := range []func() error{
+		func() error { return c.StartContainer(context.Background(), "laya-broker") },
+		func() error { return c.RestartContainer(context.Background(), "laya-broker") },
+		func() error { return c.ApplyInstanceConfig(context.Background(), "laya", "service:\n  model: after\n") },
+	} {
+		if err := call(); err == nil || !strings.Contains(err.Error(), "refusing to start") {
+			t.Errorf("call = %v, want a refusal naming the stale image", err)
+		}
+	}
+	if ops := l.all(); len(ops) != 0 {
+		t.Errorf("ops = %v, want nothing recorded, started or restarted", ops)
+	}
+	// The event is on the recorded image, so its routes still work.
+	if err := c.RestartContainer(context.Background(), "laya-event"); err != nil {
+		t.Errorf("RestartContainer(laya-event) = %v, want it allowed", err)
+	}
+}
+
+// With an instance container gone, docker's name lookup would fall back to the shortest
+// name containing it. The instance routes refuse instead of acting on that neighbour.
+func TestInstanceRoutesNeedTheExactContainer(t *testing.T) {
+	l := &opLog{}
+	c := newFaultyInstanceCtrl(t, l, nil, "", "", daemonFaults{missing: map[string]bool{"laya-event": true}})
+
+	for alias, call := range map[string]func() error{
+		"stop":    func() error { return c.StopContainer(context.Background(), "laya-event") },
+		"start":   func() error { return c.StartContainer(context.Background(), "laya-event") },
+		"restart": func() error { return c.RestartContainer(context.Background(), "laya-event") },
+	} {
+		var ambiguous *AmbiguousContainerError
+		if err := call(); !errors.As(err, &ambiguous) {
+			t.Errorf("%s = %v, want AmbiguousContainerError", alias, err)
+		}
+	}
+	if ops := l.all(); len(ops) != 0 {
+		t.Errorf("ops = %v, want nothing touched", ops)
 	}
 }
