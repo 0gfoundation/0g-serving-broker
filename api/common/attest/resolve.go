@@ -30,6 +30,14 @@ const (
 	EventImageUpdate = "zg-image-update"
 	// EventConfigUpdate carries hex(sha256(config file content)).
 	EventConfigUpdate = "zg-config-update"
+	// EventInstanceConfigUpdate carries "<instance> <hex(sha256(content))>": a config
+	// change to one of the EXTRA broker instances a controller manages beside the
+	// primary one (controller InstancesEnvVar). Its own event rather than a
+	// zg-config-update, because a reader takes the last zg-config-update as the
+	// primary broker's file and would otherwise attribute another provider's config
+	// to it. "<instance> unknown" is what an aborted change writes when the file
+	// cannot be re-read, and a reader refuses it the way it refuses "unknown" above.
+	EventInstanceConfigUpdate = "zg-instance-config-update"
 
 	// EventUpstreamSet carries the WHOLE set of destinations the broker may forward
 	// unsealed plaintext to: a header line naming how many members follow, then one
@@ -212,6 +220,11 @@ type RunningState struct {
 	// learns that the file changed and when, relative to the image records — not what it
 	// changed to.
 	ConfigSHA256 string
+	// InstanceConfigSHA256 maps each extra broker instance (EventInstanceConfigUpdate)
+	// to the hex SHA-256 of its config, from that instance's last recorded change.
+	// Same meaning as ConfigSHA256, per instance: an instance absent here had no
+	// config change recorded. Nil when none was.
+	InstanceConfigSHA256 map[string]string
 	// Upstreams is the set of destinations the ledger permits, in the order the last
 	// EventUpstreamSet record listed them. Meaningful only when UpstreamsState is
 	// UpstreamsKnown.
@@ -503,6 +516,9 @@ func ResolveRunningState(v VerifiedQuote, tcbInfoJSON []byte, brokerService stri
 	// writer emitting it: refusing beats believing the record it replaced.
 	state := &RunningState{ComposeHash: composeHash, Events: events}
 	var imageErr, configErr error
+	// Per instance, for the rule ConfigSHA256 follows: only an instance's LAST record
+	// decides, so an unreadable one is fatal only when nothing after it repaired it.
+	instanceConfigErr := map[string]error{}
 	// The last set that could be read, and whether there was one. Kept separately from
 	// state.Upstreams because an unreadable record clears that — see the upstream case.
 	var lastSet []Upstream
@@ -525,6 +541,21 @@ func ResolveRunningState(v VerifiedQuote, tcbInfoJSON []byte, brokerService stri
 				configErr = fmt.Errorf("%s payload %q is not a hex sha256", EventConfigUpdate, sum)
 			}
 			state.ConfigSHA256 = sum
+		case EventInstanceConfigUpdate:
+			name, sum, ok := strings.Cut(string(event.Payload), " ")
+			if !ok || name == "" {
+				// Not attributable to any instance, so no later record can repair it.
+				return nil, fmt.Errorf("%s payload %q names no instance", EventInstanceConfigUpdate, event.Payload)
+			}
+			if state.InstanceConfigSHA256 == nil {
+				state.InstanceConfigSHA256 = map[string]string{}
+			}
+			state.InstanceConfigSHA256[name] = sum
+			if hexSHA256Pattern.MatchString(sum) {
+				delete(instanceConfigErr, name)
+			} else {
+				instanceConfigErr[name] = fmt.Errorf("%s for instance %q: payload %q is not a hex sha256", EventInstanceConfigUpdate, name, sum)
+			}
 		case EventUpstreamSet:
 			// One record carries the whole set, so the last one decides — the same rule as
 			// the two record types above, and it holds for the same reason: RTMR3 only
@@ -594,6 +625,9 @@ func ResolveRunningState(v VerifiedQuote, tcbInfoJSON []byte, brokerService stri
 	}
 	if configErr != nil {
 		return nil, configErr
+	}
+	for _, name := range slices.Sorted(maps.Keys(instanceConfigErr)) {
+		return nil, instanceConfigErr[name]
 	}
 	// Which members are containers this deployment declares, and what it pinned for them.
 	//

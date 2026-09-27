@@ -35,7 +35,8 @@ func (h *Handler) RegisterRoutes(v1 *gin.RouterGroup) {
 	config := v1.Group("/config")
 	{
 		// Core config (shared by broker and event) - YAML file
-		// PUT updates config AND restarts broker+event
+		// PUT updates config AND restarts broker+event.
+		// ?instance=<name> addresses an extra instance's config instead of the primary's.
 		config.GET("/core", h.GetCoreConfig)
 		config.PUT("/core", h.UpdateCoreConfig)
 
@@ -186,8 +187,19 @@ func (h *Handler) RestartContainer(ctx *gin.Context) {
 
 // GetCoreConfig returns the core config (shared by broker and event)
 func (h *Handler) GetCoreConfig(ctx *gin.Context) {
-	content, err := h.ctrl.GetCoreConfig()
+	var content string
+	var err error
+	if instance := ctx.Query("instance"); instance != "" {
+		content, err = h.ctrl.GetInstanceConfig(instance)
+	} else {
+		content, err = h.ctrl.GetCoreConfig()
+	}
 	if err != nil {
+		var invalid *ctrl.InvalidInstanceError
+		if errors.As(err, &invalid) {
+			ctx.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			return
+		}
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -209,7 +221,18 @@ func (h *Handler) UpdateCoreConfig(ctx *gin.Context) {
 		return
 	}
 
-	if err := h.ctrl.ApplyCoreConfig(ctx, req.Config); err != nil {
+	var err error
+	if instance := ctx.Query("instance"); instance != "" {
+		err = h.ctrl.ApplyInstanceConfig(ctx, instance, req.Config)
+	} else {
+		err = h.ctrl.ApplyCoreConfig(ctx, req.Config)
+	}
+	if err != nil {
+		var invalid *ctrl.InvalidInstanceError
+		if errors.As(err, &invalid) {
+			ctx.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			return
+		}
 		if _, ok := err.(*ctrl.InvalidConfigError); ok {
 			ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return

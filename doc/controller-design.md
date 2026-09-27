@@ -257,6 +257,39 @@ ALLOWED_IPS=127.0.0.1,192.168.1.0/24
 
 Set these in the compose file. §4.4 covers what that does and does not close.
 
+### 3.3 Extra provider instances (`ZG_CONTROLLER_INSTANCES`)
+
+A CVM can carry more than one provider. The chain holds one service per provider
+address and a broker serves one `service.type`, so a second type on the same machine
+is a second broker with its own wallet, config, event service and ingress. It runs the
+same broker image and signs through this controller's attestation proxy — whose key is
+derived from the **primary** broker's image — so it has to move with every upgrade.
+
+Declare each one in the controller's environment, as a compose literal:
+
+```yaml
+- 'ZG_CONTROLLER_INSTANCES=[{"name":"laya","broker":"laya-broker","event":"laya-event","ingress":"laya-ingress","configFile":"/etc/config-laya/config.yaml"}]'
+```
+
+From the controller's environment and never from the config file, for the reason the
+primary names are constants: `PUT /v1/config/core` rewrites that file. Validated at
+startup: names and container names unique and not the primary's, `configFile` a clean
+absolute path the controller mounts (the volume the instance's broker reads). Refused
+together with `controller.recordUpstreamSet`, because that record is derived from the
+primary config alone and would understate the destinations of a second broker.
+
+What each instance gets:
+
+- `POST /v1/images/update` stops its event and broker before the `zg-image-update`
+  record (like the primary's) and carries it onto the new image after the primary
+  broker: broker → health → event → its ingress. Its own broker then rewrites the
+  image fields and pushes its signer on start, so the controller needs no second
+  wallet. An instance that fails is reported after the primary finishes, and left
+  down rather than on the old image.
+- `GET|PUT /v1/config/core?instance=<name>` reads and writes its config file, recorded
+  as `zg-instance-config-update`, restarting only that instance.
+- Container aliases `<name>-broker`, `<name>-event`, `<name>-ingress`.
+
 ---
 
 ## 4. API Design
@@ -277,6 +310,7 @@ Set these in the compose file. §4.4 covers what that does and does not close.
 | ------ | ------------------------- | ------------------------------ |
 | GET    | `/v1/config/core`         | Get the config file shared by broker and event |
 | PUT    | `/v1/config/core`         | Write that file and restart broker + event |
+| GET/PUT | `/v1/config/core?instance=<name>` | The same, for an extra instance (§3.3) |
 | GET    | `/v1/config/ingress`      | Report the ingress container's environment |
 | GET    | `/v1/config/prometheus`   | Get the Prometheus config (base64) |
 | PUT    | `/v1/config/prometheus`   | Rerun prometheus-init with a new config |
@@ -606,6 +640,7 @@ on that process being honest later.
 |---|---|---|
 | `zg-image-update` | `<repo>@sha256:<64hex> <0xsigner> <enc_pub>` — the reference the upgrade runs on, then both keys derived from that image | `POST /v1/images/update` touches any container |
 | `zg-config-update` | `hex(sha256(<config file content>))` | `PUT /v1/config/core` writes the file |
+| `zg-instance-config-update` | `<instance> hex(sha256(<content>))` | `PUT /v1/config/core?instance=<name>` writes that instance's file (§3.3) |
 
 **Not everything is covered.** `PUT /v1/config/ingress` and
 `PUT /v1/config/prometheus` change in-TEE state with no record at all, and
