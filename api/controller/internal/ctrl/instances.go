@@ -293,20 +293,23 @@ func (c *Ctrl) abortInstanceConfigChange(ctx context.Context, in Instance, cause
 	return cause
 }
 
-// exactStatus is a container's status when it resolves by its exact name, nil when
-// no container matches at all, and AmbiguousContainerError when a DIFFERENT one does —
-// docker's lookup falls back to the shortest name containing the one asked for, and
-// that neighbour is the container nothing here may act on.
+// exactStatus is a container's status when one exists under exactly this name, and nil
+// when none does — including when docker's lookup, which falls back to the shortest
+// name CONTAINING the one asked for, settles on a neighbour instead. That neighbour is
+// never returned, so nothing built on this can act on it.
+//
+// "No exact match" rather than "ambiguous", because the two cannot be told apart from
+// here and the second reading blocks recovery: a one-shot container whose name
+// contains an instance's (compose's <project>-laya-broker-config-init-1, which stays
+// listed after it exits) would otherwise make a gone laya-broker refuse every later
+// upgrade, the primary's included.
 func (c *Ctrl) exactStatus(ctx context.Context, name string) (*docker.ContainerStatus, error) {
 	status, err := c.dockerClient.GetContainerStatus(ctx, name)
 	if err != nil {
 		return nil, fmt.Errorf("looking up container %s: %w", name, err)
 	}
-	if status == nil {
+	if status == nil || status.Name != name {
 		return nil, nil
-	}
-	if status.Name != name {
-		return nil, &AmbiguousContainerError{Want: name, Got: status.Name}
 	}
 	return status, nil
 }
@@ -330,10 +333,10 @@ type instancePlan struct {
 
 // planInstances inspects every extra instance without changing anything.
 //
-// A container that is simply GONE is reported rather than refused: it holds no key and
-// runs no image, and refusing would let one failed instance recreate freeze every later
-// upgrade, the primary's included. A name that resolves to a DIFFERENT container is
-// refused, because acting on it is acting on the wrong service.
+// A container with no exact match is GONE (see exactStatus) and is reported rather than
+// refused: it holds no key and runs no image, and refusing would let one failed instance
+// recreate freeze every later upgrade, the primary's included. Only exactly-named
+// containers are ever stopped or recreated.
 func (c *Ctrl) planInstances(ctx context.Context) (*instancePlan, error) {
 	plan := &instancePlan{running: map[string]bool{}, noIngress: map[string]bool{}}
 	var brokers []string
@@ -411,15 +414,20 @@ func (c *Ctrl) upgradeInstance(ctx context.Context, in Instance, ref string, noI
 	if err != nil {
 		return fmt.Errorf("recreating %s: %w", in.Broker, err)
 	}
-	if err := c.dockerClient.WaitForHealthy(ctx, in.Broker, 2*time.Minute); err != nil {
-		return fmt.Errorf("%s did not become healthy: %w", in.Broker, err)
-	}
+	// A broker that does not come up healthy still gets its event moved onto ref, and
+	// the health failure is reported after. Left on the old image, the event would make
+	// every later config change for this instance refuse (checkOnRef) — and the fix for
+	// a broker that will not start on a new image is usually exactly that config change.
+	healthErr := c.dockerClient.WaitForHealthy(ctx, in.Broker, 2*time.Minute)
 	r, err = c.dockerClient.RecreateContainer(ctx, in.Event, ref)
 	if r != nil {
 		result.UpdatedContainers = append(result.UpdatedContainers, *r)
 	}
 	if err != nil {
-		return fmt.Errorf("recreating %s: %w", in.Event, err)
+		return errors.Join(healthErr, fmt.Errorf("recreating %s: %w", in.Event, err))
+	}
+	if healthErr != nil {
+		return fmt.Errorf("%s did not become healthy on the new image (fix its config with PUT /v1/config/core?instance=%s): %w", in.Broker, in.Name, healthErr)
 	}
 	if in.Ingress != "" {
 		if noIngress {
@@ -503,4 +511,26 @@ func (c *Ctrl) checkOnRef(ctx context.Context, name string) error {
 		return fmt.Errorf("refusing to start %s: it runs %s, but the broker (and the ledger) is on %s — upgrade to that digest instead", name, got, want)
 	}
 	return nil
+}
+
+// restartOnRef starts the instance containers that were running when the upgrade began
+// and that run the image the ledger now names — after an aborted primary recreate the
+// restored record names the old image again, which is what the instances were left on.
+// Refused ones stay down, which is the direction the record allows.
+func (c *Ctrl) restartOnRef(ctx context.Context, plan *instancePlan) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), restoreTimeout)
+	defer cancel()
+	for i := len(plan.stop) - 1; i >= 0; i-- {
+		name := plan.stop[i]
+		if !plan.running[name] {
+			continue
+		}
+		if err := c.checkOnRef(ctx, name); err != nil {
+			c.logger.Warnf("[UpdateImages] Leaving %s down after the aborted upgrade: %v", name, err)
+			continue
+		}
+		if err := c.dockerClient.StartContainer(ctx, name); err != nil {
+			c.logger.Errorf("[UpdateImages] Could not restart %s after the aborted upgrade: %v", name, err)
+		}
+	}
 }

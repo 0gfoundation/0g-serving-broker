@@ -306,6 +306,9 @@ Things to know before relying on it:
 - **One trust domain.** All instances share the signing and E2EE keys. A verifier of
   the primary provider sees `ConfigSHA256` only; an instance's config changes show in
   `InstanceConfigSHA256`, and one who relies on "no config change" should check both.
+  The same holds for failures: an aborted instance change records `"<name> unknown"`,
+  and until a later change to that instance succeeds, `ResolveRunningState` refuses
+  the whole CVM — the primary provider's verification included.
 - **Outage window.** The instances are upgraded after the primary broker is recreated
   and before its event and ingress are, so the primary stays unreachable for as long
   as the instances take (each up to the 2-minute health wait). That order is what

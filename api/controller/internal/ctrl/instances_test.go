@@ -98,7 +98,7 @@ func TestInstanceAliasesResolve(t *testing.T) {
 // controller itself and one extra instance, logging every write by container NAME:
 // creates or stops that fail by name, containers absent from the list, neighbours
 // added to it (whose names contain an instance's), and per-container images (default
-// prevRef) and states (default running).
+// prevRef), states (default running) and health (default none).
 //
 // The instance tests fail the primary event's create, the same stopping point the
 // single-instance tests use: past everything asserted and short of the contract sync,
@@ -110,6 +110,7 @@ type daemonFaults struct {
 	extra      []string
 	image      map[string]string
 	state      map[string]string
+	health     map[string]string
 }
 
 func fakeInstanceDaemon(t *testing.T, l *opLog, failCreate map[string]bool) *docker.Client {
@@ -199,7 +200,7 @@ func fakeFaultyDaemon(t *testing.T, l *opLog, f daemonFaults) *docker.Client {
 				"RepoDigests": []string{imageRepo + "@" + testDigest},
 				"Created":     "2026-01-01T00:00:00Z",
 				"Config":      map[string]any{"Image": img},
-				"State":       map[string]any{"Status": state},
+				"State":       stateOf(state, f.health[n]),
 				"NetworkSettings": map[string]any{
 					"Networks": map[string]any{"default": map[string]any{}},
 				},
@@ -536,32 +537,83 @@ func TestUpgradeGoesAheadPastAGoneInstanceContainer(t *testing.T) {
 	}
 }
 
-// A declared ingress that resolves to a DIFFERENT container is refused before anything is
-// touched; one that is simply gone is reported after the instance is upgraded.
-func TestInstanceIngressIsCheckedBeforeTheRecord(t *testing.T) {
+// An instance container with no exact match is gone, even when docker's lookup would
+// settle on a neighbour containing its name: the upgrade goes ahead, the neighbour is
+// never touched, and the report says what is missing.
+func TestNeighboursNeverStandInForAGoneInstanceContainer(t *testing.T) {
+	for name, tc := range map[string]struct {
+		gone, neighbour, report string
+		upgraded                bool
+	}{
+		"broker, next to its config-init": {gone: "laya-broker", neighbour: "proj-laya-broker-config-init-1", report: "laya-broker is gone"},
+		"ingress, under compose's name":   {gone: "laya-ingress", neighbour: "proj-laya-ingress-1", report: "ingress laya-ingress is gone", upgraded: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			l := &opLog{}
+			c := newFaultyInstanceCtrl(t, l, nil, "", "", daemonFaults{
+				missing:    map[string]bool{tc.gone: true},
+				extra:      []string{tc.neighbour},
+				failCreate: map[string]bool{containerEvent: true},
+			})
+			result, err := c.UpdateImages(context.Background(), testDigest)
+			if err == nil || !strings.Contains(result.Error, tc.report) {
+				t.Fatalf("UpdateImages() = %+v, %v; want %q reported", result, err, tc.report)
+			}
+			if l.indexOf("create "+containerBroker) < 0 {
+				t.Errorf("ops = %v, want the primary upgraded", l.all())
+			}
+			for _, op := range l.all() {
+				if strings.Contains(op, tc.neighbour) {
+					t.Errorf("ops = %v, want the neighbour %s never touched", l.all(), tc.neighbour)
+				}
+			}
+			if got := l.indexOf("create laya-event") >= 0; got != tc.upgraded {
+				t.Errorf("ops = %v, instance upgraded = %v, want %v", l.all(), got, tc.upgraded)
+			}
+		})
+	}
+}
+
+// A broker that will not come up healthy on the new image still has its event moved
+// onto it, so the config change that fixes the broker is not refused for a stale event.
+func TestUnhealthyInstanceBrokerStillMovesItsEvent(t *testing.T) {
 	l := &opLog{}
 	c := newFaultyInstanceCtrl(t, l, nil, "", "", daemonFaults{
-		missing: map[string]bool{"laya-ingress": true},
-		extra:   []string{"proj-laya-ingress-1"},
-	})
-	var ambiguous *AmbiguousContainerError
-	if _, err := c.UpdateImages(context.Background(), testDigest); !errors.As(err, &ambiguous) {
-		t.Fatalf("UpdateImages() = %v, want AmbiguousContainerError", err)
-	}
-	if ops := l.all(); len(ops) != 0 {
-		t.Errorf("ops = %v, want nothing touched", ops)
-	}
-
-	l = &opLog{}
-	c = newFaultyInstanceCtrl(t, l, nil, "", "", daemonFaults{
-		missing:    map[string]bool{"laya-ingress": true},
+		state:      map[string]string{"laya-broker": "exited"},
+		health:     map[string]string{"laya-broker": "unhealthy"},
 		failCreate: map[string]bool{containerEvent: true},
 	})
 	result, err := c.UpdateImages(context.Background(), testDigest)
-	if err == nil || !strings.Contains(result.Error, "ingress laya-ingress is gone") {
-		t.Fatalf("UpdateImages() = %+v, %v; want the gone ingress reported", result, err)
+	if err == nil || !strings.Contains(result.Error, "laya-broker did not become healthy") {
+		t.Fatalf("UpdateImages() = %+v, %v; want the health failure reported", result, err)
 	}
 	if l.indexOf("create laya-event") < 0 {
-		t.Errorf("ops = %v, want the instance upgraded all the same", l.all())
+		t.Errorf("ops = %v, want the event recreated on the new image anyway", l.all())
 	}
+}
+
+// An aborted primary recreate restores the record to the image the instances are on, so
+// the ones that were running come back.
+func TestAbortedPrimaryRecreateRestartsTheInstance(t *testing.T) {
+	l := &opLog{}
+	c := newFaultyInstanceCtrl(t, l, nil, "", "", daemonFaults{failCreate: map[string]bool{containerBroker: true}})
+	if _, err := c.UpdateImages(context.Background(), testDigest); err == nil {
+		t.Fatal("UpdateImages() = nil, want the primary recreate to fail")
+	}
+	for _, want := range []string{"start laya-broker", "start laya-event"} {
+		if l.indexOf(want) < 0 {
+			t.Errorf("ops = %v, want %q", l.all(), want)
+		}
+	}
+	if l.indexOf("create laya-broker") >= 0 {
+		t.Errorf("ops = %v, want the instance not recreated after an abort", l.all())
+	}
+}
+
+func stateOf(status, health string) map[string]any {
+	st := map[string]any{"Status": status}
+	if health != "" {
+		st["Health"] = map[string]any{"Status": health}
+	}
+	return st
 }

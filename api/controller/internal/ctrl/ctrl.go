@@ -1228,6 +1228,7 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 		// is non-nil — and "RTMR3 is left overstating" is the half an operator
 		// has to act on.
 		err = c.abortImageChange(ctx, err)
+		c.restartOnRef(ctx, plan)
 		result.Success = false
 		result.Error = "failed to recreate broker container: " + err.Error()
 		return result, err
