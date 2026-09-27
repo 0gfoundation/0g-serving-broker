@@ -1,0 +1,352 @@
+package ctrl
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/0glabs/0g-serving-broker/common/attest"
+	"github.com/0glabs/0g-serving-broker/controller/internal/attestproxy"
+	"github.com/0glabs/0g-serving-broker/controller/internal/docker"
+	"github.com/0glabs/0g-serving-broker/inference/config"
+)
+
+const layaInstances = `[{"name":"laya","broker":"laya-broker","event":"laya-event","ingress":"laya-ingress","configFile":"/etc/config-laya/config.yaml"}]`
+
+func TestParseInstances(t *testing.T) {
+	got, err := parseInstances(layaInstances, "/etc/config/config.yaml", false)
+	if err != nil {
+		t.Fatalf("parseInstances() = %v", err)
+	}
+	want := Instance{Name: "laya", Broker: "laya-broker", Event: "laya-event", Ingress: "laya-ingress", ConfigFile: "/etc/config-laya/config.yaml"}
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("parseInstances() = %+v, want [%+v]", got, want)
+	}
+
+	if got, err := parseInstances("  ", "/etc/config/config.yaml", true); err != nil || got != nil {
+		t.Errorf("parseInstances(blank) = %v, %v; want none and no error", got, err)
+	}
+
+	one := func(fields string) string { return "[{" + fields + "}]" }
+	ok := `"broker":"b1","event":"e1","configFile":"/c1/config.yaml"`
+	refused := map[string]struct {
+		raw               string
+		recordUpstreamSet bool
+	}{
+		"not json":                          {raw: "laya"},
+		"unknown field":                     {raw: one(`"name":"x",` + ok + `,"image":"evil"`)},
+		"upper-case name":                   {raw: one(`"name":"Laya",` + ok)},
+		"name with a space":                 {raw: one(`"name":"la ya",` + ok)},
+		"no broker":                         {raw: one(`"name":"x","event":"e1","configFile":"/c1/config.yaml"`)},
+		"broker is the primary's":           {raw: one(`"name":"x","broker":"0g-serving-provider-broker","event":"e1","configFile":"/c1/config.yaml"`)},
+		"ingress is the primary's":          {raw: one(`"name":"x",` + ok + `,"ingress":"broker-ingress"`)},
+		"broker and event are one":          {raw: one(`"name":"x","broker":"b1","event":"b1","configFile":"/c1/config.yaml"`)},
+		"relative config":                   {raw: one(`"name":"x","broker":"b1","event":"e1","configFile":"c1/config.yaml"`)},
+		"unclean config":                    {raw: one(`"name":"x","broker":"b1","event":"e1","configFile":"/c1/../config/config.yaml"`)},
+		"config is the primary's":           {raw: one(`"name":"x","broker":"b1","event":"e1","configFile":"/etc/config/config.yaml"`)},
+		"name declared twice":               {raw: "[{" + `"name":"x",` + ok + "},{" + `"name":"x","broker":"b2","event":"e2","configFile":"/c2/config.yaml"` + "}]"},
+		"container shared by two":           {raw: "[{" + `"name":"x",` + ok + "},{" + `"name":"y","broker":"b1","event":"e2","configFile":"/c2/config.yaml"` + "}]"},
+		"config shared by two":              {raw: "[{" + `"name":"x",` + ok + "},{" + `"name":"y","broker":"b2","event":"e2","configFile":"/c1/config.yaml"` + "}]"},
+		"alongside a recorded upstream set": {raw: one(`"name":"x",` + ok), recordUpstreamSet: true},
+	}
+	for name, tc := range refused {
+		t.Run(name, func(t *testing.T) {
+			if got, err := parseInstances(tc.raw, "/etc/config/config.yaml", tc.recordUpstreamSet); err == nil {
+				t.Errorf("parseInstances(%s) = %+v, want an error", tc.raw, got)
+			}
+		})
+	}
+}
+
+func TestInstanceAliasesResolve(t *testing.T) {
+	c := &Ctrl{}
+	var err error
+	if c.instances, err = parseInstances(layaInstances, "/etc/config/config.yaml", false); err != nil {
+		t.Fatal(err)
+	}
+	for alias, want := range map[string]string{
+		"laya-broker":  "laya-broker",
+		"laya-event":   "laya-event",
+		"laya-ingress": "laya-ingress",
+		"broker":       containerBroker,
+		"laya":         "",
+		"other-broker": "",
+	} {
+		if got := c.getContainerName(alias); got != want {
+			t.Errorf("getContainerName(%q) = %q, want %q", alias, got, want)
+		}
+	}
+	for _, alias := range c.GetAllManagedContainerAliases() {
+		if c.getContainerName(alias) == "" {
+			t.Errorf("alias %q is listed but resolves to nothing", alias)
+		}
+	}
+}
+
+// A daemon holding the primary pair, the controller itself and one extra instance,
+// logging every write by container NAME. The primary event's create fails, which is
+// the same stopping point the single-instance tests use: past everything asserted and
+// short of the contract sync, which would need a chain.
+func fakeInstanceDaemon(t *testing.T, l *opLog, failCreate map[string]bool) *docker.Client {
+	t.Helper()
+
+	names := map[string]string{
+		brokerID:                         containerBroker,
+		eventID:                          containerEvent,
+		selfID:                           "0g-controller",
+		"dddd" + strings.Repeat("4", 60): "laya-broker",
+		"eeee" + strings.Repeat("5", 60): "laya-event",
+		"ffff" + strings.Repeat("6", 60): "laya-ingress",
+	}
+	nameOf := func(path, suffix string) string {
+		parts := strings.Split(strings.TrimSuffix(path, suffix), "/")
+		if n, ok := names[parts[len(parts)-1]]; ok {
+			return n
+		}
+		return parts[len(parts)-1]
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/_ping"):
+			w.Header().Set("Api-Version", "1.47")
+		case strings.Contains(r.URL.Path, "/images/create"):
+			l.add("pull")
+			_, _ = w.Write([]byte(okPull))
+		case strings.HasSuffix(r.URL.Path, "/containers/json"):
+			var list []map[string]any
+			for id, n := range names {
+				list = append(list, map[string]any{"Id": id, "Names": []string{"/" + n}})
+			}
+			_ = json.NewEncoder(w).Encode(list)
+		case strings.HasSuffix(r.URL.Path, "/containers/create"):
+			n := r.URL.Query().Get("name")
+			if failCreate[n] {
+				l.add("create " + n + " refused")
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]any{"message": "no space left on device"})
+				return
+			}
+			l.add("create " + n)
+			_ = json.NewEncoder(w).Encode(map[string]any{"Id": "abcd" + strings.Repeat("0", 60)})
+		case strings.HasSuffix(r.URL.Path, "/stop"):
+			l.add("stop " + nameOf(r.URL.Path, "/stop"))
+			w.WriteHeader(http.StatusNoContent)
+		case strings.HasSuffix(r.URL.Path, "/restart"):
+			l.add("restart " + nameOf(r.URL.Path, "/restart"))
+			w.WriteHeader(http.StatusNoContent)
+		case strings.HasSuffix(r.URL.Path, "/start"):
+			l.add("start " + nameOf(r.URL.Path, "/start"))
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodDelete:
+			l.add("remove " + nameOf(r.URL.Path, ""))
+			w.WriteHeader(http.StatusNoContent)
+		case strings.HasSuffix(r.URL.Path, "/json"):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"Id":          brokerID,
+				"Name":        "/" + nameOf(r.URL.Path, "/json"),
+				"RepoDigests": []string{imageRepo + "@" + testDigest},
+				"Created":     "2026-01-01T00:00:00Z",
+				"Config":      map[string]any{"Image": prevRef},
+				"State":       map[string]any{"Status": "running"},
+				"NetworkSettings": map[string]any{
+					"Networks": map[string]any{"default": map[string]any{}},
+				},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := docker.NewClient(config.ControllerConfig{
+		Docker: config.DockerConfig{Host: srv.URL, APIVersion: "1.47"},
+	})
+	if err != nil {
+		t.Fatalf("building docker client: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	return c
+}
+
+func newInstanceCtrl(t *testing.T, l *opLog, emitErr error, primaryConfig, layaConfig string, failCreate map[string]bool) *Ctrl {
+	t.Helper()
+	t.Cleanup(docker.SetHostnameForTests(selfHost))
+	t.Setenv(attestproxy.SocketEnvVar, "/var/run/zg-tee/tee.sock")
+	return &Ctrl{
+		config:       config.ControllerConfig{ImageRepo: imageRepo, ConfigFile: primaryConfig},
+		dockerClient: fakeInstanceDaemon(t, l, failCreate),
+		emitter:      &fakeEmitter{log: l, err: emitErr},
+		deriver:      &fakeDeriver{log: l},
+		logger:       testLogger(t),
+		instances: []Instance{{
+			Name: "laya", Broker: "laya-broker", Event: "laya-event", Ingress: "laya-ingress", ConfigFile: layaConfig,
+		}},
+	}
+}
+
+// The extra instance moves with the primary: stopped before the record, because it signs
+// under the key the record rebinds, and carried onto the new image after it — broker,
+// event and its own ingress.
+func TestUpgradeCarriesTheExtraInstance(t *testing.T) {
+	l := &opLog{}
+	c := newInstanceCtrl(t, l, nil, "", "", map[string]bool{containerEvent: true})
+
+	if _, err := c.UpdateImages(context.Background(), testDigest); err == nil {
+		t.Fatal("UpdateImages() = nil, want the primary event recreate to fail")
+	}
+
+	ops := l.all()
+	emit := l.indexOf("emit " + attest.EventImageUpdate + " " + imageRecord(imageRepo+"@"+testDigest))
+	if emit < 0 {
+		t.Fatalf("ops = %v, want the image change recorded", ops)
+	}
+	for _, before := range []string{"stop laya-event", "stop laya-broker", "stop " + containerEvent, "stop " + containerBroker} {
+		if i := l.indexOf(before); i < 0 || i > emit {
+			t.Errorf("ops = %v, want %q before the record at %d", ops, before, emit)
+		}
+	}
+	for _, after := range []string{"create " + containerBroker, "create laya-broker", "create laya-event", "restart laya-ingress"} {
+		if i := l.indexOf(after); i < 0 || i < emit {
+			t.Errorf("ops = %v, want %q after the record at %d", ops, after, emit)
+		}
+	}
+	// The primary broker goes first: it is the image the key is derived from.
+	if l.indexOf("create laya-broker") < l.indexOf("create "+containerBroker) {
+		t.Errorf("ops = %v, want the primary broker recreated before the instance's", ops)
+	}
+}
+
+// A failure on the instance's side must not abort the primary's upgrade: the primary is
+// already on the new image and has to finish, and the instance failure is still reported.
+func TestUpgradeFinishesThePrimaryWhenAnInstanceFails(t *testing.T) {
+	l := &opLog{}
+	c := newInstanceCtrl(t, l, nil, "", "", map[string]bool{"laya-broker": true, containerEvent: true})
+
+	_, err := c.UpdateImages(context.Background(), testDigest)
+	if err == nil {
+		t.Fatal("UpdateImages() = nil, want an error")
+	}
+	if l.indexOf("create "+containerEvent) < 0 {
+		t.Errorf("ops = %v, want the primary to carry on to its event after the instance failed", l.all())
+	}
+	if l.indexOf("create laya-event") >= 0 {
+		t.Errorf("ops = %v, want the failed instance's event left alone", l.all())
+	}
+}
+
+// Nothing recorded means nothing changed, so every stopped container — the instance's
+// included — is started again.
+func TestFailedRecordRestartsTheExtraInstance(t *testing.T) {
+	l := &opLog{}
+	c := newInstanceCtrl(t, l, errors.New("dstack.sock: connection refused"), "", "", nil)
+
+	if _, err := c.UpdateImages(context.Background(), testDigest); err == nil {
+		t.Fatal("UpdateImages() = nil, want an error")
+	}
+	for _, want := range []string{"start laya-broker", "start laya-event", "start " + containerBroker} {
+		if l.indexOf(want) < 0 {
+			t.Errorf("ops = %v, want %q", l.all(), want)
+		}
+	}
+	if l.indexOf("create") >= 0 {
+		t.Errorf("ops = %v, want nothing recreated", l.all())
+	}
+}
+
+func TestInstanceConfigChangeIsRecordedAndTouchesOnlyThatInstance(t *testing.T) {
+	dir := t.TempDir()
+	primary := filepath.Join(dir, "config.yaml")
+	laya := filepath.Join(dir, "laya.yaml")
+	const primaryBefore = "service:\n  model: primary\n"
+	for path, content := range map[string]string{primary: primaryBefore, laya: "service:\n  model: before\n"} {
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	l := &opLog{}
+	c := newInstanceCtrl(t, l, nil, primary, laya, nil)
+
+	const content = "service:\n  model: after\n"
+	if err := c.ApplyInstanceConfig(context.Background(), "laya", content); err != nil {
+		t.Fatalf("ApplyInstanceConfig() = %v", err)
+	}
+
+	sum := sha256.Sum256([]byte(content))
+	ops := l.all()
+	if want := "emit " + attest.EventInstanceConfigUpdate + " laya " + hex.EncodeToString(sum[:]); len(ops) == 0 || ops[0] != want {
+		t.Fatalf("ops = %v, want %q first", ops, want)
+	}
+	for _, want := range []string{"restart laya-broker", "restart laya-event", "restart laya-ingress"} {
+		if l.indexOf(want) < 0 {
+			t.Errorf("ops = %v, want %q", ops, want)
+		}
+	}
+	for _, never := range []string{"restart " + containerBroker, "restart " + containerEvent, "emit " + attest.EventConfigUpdate} {
+		if l.indexOf(never) >= 0 {
+			t.Errorf("ops = %v, want no %q", ops, never)
+		}
+	}
+	if got, _ := os.ReadFile(laya); string(got) != content {
+		t.Errorf("instance config = %q, want %q", got, content)
+	}
+	if got, _ := os.ReadFile(primary); string(got) != primaryBefore {
+		t.Errorf("primary config = %q, want it untouched", got)
+	}
+	if got, err := c.GetInstanceConfig("laya"); err != nil || got != content {
+		t.Errorf("GetInstanceConfig() = %q, %v; want the new content", got, err)
+	}
+}
+
+func TestInstanceConfigRefusals(t *testing.T) {
+	dir := t.TempDir()
+	laya := filepath.Join(dir, "laya.yaml")
+	l := &opLog{}
+	c := newInstanceCtrl(t, l, nil, filepath.Join(dir, "config.yaml"), laya, nil)
+
+	var invalid *InvalidInstanceError
+	if err := c.ApplyInstanceConfig(context.Background(), "nope", "service:\n  model: x\n"); !errors.As(err, &invalid) {
+		t.Errorf("ApplyInstanceConfig(unknown) = %v, want InvalidInstanceError", err)
+	}
+	if _, err := c.GetInstanceConfig("nope"); !errors.As(err, &invalid) {
+		t.Errorf("GetInstanceConfig(unknown) = %v, want InvalidInstanceError", err)
+	}
+	if err := c.ApplyInstanceConfig(context.Background(), "laya", "service: [\n"); err == nil {
+		t.Error("ApplyInstanceConfig(bad yaml) = nil, want an error")
+	}
+	if ops := l.all(); len(ops) != 0 {
+		t.Errorf("ops = %v, want nothing recorded or touched by a refused change", ops)
+	}
+}
+
+// A write that fails after the record is recorded again with what is actually on disk.
+func TestFailedInstanceConfigWriteRestoresTheRecord(t *testing.T) {
+	dir := t.TempDir()
+	l := &opLog{}
+	// A directory where the file should be: the write fails, the re-read fails too.
+	laya := filepath.Join(dir, "laya.yaml")
+	if err := os.Mkdir(laya, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	c := newInstanceCtrl(t, l, nil, filepath.Join(dir, "config.yaml"), laya, nil)
+
+	if err := c.ApplyInstanceConfig(context.Background(), "laya", "service:\n  model: x\n"); err == nil {
+		t.Fatal("ApplyInstanceConfig() = nil, want the write to fail")
+	}
+	ops := l.all()
+	if want := "emit " + attest.EventInstanceConfigUpdate + " laya unknown"; len(ops) < 2 || ops[1] != want {
+		t.Fatalf("ops = %v, want the record restored as %q", ops, want)
+	}
+	if l.indexOf("restart") >= 0 {
+		t.Errorf("ops = %v, want nothing restarted", ops)
+	}
+}

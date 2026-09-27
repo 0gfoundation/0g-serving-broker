@@ -245,6 +245,10 @@ type Ctrl struct {
 	// reaches the broker. See boundUpstreamSetHash.
 	setHashMu       sync.RWMutex
 	boundSetHashVal string
+
+	// instances are the extra broker/event pairs this controller manages beside the
+	// primary one (InstancesEnvVar). Fixed at startup, like the admin list.
+	instances []Instance
 }
 
 // boundUpstreamSetHash reports the set hash keys are currently derived for, or "" for
@@ -314,6 +318,15 @@ func NewCtrl(fullConfig *config.Config, logger log.Logger) (*Ctrl, error) {
 		adminAddresses: adminAddresses,
 		allowedIPs:     allowedIPs,
 		logger:         logger,
+	}
+
+	instances, err := parseInstances(os.Getenv(InstancesEnvVar), cfg.ConfigFile, cfg.RecordUpstreamSet)
+	if err != nil {
+		return nil, err
+	}
+	ctrl.instances = instances
+	for _, in := range instances {
+		logger.Infof("Managing extra instance %q: broker=%s event=%s ingress=%s config=%s", in.Name, in.Broker, in.Event, in.Ingress, in.ConfigFile)
 	}
 
 	// Initialize ServingContract for deleting services (required)
@@ -430,13 +443,13 @@ func (c *Ctrl) getContainerName(alias string) string {
 	case "prometheus":
 		return containerPrometheus
 	default:
-		return ""
+		return c.instanceContainer(alias)
 	}
 }
 
 // GetAllManagedContainerAliases returns all managed container aliases
 func (c *Ctrl) GetAllManagedContainerAliases() []string {
-	return []string{"broker", "event", "ingress", "prometheus-init", "prometheus"}
+	return append([]string{"broker", "event", "ingress", "prometheus-init", "prometheus"}, c.instanceAliases()...)
 }
 
 // GetContainerStatus gets the status of a specific container
@@ -658,18 +671,24 @@ func (c *Ctrl) ApplyCoreConfig(ctx context.Context, configContent string) error 
 // though — a restart that fails for any other reason is reported, because the
 // alternative is a provider that is unreachable and says nothing about it.
 func (c *Ctrl) reloadIngress(ctx context.Context) error {
-	err := c.dockerClient.RestartContainer(ctx, containerIngress)
+	return c.restartIngress(ctx, containerIngress)
+}
+
+// restartIngress is reloadIngress for a named proxy, so an extra instance's ingress
+// gets the same treatment as the primary one.
+func (c *Ctrl) restartIngress(ctx context.Context, name string) error {
+	err := c.dockerClient.RestartContainer(ctx, name)
 	if err == nil {
-		c.logger.Infof("[reloadIngress] Restarted %s so it re-resolves the recreated containers", containerIngress)
+		c.logger.Infof("[reloadIngress] Restarted %s so it re-resolves the recreated containers", name)
 		return nil
 	}
 
 	var notFound *docker.ContainerNotFoundError
 	if errors.As(err, &notFound) {
-		c.logger.Infof("[reloadIngress] No %s in this deployment; nothing in front of the broker to re-resolve", containerIngress)
+		c.logger.Infof("[reloadIngress] No %s in this deployment; nothing in front of the broker to re-resolve", name)
 		return nil
 	}
-	return fmt.Errorf("restarting %s so it re-resolves the recreated containers: %w", containerIngress, err)
+	return fmt.Errorf("restarting %s so it re-resolves the recreated containers: %w", name, err)
 }
 
 // AmbiguousContainerError is returned when a container the upgrade must act on cannot
@@ -992,6 +1011,14 @@ func (c *Ctrl) SyncService(ctx context.Context, imageName, imageDigest string) e
 // 2. Stop containers (event -> broker)
 // 3. Recreate containers (broker -> event)
 // 4. Sync service to contract (only after containers are running with new image)
+//
+// Extra instances (InstancesEnvVar) move with the primary pair at every step, and that
+// is not optional. They sign through this controller, whose key is derived from the
+// primary broker's image, so an upgrade that recreated only the primary would leave
+// them on the old image signing under the new image's key. Their stops precede the
+// record for the same reason the primary's do; their recreates follow it. Their
+// contract sync is their own broker's: it rewrites the image fields and pushes its
+// signer on every start, from the IMAGE_REPO / IMAGE_DIGEST pair written below.
 func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUpdateResult, error) {
 	if err := ValidateDigest(digest); err != nil {
 		return nil, err
@@ -1044,6 +1071,13 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 	if err := c.verifyExactContainer(ctx, eventName); err != nil {
 		return nil, err
 	}
+	for _, in := range c.instances {
+		for _, name := range []string{in.Broker, in.Event} {
+			if err := c.verifyExactContainer(ctx, name); err != nil {
+				return nil, fmt.Errorf("instance %q: %w", in.Name, err)
+			}
+		}
+	}
 
 	// The address the broker's signing key will have once it runs ref, derived before anything
 	// is touched.
@@ -1089,9 +1123,25 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 
 	// Step 2: Stop containers in reverse dependency order (event -> broker)
 	c.logger.Info("[UpdateImages] Stopping containers...")
+	// Every extra instance first, and all of it before the record: the record must not
+	// exist while ANY broker is alive that is not on ref, and these sign under the same
+	// key as the primary.
+	for _, in := range c.instances {
+		for _, name := range []string{in.Event, in.Broker} {
+			if err := c.dockerClient.StopContainer(ctx, name); err != nil {
+				if _, ok := err.(*docker.ContainerNotFoundError); !ok {
+					c.startAfterFailedStop(ctx)
+					result.Success = false
+					result.Error = "failed to stop " + name + ": " + err.Error()
+					return result, err
+				}
+			}
+		}
+	}
 	if err := c.dockerClient.StopContainer(ctx, eventName); err != nil {
 		// Log error but continue - container might not exist
 		if _, ok := err.(*docker.ContainerNotFoundError); !ok {
+			c.startAfterFailedStop(ctx)
 			result.Success = false
 			result.Error = "failed to stop event container: " + err.Error()
 			return result, err
@@ -1101,6 +1151,7 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 	// Then stop broker
 	if err := c.dockerClient.StopContainer(ctx, brokerName); err != nil {
 		if _, ok := err.(*docker.ContainerNotFoundError); !ok {
+			c.startAfterFailedStop(ctx)
 			result.Success = false
 			result.Error = "failed to stop broker container: " + err.Error()
 			return result, err
@@ -1144,7 +1195,7 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 		// one leaves settlement and event processing down while the broker answers
 		// requests — an outage in the half nobody is watching, reported as an error that
 		// mentions only RTMR3.
-		for _, name := range []string{brokerName, eventName} {
+		for _, name := range append([]string{brokerName, eventName}, c.instanceContainers()...) {
 			if startErr := c.dockerClient.StartContainer(startCtx, name); startErr != nil {
 				c.logger.Errorf("[UpdateImages] Could not restart %s after failing to record the change: %v", name, startErr)
 			}
@@ -1175,6 +1226,14 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 	// and the abort paths below must NOT restore it. Everything that remains —
 	// the health wait, the ingress reload, the event container, the contract sync
 	// — can fail without changing which image the broker is running.
+
+	// The extra instances, now that the record names ref and the primary broker is on
+	// it. Each one is carried all the way — broker, health, event, ingress — before the
+	// primary continues, so a later failure on the primary's side cannot strand them
+	// half-upgraded. A failure leaves that instance down rather than on the old image,
+	// which is the direction the record allows, and is reported once the primary has
+	// finished rather than aborting it.
+	instErr := c.upgradeInstances(ctx, ref, result)
 
 	// Wait for broker to become healthy before starting event
 	if err := c.dockerClient.WaitForHealthy(ctx, brokerName, 2*time.Minute); err != nil {
@@ -1232,7 +1291,13 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 	if err := c.SyncService(ctx, c.config.ImageRepo, imageInfo.Digest); err != nil {
 		result.Success = false
 		result.Error = "failed to sync service: " + err.Error()
-		return result, err
+		return result, errors.Join(err, instErr)
+	}
+
+	if instErr != nil {
+		result.Success = false
+		result.Error = "the primary broker is upgraded, but " + instErr.Error()
+		return result, instErr
 	}
 
 	result.Success = true

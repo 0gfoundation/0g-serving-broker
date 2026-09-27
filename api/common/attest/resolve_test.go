@@ -678,3 +678,48 @@ func TestResolveBlanksTheEncPubWhenTheQuoteCarriesNone(t *testing.T) {
 		t.Errorf("BrokerEncPub = %q, want empty: nothing checked it, and a caller must not read that as vouched for", state.BrokerEncPub)
 	}
 }
+
+// Extra broker instances have their own config record, kept per instance and never
+// mistaken for the primary's.
+func TestResolveReadsInstanceConfigRecords(t *testing.T) {
+	compose := pinnedCompose(t)
+	other := strings.Repeat("b", 64)
+
+	events := append(bootEvents(),
+		RuntimeEvent{Event: EventInstanceConfigUpdate, Payload: []byte("laya unknown")},
+		RuntimeEvent{Event: EventInstanceConfigUpdate, Payload: []byte("laya " + configSum)},
+		RuntimeEvent{Event: EventInstanceConfigUpdate, Payload: []byte("other " + other)},
+	)
+	state, err := resolve(t, compose, events)
+	if err != nil {
+		t.Fatalf("ResolveRunningState() = %v, want the later laya record to repair the unknown one", err)
+	}
+	if state.ConfigSHA256 != "" {
+		t.Errorf("ConfigSHA256 = %q, want the primary's untouched by instance records", state.ConfigSHA256)
+	}
+	if got := state.InstanceConfigSHA256["laya"]; got != configSum {
+		t.Errorf("InstanceConfigSHA256[laya] = %q, want %q", got, configSum)
+	}
+	if got := state.InstanceConfigSHA256["other"]; got != other {
+		t.Errorf("InstanceConfigSHA256[other] = %q, want %q", got, other)
+	}
+}
+
+func TestResolveRefusesUnreadableInstanceConfigRecords(t *testing.T) {
+	compose := pinnedCompose(t)
+	refused := map[string][]RuntimeEvent{
+		"last record unknown": {
+			{Event: EventInstanceConfigUpdate, Payload: []byte("laya " + configSum)},
+			{Event: EventInstanceConfigUpdate, Payload: []byte("laya unknown")},
+		},
+		"no instance named": {{Event: EventInstanceConfigUpdate, Payload: []byte(configSum)}},
+		"empty instance":    {{Event: EventInstanceConfigUpdate, Payload: []byte(" " + configSum)}},
+	}
+	for name, extra := range refused {
+		t.Run(name, func(t *testing.T) {
+			if _, err := resolve(t, compose, append(bootEvents(), extra...)); err == nil {
+				t.Errorf("ResolveRunningState() = nil, want %s refused", name)
+			}
+		})
+	}
+}
