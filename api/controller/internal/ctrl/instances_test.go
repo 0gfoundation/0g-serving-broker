@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/0glabs/0g-serving-broker/common/attest"
@@ -98,7 +99,8 @@ func TestInstanceAliasesResolve(t *testing.T) {
 // controller itself and one extra instance, logging every write by container NAME:
 // creates or stops that fail by name, containers absent from the list, neighbours
 // added to it (whose names contain an instance's), and per-container images (default
-// prevRef), states (default running) and health (default none).
+// prevRef), states (default running) and health (default none). A removed container
+// leaves the list, as it does on a real daemon.
 //
 // The instance tests fail the primary event's create, the same stopping point the
 // single-instance tests use: past everything asserted and short of the contract sync,
@@ -111,6 +113,9 @@ type daemonFaults struct {
 	image      map[string]string
 	state      map[string]string
 	health     map[string]string
+	// failSecondStop fails a container's second stop — the one RecreateContainer does
+	// before it removes, after the upgrade's own stop has succeeded.
+	failSecondStop map[string]bool
 }
 
 func fakeInstanceDaemon(t *testing.T, l *opLog, failCreate map[string]bool) *docker.Client {
@@ -130,6 +135,9 @@ func fakeFaultyDaemon(t *testing.T, l *opLog, f daemonFaults) *docker.Client {
 		"eeee" + strings.Repeat("5", 60): "laya-event",
 		"ffff" + strings.Repeat("6", 60): "laya-ingress",
 	}
+	var mu sync.Mutex
+	stops := map[string]int{}
+	removed := map[string]bool{}
 	for i, n := range f.extra {
 		names[fmt.Sprintf("%04d", i)+strings.Repeat("7", 60)] = n
 	}
@@ -150,8 +158,10 @@ func fakeFaultyDaemon(t *testing.T, l *opLog, f daemonFaults) *docker.Client {
 			_, _ = w.Write([]byte(okPull))
 		case strings.HasSuffix(r.URL.Path, "/containers/json"):
 			var list []map[string]any
+			mu.Lock()
+			defer mu.Unlock()
 			for id, n := range names {
-				if !f.missing[n] {
+				if !f.missing[n] && !removed[n] {
 					list = append(list, map[string]any{"Id": id, "Names": []string{"/" + n}})
 				}
 			}
@@ -164,11 +174,18 @@ func fakeFaultyDaemon(t *testing.T, l *opLog, f daemonFaults) *docker.Client {
 				_ = json.NewEncoder(w).Encode(map[string]any{"message": "no space left on device"})
 				return
 			}
+			mu.Lock()
+			removed[n] = false // listed again under the name, as a recreate leaves it
+			mu.Unlock()
 			l.add("create " + n)
 			_ = json.NewEncoder(w).Encode(map[string]any{"Id": "abcd" + strings.Repeat("0", 60)})
 		case strings.HasSuffix(r.URL.Path, "/stop"):
 			n := nameOf(r.URL.Path, "/stop")
-			if f.failStop[n] {
+			mu.Lock()
+			stops[n]++
+			second := stops[n] == 2
+			mu.Unlock()
+			if f.failStop[n] || (second && f.failSecondStop[n]) {
 				l.add("stop " + n + " refused")
 				w.WriteHeader(http.StatusInternalServerError)
 				_ = json.NewEncoder(w).Encode(map[string]any{"message": "device busy"})
@@ -183,7 +200,11 @@ func fakeFaultyDaemon(t *testing.T, l *opLog, f daemonFaults) *docker.Client {
 			l.add("start " + nameOf(r.URL.Path, "/start"))
 			w.WriteHeader(http.StatusNoContent)
 		case r.Method == http.MethodDelete:
-			l.add("remove " + nameOf(r.URL.Path, ""))
+			n := nameOf(r.URL.Path, "")
+			mu.Lock()
+			removed[n] = true
+			mu.Unlock()
+			l.add("remove " + n)
 			w.WriteHeader(http.StatusNoContent)
 		case strings.HasSuffix(r.URL.Path, "/json"):
 			n := nameOf(r.URL.Path, "/json")
@@ -592,21 +613,53 @@ func TestUnhealthyInstanceBrokerStillMovesItsEvent(t *testing.T) {
 	}
 }
 
-// An aborted primary recreate restores the record to the image the instances are on, so
-// the ones that were running come back.
-func TestAbortedPrimaryRecreateRestartsTheInstance(t *testing.T) {
-	l := &opLog{}
-	c := newFaultyInstanceCtrl(t, l, nil, "", "", daemonFaults{failCreate: map[string]bool{containerBroker: true}})
-	if _, err := c.UpdateImages(context.Background(), testDigest); err == nil {
-		t.Fatal("UpdateImages() = nil, want the primary recreate to fail")
+// nthEmitter fails its failOn-th emit (1-based) and records the rest.
+type nthEmitter struct {
+	log    *opLog
+	n      int
+	failOn int
+}
+
+func (e *nthEmitter) EmitEvent(ctx context.Context, event string, payload []byte) error {
+	e.n++
+	if e.n == e.failOn {
+		e.log.add("emit refused " + event)
+		return errors.New("dstack.sock: connection refused")
 	}
-	for _, want := range []string{"start laya-broker", "start laya-event"} {
-		if l.indexOf(want) < 0 {
-			t.Errorf("ops = %v, want %q", l.all(), want)
-		}
-	}
-	if l.indexOf("create laya-broker") >= 0 {
-		t.Errorf("ops = %v, want the instance not recreated after an abort", l.all())
+	e.log.add("emit " + event + " " + string(payload))
+	return nil
+}
+
+// After an aborted primary recreate the instances come back only when the record was
+// put back to the image they run: a primary recreate that failed before removing the
+// old container, with the restore succeeding. Removed, or with the restore failing, they
+// stay down — the ledger either names nothing readable or still names the new image.
+func TestAbortedPrimaryRecreateRestartsTheInstanceOnlyWhenRestored(t *testing.T) {
+	for name, tc := range map[string]struct {
+		faults    daemonFaults
+		failEmit  int
+		restarted bool
+	}{
+		"failed before removal, restored":        {faults: daemonFaults{failSecondStop: map[string]bool{containerBroker: true}}, restarted: true},
+		"failed before removal, restore refused": {faults: daemonFaults{failSecondStop: map[string]bool{containerBroker: true}}, failEmit: 2},
+		"removed, then create failed":            {faults: daemonFaults{failCreate: map[string]bool{containerBroker: true}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			l := &opLog{}
+			c := newFaultyInstanceCtrl(t, l, nil, "", "", tc.faults)
+			c.emitter = &nthEmitter{log: l, failOn: tc.failEmit}
+			if _, err := c.UpdateImages(context.Background(), testDigest); err == nil {
+				t.Fatal("UpdateImages() = nil, want the primary recreate to fail")
+			}
+			for _, op := range []string{"start laya-broker", "start laya-event"} {
+				if got := l.indexOf(op) >= 0; got != tc.restarted {
+					t.Errorf("ops = %v: %q = %v, want %v", l.all(), op, got, tc.restarted)
+				}
+			}
+			if l.indexOf("create laya-broker") >= 0 {
+				t.Errorf("ops = %v, want the instance not recreated after an abort", l.all())
+			}
+		})
 	}
 }
 
