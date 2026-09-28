@@ -863,6 +863,14 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 			p.handleBrokerError(ctx, err, "prepare HTTP request")
 			return
 		}
+		// PrepareHTTPRequest detaches the upstream call from the caller so a client
+		// hang-up cannot cut short the completion it is billed for. Whitelisted
+		// traffic is never billed here, so that reason does not hold, and finishing
+		// the work anyway only burns the engine: the router abandons an attempt
+		// that misses its first-token deadline and retries elsewhere, and the
+		// detached copy kept decoding on the saturated engine it was fleeing.
+		// Tie it to the caller, so the upstream (and sglang behind it) aborts too.
+		httpReq = httpReq.WithContext(ctx.Request.Context())
 
 		// Get billing prices (won't be used for billing, but needed for processing)
 		prices, err := p.ctrl.GetBillingPrices(ctx)
