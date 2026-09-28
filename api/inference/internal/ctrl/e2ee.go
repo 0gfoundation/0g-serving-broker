@@ -445,15 +445,9 @@ func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, targetPath string, reqBody [
 	if profile == wire.ProfileSpeech && !isJSONIfiedRoute(targetPath) {
 		return nil, fmt.Errorf("a sealed %s request is only accepted on %s, not %q (SPEC §5.3)", profile, speechTranscriptionRoute, ctx.Request.URL.Path)
 	}
-	// The embedding profile gets the same check, for the same reason: the PR that
-	// added its profileForRequest arm is what made a sealed envelope openable on
-	// an embedding provider at all — before it the arm returned ("", false) and
-	// the envelope was refused. Without this, an envelope POSTed to a free route
-	// (/attestation/report, /signature/{id}) is opened and its plaintext `input`
-	// swapped into the body; that route's response is never sealed, and on a
-	// TargetSeparated provider the plaintext is also forwarded upstream. A second
-	// profile-specific `&&` is still not the end state — #734's per-profile route
-	// set should replace both of these checks.
+	// Same for embedding: opened on any other route (/attestation/report,
+	// /signature/{id}), the plaintext `input` would land in a body whose response
+	// is never sealed. #734's per-profile route set should replace both checks.
 	if profile == wire.ProfileEmbedding && targetPath != embeddingRoute {
 		return nil, fmt.Errorf("a sealed %s request is only accepted on %s, not %q (SPEC §7.4)", profile, embeddingRoute, ctx.Request.URL.Path)
 	}
@@ -1434,16 +1428,9 @@ func (rs *responseFrameSealer) signedText() (text string, ok bool, err error) {
 //     output tokens the same response reported. Nothing would report a problem:
 //     exactly the silent failure this profile's rules exist to remove.
 //
-// Embedding has NO entry either, and its absence is the clearest case for why
-// this map is keyed on the profile rather than the field name. Its sealed field
-// is called `data` and IS an array, so a name-keyed set would hand it image's
-// permission automatically — the coincidence of vocabulary named above. But
-// `/v1/embeddings` has no well-formed response without `data`: the vectors are
-// the entire point of the call, so a frame missing them is a broken upstream,
-// not a trailing bookkeeping frame. A placeholder there would seal, sign and
-// mark final a response with no vectors in it while the router bills the
-// `usage.prompt_tokens` that same frame is now required to carry (§7.4) — the
-// Anthropic failure above exactly, with the bill attached.
+// Embedding has NO entry either, although its sealed field is also an array
+// named `data`. A response without the vectors is a broken upstream, and a
+// placeholder would sign and bill (§7.4 `usage.prompt_tokens`) an empty answer.
 //
 // So a frame whose shape declares a field it does not carry fails closed here,
 // with the sealer's own "sealed field not present in frame".
