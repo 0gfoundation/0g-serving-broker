@@ -187,7 +187,7 @@ applied silently.
 | `chatbot` | an unrecognized path | **refused** |
 | `text-to-image` | any (route-blind) | `image` |
 | `speech-to-text` | any (route-blind), but ALSO route-scoped — see below | `speech` |
-| `embedding` | any (route-blind) | `embedding` |
+| `embedding` | any (route-blind), but ALSO route-scoped to `/embeddings` — see below | `embedding` |
 | everything else — `image-editing`, `video-generation`, anything newer | any | refused |
 
 **The surface is half the key for `chatbot` and for nothing else.** One chatbot
@@ -199,14 +199,18 @@ frames look plausible. The other three service types serve one surface each, so
 the surface they arrived on is whatever the path happened to be and only the
 chatbot arm consults it.
 
-**Route-blind is not the same as route-scoped, and only `speech` is both.**
-Profile resolution answers from the service type, so on an image or embedding
-provider a sealed envelope POSTed to a route that serves no inference at all —
-`/signature/{chatID}`, `/attestation/report` — is OPENED rather than refused.
-`speech` carries an extra `isJSONIfiedRoute` check because its own change is
-what made that reachable for multipart; image predates it and embedding inherits
-the same gap. Widening the rule wants a per-profile route set rather than a
-third profile-specific `&&`, so it is tracked as `#734`.
+**Route-blind is not the same as route-scoped.** Profile resolution answers
+from the service type, so without a route check a sealed envelope POSTed to a
+route that serves no inference at all — `/signature/{chatID}`,
+`/attestation/report` — is OPENED rather than refused, and that route's response
+is never sealed. `speech` and `embedding` each carry an extra route check in
+`MaybeUnsealRequest` (`isJSONIfiedRoute`, and `targetPath == embeddingRoute`),
+for the same reason: the change that gave each its profile is what made the
+envelope openable on that provider at all — before it, the arm returned
+`("", false)` and the envelope was refused everywhere. `image` has no such
+check; it was already route-blind before the rule existed, and that is the gap
+`#734` tracks. `#734`'s per-profile route set should replace all three: the two
+checks here and image's missing one.
 
 An **unrecognized** chatbot path is refused for the same reason, and it is the
 likelier way in: adding a chat route means adding to `constant.TargetRoute`,

@@ -202,6 +202,51 @@ func TestProxyE2EESpeechRouteScopingUsesTheDispatcherPath(t *testing.T) {
 	}
 }
 
+// The embedding profile's route scoping, through the real dispatcher: what the
+// guard compares against is the path the proxy computes, so a free route with the
+// endpoint name appended must still read as off-route.
+func TestProxyE2EEEmbeddingRouteScopingUsesTheDispatcherPath(t *testing.T) {
+	input, _ := json.Marshal([]string{"patient chart 4471"})
+	model, _ := json.Marshal("qwen3.7-text-embedding")
+
+	for _, tt := range []struct {
+		path      string
+		offRoute  bool
+		whyItsRun string
+	}{
+		{constant.ServicePrefix + "/embeddings", false, "the endpoint itself"},
+		{constant.ServicePrefix + "/v1/embeddings", false, "the /v1 spelling the SDKs send"},
+		{constant.ServicePrefix + "/signature/embeddings", true, "a free route with the endpoint appended"},
+		{constant.ServicePrefix + "/attestation/report", true, "the attestation route"},
+	} {
+		t.Run(tt.whyItsRun, func(t *testing.T) {
+			e := newE2EEProxyEnv(t)
+			e.p.serviceType = constant.ServiceTypeEmbedding
+			e.p.ctrl.Service = config.Service{Type: constant.ServiceTypeEmbedding}
+
+			req := wire.Request{"model": model, "input": input}
+			sealed, err := wire.SealRequestFor(wire.ProfileEmbedding, e.encPub, req,
+				nil, e.signerHex, e.clientEphPub)
+			if err != nil {
+				t.Fatalf("SealRequestFor(embedding): %v", err)
+			}
+			body, _ := json.Marshal(sealed)
+
+			w := e.doPath(t, tt.path, body)
+			// The off-route message is the discriminator, not the status: an
+			// on-route request also fails here (serviceTarget is a dead host).
+			const offRoute = "is only accepted on"
+			if got := strings.Contains(w.Body.String(), offRoute); got != tt.offRoute {
+				t.Errorf("refused as off-route = %v, want %v (status %d)\n%s",
+					got, tt.offRoute, w.Code, w.Body.String())
+			}
+			if strings.Contains(w.Body.String(), "patient chart 4471") {
+				t.Errorf("the decrypted input reached the response on %s", tt.path)
+			}
+		})
+	}
+}
+
 // A decentralized TargetSeparated provider forwards /signature/ upstream, where
 // the remote TEE signs. A sealed reply is signed HERE instead, under the chatKey
 // returned as ZG-Res-Key, so that lookup must be answered from the broker cache:

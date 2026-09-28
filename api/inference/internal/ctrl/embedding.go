@@ -26,6 +26,12 @@ import (
 // speechToTextMetricLabel's underscore convention for this family.
 const embeddingMetricLabel = "embedding"
 
+// embeddingRoute is the only route a sealed embedding envelope is opened on
+// (see MaybeUnsealRequest), as it appears in constant.TargetRoute — the proxy
+// strips the service prefix and the /v1 segment before matching, so it carries
+// neither.
+const embeddingRoute = "/embeddings"
+
 // EmbeddingResponse is the OpenAI Embeddings API response shape this handler
 // actually reads. `data`/`object` are opaque to billing and pass through in
 // the raw body untouched — only `usage` is inspected here.
