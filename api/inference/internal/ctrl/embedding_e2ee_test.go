@@ -53,13 +53,22 @@ func (f *e2eeTestFixture) sealEmbeddingRequest(t *testing.T) []byte {
 	return b
 }
 
+// newEmbeddingGinCtx is newGinCtx on a caller-chosen path. The embedding profile
+// is route-scoped (a sealed envelope opens only on /embeddings), so these tests
+// cannot reuse newGinCtx, whose path is the chat endpoint.
+func newEmbeddingGinCtx(path string) *gin.Context {
+	ctx := newGinCtx()
+	ctx.Request = httptest.NewRequest("POST", path, nil)
+	return ctx
+}
+
 // newSealedEmbeddingCtx unseals a sealed embedding request on a fresh context, so
 // the response-side tests below run with the same context state the real handler
 // sees (profile, ephemeral key, request binding hash).
 func (f *e2eeTestFixture) newSealedEmbeddingCtx(t *testing.T) (*gin.Context, []byte) {
 	t.Helper()
 	f.c.Service = config.Service{Type: constant.ServiceTypeEmbedding}
-	ctx := newGinCtx()
+	ctx := newEmbeddingGinCtx(constant.ServicePrefix + "/v1/embeddings")
 	out, err := unsealOn(f.c, ctx, f.sealEmbeddingRequest(t))
 	if err != nil {
 		t.Fatalf("unseal embedding request: %v", err)
@@ -151,7 +160,7 @@ func TestMaybeUnsealEmbeddingRequestRejectsCleartextInput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal tampered envelope: %v", err)
 	}
-	out, err := unsealOn(f.c, newGinCtx(), tampered)
+	out, err := unsealOn(f.c, newEmbeddingGinCtx(constant.ServicePrefix+"/v1/embeddings"), tampered)
 	if err == nil {
 		t.Fatalf("the enclave must refuse a sealed request carrying `input` in cleartext, got %s", out)
 	}
@@ -606,5 +615,50 @@ func runSealedEmbeddingHandler(t *testing.T, svc config.Service, providerUsage s
 	}
 	if !strings.Contains(string(opened["data"]), "0.0231") {
 		t.Fatalf("client did not recover the vectors: %s", opened["data"])
+	}
+}
+
+// A sealed embedding envelope opens on /embeddings and nowhere else. Before the
+// profile existed the envelope was refused on every route; the profile is what
+// made it openable, so it must not make it openable on a route whose response is
+// never sealed — /attestation/report and /signature/{id} would otherwise answer
+// with the plaintext `input` swapped into the body, and a TargetSeparated
+// provider would also forward that plaintext upstream.
+func TestMaybeUnsealEmbeddingRequestIsScopedToTheEmbeddingsRoute(t *testing.T) {
+	for _, tc := range []struct {
+		path     string
+		offRoute bool
+	}{
+		{constant.ServicePrefix + "/embeddings", false},
+		{constant.ServicePrefix + "/v1/embeddings", false}, // the /v1 spelling SDKs send
+		{constant.ServicePrefix + "/attestation/report", true},
+		{constant.ServicePrefix + "/signature/abc123", true},
+		{constant.ServicePrefix + "/signature/embeddings", true}, // free route with the endpoint appended
+		{constant.ServicePrefix + "/v1/chat/completions", true},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			f := newE2EEFixture(t)
+			f.c.Service = config.Service{Type: constant.ServiceTypeEmbedding}
+
+			out, err := unsealOn(f.c, newEmbeddingGinCtx(tc.path), f.sealEmbeddingRequest(t))
+			if tc.offRoute {
+				if err == nil {
+					t.Fatalf("a sealed embedding envelope must be refused on %s, got %s", tc.path, out)
+				}
+				if !strings.Contains(err.Error(), "is only accepted on /embeddings") {
+					t.Fatalf("want the off-route refusal, got %v", err)
+				}
+				if strings.Contains(string(out), embSecretA) {
+					t.Fatal("an off-route refusal must not return the decrypted input")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("a sealed embedding envelope must open on %s: %v", tc.path, err)
+			}
+			if !strings.Contains(string(out), embSecretA) {
+				t.Fatalf("the enclave did not recover the input on %s", tc.path)
+			}
+		})
 	}
 }

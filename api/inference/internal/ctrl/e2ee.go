@@ -445,6 +445,18 @@ func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, targetPath string, reqBody [
 	if profile == wire.ProfileSpeech && !isJSONIfiedRoute(targetPath) {
 		return nil, fmt.Errorf("a sealed %s request is only accepted on %s, not %q (SPEC §5.3)", profile, speechTranscriptionRoute, ctx.Request.URL.Path)
 	}
+	// The embedding profile gets the same check, for the same reason: the PR that
+	// added its profileForRequest arm is what made a sealed envelope openable on
+	// an embedding provider at all — before it the arm returned ("", false) and
+	// the envelope was refused. Without this, an envelope POSTed to a free route
+	// (/attestation/report, /signature/{id}) is opened and its plaintext `input`
+	// swapped into the body; that route's response is never sealed, and on a
+	// TargetSeparated provider the plaintext is also forwarded upstream. A second
+	// profile-specific `&&` is still not the end state — #734's per-profile route
+	// set should replace both of these checks.
+	if profile == wire.ProfileEmbedding && targetPath != embeddingRoute {
+		return nil, fmt.Errorf("a sealed %s request is only accepted on %s, not %q (SPEC §7.4)", profile, embeddingRoute, ctx.Request.URL.Path)
+	}
 
 	// Extract the client's response ephemeral key before opening, so the response
 	// path can seal even though the field lives in the (now consumed) envelope.
@@ -578,11 +590,8 @@ func profileForRequest(svcType, surface string) (p wire.Profile, sealable bool) 
 		// materializeSpeechRequest.
 		return wire.ProfileSpeech, true
 	case constant.ServiceTypeEmbedding:
-		// SPEC §7.4. Route-blind like ProfileImage, and inheriting the same known
-		// gap: a sealed envelope POSTed to a free route on an embedding provider is
-		// opened rather than refused. Not fixed here for the reason the speech arm
-		// above gives for not widening its own check — the rule wants a per-profile
-		// route set, tracked as #734, not a third profile-specific `&&`.
+		// SPEC §7.4. Resolution here is route-blind, like every arm; the route is
+		// scoped to /embeddings in MaybeUnsealRequest, next to speech's check.
 		return wire.ProfileEmbedding, true
 	default:
 		return "", false
