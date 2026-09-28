@@ -109,29 +109,10 @@ func TestMaybeUnsealEmbeddingRequestReconstructsInput(t *testing.T) {
 	}
 }
 
-// A sealed request that leaves `input` readable defeats the profile, and BOTH
-// halves must refuse it — §12's rule, since a third-party client is under no
-// obligation to run the sender's check.
-//
-// The two halves are reached differently, which is why they are separate
-// assertions rather than one round trip:
-//
-//   - the SENDER is refused at build time for a sealed set that omits `input`;
-//   - the ENCLAVE cannot be handed that same envelope — SealRequestFor will not
-//     build it and there is no non-conforming request sealer — so what is
-//     exercised here is the reachable half: `input` re-added to the CLEARTEXT
-//     side on the wire is refused.
-//
-// Note WHICH mechanism refuses that second case, because it is not the payload
-// rule and the difference is the point. `input` is still named in
-// `sealed_fields`, so re-adding it in cleartext is a sealed/cleartext COLLISION
-// (§5.1), and that check sits after the decrypt — while the cleartext half is
-// inside the AAD, so the AEAD fails first. A tampered envelope can therefore
-// only ever produce an authentication failure, which is the stronger answer: an
-// intermediary cannot smuggle a payload field back into the readable half at
-// all. The rule-based half of the enclave check (a sealed set that never covered
-// the payload, caught by validatePayloadSealedFor BEFORE any decrypt) is
-// profile-independent and covered upstream by the protocol's own
+// A readable `input` is refused on both sides (§12). The sender refuses a sealed
+// set without it; the enclave refuses `input` re-added in cleartext, and it does
+// so at the AEAD, because the cleartext half is inside the AAD. The rule-based
+// enclave check is covered by the protocol's
 // TestOpenRequestForRunsEveryReceiverSideCheck.
 func TestMaybeUnsealEmbeddingRequestRejectsCleartextInput(t *testing.T) {
 	f := newE2EEFixture(t)
@@ -164,10 +145,8 @@ func TestMaybeUnsealEmbeddingRequestRejectsCleartextInput(t *testing.T) {
 	if err == nil {
 		t.Fatalf("the enclave must refuse a sealed request carrying `input` in cleartext, got %s", out)
 	}
-	// The cleartext half is bound, so this is an authentication failure rather
-	// than a rule violation — see the note above. Asserted so a future change that
-	// moved `input` out of the AAD (which would make this pass for the wrong
-	// reason, via the collision rule) is visible here.
+	// The cleartext half is bound, so the AEAD refuses it before the collision
+	// rule could.
 	if !strings.Contains(err.Error(), "authentication failed") {
 		t.Errorf("want the AEAD to refuse the tampered cleartext half, got %v", err)
 	}
@@ -258,12 +237,8 @@ func TestSealedEmbeddingResponseDetectsTamperedTokenCount(t *testing.T) {
 	}
 }
 
-// Without the count the frame does not seal AT ALL — this is the §7.4 rule
-// reached through this broker's own path, not just asserted in the wire package.
-//
-// It is what makes withEmbeddingUsage mandatory rather than a nicety: the router
-// cannot recover the number by itself, because its fallback estimator measures
-// the request's `input`, which this profile seals.
+// Without the count the frame does not seal at all (§7.4), through this
+// broker's own seal path.
 func TestSealedEmbeddingResponseWithoutBillableCountIsRefused(t *testing.T) {
 	f := newE2EEFixture(t)
 	ctx, _ := f.newSealedEmbeddingCtx(t)
@@ -330,10 +305,7 @@ func TestWithEmbeddingUsage(t *testing.T) {
 			wantUsage:    `{"prompt_tokens":50,"total_tokens":50}`,
 		},
 		{
-			// `null` unmarshals into a map as the ZERO value with no error, so
-			// decoding in place would leave a nil map and the write would panic.
-			// The inference engine runs without gin.Recovery(), so that panic kills
-			// the connection: truncated response, no billing, no attribution.
+			// Decoding `null` in place would leave a nil map to write to.
 			name:         "usage null is replaced, not panicked on",
 			body:         `{"usage":null,"data":[]}`,
 			promptTokens: 14,
@@ -358,11 +330,7 @@ func TestWithEmbeddingUsage(t *testing.T) {
 			wantErr:      true,
 		},
 		{
-			// The case a `[1,2,3]` fixture walks straight past: a JSON `null` body
-			// unmarshals into a nil map with NO error, so an implementation that
-			// wraps the (nil) error returns (nil, nil) and the caller reads a
-			// success with no body. Wants a non-nil error, like every other
-			// malformed body.
+			// Unmarshals into a nil map with a nil error; must still be an error.
 			name:         "JSON null body",
 			body:         `null`,
 			promptTokens: 14,
@@ -416,27 +384,9 @@ func TestWithEmbeddingUsage(t *testing.T) {
 	}
 }
 
-// The end-to-end handler test, and the one that guards the failure this whole
-// change exists for: on a sealed turn the count the frame publishes must be the
-// count the broker BILLED, not a second computation of it.
-//
-// The provider here reports NO usage at all, so the broker falls back to its
-// estimator — which, inside the enclave, measures the DECRYPTED input and is
-// therefore accurate. Before §7.4 that number went only into the broker's own
-// billing: the frame carried no usage, so the router fell through to its own
-// estimator over a SEALED `input`, floored to 1 token, and the two sides priced
-// one request differently. Asserting the frame's number equals the estimator's
-// is what pins that shut.
-// Run across both signing topologies, because they take different paths to the
-// ZG-Res-Key handle and only one of them was covered before.
-//
-// `TargetSeparated && !IsCentralized` is the case that exposed a real hole: the
-// header gate used to read `!TargetSeparated || IsCentralized()`, with no
-// e2eeSealed arm, so on this topology the broker sealed the frame, signed §8 and
-// cached the signature while sending NO handle — and an E2EE client refuses a
-// response it cannot verify, so that is a response the caller must reject and
-// has already paid for. The first arm made the decentralized row pass regardless,
-// which is why one row was not enough.
+// On a sealed turn the count the frame publishes must be the count the broker
+// bills, and the ZG-Res-Key handle must be sent and resolve. Run across both
+// signing topologies, which reach the handle by different arms of the gate.
 func TestHandleEmbeddingResponseSealsAndPublishesTheBilledCount(t *testing.T) {
 	decentralized := config.Service{
 		Type:         constant.ServiceTypeEmbedding,
@@ -451,8 +401,7 @@ func TestHandleEmbeddingResponseSealsAndPublishesTheBilledCount(t *testing.T) {
 	}{
 		{name: "in-network decentralized", svc: decentralized},
 		{
-			// Neither arm of the OLD gate fires here: TargetSeparated is true and
-			// the provider is not centralized.
+			// Only the e2eeSealed arm of the gate sends the handle here.
 			name: "targetSeparated, not centralized",
 			svc: config.Service{
 				Type:            constant.ServiceTypeEmbedding,
@@ -493,10 +442,7 @@ func runSealedEmbeddingHandler(t *testing.T, svc config.Service, providerUsage s
 	keyID := sha256.Sum256(encPub)
 
 	c := newChatbotTestCtrl(t, svc)
-	// Held, not discarded: this is what the drift assertion reads. The whitelisted
-	// branch funnels through recordWhitelistedUsage → AccumulateHourlyUsage, so the
-	// row's InputCount is the handler's OWN number — the one it would bill on —
-	// rather than a recomputation of it.
+	// The drift assertion reads the handler's own ledger write from here.
 	recon := &mockReconciliationDB{}
 	c.reconciliationDB = recon
 	c.teeService = &teeutil.TeeService{
@@ -541,11 +487,8 @@ func runSealedEmbeddingHandler(t *testing.T, svc config.Service, providerUsage s
 		t.Fatalf("enclave did not recover the input: %s", reconstructed)
 	}
 
-	// A floor check on the fixture only — NOT the value the drift assertion
-	// compares against. The number that matters is read back off the handler
-	// below; recomputing it here and comparing the two would assert that the
-	// estimator is deterministic, which it trivially is, and would pass just as
-	// well if the handler published `usage.TotalTokens` or any other field.
+	// A precondition on the fixture only; the drift assertion below reads the
+	// handler's number rather than recomputing it.
 	if floor := estimateEmbeddingUsageFromRequest(reconstructed).PromptTokens; floor <= 1 {
 		t.Fatalf("precondition: the fixture must estimate to more than the flat floor, got %d", floor)
 	}
@@ -562,11 +505,7 @@ func runSealedEmbeddingHandler(t *testing.T, svc config.Service, providerUsage s
 		t.Fatalf("handleEmbeddingResponse: %v", err)
 	}
 
-	// The handle, and a signature that actually resolves through it. A sealed turn
-	// that ships a frame with no ZG-Res-Key gives the client no way to fetch §8,
-	// and an E2EE client refuses a response it cannot verify — so a cached
-	// signature with no handle is strictly worse than no signature: the caller is
-	// billed for a response it must throw away.
+	// The handle, and a signature that resolves through it.
 	handle := rec.Header().Get("ZG-Res-Key")
 	if handle == "" {
 		t.Fatal("a sealed turn must publish ZG-Res-Key, whatever the signing topology: " +
@@ -597,8 +536,7 @@ func runSealedEmbeddingHandler(t *testing.T, svc config.Service, providerUsage s
 	if err := json.Unmarshal(frame["usage"], &usage); err != nil {
 		t.Fatalf("usage must be readable cleartext: %v", err)
 	}
-	// THE drift assertion: the number in the frame must be the number the handler
-	// accounted for, read back off its own ledger write rather than recomputed.
+	// The drift assertion: the frame's number is the one the handler recorded.
 	if len(recon.calls) != 1 {
 		t.Fatalf("want exactly one usage row recorded, got %d", len(recon.calls))
 	}
@@ -618,12 +556,9 @@ func runSealedEmbeddingHandler(t *testing.T, svc config.Service, providerUsage s
 	}
 }
 
-// A sealed embedding envelope opens on /embeddings and nowhere else. Before the
-// profile existed the envelope was refused on every route; the profile is what
-// made it openable, so it must not make it openable on a route whose response is
-// never sealed — /attestation/report and /signature/{id} would otherwise answer
-// with the plaintext `input` swapped into the body, and a TargetSeparated
-// provider would also forward that plaintext upstream.
+// A sealed embedding envelope opens on /embeddings and nowhere else: on any
+// other route the plaintext `input` would land in a response that is never
+// sealed.
 func TestMaybeUnsealEmbeddingRequestIsScopedToTheEmbeddingsRoute(t *testing.T) {
 	for _, tc := range []struct {
 		path     string

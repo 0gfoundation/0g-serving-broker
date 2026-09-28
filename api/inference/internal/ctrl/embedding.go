@@ -63,48 +63,25 @@ type EmbeddingUsage struct {
 }
 
 // withEmbeddingUsage returns body with a top-level `usage.prompt_tokens` set to
-// promptTokens, the input token count the enclave actually billed (SPEC §7.4).
+// promptTokens, the input token count the broker bills (SPEC §7.4).
 //
-// It exists for the sealed path, and for a reason weaker than image's twin looks
-// from the outside. `usage` staying cleartext is a floor rule
-// (mustStayCleartextInResponse), but that rule forbids SEALING the field — it
-// never requires it to EXIST. §7.4 is what requires it, so on a sealed turn the
-// enclave must publish the count even when the upstream sent no `usage` at all.
+// The sealed path must publish it even when the upstream sent no `usage`: the
+// router's fallback estimator measures the request's `input`, which is sealed,
+// so without this count it has nothing accurate to bill on. The count stays
+// bound, so the seal AAD and the §8 signature cover it.
 //
-// Without it the router has nothing to bill on and no way to recover it: its own
-// estimator for a usage-less embedding response measures the REQUEST's `input`
-// (a response echoes no text back to measure instead), and that is the field
-// this profile seals, so it floors to a flat constant. The enclave, holding the
-// decrypted input, would meanwhile bill the provider an accurate count — one
-// request transacted at two prices. Hence the count comes from the same `usage`
-// the billing below uses, not from a second computation.
-//
-// It stays BOUND (not in unbound_fields), so the seal AAD and the §8 signature
-// cover it: the router reads it without decrypting, and a count that does not
-// match what the enclave billed fails the client's verify.
-//
-// Any usage object the upstream already sent is preserved and only
-// "prompt_tokens" is overridden, since the broker's number is the authority (it
-// IS the upstream's when the upstream reported a usable one). `total_tokens` is
-// deliberately not synthesized when absent: §7.4 does not require it, and the
-// plaintext path does not invent one either.
+// An upstream usage object is kept and only "prompt_tokens" is overridden;
+// `total_tokens` is not synthesized when absent.
 func withEmbeddingUsage(body []byte, promptTokens int) ([]byte, error) {
 	var resp map[string]json.RawMessage
 	if err := json.Unmarshal(body, &resp); err != nil || resp == nil {
-		// fmt.Errorf, not errors.Wrap, and that is the difference between an error
-		// and a silent nil: a JSON `null` body unmarshals into a nil map with NO
-		// error, so err is nil on that branch and errors.Wrap(nil, …) returns nil —
-		// this would have handed the caller (nil, nil). withImageUsage uses
-		// fmt.Errorf and never had the hole; diverging from it was the mistake.
+		// fmt.Errorf rather than errors.Wrap: a `null` body gives a nil map and a
+		// nil err, and errors.Wrap(nil, …) would return nil.
 		return nil, fmt.Errorf("attach usage.prompt_tokens: embedding response is not a JSON object: %w", err)
 	}
 
-	// Adopt the upstream's usage only when it decodes to an actual object —
-	// a string, a number or `null` is replaced rather than failing the request.
-	// `null` is the case that matters: it unmarshals into a map as the ZERO value
-	// with NO error, so decoding in place would leave a nil map and the write
-	// below would panic on it. Decoding into a separate variable makes that
-	// unreachable by construction. (Same hazard, same fix as withImageUsage.)
+	// Adopt the upstream's usage only when it is an object. Decoding into a
+	// separate variable keeps a `null` usage from leaving a nil map to write to.
 	usage := map[string]json.RawMessage{}
 	if raw, ok := resp["usage"]; ok {
 		var upstream map[string]json.RawMessage
@@ -139,16 +116,8 @@ func (c *Ctrl) handleEmbeddingResponse(ctx *gin.Context, resp *http.Response, _ 
 	defer resp.Body.Close()
 
 	chatKey := uuid.NewString()
-	// The third arm is not optional on a sealed turn, and its absence here was a
-	// real hole: the sealed path below signs §8 UNCONDITIONALLY and caches it, so
-	// on a provider with TargetSeparated && !IsCentralized the broker sealed the
-	// frame, signed it and cached the signature while sending no handle — and an
-	// E2EE client refuses a response it cannot verify (signChatResponse's own
-	// note). That is a response the caller must reject and has already been billed
-	// for. Every other handler already carries this arm (chatbot 218/334,
-	// text_to_image 179, speech_to_text 290/592); embedding was the one that did
-	// not, and the fail-closed arms further down assume the header IS set, which
-	// made their Del calls no-ops on exactly that topology.
+	// A sealed turn always gets the handle: the sealed path below signs §8 on
+	// every topology, and an E2EE client refuses a response it cannot verify.
 	_, e2eeSealed := e2eeSealedRequest(ctx)
 	if !c.Service.TargetSeparated || c.Service.IsCentralized() || e2eeSealed {
 		ctx.Writer.Header().Set("ZG-Res-Key", chatKey)
@@ -177,13 +146,8 @@ func (c *Ctrl) handleEmbeddingResponse(ctx *gin.Context, resp *http.Response, _ 
 
 	// Decompress (if the forwarder sanitization above did not already, i.e. a
 	// non-forwarder provider) so usage can be parsed regardless of upstream
-	// compression.
-	//
-	// Hoisted above the signing and the flush, which it used to sit below. The
-	// sealed path needs the billable count BEFORE it seals, because §7.4 makes
-	// that count part of the frame — the same reason the image path computes
-	// `imageNum` before its own flush. Nothing about the plaintext path changes:
-	// it signs and writes the same `body` in the same order as before.
+	// compression. Done before signing and flushing because the sealed path
+	// puts the billable count in the frame (§7.4).
 	decompressedBody := body
 	if contentEncoding := resp.Header.Get("Content-Encoding"); contentEncoding != "" && !c.Service.IsForwarder() {
 		if decoded, derr := decodeBody(body, contentEncoding); derr == nil {
@@ -238,15 +202,9 @@ func (c *Ctrl) handleEmbeddingResponse(ctx *gin.Context, resp *http.Response, _ 
 		// sealed as opaque bytes.
 		ctx.Writer.Header().Del("Content-Encoding")
 
-		// Both arms below attribute the same way, on the rule the speech path
-		// states: a sealed turn whose PROFILE is in hand has everything the broker
-		// owes, so what is left to fail is the upstream's response — a body that is
-		// not a JSON object, or one carrying no `data` at all (which this profile
-		// deliberately has no placeholder for, see placeholderSealedFields). A
-		// MISSING profile is broker state and keeps the default bucket, so the gate
-		// is not decoration: without it a broker-state problem would be alerted on
-		// as a provider fault. The §7.4 count is never what fails here — it is
-		// written from the same number the billing below uses.
+		// With the profile in hand, what can still fail below is the upstream's
+		// body (not a JSON object, or no `data`), so attribute it upstream. A
+		// missing profile is broker state and keeps the default bucket.
 		_, profileInHand := e2eeProfile(ctx)
 
 		withUsage, usageErr := withEmbeddingUsage(decompressedBody, usage.PromptTokens)

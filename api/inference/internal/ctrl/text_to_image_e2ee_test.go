@@ -135,8 +135,8 @@ func TestProfileForRequest(t *testing.T) {
 		// to multipart inside the enclave, so the envelope is ordinary and only
 		// the materialization is new.
 		{"speech-to-text", constant.ServiceTypeSpeechToText, "", wire.ProfileSpeech, true},
-		// SPEC §7.4. Route-blind like text-to-image — the surface is whatever the
-		// path happened to be and must not change the answer.
+		// SPEC §7.4. The surface does not change the answer; the route is checked
+		// in MaybeUnsealRequest.
 		{"embedding", constant.ServiceTypeEmbedding, "", wire.ProfileEmbedding, true},
 		{"embedding on a chat path", constant.ServiceTypeEmbedding, config.APIFormatOpenAI, wire.ProfileEmbedding, true},
 		// Still an ALLOWLIST, not a switch with a default. image-editing is the
