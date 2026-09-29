@@ -2026,8 +2026,8 @@ func TestVideoPriceUnit(t *testing.T) {
 
 // TestGetModels_PerModelUpstreamRateLimit: an entry that declares the vendor
 // key's RPM ceiling advertises it as upstream_rate_limit, and an entry that does
-// not omits the field — the router reads absence as "no budget", so a stray
-// zero-valued block here would silently switch budgeting on with a 0 ceiling.
+// not omits the field. The router treats rpm <= 0 as absent too, so the
+// handler's own rpm < 1 guard is defence-in-depth, not the router's safety.
 func TestGetModels_PerModelUpstreamRateLimit(t *testing.T) {
 	cfg := config.Service{
 		ProviderType:     "centralized",

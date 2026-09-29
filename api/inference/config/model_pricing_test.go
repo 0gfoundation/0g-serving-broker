@@ -439,9 +439,10 @@ func TestDropUnreachableTokenTiers(t *testing.T) {
 	}
 }
 
-// TestValidateUpstreamRateLimit pins the one rule of the block: rpm must be a
-// positive integer. The router reads 0 as "unadvertised", so a 0 here would
-// declare nothing while looking configured; a nil block is simply absent.
+// TestValidateUpstreamRateLimit pins the block's rules: rpm must be a positive
+// integer (the router reads 0 as "unadvertised", so a 0 here would declare
+// nothing while looking configured), the group must fit the router's column,
+// and the block is refused on the wildcard entry; a nil block is simply absent.
 func TestValidateUpstreamRateLimit(t *testing.T) {
 	const path = "service.modelPricing[0].upstreamRateLimit"
 	if err := validateUpstreamRateLimit(path, nil); err != nil {
@@ -458,6 +459,12 @@ func TestValidateUpstreamRateLimit(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), path+".rpm") {
 			t.Errorf("rpm %d must be rejected naming %s.rpm, got %v", rpm, path, err)
 		}
+	}
+	if err := validateUpstreamRateLimit(path, &UpstreamRateLimitConfig{RPM: 60, Group: strings.Repeat("g", 128)}); err != nil {
+		t.Errorf("a 128-char group must validate, got %v", err)
+	}
+	if err := validateUpstreamRateLimit(path, &UpstreamRateLimitConfig{RPM: 60, Group: strings.Repeat("g", 129)}); err == nil || !strings.Contains(err.Error(), path+".group") {
+		t.Errorf("a 129-char group must be rejected naming %s.group (the router would drop the block), got %v", path, err)
 	}
 	// On the wildcard entry the block would validate and then never be
 	// published (GetModels skips `*`), so it is refused with a pointer to where

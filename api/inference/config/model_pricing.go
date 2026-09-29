@@ -143,13 +143,23 @@ type ModelPricingEntry struct {
 	// the API key behind THIS entry's upstream, so the router can spend it before
 	// dispatch instead of discovering it from the vendor's 429 after the whole
 	// body has crossed router→broker→vendor (0g-router
-	// features.upstream_rate_limit). Surfaced verbatim on GET /v1/models as
-	// `upstream_rate_limit`; the broker itself enforces nothing from it. Group
-	// names the budget the key belongs to: two brokers (or two entries) that
-	// share one vendor key must carry the same group, because the vendor counts
-	// them together; empty means "the router's default", which is
-	// providerIdentity. Omit the block for an upstream whose limit is unknown —
-	// a guessed ceiling either wastes capacity or fails to prevent the 429.
+	// features.upstream_rate_limit). Surfaced as-is on GET /v1/models as
+	// `upstream_rate_limit` (group trimmed); the broker itself enforces nothing
+	// from it.
+	//
+	// How the router names the budget it counts under:
+	//   - group empty  → one budget PER (providerIdentity, model). Right when the
+	//     vendor limits each model separately (Tencent TokenHub does).
+	//   - group set    → one budget named exactly that (case-sensitive), shared
+	//     by every entry that carries it. Required when several entries on this
+	//     broker draw on one key that the vendor limits as a whole.
+	// Either way the router scopes the budget to THIS broker's address unless
+	// the router operator lists the address for that name in
+	// router.upstream_rpm_pools — so a shared group on two brokers pools nothing
+	// by itself; ask the router operator to pool the two addresses. Omit the
+	// block for an upstream whose limit is unknown: a guessed ceiling either
+	// wastes capacity or fails to prevent the 429. Give every entry that shares
+	// a budget the same rpm; the router bounds a mixed budget by the largest.
 	UpstreamRateLimit *UpstreamRateLimitConfig `yaml:"upstreamRateLimit"`
 
 	// InjectBodyFields is the per-model counterpart of service.injectBodyFields:
@@ -1799,10 +1809,10 @@ func validateModelPricingEntry(i int, entry *ModelPricingEntry, serviceType stri
 		return err
 	}
 	// The block is published per concrete model (GetModels skips the wildcard
-	// entry), so accepting it on `*` would load cleanly and declare nothing —
-	// the same trap this file already closes for upstreamModel on `*`.
+	// entry), so accepting it on `*` would load cleanly and declare nothing.
+	// Refused rather than ignored, as upstreamModel on `*` is.
 	if entry.UpstreamRateLimit != nil && entry.Model == ModelWildcard {
-		return fmt.Errorf("invalid config: service.modelPricing[%d].upstreamRateLimit is not published for the wildcard entry '*'; declare it on the concrete model entries that share the key", i)
+		return fmt.Errorf("invalid config: service.modelPricing[%d].upstreamRateLimit is not published for the wildcard entry ('%s'); declare it on each concrete model entry, with the same group when they share one key", i, ModelWildcard)
 	}
 	if err := validateUpstreamRateLimit(fmt.Sprintf("service.modelPricing[%d].upstreamRateLimit", i), entry.UpstreamRateLimit); err != nil {
 		return err
@@ -1926,18 +1936,27 @@ func validateVideoModelEntry(i int, entry *ModelPricingEntry, isUSD bool) error 
 // UpstreamRateLimitConfig is ModelPricingEntry.UpstreamRateLimit.
 type UpstreamRateLimitConfig struct {
 	RPM   int    `yaml:"rpm"`   // vendor requests-per-minute ceiling for the key; must be >= 1
-	Group string `yaml:"group"` // shared-key budget name; "" = router default (providerIdentity)
+	Group string `yaml:"group"` // budget name, <= 128 chars; "" = router default, one budget per (providerIdentity, model)
 }
 
+// maxUpstreamRateLimitGroupLen is the router's column width for the group. The
+// router drops the WHOLE block (rpm included) for a longer group, silently, so
+// the broker refuses it at load where the operator is looking.
+const maxUpstreamRateLimitGroupLen = 128
+
 // validateUpstreamRateLimit rejects a block whose rpm is not a positive
-// integer: the router treats 0 as "unadvertised", so a 0 here would silently
-// declare nothing, and a negative ceiling has no meaning it could act on.
+// integer — the router treats 0 as "unadvertised", so a 0 here would silently
+// declare nothing, and a negative ceiling has no meaning it could act on — and
+// a group the router could not store.
 func validateUpstreamRateLimit(path string, rl *UpstreamRateLimitConfig) error {
 	if rl == nil {
 		return nil
 	}
 	if rl.RPM < 1 {
 		return fmt.Errorf("invalid config: %s.rpm must be >= 1 (got %d); omit the block when the vendor limit is unknown", path, rl.RPM)
+	}
+	if n := len(strings.TrimSpace(rl.Group)); n > maxUpstreamRateLimitGroupLen {
+		return fmt.Errorf("invalid config: %s.group is %d chars; the router stores at most %d and would drop the whole block", path, n, maxUpstreamRateLimitGroupLen)
 	}
 	return nil
 }
