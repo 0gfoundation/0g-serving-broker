@@ -554,10 +554,13 @@ func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType s
 		// Parse and decode data line by line for streams
 		lines := bytes.Split(decodedBody, []byte("\n"))
 
-		// Detect stream format from first non-empty line
+		// Detect stream format from the first non-empty, non-comment line: upstreams
+		// may open with a keepalive comment (e.g. RedPill's ": PROCESSING" while a
+		// long prompt prefills) that would otherwise default an Anthropic stream to
+		// OpenAI and fail on its "event:" lines.
 		var format ResponseFormat = FormatOpenAI
 		for _, line := range lines {
-			if !isLineEmpty(line) {
+			if !isLineEmpty(line) && !isSSEComment(line) {
 				format = detectStreamFormat(line)
 				break
 			}
