@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -61,6 +62,24 @@ type ModelObject struct {
 	// decentralized providers. Consumers prepend "https://" if they need a URL.
 	ServingDomain string           `json:"serving_domain,omitempty"`
 	RateLimits    *ModelRateLimits `json:"rate_limits,omitempty"`
+	// UpstreamRateLimit is the VENDOR-side ceiling of the key behind this
+	// model's upstream (config modelPricing[].upstreamRateLimit), declared so
+	// the router can budget dispatches before the vendor 429s. Distinct from
+	// RateLimits above, which is this broker's own per-user limit on callers.
+	UpstreamRateLimit *ModelUpstreamRateLimit `json:"upstream_rate_limit,omitempty"`
+}
+
+// ModelUpstreamRateLimit mirrors config.UpstreamRateLimitConfig on the wire.
+type ModelUpstreamRateLimit struct {
+	RPM   int    `json:"rpm"`
+	Group string `json:"group,omitempty"`
+}
+
+func newModelUpstreamRateLimit(cfg *config.UpstreamRateLimitConfig) *ModelUpstreamRateLimit {
+	if cfg == nil || cfg.RPM < 1 {
+		return nil
+	}
+	return &ModelUpstreamRateLimit{RPM: cfg.RPM, Group: strings.TrimSpace(cfg.Group)}
 }
 
 // ModelRateLimits exposes per-user rate limit configuration so clients/SDKs
@@ -643,22 +662,23 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 				providerName = cfg.ProviderName
 			}
 			obj := ModelObject{
-				ID:               mp.Model,
-				CanonicalID:      canonicalID,
-				Object:           "model",
-				Created:          created,
-				OwnedBy:          cfg.OwnedBy,
-				Type:             svc.Type,
-				Verifiability:    svc.Verifiability,
-				TeeAttested:      teeAttested,
-				TeeVerifier:      teeVerifier,
-				Pricing:          &ModelPricing{CacheTokenBilling: modelCacheBilling},
-				ProviderType:     providerType,
-				ProviderIdentity: providerIdentity,
-				ProviderName:     providerName,
-				ProviderCountry:  cfg.ProviderCountry,
-				ServingDomain:    servingDomain,
-				RateLimits:       sharedLimits,
+				ID:                mp.Model,
+				CanonicalID:       canonicalID,
+				Object:            "model",
+				Created:           created,
+				OwnedBy:           cfg.OwnedBy,
+				Type:              svc.Type,
+				Verifiability:     svc.Verifiability,
+				TeeAttested:       teeAttested,
+				TeeVerifier:       teeVerifier,
+				Pricing:           &ModelPricing{CacheTokenBilling: modelCacheBilling},
+				ProviderType:      providerType,
+				ProviderIdentity:  providerIdentity,
+				ProviderName:      providerName,
+				ProviderCountry:   cfg.ProviderCountry,
+				ServingDomain:     servingDomain,
+				RateLimits:        sharedLimits,
+				UpstreamRateLimit: newModelUpstreamRateLimit(mp.UpstreamRateLimit),
 			}
 
 			// Per-model metadata: the entry's own modelInfo wins; fall back to the

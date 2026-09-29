@@ -2023,3 +2023,69 @@ func TestVideoPriceUnit(t *testing.T) {
 		t.Errorf("videoPriceUnit(nil) = %q, want empty", got)
 	}
 }
+
+// TestGetModels_PerModelUpstreamRateLimit: an entry that declares the vendor
+// key's RPM ceiling advertises it as upstream_rate_limit, and an entry that does
+// not omits the field — the router reads absence as "no budget", so a stray
+// zero-valued block here would silently switch budgeting on with a 0 ceiling.
+func TestGetModels_PerModelUpstreamRateLimit(t *testing.T) {
+	cfg := config.Service{
+		ProviderType:     "centralized",
+		ProviderIdentity: "aliyun",
+		TargetURL:        "https://dashscope.example/compatible-mode/v1",
+		ModelPricing: []config.ModelPricingEntry{
+			{Model: "deepseek-v4-flash-0731", InputPrice: "100", OutputPrice: "200"},
+			{
+				Model:             "deepseek-v4-flash-tencent",
+				CanonicalID:       "deepseek-v4-flash",
+				InputPrice:        "100",
+				OutputPrice:       "200",
+				TargetURL:         "https://tokenhub.example/v1",
+				ProviderIdentity:  "tencent",
+				UpstreamRateLimit: &config.UpstreamRateLimitConfig{RPM: 60, Group: " tencent-key-1 "},
+			},
+		},
+	}
+	if err := cfg.BuildModelPricingMap(); err != nil {
+		t.Fatalf("build pricing map: %v", err)
+	}
+	mock := &mockModelsCtrl{
+		service: model.Service{
+			ModelType:             "deepseek-v4-flash-0731",
+			Type:                  "chatbot",
+			InputPrice:            "100",
+			OutputPrice:           "200",
+			Verifiability:         "TeeTLS",
+			TeeSignerAcknowledged: true,
+			AdditionalInfo:        `{"TargetSeparated":true}`,
+		},
+		serviceConfig: cfg,
+	}
+	h := newModelsTestHandler(mock)
+	w := performRequest(h.GetModels, "GET", "/v1/models", "", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", w.Code, w.Body.String())
+	}
+	// Decode loosely so the assertion is on the WIRE key, not the Go field.
+	var raw struct {
+		Data []map[string]json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+	seen := map[string]json.RawMessage{}
+	for _, m := range raw.Data {
+		var id string
+		_ = json.Unmarshal(m["id"], &id)
+		seen[id] = m["upstream_rate_limit"]
+	}
+	if got := string(seen["deepseek-v4-flash-tencent"]); got != `{"rpm":60,"group":"tencent-key-1"}` {
+		t.Errorf("tencent entry upstream_rate_limit = %s, want {\"rpm\":60,\"group\":\"tencent-key-1\"}", got)
+	}
+	if v, ok := seen["deepseek-v4-flash-0731"]; ok && v != nil {
+		t.Errorf("aliyun entry must not advertise upstream_rate_limit, got %s", v)
+	}
+	if _, ok := seen["deepseek-v4-flash-0731"]; !ok {
+		t.Fatalf("aliyun entry missing from response: %s", w.Body.String())
+	}
+}

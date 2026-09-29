@@ -3,6 +3,7 @@ package config
 import (
 	"math"
 	"math/big"
+	"strings"
 	"testing"
 
 	"github.com/0glabs/0g-serving-broker/common/videospec"
@@ -435,5 +436,32 @@ func TestDropUnreachableTokenTiers(t *testing.T) {
 	}
 	if err := validateTokenPriceTiers("b", dup); err == nil {
 		t.Error("two spellings of one tier must be rejected: the billed price would depend on slice order")
+	}
+}
+
+// TestValidateUpstreamRateLimit pins the one rule of the block: rpm must be a
+// positive integer. The router reads 0 as "unadvertised", so a 0 here would
+// declare nothing while looking configured; a nil block is simply absent.
+func TestValidateUpstreamRateLimit(t *testing.T) {
+	const path = "service.modelPricing[0].upstreamRateLimit"
+	if err := validateUpstreamRateLimit(path, nil); err != nil {
+		t.Errorf("nil block must validate, got %v", err)
+	}
+	if err := validateUpstreamRateLimit(path, &UpstreamRateLimitConfig{RPM: 60, Group: "tencent-key-1"}); err != nil {
+		t.Errorf("rpm 60 must validate, got %v", err)
+	}
+	if err := validateUpstreamRateLimit(path, &UpstreamRateLimitConfig{RPM: 1}); err != nil {
+		t.Errorf("rpm 1 must validate, got %v", err)
+	}
+	for _, rpm := range []int{0, -1} {
+		err := validateUpstreamRateLimit(path, &UpstreamRateLimitConfig{RPM: rpm, Group: "g"})
+		if err == nil || !strings.Contains(err.Error(), path+".rpm") {
+			t.Errorf("rpm %d must be rejected naming %s.rpm, got %v", rpm, path, err)
+		}
+	}
+	// Through the entry validator, so the block is actually reached for a chat entry.
+	entry := &ModelPricingEntry{Model: "m", InputPrice: "1", OutputPrice: "2", UpstreamRateLimit: &UpstreamRateLimitConfig{RPM: 0}}
+	if err := validateModelPricingEntry(0, entry, "chatbot", false, false); err == nil || !strings.Contains(err.Error(), "upstreamRateLimit.rpm") {
+		t.Errorf("entry validator must surface the block's error, got %v", err)
 	}
 }

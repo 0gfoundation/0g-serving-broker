@@ -139,6 +139,18 @@ type ModelPricingEntry struct {
 	// GET /v1/models. Same validation as the service-level block: divisor >= 1
 	// when enabled.
 	CacheTokenBilling *CacheTokenBillingConfig `yaml:"cacheTokenBilling"`
+	// UpstreamRateLimit declares the vendor-side requests-per-minute ceiling of
+	// the API key behind THIS entry's upstream, so the router can spend it before
+	// dispatch instead of discovering it from the vendor's 429 after the whole
+	// body has crossed router→broker→vendor (0g-router
+	// features.upstream_rate_limit). Surfaced verbatim on GET /v1/models as
+	// `upstream_rate_limit`; the broker itself enforces nothing from it. Group
+	// names the budget the key belongs to: two brokers (or two entries) that
+	// share one vendor key must carry the same group, because the vendor counts
+	// them together; empty means "the router's default", which is
+	// providerIdentity. Omit the block for an upstream whose limit is unknown —
+	// a guessed ceiling either wastes capacity or fails to prevent the 429.
+	UpstreamRateLimit *UpstreamRateLimitConfig `yaml:"upstreamRateLimit"`
 
 	// InjectBodyFields is the per-model counterpart of service.injectBodyFields:
 	// top-level key/value pairs merged into the forwarded chat body for requests
@@ -1786,6 +1798,9 @@ func validateModelPricingEntry(i int, entry *ModelPricingEntry, serviceType stri
 	if err := validateModelUpstream(i, entry, serviceType, isCentralized); err != nil {
 		return err
 	}
+	if err := validateUpstreamRateLimit(fmt.Sprintf("service.modelPricing[%d].upstreamRateLimit", i), entry.UpstreamRateLimit); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -1904,6 +1919,25 @@ func validateVideoModelEntry(i int, entry *ModelPricingEntry, isUSD bool) error 
 
 // validateTokenModelEntry validates a chatbot / speech-to-text entry, whose price
 // is per token in the service denomination (NATIVE neuron or USD-per-1M-tokens).
+// UpstreamRateLimitConfig is ModelPricingEntry.UpstreamRateLimit.
+type UpstreamRateLimitConfig struct {
+	RPM   int    `yaml:"rpm"`   // vendor requests-per-minute ceiling for the key; must be >= 1
+	Group string `yaml:"group"` // shared-key budget name; "" = router default (providerIdentity)
+}
+
+// validateUpstreamRateLimit rejects a block whose rpm is not a positive
+// integer: the router treats 0 as "unadvertised", so a 0 here would silently
+// declare nothing, and a negative ceiling has no meaning it could act on.
+func validateUpstreamRateLimit(path string, rl *UpstreamRateLimitConfig) error {
+	if rl == nil {
+		return nil
+	}
+	if rl.RPM < 1 {
+		return fmt.Errorf("invalid config: %s.rpm must be >= 1 (got %d); omit the block when the vendor limit is unknown", path, rl.RPM)
+	}
+	return nil
+}
+
 func validateTokenModelEntry(i int, entry *ModelPricingEntry, serviceType string, isUSD bool) error {
 	if entry.OutputPriceUSDPerSecond != "" {
 		return fmt.Errorf("invalid config: service.modelPricing[%d].outputPriceUSDPerSecond is only valid for video-generation (model '%s')", i, entry.Model)
