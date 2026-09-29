@@ -148,15 +148,19 @@ type ModelPricingEntry struct {
 	// from it.
 	//
 	// How the router names the budget it counts under:
-	//   - group empty  → one budget PER (providerIdentity, model). Right when the
-	//     vendor limits each model separately (Tencent TokenHub does).
+	//   - group empty  → one budget PER (providerIdentity, canonicalId — or the
+	//     model id when no canonicalId is set), so dated aliases of one model
+	//     share a budget. Right when the vendor limits each model separately
+	//     (Tencent TokenHub does).
 	//   - group set    → one budget named exactly that (case-sensitive), shared
 	//     by every entry that carries it. Required when several entries on this
 	//     broker draw on one key that the vendor limits as a whole.
 	// Either way the router scopes the budget to THIS broker's address unless
 	// the router operator lists the address for that name in
-	// router.upstream_rpm_pools — so a shared group on two brokers pools nothing
-	// by itself; ask the router operator to pool the two addresses. Omit the
+	// router.upstream_rpm_pools (the pool name is the group, or the
+	// providerIdentity when group is empty) — so a shared group on two brokers
+	// pools nothing by itself; ask the router operator to pool the two
+	// addresses. Omit the
 	// block for an upstream whose limit is unknown: a guessed ceiling either
 	// wastes capacity or fails to prevent the 429. Give every entry that shares
 	// a budget the same rpm; the router bounds a mixed budget by the largest.
@@ -1810,7 +1814,7 @@ func validateModelPricingEntry(i int, entry *ModelPricingEntry, serviceType stri
 	}
 	// The block is published per concrete model (GetModels skips the wildcard
 	// entry), so accepting it on `*` would load cleanly and declare nothing.
-	// Refused rather than ignored, as upstreamModel on `*` is.
+	// Refused at load, the same way upstreamModel on `*` is refused above.
 	if entry.UpstreamRateLimit != nil && entry.Model == ModelWildcard {
 		return fmt.Errorf("invalid config: service.modelPricing[%d].upstreamRateLimit is not published for the wildcard entry ('%s'); declare it on each concrete model entry, with the same group when they share one key", i, ModelWildcard)
 	}
@@ -1936,7 +1940,7 @@ func validateVideoModelEntry(i int, entry *ModelPricingEntry, isUSD bool) error 
 // UpstreamRateLimitConfig is ModelPricingEntry.UpstreamRateLimit.
 type UpstreamRateLimitConfig struct {
 	RPM   int    `yaml:"rpm"`   // vendor requests-per-minute ceiling for the key; must be >= 1
-	Group string `yaml:"group"` // budget name, <= 128 chars; "" = router default, one budget per (providerIdentity, model)
+	Group string `yaml:"group"` // budget name, <= 128 bytes; "" = router default, one budget per (providerIdentity, canonical model)
 }
 
 // maxUpstreamRateLimitGroupLen is the router's column width for the group. The
@@ -1956,7 +1960,7 @@ func validateUpstreamRateLimit(path string, rl *UpstreamRateLimitConfig) error {
 		return fmt.Errorf("invalid config: %s.rpm must be >= 1 (got %d); omit the block when the vendor limit is unknown", path, rl.RPM)
 	}
 	if n := len(strings.TrimSpace(rl.Group)); n > maxUpstreamRateLimitGroupLen {
-		return fmt.Errorf("invalid config: %s.group is %d chars; the router stores at most %d and would drop the whole block", path, n, maxUpstreamRateLimitGroupLen)
+		return fmt.Errorf("invalid config: %s.group is %d bytes; the router stores at most %d and would drop the whole block", path, n, maxUpstreamRateLimitGroupLen)
 	}
 	return nil
 }
