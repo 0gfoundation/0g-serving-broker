@@ -1798,6 +1798,12 @@ func validateModelPricingEntry(i int, entry *ModelPricingEntry, serviceType stri
 	if err := validateModelUpstream(i, entry, serviceType, isCentralized); err != nil {
 		return err
 	}
+	// The block is published per concrete model (GetModels skips the wildcard
+	// entry), so accepting it on `*` would load cleanly and declare nothing —
+	// the same trap this file already closes for upstreamModel on `*`.
+	if entry.UpstreamRateLimit != nil && entry.Model == ModelWildcard {
+		return fmt.Errorf("invalid config: service.modelPricing[%d].upstreamRateLimit is not published for the wildcard entry '*'; declare it on the concrete model entries that share the key", i)
+	}
 	if err := validateUpstreamRateLimit(fmt.Sprintf("service.modelPricing[%d].upstreamRateLimit", i), entry.UpstreamRateLimit); err != nil {
 		return err
 	}
@@ -1917,8 +1923,6 @@ func validateVideoModelEntry(i int, entry *ModelPricingEntry, isUSD bool) error 
 	return nil
 }
 
-// validateTokenModelEntry validates a chatbot / speech-to-text entry, whose price
-// is per token in the service denomination (NATIVE neuron or USD-per-1M-tokens).
 // UpstreamRateLimitConfig is ModelPricingEntry.UpstreamRateLimit.
 type UpstreamRateLimitConfig struct {
 	RPM   int    `yaml:"rpm"`   // vendor requests-per-minute ceiling for the key; must be >= 1
@@ -1938,6 +1942,8 @@ func validateUpstreamRateLimit(path string, rl *UpstreamRateLimitConfig) error {
 	return nil
 }
 
+// validateTokenModelEntry validates a chatbot / speech-to-text entry, whose price
+// is per token in the service denomination (NATIVE neuron or USD-per-1M-tokens).
 func validateTokenModelEntry(i int, entry *ModelPricingEntry, serviceType string, isUSD bool) error {
 	if entry.OutputPriceUSDPerSecond != "" {
 		return fmt.Errorf("invalid config: service.modelPricing[%d].outputPriceUSDPerSecond is only valid for video-generation (model '%s')", i, entry.Model)

@@ -459,6 +459,13 @@ func TestValidateUpstreamRateLimit(t *testing.T) {
 			t.Errorf("rpm %d must be rejected naming %s.rpm, got %v", rpm, path, err)
 		}
 	}
+	// On the wildcard entry the block would validate and then never be
+	// published (GetModels skips `*`), so it is refused with a pointer to where
+	// it belongs.
+	wild := &ModelPricingEntry{Model: ModelWildcard, InputPrice: "1", OutputPrice: "2", UpstreamRateLimit: &UpstreamRateLimitConfig{RPM: 60}}
+	if err := validateModelPricingEntry(0, wild, "chatbot", false, false); err == nil || !strings.Contains(err.Error(), "wildcard") {
+		t.Errorf("wildcard entry must reject upstreamRateLimit, got %v", err)
+	}
 	// Through the entry validator, so the block is actually reached for a chat entry.
 	entry := &ModelPricingEntry{Model: "m", InputPrice: "1", OutputPrice: "2", UpstreamRateLimit: &UpstreamRateLimitConfig{RPM: 0}}
 	if err := validateModelPricingEntry(0, entry, "chatbot", false, false); err == nil || !strings.Contains(err.Error(), "upstreamRateLimit.rpm") {
