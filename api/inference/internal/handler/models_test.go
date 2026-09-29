@@ -2044,6 +2044,27 @@ func TestGetModels_PerModelUpstreamRateLimit(t *testing.T) {
 				ProviderIdentity:  "tencent",
 				UpstreamRateLimit: &config.UpstreamRateLimitConfig{RPM: 60, Group: " tencent-key-1 "},
 			},
+			// rpm without a group: the key must be omitted, not emitted as "".
+			{
+				Model:             "deepseek-v4-flash-baidu",
+				CanonicalID:       "deepseek-v4-flash",
+				InputPrice:        "100",
+				OutputPrice:       "200",
+				TargetURL:         "https://qianfan.example/v2",
+				ProviderIdentity:  "baidu",
+				UpstreamRateLimit: &config.UpstreamRateLimitConfig{RPM: 30},
+			},
+			// Bypasses config validation on purpose (this test builds the struct
+			// directly): the handler's own guard must still not publish rpm 0.
+			{
+				Model:             "deepseek-v4-flash-openrouter",
+				CanonicalID:       "deepseek-v4-flash",
+				InputPrice:        "100",
+				OutputPrice:       "200",
+				TargetURL:         "https://openrouter.example/api/v1",
+				ProviderIdentity:  "openrouter",
+				UpstreamRateLimit: &config.UpstreamRateLimitConfig{RPM: 0, Group: "g"},
+			},
 		},
 	}
 	if err := cfg.BuildModelPricingMap(); err != nil {
@@ -2081,6 +2102,12 @@ func TestGetModels_PerModelUpstreamRateLimit(t *testing.T) {
 	}
 	if got := string(seen["deepseek-v4-flash-tencent"]); got != `{"rpm":60,"group":"tencent-key-1"}` {
 		t.Errorf("tencent entry upstream_rate_limit = %s, want {\"rpm\":60,\"group\":\"tencent-key-1\"}", got)
+	}
+	if got := string(seen["deepseek-v4-flash-baidu"]); got != `{"rpm":30}` {
+		t.Errorf("baidu entry upstream_rate_limit = %s, want {\"rpm\":30} with no group key", got)
+	}
+	if v, ok := seen["deepseek-v4-flash-openrouter"]; ok && v != nil {
+		t.Errorf("rpm 0 must not be published even when validation was bypassed, got %s", v)
 	}
 	if v, ok := seen["deepseek-v4-flash-0731"]; ok && v != nil {
 		t.Errorf("aliyun entry must not advertise upstream_rate_limit, got %s", v)
