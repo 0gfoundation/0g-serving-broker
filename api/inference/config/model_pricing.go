@@ -152,18 +152,21 @@ type ModelPricingEntry struct {
 	//     model id when no canonicalId is set), so dated aliases of one model
 	//     share a budget. Right when the vendor limits each model separately
 	//     (Tencent TokenHub does).
-	//   - group set    → one budget named exactly that (case-sensitive), shared
-	//     by every entry that carries it. Required when several entries on this
-	//     broker draw on one key that the vendor limits as a whole.
+	//   - group set    → one budget named exactly that, shared by every entry
+	//     that carries it. Required when several entries on this broker draw on
+	//     one key that the vendor limits as a whole. Use one spelling: pool
+	//     matching is case-sensitive while the ledger's key column is not, so
+	//     two casings would half-pool and half-merge.
 	// Either way the router scopes the budget to THIS broker's address unless
 	// the router operator lists the address for that name in
 	// router.upstream_rpm_pools (the pool name is the group, or the
-	// providerIdentity when group is empty) — so a shared group on two brokers
-	// pools nothing by itself; ask the router operator to pool the two
-	// addresses. Omit the
-	// block for an upstream whose limit is unknown: a guessed ceiling either
-	// wastes capacity or fails to prevent the 429. Give every entry that shares
-	// a budget the same rpm; the router bounds a mixed budget by the largest.
+	// providerIdentity when group is empty; an entry with no providerIdentity
+	// falls back to the broker address for both) — so a shared group on two
+	// brokers pools nothing by itself; ask the router operator to pool the two
+	// addresses. Omit the block for an upstream whose limit is unknown: a
+	// guessed ceiling either wastes capacity or fails to prevent the 429. Give
+	// every entry that shares a budget the same rpm; the router bounds a mixed
+	// budget by the largest.
 	UpstreamRateLimit *UpstreamRateLimitConfig `yaml:"upstreamRateLimit"`
 
 	// InjectBodyFields is the per-model counterpart of service.injectBodyFields:
