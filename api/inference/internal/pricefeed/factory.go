@@ -11,12 +11,13 @@ import (
 // 0G-specific symbol constants for each supported source.  These are facts
 // about where 0G trades, not operator choices — there's no sensible alternate
 // value for this broker (it prices 0G for on-chain settlement).  If 0G is
-// ever re-slugged on CoinGecko or relisted under a different pair on Binance,
-// update these in place.
+// ever re-slugged on CoinGecko or relisted under a different pair on an
+// exchange, update these in place.
 const (
-	coinGeckoCoinID     = "zero-gravity"
-	coinGeckoQuote      = "usd"
-	binanceSymbol       = "0GUSDT"
+	coinGeckoCoinID = "zero-gravity"
+	coinGeckoQuote  = "usd"
+	binanceSymbol   = "0GUSDT"
+	bybitSymbol     = "0GUSDT"
 )
 
 // BuildSources constructs Source implementations from a PriceFeedConfig.
@@ -40,6 +41,8 @@ func BuildSources(cfg config.PriceFeedConfig) ([]Source, error) {
 			sources = append(sources, NewCoinGeckoSource(httpClient, "", coinGeckoCoinID, coinGeckoQuote, cfg.CoinGeckoAPIKey, cfg.CoinGeckoKeyType, cfg.UserAgent))
 		case "binance":
 			sources = append(sources, NewBinanceSource(httpClient, "", binanceSymbol, cfg.UserAgent))
+		case "bybit":
+			sources = append(sources, NewBybitSource(httpClient, "", bybitSymbol, cfg.UserAgent))
 		default:
 			return nil, fmt.Errorf("pricefeed: unknown source %q", name)
 		}
