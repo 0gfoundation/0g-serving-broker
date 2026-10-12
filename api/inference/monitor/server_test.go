@@ -636,6 +636,74 @@ func TestTrackMetricsSetsStartTime(t *testing.T) {
 	}
 }
 
+// TestMetricPath pins the label-cardinality guard: identifier segments collapse
+// to ":id", everything else is left verbatim.
+func TestMetricPath(t *testing.T) {
+	cases := map[string]string{
+		"/v1/proxy/signature/1421e0c3-cc15-4468-9e26-220b1f17c8a1":         "/v1/proxy/signature/:id",
+		"/v1/proxy/chat/completions":                                       "/v1/proxy/chat/completions",
+		"/v1/user/0x4870CbC4D07d6Ac2EE5aA865588e5985FE77a4E9/unsettledfee": "/v1/user/:id/unsettledfee",
+		"/v1/async/jobs/0123456789abcdef0123456789abcdef0123456789abcdef":  "/v1/async/jobs/:id",
+		"/v1/logs/broker/inference.log":                                    "/v1/logs/broker/inference.log",
+		"/v1/proxy/signature/1421e0c3-cc15-4468-9e26-220b1f17c8a1/":        "/v1/proxy/signature/:id/",
+		"/metrics": "/metrics",
+	}
+	for in, want := range cases {
+		if got := metricPath(in); got != want {
+			t.Errorf("metricPath(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestTrackMetricsCollapsesIDPaths: two signature lookups for different chat
+// ids must land on ONE duration series, not one each — the proxy's wildcard
+// route is what makes this the middleware's job rather than gin's.
+func TestTrackMetricsCollapsesIDPaths(t *testing.T) {
+	setupTestMetrics(t)
+	gin.SetMode(gin.TestMode)
+
+	engine := gin.New()
+	engine.Use(TrackMetrics())
+	engine.Any("/v1/proxy/*any", func(c *gin.Context) { c.Status(http.StatusOK) })
+
+	for _, id := range []string{"1421e0c3-cc15-4468-9e26-220b1f17c8a1", "0e0cb3c0-396c-4b2a-a243-1ca1df2fb7bb"} {
+		w := httptest.NewRecorder()
+		engine.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/v1/proxy/signature/"+id, nil))
+	}
+
+	if got := getCounterValue(RequestCount, "/v1/proxy/signature/:id", "OK", "", ""); got != 2 {
+		t.Errorf("collapsed request count = %v, want 2", got)
+	}
+	// No raw-id series may exist: gathering the histogram must yield exactly
+	// one child for the signature path.
+	mfs, err := func() ([]*dto.MetricFamily, error) {
+		reg := prometheus.NewRegistry()
+		if err := reg.Register(RequestDuration); err != nil {
+			return nil, err
+		}
+		return reg.Gather()
+	}()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	n := 0
+	for _, mf := range mfs {
+		for _, m := range mf.GetMetric() {
+			for _, l := range m.GetLabel() {
+				if l.GetName() == "path" {
+					if l.GetValue() != "/v1/proxy/signature/:id" {
+						t.Errorf("unexpected path label %q", l.GetValue())
+					}
+					n++
+				}
+			}
+		}
+	}
+	if n != 1 {
+		t.Errorf("duration series for the signature path = %d, want 1", n)
+	}
+}
+
 // TestTrackMetricsRecordsRequestMetrics verifies the middleware records request count and duration.
 func TestTrackMetricsRecordsRequestMetrics(t *testing.T) {
 	setupTestMetrics(t)

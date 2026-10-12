@@ -785,6 +785,23 @@ func (w *failureSourceWriter) WriteString(s string) (int, error) {
 	return w.ResponseWriter.WriteString(s)
 }
 
+// idSegment matches a path segment that is a per-request identifier: a UUID
+// (/v1/proxy/signature/<chat id>), a 0x address (/user/<addr>/unsettledfee) or
+// any long hex token (job ids). Each such segment would otherwise mint its own
+// label value.
+var idSegment = regexp.MustCompile(`(?i)/(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|0x[0-9a-f]{40}|[0-9a-f]{32,})(/|$)`)
+
+// metricPath is the request path as a bounded metric label: identifier
+// segments collapse to ":id". The proxy mounts everything under one wildcard
+// route, so gin's FullPath() cannot tell endpoints apart, and the raw URL path
+// gave every signature lookup (/v1/proxy/signature/<uuid>) its own
+// broker_request_duration_seconds series — a busy provider accumulated 44k of
+// them, its /metrics grew past 1 GB, Prometheus timed out every scrape and the
+// provider silently vanished from ARMS.
+func metricPath(urlPath string) string {
+	return idSegment.ReplaceAllString(urlPath, "/:id$1")
+}
+
 // TrackMetrics is a Gin middleware that tracks request metrics.
 func TrackMetrics() gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -797,7 +814,7 @@ func TrackMetrics() gin.HandlerFunc {
 		// first write instead.
 		c.Writer = &failureSourceWriter{ResponseWriter: c.Writer, ctx: c}
 
-		path := c.Request.URL.Path
+		path := metricPath(c.Request.URL.Path)
 		c.Next() // Process the request
 
 		ignoreError := c.GetBool("ignoreError")
