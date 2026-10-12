@@ -35,9 +35,11 @@ import (
 // proxies POST /v1/proxy/chat/completions to TargetURL + /chat/completions,
 // so TargetURL must carry the /v1 segment (e.g. http://localhost:8200/v1).
 func TestBrokerToVerifierToGPU(t *testing.T) {
+	// Needs a live verifier and GPU node, which CI does not have: run it by hand
+	// with VERIFIER_TARGET_URL set (e.g. http://localhost:8200/v1).
 	target := os.Getenv("VERIFIER_TARGET_URL")
 	if target == "" {
-		target = "http://localhost:8200/v1"
+		t.Skip("VERIFIER_TARGET_URL not set: this test needs a live assay verifier")
 	}
 	modelName := os.Getenv("ASSAY_MODEL")
 	if modelName == "" {
