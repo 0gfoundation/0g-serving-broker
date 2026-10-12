@@ -400,6 +400,11 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 		req.Body = io.NopCloser(bytes.NewBuffer(body))
 	}
 
+	if err := c.providerHooks().beforeUpstream(req, body, reqModel); err != nil {
+		c.handleBrokerError(ctx, err, "refusing to forward the request")
+		return err
+	}
+
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		if strings.Contains(ctx.Request.RequestURI, "/api/event_logging/batch") {

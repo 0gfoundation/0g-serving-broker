@@ -138,6 +138,10 @@ type Ctrl struct {
 	teeService          *tee.TeeService
 	chatCacheExpiration time.Duration
 
+	// hooks is what this provider type adds to the shared path; read through
+	// providerHooks(), never directly.
+	hooks providerHooks
+
 	// Session validation cache
 	sessionCache *cache.Cache
 
@@ -301,6 +305,9 @@ func New(
 		}
 	}
 
+	// teeml adds nothing to the shared path.
+	var hooks providerHooks = noHooks{}
+
 	p := &Ctrl{
 		autoSettleBufferTime: cfg.Interval.AutoSettleBufferTime,
 		minSettlementFee:     minSettlementFee,
@@ -320,6 +327,7 @@ func New(
 		priceCache:           priceCache,
 		svcCache:             svcCache,
 		teeService:           teeService,
+		hooks:                hooks,
 		chatCacheExpiration:  cfg.ChatCacheExpiration,
 		logger:               logger,
 		// Initialize session cache with 5 minute expiration and cleanup every 10 minutes
@@ -347,6 +355,7 @@ func New(
 				DisableKeepAlives:     false,                                  // Enable connection reuse (critical)
 				DisableCompression:    false,                                  // Allow gzip compression
 				ForceAttemptHTTP2:     false,                                  // Use HTTP/1.1 for stability
+				TLSClientConfig:       hooks.upstreamTLS(),
 			},
 		},
 		// Initialize whitelist users map

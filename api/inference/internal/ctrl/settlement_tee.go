@@ -157,6 +157,12 @@ func (c *Ctrl) IsTeeSignerAcknowledged(ctx context.Context) bool {
 
 // SettleFeesWithTEE implements the optimized settlement logic.
 func (c *Ctrl) SettleFeesWithTEE(ctx context.Context) error {
+	// First, before any pruning or listing: a blocked round must leave every row as it is.
+	if blocked, why := c.providerHooks().settlementBlocked(); blocked {
+		c.logger.Errorf("Settlement skipped this round: %s", why)
+		return nil
+	}
+
 	// Clear expired skipUntil flags for both requests and users
 	if err := c.db.ClearExpiredSkipUntil(); err != nil {
 		c.logger.Warnf("Failed to clear expired skipUntil for requests: %v", err)
@@ -199,6 +205,8 @@ func (c *Ctrl) SettleFeesWithTEE(ctx context.Context) error {
 			return errors.Wrap(err, "list request from db")
 		}
 
+		reqs = c.providerHooks().filterSettlement(ctx, reqs)
+
 		if len(reqs) == 0 {
 			c.logger.Infof("No more requests to settle after %d rounds", round)
 			return nil
@@ -218,6 +226,8 @@ func (c *Ctrl) SettleFeesWithTEE(ctx context.Context) error {
 			execErr = c.executeAndProcessResults(ctx, batch)
 			// Don't return immediately — always process outcomes for completed batches
 		}
+
+		c.providerHooks().afterSettlement(ctx, batch.Outcomes)
 
 		// Process outcomes (delete/skip requests) — runs even if execution had partial errors
 		c.processOutcomes(batch.Outcomes)

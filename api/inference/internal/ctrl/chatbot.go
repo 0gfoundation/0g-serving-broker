@@ -224,6 +224,8 @@ func (c *Ctrl) responseIDRewrite(chatKey string, e2eeSealed bool) string {
 func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, account model.User, outputPrice string, reqBody []byte, reqModel model.Request) error {
 	defer resp.Body.Close()
 
+	c.providerHooks().onChargedResponse(resp, reqModel)
+
 	chatKey := uuid.NewString()
 
 	// Set ZG-Res-Key for broker-signed responses:
@@ -334,6 +336,8 @@ func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, acc
 
 func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Response, account model.User, outputPrice string, reqBody []byte, reqModel model.Request) error {
 	defer resp.Body.Close()
+
+	c.providerHooks().onChargedResponse(resp, reqModel)
 
 	// The stream path sanitizes raw SSE lines and cannot transparently decode a
 	// compressed stream (sanitizeStreamLine works line-by-line). We force
