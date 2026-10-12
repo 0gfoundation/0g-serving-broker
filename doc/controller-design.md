@@ -314,6 +314,52 @@ Things to know before relying on it:
   as the instances take (each up to the 2-minute health wait). That order is what
   keeps a later primary failure from stranding an instance half-upgraded.
 
+### 3.4 What the controller does with the docker socket
+
+The controller is the only service in a deployment that mounts
+`/var/run/docker.sock`, and a verifier reviewing a manifest has to decide whether to
+accept that. This section is the list to check it against. Every docker operation
+below is reached only through the controller's own API, behind the admin and IP
+whitelists, and on the names stated — never on a name a caller supplies, except where
+the row says so.
+
+| Operation | Containers it touches | Image it can introduce | Recorded in RTMR3 first |
+|---|---|---|---|
+| Pull + recreate (`POST /v1/images/update`) | primary broker and event; each `ZG_CONTROLLER_INSTANCES` broker and event | `controller.imageRepo@sha256:<digest>` only — never a tag, never another repository | yes, `zg-image-update` naming the reference and both keys derived from it |
+| Restart after a config write (`PUT /v1/config/core`) | broker, event, ingress (or one instance's three) | none | yes, `zg-config-update` / `zg-instance-config-update`, and `zg-upstream-set` when recording is on |
+| Start / stop / restart by alias (`POST /v1/containers/:name/{start,stop,restart}`) | `broker`, `event`, `ingress`, `prometheus-init`, `prometheus`, and the `<instance>-*` aliases | none | no — these change no code and no config |
+| Rerun with one env var (`PUT /v1/config/prometheus`) | `prometheus-init`, then restart `prometheus` | none; only `PROMETHEUS_CONFIG` changes | no — monitoring config, not on the plaintext path |
+| Exec, fixed command | broker: `0g-validate-config -` (config passed on stdin); ingress: `nginx -s reload` | none | no — the command is a constant, not caller input |
+| Read (inspect, list, logs, env, image info) | any container | none | no |
+| Create / remove engine (`/v1/engines`) | a new container the request names | an image `controller.engines` allows, digest-pinned | yes, `zg-engine-set` — and **refused unless `ZG_CONTROLLER_ENGINES=on`** |
+
+The docker layer additionally refuses every state change on the controller's own
+container (§3.1a), and resolves names exactly rather than by docker's substring
+fallback wherever acting on a neighbour would be wrong.
+
+**What a verifier can therefore conclude from the manifest alone.** With
+`ZG_CONTROLLER_ENGINES` absent from the controller's `environment`, the set of
+containers is the set the compose lists — nothing here can add one. The only code
+that can change after launch is the broker/event image, every change is recorded
+before it happens, and the record names a reference in one repository by digest, so
+a reader that replays RTMR3 and accepts only released digests bounds what runs. That
+argument holds for **a controller image the reader has also accepted**: a different
+controller could do anything the socket allows, which is why its digest belongs on
+the same release list as the broker's.
+
+**What it cannot conclude.** The socket is still the whole docker API; the bound above
+is this program's behaviour, not a kernel restriction. A docker-API filtering proxy was
+considered and not adopted: its rules are per endpoint (`POST /containers/create`),
+coarser than "only these two containers, only this repository", so the narrowing would
+still live here and the proxy would be one more image to trust.
+
+**`ZG_CONTROLLER_ENGINES`** is read from the controller's environment, not the config
+file, for the reason `ZG_CONTROLLER_INSTANCES` is (§3.3): the config file is rewritten
+through this API and no measurement covers its content, so a switch kept there could
+be turned on by the party it is meant to bound. Only the exact value `on` enables
+engine creation. Removal is never gated on it, since it only shrinks where plaintext
+may go.
+
 ---
 
 ## 4. API Design
@@ -451,6 +497,9 @@ container created afterwards is outside it, and without a record a destination
 pointing at it classifies as an **external vendor** (`attest.classifyUpstreams`
 matches a URL host against the compose's services and finds nothing). Fail-closed,
 and useless for the one case dynamic engines exist for.
+
+Creation is refused unless the controller's environment sets `ZG_CONTROLLER_ENGINES=on`
+(§3.4), so a deployment whose compose does not opt in cannot gain a container at runtime.
 
 So every create writes `zg-engine-set` into RTMR3 **before** the container exists,
 and every removal writes the correction **after** it is gone. Both orders follow one

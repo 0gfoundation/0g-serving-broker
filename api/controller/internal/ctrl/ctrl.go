@@ -250,6 +250,9 @@ type Ctrl struct {
 	// instances are the extra broker/event pairs this controller manages beside the
 	// primary one (InstancesEnvVar). Fixed at startup, like the admin list.
 	instances []Instance
+
+	// enginesEnabled is EnginesEnvVar, read once at startup. See CreateEngine.
+	enginesEnabled bool
 }
 
 // boundUpstreamSetHash reports the set hash keys are currently derived for, or "" for
@@ -326,6 +329,7 @@ func NewCtrl(fullConfig *config.Config, logger log.Logger) (*Ctrl, error) {
 		return nil, err
 	}
 	ctrl.instances = instances
+	ctrl.enginesEnabled = os.Getenv(EnginesEnvVar) == "on"
 	for _, in := range instances {
 		logger.Infof("Managing extra instance %q: broker=%s event=%s ingress=%s config=%s", in.Name, in.Broker, in.Event, in.Ingress, in.ConfigFile)
 	}

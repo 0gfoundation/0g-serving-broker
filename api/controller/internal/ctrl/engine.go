@@ -139,6 +139,19 @@ func (c *Ctrl) GPUAllocation(ctx context.Context) (map[string][]GPUClaim, error)
 	return out, nil
 }
 
+// EnginesEnvVar must be exactly "on" in the controller's OWN environment for
+// POST /v1/engines to create anything. Unset by default, so a deployment cannot gain a
+// container at runtime unless its compose says so.
+//
+// An environment literal and not a config key, for the reason InstancesEnvVar is: the
+// config file is rewritten through this controller's own API and no measurement covers
+// its content, so a switch kept there could be flipped by the party it is meant to
+// bound. A compose literal is covered by compose_hash, which lets a verifier reading the
+// manifest know that the containers it lists are the only ones this CVM can run.
+//
+// Removal is not gated on it: removing an engine only shrinks where plaintext may go.
+const EnginesEnvVar = "ZG_CONTROLLER_ENGINES"
+
 // CreateEngine records an engine and then creates it, in that order.
 //
 // # The order is the whole design
@@ -176,6 +189,9 @@ func (c *Ctrl) CreateEngine(ctx context.Context, spec EngineSpec) error {
 	// two deployments permitting the same destinations agree on that hash whatever
 	// containers they happen to have created. The engine record is readable, and worth
 	// exactly what it is worth, on a deployment with no proxy at all.
+	if !c.enginesEnabled {
+		return refusef("cannot create an engine: %s is not \"on\" in the controller's environment, so this deployment's compose does not permit containers beyond the ones it lists", EnginesEnvVar)
+	}
 	if !c.config.RecordUpstreamSet {
 		return refusef("cannot create an engine: controller.recordUpstreamSet is off, so there is nowhere to record the set and the container would serve unrecorded")
 	}
