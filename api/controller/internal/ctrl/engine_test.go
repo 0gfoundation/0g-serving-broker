@@ -302,9 +302,10 @@ func engineCtrl(t *testing.T, containers ...fakeContainer) (*Ctrl, *fakeMachine,
 				ShmSize:      "32gb",
 			}},
 		},
-		dockerClient: dc,
-		emitter:      &fakeEmitter{log: l},
-		logger:       logger,
+		dockerClient:   dc,
+		emitter:        &fakeEmitter{log: l},
+		logger:         logger,
+		enginesEnabled: true,
 	}, m, l
 }
 
@@ -596,6 +597,22 @@ func TestCreateEngineCountsTheOlderNvidiaRuntimeSpelling(t *testing.T) {
 	err := c.CreateEngine(context.Background(), okSpec())
 	if err == nil || !strings.Contains(err.Error(), "occupied by") {
 		t.Fatalf("CreateEngine() = %v, want a refusal: `runtime: nvidia` gives a container cards too", err)
+	}
+}
+
+func TestCreateEngineRefusedWithoutComposeOptIn(t *testing.T) {
+	c, m, l := engineCtrl(t)
+	c.enginesEnabled = false
+
+	err := c.CreateEngine(context.Background(), okSpec())
+	if err == nil || !strings.Contains(err.Error(), EnginesEnvVar) {
+		t.Fatalf("CreateEngine() = %v, want a refusal naming %s", err, EnginesEnvVar)
+	}
+	if names := m.names(); contains(names, "dsv4flash") {
+		t.Errorf("machine = %v, want nothing created", names)
+	}
+	if ops := l.all(); len(ops) != 0 {
+		t.Errorf("ops = %v, want none: nothing may be recorded or pulled", ops)
 	}
 }
 
