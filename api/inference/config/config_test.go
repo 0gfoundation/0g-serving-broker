@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	constant "github.com/0glabs/0g-serving-broker/inference/const"
 )
 
 func validModelInfo() *ModelInfo {
@@ -1840,7 +1842,7 @@ service:
 	if err == nil {
 		t.Fatal("expected error for invalid providerType")
 	}
-	if !strings.Contains(err.Error(), "must be 'decentralized', 'centralized', or 'standard'") {
+	if !strings.Contains(err.Error(), "must be 'decentralized', 'centralized', 'standard', or 'spml'") {
 		t.Errorf("unexpected error message: %v", err)
 	}
 }
@@ -4236,5 +4238,184 @@ service:
 	t.Setenv("CONFIG_FILE", configPath)
 	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "positive modelInfo.maxCompletionTokens") {
 		t.Fatalf("expected a missing-cap rejection, got: %v", err)
+	}
+}
+
+// --- providerType: spml -----------------------------------------------------
+//
+// The point of the type is the precondition block: each of these configs is one
+// an operator could plausibly write and that cannot do what they think it does.
+// A test per rule, because a validation nobody proves is a validation that rots.
+
+func spmlConfig(t *testing.T, extra string) string {
+	t.Helper()
+	return `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "http://verifier:8200/v1"
+  model: "Qwen/Qwen3-0.6B"
+  verifiability: "TeeML"
+  providerType: "spml"
+` + extra
+}
+
+func loadSPML(t *testing.T, extra string) error {
+	t.Helper()
+	t.Setenv("CONFIG_FILE", writeTestConfig(t, spmlConfig(t, extra)))
+	return loadConfig(&Config{})
+}
+
+func TestSPML_Valid(t *testing.T) {
+	err := loadSPML(t, `
+assay:
+  verifierUrl: "http://verifier:8200"
+  verifierAddress: "0x1111111111111111111111111111111111111111"
+`)
+	if err != nil {
+		t.Fatalf("a complete spml config should load, got: %v", err)
+	}
+}
+
+// There is no assay.enabled any more: the provider type is the switch. A config
+// still carrying the old key must fail loudly rather than be ignored, which is
+// what UnmarshalStrict gives us for free.
+// assay.enabled was removed: providerType: spml is the switch. Unknown keys are
+// ignored and reported rather than refused (see IgnoredConfigKeys), so the stale key
+// must at least show up in that report. Ignoring it cannot silently turn spml off:
+// spml still refuses to load without its verifier settings (RequiresVerifierURL).
+func TestSPML_ReportsStaleEnabledKey(t *testing.T) {
+	ignored, err := IgnoredConfigKeys([]byte(spmlConfig(t, "assay:\n  enabled: true\n")))
+	if err != nil {
+		t.Fatalf("IgnoredConfigKeys: %v", err)
+	}
+	for _, k := range ignored {
+		if k.Key == "enabled" {
+			return
+		}
+	}
+	t.Errorf("the removed assay.enabled key must be reported as ignored, got: %v", ignored)
+}
+
+func TestSPML_RequiresVerifierURL(t *testing.T) {
+	err := loadSPML(t, `
+assay:
+  verifierAddress: "0x1111111111111111111111111111111111111111"
+`)
+	if err == nil || !strings.Contains(err.Error(), "requires assay.verifierUrl") {
+		t.Errorf("spml without a verifier url must be refused, got: %v", err)
+	}
+}
+
+func TestSPML_RequiresVerifierAddress(t *testing.T) {
+	err := loadSPML(t, `
+assay:
+  verifierUrl: "http://verifier:8200"
+`)
+	if err == nil || !strings.Contains(err.Error(), "requires assay.verifierAddress") {
+		t.Errorf("spml without a verifier address must be refused, got: %v", err)
+	}
+}
+
+// https to a KMS-derived self-signed cert with no pin is an encrypted channel
+// to an anonymous peer — worse than plaintext, because it looks authenticated.
+func TestSPML_HTTPSRequiresPinOrAttestation(t *testing.T) {
+	err := loadSPML(t, `
+assay:
+  verifierUrl: "https://verifier:8200"
+  verifierAddress: "0x1111111111111111111111111111111111111111"
+`)
+	if err == nil || !strings.Contains(err.Error(), "verifierKeyPin") {
+		t.Errorf("https without a pin must be refused, got: %v", err)
+	}
+
+	if err := loadSPML(t, `
+assay:
+  verifierUrl: "https://verifier:8200"
+  verifierAddress: "0x1111111111111111111111111111111111111111"
+  verifierKeyPin: "0xaa"
+`); err != nil {
+		t.Errorf("https with a pin should load, got: %v", err)
+	}
+}
+
+// A config still asking for the removed source must be refused, not quietly
+// given the tappscan check instead: the operator asked for a specific evidence
+// path and is entitled to hear that it is gone rather than to believe they are
+// running something they are not.
+func TestSPML_AttestationRejectsTappCliSource(t *testing.T) {
+	err := loadSPML(t, `
+assay:
+  verifierUrl: "http://verifier:8200"
+  verifierAddress: "0x1111111111111111111111111111111111111111"
+  attestation:
+    enabled: true
+    source: "tapp-cli"
+`)
+	if err == nil || !strings.Contains(err.Error(), "tappscan") {
+		t.Errorf("the removed tapp-cli source must be refused, got: %v", err)
+	}
+}
+
+// expected.image is what the measured boot chain is held against. Without it
+// the check would pass on any image the assay happened to boot.
+func TestSPML_AttestationRequiresExpectedImage(t *testing.T) {
+	err := loadSPML(t, `
+assay:
+  verifierUrl: "http://verifier:8200"
+  verifierAddress: "0x1111111111111111111111111111111111111111"
+  attestation:
+    enabled: true
+    source: "tappscan"
+    appId: "assay-verifier"
+    registry: "0x2222222222222222222222222222222222222222"
+    rpcUrl: "https://rpc.example"
+    tappscan:
+      url: "https://scan.example"
+      pubkeyPin: "0xbb"
+`)
+	if err == nil || !strings.Contains(err.Error(), "expected.image") {
+		t.Errorf("attestation without expected.image must be refused, got: %v", err)
+	}
+}
+
+// You cannot FP32-recompute someone else's API. With the flag gone that
+// combination is not rejected — it is unrepresentable: a centralized provider
+// simply is not spml, so the integration never runs, and leftover assay
+// settings are inert configuration for a path that is off.
+func TestAssayInertOnForwarder(t *testing.T) {
+	t.Setenv("CONFIG_FILE", writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://api.openai.com/v1"
+  model: "gpt-4o"
+  verifiability: "TeeML"
+  providerType: "centralized"
+  providerIdentity: "openai"
+assay:
+  verifierUrl: "http://verifier:8200"
+`))
+	cfg := &Config{}
+	if err := loadConfig(cfg); err != nil {
+		t.Fatalf("centralized config should still load: %v", err)
+	}
+	if cfg.Service.IsSPML() {
+		t.Error("a centralized provider must never be spml")
+	}
+}
+
+func TestSPMLPredicates(t *testing.T) {
+	spml := &Service{ProviderType: constant.ProviderTypeSPML}
+	if !spml.IsSPML() || spml.IsForwarder() || !spml.IsSelfHosted() {
+		t.Error("spml must be self-hosted and not a forwarder")
+	}
+	dec := &Service{ProviderType: constant.ProviderTypeDecentralized}
+	if dec.IsSPML() || !dec.IsSelfHosted() {
+		t.Error("decentralized stays self-hosted and is not spml")
+	}
+	for _, pt := range []string{constant.ProviderTypeCentralized, constant.ProviderTypeStandard} {
+		s := &Service{ProviderType: pt}
+		if s.IsSelfHosted() || s.IsSPML() {
+			t.Errorf("%s must not be self-hosted", pt)
+		}
 	}
 }

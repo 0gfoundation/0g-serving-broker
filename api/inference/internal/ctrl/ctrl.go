@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/patrickmn/go-cache"
 
 	"github.com/0glabs/0g-serving-broker/common/log"
@@ -141,6 +142,45 @@ type Ctrl struct {
 	// hooks is what this provider type adds to the shared path; read through
 	// providerHooks(), never directly.
 	hooks providerHooks
+
+	// assayVerdictFilter, when true, records the Assay verifier's ZG-Verdict
+	// per request and excludes REJECT'd requests from settlement. Set from
+	// providerType "spml"; inert for every other provider type.
+	assayVerdictFilter bool
+	// assayAttestor is the Phase-2 verify-app loop (nil = attestation off);
+	// it supplies the live TLS pin and the settlement/invoice gate.
+	assayAttestor *assayAttestor
+	// assayAttCache memoises the relayed assay attestation (see attestation_relay.go).
+	assayAttCache *assayAttestationCache
+	// assayVerifierAddress, when non-nil, is the verifier's secp256k1 signing
+	// address (cfg.Assay.VerifierAddress). A verdict is then only recorded if
+	// ZG-Verdict-Sig recovers to this address over the verdict + request hash —
+	// the verdict decides settlement, so it must be authenticated. nil = legacy
+	// trust-the-header mode.
+	assayVerifierAddress *common.Address
+	// assayStrictVerdict records INVALID_SIG (settlement-excluded) for
+	// responses whose verdict is missing/unverifiable, so header stripping
+	// can't launder a REJECT. Only meaningful with assayVerifierAddress set.
+	assayStrictVerdict bool
+	// assayRejectGates decides whether a REJECT withholds settlement or is
+	// only recorded (see config.Assay.RejectGatesSettlement — off while the
+	// LDD thresholds are uncalibrated). INVALID_SIG withholds either way.
+	assayRejectGates bool
+	// assayVerifierURL, when non-empty, is where settlement fetches the
+	// batch's final verdicts (POST {url}/v1/settlement/check) before
+	// deciding to settle — required to resolve PENDING verdicts from the
+	// verifier's non-blocking mode. Empty = decide on recorded verdicts only.
+	assayVerifierURL string
+	// assayCheckWaitMs is forwarded as wait_ms on the settlement check: how
+	// long the verifier may hold the request waiting for in-flight audits.
+	assayCheckWaitMs int
+	// assayPayoutEnabled drives the SPML voucher flow: after settlement the
+	// broker accumulates each settled request's fee onto its node's
+	// cumulative and invoices the verifier for signed PayoutVouchers.
+	assayPayoutEnabled bool
+	// assayVerifierCutBps is the assay's cut in basis points of each newly
+	// settled amount (the on-chain cut cap independently bounds it).
+	assayVerifierCutBps int64
 
 	// Session validation cache
 	sessionCache *cache.Cache
@@ -305,8 +345,13 @@ func New(
 		}
 	}
 
-	// teeml adds nothing to the shared path.
+	// teeml adds nothing to the shared path; spml adds the assay's.
 	var hooks providerHooks = noHooks{}
+	var spml *spmlSetup
+	if cfg.Service.IsSPML() {
+		spml = newSPMLSetup(cfg, teeService, logger)
+		hooks = spml.hooks
+	}
 
 	p := &Ctrl{
 		autoSettleBufferTime: cfg.Interval.AutoSettleBufferTime,
@@ -385,6 +430,10 @@ func New(
 		}
 	} else {
 		logger.Info("Whitelist: disabled")
+	}
+
+	if spml != nil {
+		spml.apply(p, cfg, logger)
 	}
 
 	return p
