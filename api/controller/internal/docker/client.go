@@ -182,12 +182,24 @@ func (c *Client) GetContainerLogs(ctx context.Context, containerName string, tai
 	}
 	defer reader.Close()
 
-	logs, err := io.ReadAll(reader)
+	// A container without a TTY (every one in a compose deployment) multiplexes
+	// stdout and stderr with 8-byte frame headers; a raw read hands those back as
+	// binary noise between the lines. A TTY container streams plain bytes.
+	info, err := c.cli.ContainerInspect(ctx, containerID)
+	if err != nil {
+		return "", err
+	}
+	var buf bytes.Buffer
+	if info.Config != nil && info.Config.Tty {
+		_, err = io.Copy(&buf, reader)
+	} else {
+		_, err = stdcopy.StdCopy(&buf, &buf, reader)
+	}
 	if err != nil {
 		return "", err
 	}
 
-	return string(logs), nil
+	return buf.String(), nil
 }
 
 // unguardedContainerID gets container ID by name.

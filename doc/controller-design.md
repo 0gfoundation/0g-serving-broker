@@ -379,6 +379,7 @@ may go.
 | ------ | ----------------------------- | ------------------------- |
 | GET    | `/v1/containers`              | Get status of all managed containers |
 | GET    | `/v1/containers/:name`        | Get status of specific container |
+| GET    | `/v1/containers/:name/logs`   | Tail of stdout+stderr as text (`?tail=N`, default 200, max 5000); read-only, for a CVM with no SSH and public logs off |
 | POST   | `/v1/containers/:name/start`  | Start container           |
 | POST   | `/v1/containers/:name/stop`   | Stop container            |
 | POST   | `/v1/containers/:name/restart`| Restart container         |

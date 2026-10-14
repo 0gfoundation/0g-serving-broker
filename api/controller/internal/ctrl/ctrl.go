@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -465,6 +466,18 @@ func (c *Ctrl) GetContainerStatus(ctx context.Context, alias string) (*docker.Co
 	}
 
 	return c.dockerClient.GetContainerStatus(ctx, containerName)
+}
+
+// GetContainerLogs returns the last tail lines of a managed container's stdout and
+// stderr. Read-only, resolved by alias like GetContainerStatus. It exists because a
+// production CVM has no SSH and keeps public logs off, so without it a crash-looping
+// container shows an operator nothing but "restarting".
+func (c *Ctrl) GetContainerLogs(ctx context.Context, alias string, tail int) (string, error) {
+	containerName := c.getContainerName(alias)
+	if containerName == "" {
+		return "", &InvalidContainerError{Alias: alias}
+	}
+	return c.dockerClient.GetContainerLogs(ctx, containerName, strconv.Itoa(tail))
 }
 
 // GetAllContainersStatus gets the status of all managed containers
