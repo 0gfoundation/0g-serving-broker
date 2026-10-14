@@ -12,6 +12,13 @@
 // can write — the controller being the one container whose image compose_hash pins and
 // which cannot upgrade itself.
 //
+// The same goes for the ingress. dstack-ingress reads /Info for the app id it writes into
+// the _dstack-app-address TXT record and /GetQuote for the certificate evidence it serves,
+// both with a plain curl GET on /var/run/dstack.sock — and so, mounted the usual way, it
+// too could append to RTMR3. Pointing it at this socket instead (a symlink at the path its
+// scripts hard-code) is what lets a deployment take that mount away as well, which is why
+// the two forwarded methods accept GET and not only POST.
+//
 // The proxy is not what provides the property. Removing the mount is. A modified broker
 // image does not run our code, so nothing written here constrains it; what this does is
 // make the removal possible, by giving an honest broker somewhere else to ask. And a
@@ -125,11 +132,15 @@ func New(listenPath, dstackPath string, currentIdentity CurrentKeyIdentityFunc, 
 // guard refuses everything outside the allowlist before the request can reach dstack.
 func (p *Proxy) guard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// dstack's RPC is POST-only, so anything else is not a call this proxy is for.
+		// The signing operations are POST-only, like the rest of dstack's RPC.
 		if r.Method == http.MethodPost && p.handleLocal(w, r) {
 			return
 		}
-		if r.Method != http.MethodPost || !forwarded[r.URL.Path] {
+		// GET as well as POST, because the ingress asks with curl's default verb and a
+		// query string (/GetQuote?report_data=…), and dstack answers either. Only these
+		// two verbs: the path alone would also admit whatever a future dstack serves on
+		// some other one.
+		if (r.Method != http.MethodPost && r.Method != http.MethodGet) || !forwarded[r.URL.Path] {
 			// Logged at warning: on a correctly deployed CVM nothing should ever ask.
 			// A request for /EmitEvent in particular means something is trying to write
 			// the ledger through the one path built to keep it from doing that.

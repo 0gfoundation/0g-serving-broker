@@ -37,8 +37,10 @@ func fakeDstack(t *testing.T, dir string, reached *[]string) string {
 		t.Fatalf("listening on the fake dstack socket: %v", err)
 	}
 	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		*reached = append(*reached, r.URL.Path)
-		_, _ = w.Write([]byte(`{"served":"` + r.URL.Path + `"}`))
+		// RequestURI, not Path: the ingress passes report_data as a query string, and a
+		// proxy that dropped it would hand back a quote over the wrong bytes.
+		*reached = append(*reached, r.URL.RequestURI())
+		_, _ = w.Write([]byte(`{"served":"` + r.URL.RequestURI() + `"}`))
 	})}
 	go func() { _ = srv.Serve(listener) }()
 	t.Cleanup(func() { _ = srv.Close() })
@@ -148,14 +150,41 @@ func TestOnlyReadOnlyMethodsReachDstack(t *testing.T) {
 	}
 }
 
-// dstack's RPC is POST-only, so another verb is not a call this proxy is for. Checked
-// because a handler keyed on the path alone would forward a GET that some future dstack
-// version answers.
-func TestNonPostIsRefused(t *testing.T) {
+// The ingress asks for the same two methods with curl's default verb and the report
+// data in the query string, so GET is forwarded too — with the query intact, since a quote
+// over the wrong report_data is an evidence file that verifies nothing. The allowlist still
+// applies: GET /EmitEvent is as refused as POST.
+func TestIngressStyleGetIsForwarded(t *testing.T) {
 	var reached []string
 	c := start(t, &reached)
 
-	for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodDelete, http.MethodPatch} {
+	for _, path := range []string{"/Info", "/GetQuote?report_data=" + strings.Repeat("ab", 64)} {
+		if code, body := post(t, c, http.MethodGet, path); code != http.StatusOK || body != `{"served":"`+path+`"}` {
+			t.Errorf("GET %s = %d %q, want 200 with the request forwarded verbatim", path, code, body)
+		}
+	}
+	if len(reached) != 2 {
+		t.Errorf("dstack saw %v, want both forwarded", reached)
+	}
+
+	before := len(reached)
+	for _, path := range []string{"/EmitEvent", "/GetKey", "/GetTlsKey", "/Sign", "/SignerAddress", "/GetEncKey"} {
+		if code, _ := post(t, c, http.MethodGet, path); code != http.StatusNotFound {
+			t.Errorf("GET %s = %d, want 404", path, code)
+		}
+	}
+	if len(reached) != before {
+		t.Errorf("dstack saw %v after the refused GETs, want none of them through", reached[before:])
+	}
+}
+
+// Beyond GET and POST no verb is a call this proxy is for. Checked because a handler keyed
+// on the path alone would forward whatever some future dstack version answers on them.
+func TestOtherVerbsAreRefused(t *testing.T) {
+	var reached []string
+	c := start(t, &reached)
+
+	for _, method := range []string{http.MethodPut, http.MethodDelete, http.MethodPatch, http.MethodHead} {
 		if code, _ := post(t, c, method, "/GetQuote"); code != http.StatusNotFound {
 			t.Errorf("%s /GetQuote = %d, want 404", method, code)
 		}
