@@ -48,15 +48,26 @@ func fakeDstack(t *testing.T, dir string, reached *[]string) string {
 	return path
 }
 
-// start runs a proxy and returns a client that dials it.
+// start runs the broker's proxy and returns a client that dials it.
 func start(t *testing.T, reached *[]string) *http.Client {
+	t.Helper()
+	return startWith(t, reached, false)
+}
+
+// startWith runs either proxy: the broker's, or the ingress's read-only one.
+func startWith(t *testing.T, reached *[]string, readOnly bool) *http.Client {
 	t.Helper()
 
 	dir := t.TempDir()
 	dstackPath := fakeDstack(t, dir, reached)
 	listenPath := filepath.Join(dir, "tee.sock")
 
-	p := New(listenPath, dstackPath, func(context.Context) (KeyIdentity, error) { return KeyIdentity{Digest: testDigest}, nil }, testLogger(t))
+	var p *Proxy
+	if readOnly {
+		p = NewReadOnly(listenPath, dstackPath, testLogger(t))
+	} else {
+		p = New(listenPath, dstackPath, func(context.Context) (KeyIdentity, error) { return KeyIdentity{Digest: testDigest}, nil }, testLogger(t))
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	served := make(chan error, 1)
 	go func() { served <- p.Serve(ctx) }()
@@ -175,6 +186,38 @@ func TestIngressStyleGetIsForwarded(t *testing.T) {
 	}
 	if len(reached) != before {
 		t.Errorf("dstack saw %v after the refused GETs, want none of them through", reached[before:])
+	}
+}
+
+// The ingress's socket forwards the same two methods and answers nothing itself: /Sign
+// under the running image's key is what the broker's socket adds, and an ingress holding
+// that could mint response proofs — which is not better than being able to write the
+// ledger. Both are checked here, since a read-only proxy that answered /Sign anyway would
+// pass every forwarding test.
+func TestReadOnlySocketForwardsButNeverSigns(t *testing.T) {
+	var reached []string
+	c := startWith(t, &reached, true)
+
+	for _, path := range []string{"/Info", "/GetQuote?report_data=" + strings.Repeat("ab", 64)} {
+		if code, _ := post(t, c, http.MethodGet, path); code != http.StatusOK {
+			t.Errorf("read-only GET %s = %d, want 200", path, code)
+		}
+	}
+	if code, _ := post(t, c, http.MethodPost, "/GetQuote"); code != http.StatusOK {
+		t.Errorf("read-only POST /GetQuote = %d, want 200", code)
+	}
+	if len(reached) != 3 {
+		t.Errorf("dstack saw %v, want the three forwarded", reached)
+	}
+
+	before := len(reached)
+	for _, path := range []string{pathSign, pathSignerAddress, pathGetEncKey, "/EmitEvent", "/GetKey"} {
+		if code, _ := post(t, c, http.MethodPost, path); code != http.StatusNotFound {
+			t.Errorf("read-only POST %s = %d, want 404", path, code)
+		}
+	}
+	if len(reached) != before {
+		t.Errorf("dstack saw %v after the refused calls, want none of them through", reached[before:])
 	}
 }
 

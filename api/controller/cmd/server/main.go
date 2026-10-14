@@ -105,6 +105,21 @@ func Main() {
 		}()
 	}
 
+	// And the ingress's socket: the forwarded methods only, no signing. Same lifetime
+	// rules as above.
+	if socket := os.Getenv(attestproxy.ReadOnlySocketEnvVar); socket != "" {
+		proxyCtx, stopProxy := context.WithCancel(context.Background())
+		proxy := attestproxy.NewReadOnly(socket, tee.DefaultDstackSocket, logger)
+		defer func() { _ = proxy.Close() }()
+		defer stopProxy()
+
+		go func() {
+			if err := proxy.Serve(proxyCtx); err != nil {
+				logger.Fatalf("Read-only attestation proxy on %s failed: %v", socket, err)
+			}
+		}()
+	}
+
 	// Create handler
 	h := handler.NewHandler(controller)
 
