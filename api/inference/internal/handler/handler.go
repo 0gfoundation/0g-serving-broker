@@ -23,11 +23,12 @@ import (
 // The real *ctrl.Ctrl satisfies this interface. Tests can inject a mock implementation.
 type asyncCtrl interface {
 	IsAsyncEnabled() bool
-	RefuseAsync(contentType string, reqBody []byte) string
+	RefuseAsync(svcType, contentType string, reqBody []byte) string
+	UnsealAsyncRequest(svcType string, reqBody []byte) (*ctrl.SealedAsyncRequest, error)
 	ValidateSession(ctx *gin.Context) (string, error)
 	IsWhitelistedUser(userAddress string) bool
 	WhitelistMetricLabels(ctx *gin.Context, reqBody []byte, contentType string) (model, upstream string)
-	SubmitAsyncJob(ctx *gin.Context, userAddress, svcType string, reqHeaders, reqBody []byte, isWhitelisted bool) (string, error)
+	SubmitAsyncJob(ctx *gin.Context, userAddress, svcType string, reqHeaders, reqBody []byte, isWhitelisted bool, sealed *ctrl.SealedAsyncRequest) (string, error)
 	GetAsyncJob(jobID string) (model.AsyncJob, error)
 }
 

@@ -2,6 +2,7 @@ package handler
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"mime/multipart"
@@ -35,6 +36,11 @@ type mockAsyncCtrl struct {
 	capturedReqHeaders []byte
 	capturedReqBody    []byte
 	capturedWhitelist  bool
+	capturedSealed     *ctrl.SealedAsyncRequest
+
+	// UnsealAsyncRequest
+	unsealResult *ctrl.SealedAsyncRequest
+	unsealErr    error
 
 	// GetAsyncJob
 	getJobResult model.AsyncJob
@@ -50,8 +56,14 @@ func (m *mockAsyncCtrl) IsAsyncEnabled() bool {
 // the mock's opinion of it. A zero Ctrl is enough because the decision reads the
 // request bytes only — no enclave state — and if that ever stops being true this
 // fails as a compile error here rather than silently diverging.
-func (m *mockAsyncCtrl) RefuseAsync(contentType string, reqBody []byte) string {
-	return (&ctrl.Ctrl{}).RefuseAsync(contentType, reqBody)
+func (m *mockAsyncCtrl) RefuseAsync(svcType, contentType string, reqBody []byte) string {
+	return (&ctrl.Ctrl{}).RefuseAsync(svcType, contentType, reqBody)
+}
+
+// UnsealAsyncRequest is canned: opening needs an enclave key. Tests that need a
+// sealed submit set unsealResult / unsealErr.
+func (m *mockAsyncCtrl) UnsealAsyncRequest(svcType string, reqBody []byte) (*ctrl.SealedAsyncRequest, error) {
+	return m.unsealResult, m.unsealErr
 }
 
 func (m *mockAsyncCtrl) ValidateSession(ctx *gin.Context) (string, error) {
@@ -66,7 +78,8 @@ func (m *mockAsyncCtrl) IsWhitelistedUser(userAddress string) bool {
 	return m.whitelistUser
 }
 
-func (m *mockAsyncCtrl) SubmitAsyncJob(ctx *gin.Context, userAddress, svcType string, reqHeaders, reqBody []byte, isWhitelisted bool) (string, error) {
+func (m *mockAsyncCtrl) SubmitAsyncJob(ctx *gin.Context, userAddress, svcType string, reqHeaders, reqBody []byte, isWhitelisted bool, sealed *ctrl.SealedAsyncRequest) (string, error) {
+	m.capturedSealed = sealed
 	m.capturedSvcType = svcType
 	m.capturedReqHeaders = reqHeaders
 	m.capturedReqBody = reqBody
@@ -504,6 +517,46 @@ func TestGetAsyncJob_Completed_WithValidJSON(t *testing.T) {
 	}
 }
 
+// A completed sealed job answers with its stored frame, ciphertext restored,
+// and nothing of the ordinary envelope around it (SPEC §7.5.2).
+func TestGetAsyncJob_CompletedSealedServesTheFrame(t *testing.T) {
+	now := time.Now()
+	stored := []byte(`{"jobId":"job-sealed","status":"completed","usage":{"output_images":1},"_e2ee":{"v":1,"ciphertext":""}}`)
+	ciphertext := []byte("raw-ciphertext-bytes")
+	mock := &mockAsyncCtrl{
+		asyncEnabled: true,
+		sessionUser:  "0xUser1",
+		getJobResult: model.AsyncJob{
+			Model:           model.Model{CreatedAt: &now, UpdatedAt: &now},
+			JobID:           "job-sealed",
+			Status:          model.AsyncJobStatusCompleted,
+			UserAddress:     "0xUser1",
+			SealedFrame:     stored,
+			SealedResult:    ciphertext,
+			ResponseHeaders: []byte(`{"ZG-Res-Key":["chat-key"]}`),
+		},
+	}
+	h := newTestHandler(mock)
+	w := getAsyncJobRequest(h, "job-sealed")
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	want, err := ctrl.AssembleSealedAsyncFrame(stored, ciphertext)
+	if err != nil {
+		t.Fatalf("AssembleSealedAsyncFrame: %v", err)
+	}
+	if w.Body.String() != string(want) {
+		t.Errorf("body = %s, want the assembled frame %s", w.Body.String(), want)
+	}
+	if !strings.Contains(w.Body.String(), base64.RawURLEncoding.EncodeToString(ciphertext)) {
+		t.Error("the ciphertext must be restored into _e2ee")
+	}
+	if got := w.Header().Get("ZG-Res-Key"); got != "chat-key" {
+		t.Errorf("ZG-Res-Key = %q", got)
+	}
+}
+
 func TestGetAsyncJob_Completed_WithInvalidJSON(t *testing.T) {
 	now := time.Now()
 	mock := &mockAsyncCtrl{
@@ -776,36 +829,75 @@ func TestSubmitAsync_AcceptsOrdinaryMultipartEdit(t *testing.T) {
 	}
 }
 
-func TestSubmitAsync_RejectsSealedRequest(t *testing.T) {
-	sealed := `{"_e2ee":{"v":1,"kem_id":"0x0020","key_id":"k","signer_addr":"0xabc","client_eph_pub":"p","enc":"e","sealed_fields":["prompt"],"ciphertext":"c"},"model":"z-image","response_format":"b64_json"}`
+const sealedAsyncSubmit = `{"_e2ee":{"v":1,"kem_id":"0x0020","key_id":"k","signer_addr":"0xabc","client_eph_pub":"p","enc":"e","sealed_fields":["prompt","_bind"],"ciphertext":"c"},"model":"z-image","response_format":"b64_json"}`
 
+// Async edits have no sealed profile: a sealed body there is refused before it
+// is opened or submitted.
+func TestSubmitAsync_RejectsSealedEdit(t *testing.T) {
+	mock := &mockAsyncCtrl{asyncEnabled: true, sessionUser: "0xUser1", submitJobID: "job-1",
+		unsealResult: &ctrl.SealedAsyncRequest{Forward: []byte(`{}`)}}
+	h := newTestHandler(mock)
+	w := performRequest(h.SubmitAsyncImageEdit, "POST", "/v1/async/images/edits", sealedAsyncSubmit,
+		map[string]string{"Content-Type": "application/json"})
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "e2ee") {
+		t.Errorf("error should name e2ee, got: %s", w.Body.String())
+	}
+	if mock.capturedReqBody != nil {
+		t.Errorf("a sealed edit must not be submitted, got body: %s", mock.capturedReqBody)
+	}
+}
+
+// Async generations open a sealed submit (SPEC §7.5) and hand the opened request
+// to SubmitAsyncJob alongside the envelope, which is what the row stores.
+func TestSubmitAsync_SealedGenerationIsOpenedAndSubmitted(t *testing.T) {
+	opened := &ctrl.SealedAsyncRequest{Forward: []byte(`{"model":"z-image","prompt":"p"}`)}
+	mock := &mockAsyncCtrl{asyncEnabled: true, sessionUser: "0xUser1", submitJobID: "job-1", unsealResult: opened}
+	h := newTestHandler(mock)
+	w := performRequest(h.SubmitAsyncImageGeneration, "POST", "/v1/async/images/generations", sealedAsyncSubmit,
+		map[string]string{"Content-Type": "application/json"})
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d: %s", w.Code, w.Body.String())
+	}
+	if mock.capturedSealed != opened {
+		t.Error("the opened request must reach SubmitAsyncJob")
+	}
+	if string(mock.capturedReqBody) != sealedAsyncSubmit {
+		t.Errorf("the row must store the envelope, got: %s", mock.capturedReqBody)
+	}
+}
+
+// A sealed generation that cannot be opened is never submitted. A stale enc key
+// is the proxy's retriable 409 with the "e2ee_key_mismatch" prefix the router
+// matches; anything else is a 400.
+func TestSubmitAsync_SealedGenerationOpenFailure(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		path string
+		name       string
+		err        error
+		wantStatus int
+		wantPrefix string
 	}{
-		{"images/generations", "/v1/async/images/generations"},
-		{"images/edits", "/v1/async/images/edits"},
+		{"key mismatch", fmt.Errorf("%w: stale", ctrl.ErrE2EEKeyMismatch), http.StatusConflict, `{"error":"e2ee_key_mismatch`},
+		{"bad envelope", fmt.Errorf("unseal request: bad aad"), http.StatusBadRequest, `{"error":"e2ee: `},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			mock := &mockAsyncCtrl{asyncEnabled: true, sessionUser: "0xUser1", submitJobID: "job-1"}
+			mock := &mockAsyncCtrl{asyncEnabled: true, sessionUser: "0xUser1", submitJobID: "job-1", unsealErr: tc.err}
 			h := newTestHandler(mock)
-			fn := h.SubmitAsyncImageGeneration
-			if tc.path == "/v1/async/images/edits" {
-				fn = h.SubmitAsyncImageEdit
-			}
-
-			w := performRequest(fn, "POST", tc.path, sealed,
+			w := performRequest(h.SubmitAsyncImageGeneration, "POST", "/v1/async/images/generations", sealedAsyncSubmit,
 				map[string]string{"Content-Type": "application/json"})
 
-			if w.Code != http.StatusBadRequest {
-				t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+			if w.Code != tc.wantStatus {
+				t.Fatalf("expected %d, got %d: %s", tc.wantStatus, w.Code, w.Body.String())
 			}
-			if !strings.Contains(w.Body.String(), "e2ee") {
-				t.Errorf("error should name e2ee, got: %s", w.Body.String())
+			if !strings.HasPrefix(w.Body.String(), tc.wantPrefix) {
+				t.Errorf("body = %s, want prefix %s", w.Body.String(), tc.wantPrefix)
 			}
-			// The job must never have been enqueued — that is the whole point.
 			if mock.capturedReqBody != nil {
-				t.Errorf("a sealed request must not be submitted, got body: %s", mock.capturedReqBody)
+				t.Error("a sealed request that cannot be opened must not be submitted")
 			}
 		})
 	}

@@ -465,6 +465,22 @@ func (d *DB) Migrate() error {
 				return tx.AutoMigrate(&AssayPayout{})
 			},
 		},
+		{
+			// A sealed async image result (0g-pc SPEC §7.5). Nullable columns, so the
+			// migration is additive and a binary predating it ignores them. The
+			// ciphertext gets its own LONGBLOB rather than going into response_body
+			// (MEDIUMBLOB, 16 MiB): stored as base64 inside the frame it would cost
+			// ≈1.78× the raw images and break n=4 jobs that fit today. Widening
+			// response_body on a hot table instead would not be additive.
+			ID: "add-sealed-result-to-async-job",
+			Migrate: func(tx *gorm.DB) error {
+				type AsyncJob struct {
+					SealedFrame  []byte `gorm:"type:blob"`
+					SealedResult []byte `gorm:"type:longblob"`
+				}
+				return tx.AutoMigrate(&AsyncJob{})
+			},
+		},
 	})
 
 	return errors.Wrap(m.Migrate(), "migrate database")

@@ -7,6 +7,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
+
 	"github.com/0glabs/0g-serving-broker/inference/model"
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
@@ -35,25 +38,34 @@ func (h *Handler) submitAsyncJob(ctx *gin.Context, svcType string) {
 		handleBrokerError(ctx, err, "read request body")
 		return
 	}
-	// E2EE (0g-pc SPEC §1/§5): the async routes cannot serve a sealed request —
-	// they enqueue the body, a worker forwards it later, and the result is served
-	// from a store in plaintext, so there is no point at which the response could
-	// be sealed to the client's ephemeral key or signed under §8. Forwarding one
-	// anyway is worse than useless: forceB64ResponseFormat rewrites the envelope's
-	// cleartext (invalidating the AAD), the provider receives a request it cannot
-	// read, and the user is billed for the result.
-	//
-	// Refuse, so "a sealed request is fail-closed" is a property of the enclave
-	// rather than of which route the client happened to pick. The synchronous
-	// proxy reaches the same conclusion via MaybeUnsealRequest; these routes never
-	// touch it, which is exactly how they came to be a hole.
+	// E2EE (0g-pc SPEC §1/§5): the async routes enqueue the body, a worker
+	// forwards it later, and the result is served from a store. Only async
+	// text-to-image can serve a sealed request (the async-image profile, SPEC
+	// §7.5: opened below, sealed once at completion, stored as ciphertext).
+	// Anything else sealed is refused, so "a sealed request is fail-closed" is a
+	// property of the enclave rather than of which route the client picked.
 	//
 	// The Content-Type is passed because /v1/async/images/edits accepts
 	// multipart/form-data, so an envelope has two ways in here and only one of
 	// them is JSON.
-	if why := h.asyncCtrl.RefuseAsync(ctx.GetHeader("Content-Type"), reqBody); why != "" {
+	if why := h.asyncCtrl.RefuseAsync(svcType, ctx.GetHeader("Content-Type"), reqBody); why != "" {
 		ctx.Set("ignoreError", true)
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": why})
+		return
+	}
+	// Open a sealed submit now, before any job row or billing record exists, so
+	// a stale enc key or a bad envelope is answered on the submit. Same error
+	// mapping as the synchronous proxy: a key mismatch is a 409 whose message
+	// starts with "e2ee_key_mismatch" (the router re-syncs the provider's key on
+	// it); every other failure is a fail-closed 400.
+	sealed, err := h.asyncCtrl.UnsealAsyncRequest(svcType, reqBody)
+	if err != nil {
+		ctx.Set("ignoreError", true)
+		if errors.Is(err, ctrl.ErrE2EEKeyMismatch) {
+			handleBrokerError(ctx, errors.NewConflict("%s", err.Error()), "")
+		} else {
+			handleBrokerError(ctx, errors.NewBadRequest("e2ee: %s", err.Error()), "")
+		}
 		return
 	}
 	if len(reqBody) == 0 {
@@ -85,7 +97,7 @@ func (h *Handler) submitAsyncJob(ctx *gin.Context, svcType string) {
 	}
 
 	// Submit the job
-	jobID, err := h.asyncCtrl.SubmitAsyncJob(ctx, userAddress, svcType, reqHeaders, reqBody, isWhitelisted)
+	jobID, err := h.asyncCtrl.SubmitAsyncJob(ctx, userAddress, svcType, reqHeaders, reqBody, isWhitelisted, sealed)
 	if err != nil {
 		handleBrokerError(ctx, err, "submit async job")
 		return
@@ -168,6 +180,20 @@ func (h *Handler) GetAsyncJob(ctx *gin.Context) {
 				ctx.Header("ZG-Res-Key", keys[0])
 			}
 		}
+	}
+
+	// A completed SEALED job answers with its stored result frame (0g-pc SPEC
+	// §7.5.2), the same bytes on every poll. Its pending/processing/failed
+	// answers are the ordinary shape below, which for a sealed job carries no
+	// content: no data, and an errorMessage that is a fixed code.
+	if job.Status == model.AsyncJobStatusCompleted && len(job.SealedFrame) > 0 {
+		frame, err := ctrl.AssembleSealedAsyncFrame(job.SealedFrame, job.SealedResult)
+		if err != nil {
+			handleBrokerError(ctx, errors.Internal(err), "assemble sealed result")
+			return
+		}
+		ctx.Data(http.StatusOK, "application/json", frame)
+		return
 	}
 
 	// For completed jobs, embed the provider's response as raw JSON in the data field

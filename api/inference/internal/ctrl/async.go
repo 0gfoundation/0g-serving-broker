@@ -27,6 +27,9 @@ type asyncJobParams struct {
 	RequestBody    []byte
 	BillingReq     model.Request
 	IsWhitelisted  bool
+	// Sealed is the opened request of a sealed (E2EE) job, nil otherwise. When
+	// set, RequestBody is its plaintext and the job row holds the envelope.
+	Sealed *SealedAsyncRequest
 }
 
 // InitAsyncProcessing initializes the async processing subsystem.
@@ -135,9 +138,13 @@ func (c *Ctrl) GetAsyncResultTTL() time.Duration {
 //   - reqHeaders: JSON-serialized request headers to forward to the provider (e.g. Content-Type)
 //   - reqBody: raw request body bytes
 //   - isWhitelisted: if true, billing validation and fee recording are skipped
+//   - sealed: the opened request when reqBody is a sealed envelope
+//     (UnsealAsyncRequest), nil otherwise. reqBody is what the job row stores;
+//     for a sealed job that is the envelope, and the plaintext travels only in
+//     the in-memory queue.
 //
 // Returns the job ID or an error if the queue is full or validation fails.
-func (c *Ctrl) SubmitAsyncJob(ctx *gin.Context, userAddress, svcType string, reqHeaders, reqBody []byte, isWhitelisted bool) (string, error) {
+func (c *Ctrl) SubmitAsyncJob(ctx *gin.Context, userAddress, svcType string, reqHeaders, reqBody []byte, isWhitelisted bool, sealed *SealedAsyncRequest) (string, error) {
 	if !c.asyncEnabled {
 		return "", errors.New("async processing is not enabled")
 	}
@@ -153,6 +160,14 @@ func (c *Ctrl) SubmitAsyncJob(ctx *gin.Context, userAddress, svcType string, req
 		return "", errors.New("async job queue is full, please try again later")
 	}
 
+	// Billing reads the request the upstream will get: for a sealed job, the
+	// opened plaintext (the envelope's cleartext `n` is the same value, but the
+	// opened request is the one the profile has checked).
+	plainBody := reqBody
+	if sealed != nil {
+		plainBody = sealed.Forward
+	}
+
 	// Extract output count and input fee based on service type
 	var expectedInputFee string
 	var outputCount int64
@@ -160,7 +175,7 @@ func (c *Ctrl) SubmitAsyncJob(ctx *gin.Context, userAddress, svcType string, req
 
 	switch svcType {
 	case "text-to-image":
-		_, outputCount, err = c.GetTextToImageInputFeeAndImageNum(reqBody)
+		_, outputCount, err = c.GetTextToImageInputFeeAndImageNum(plainBody)
 		if err != nil {
 			return "", errors.Wrap(err, "parse text-to-image request")
 		}
@@ -224,9 +239,10 @@ func (c *Ctrl) SubmitAsyncJob(ctx *gin.Context, userAddress, svcType string, req
 		JobID:          jobID,
 		ServiceType:    svcType,
 		RequestHeaders: reqHeaders,
-		RequestBody:    reqBody,
+		RequestBody:    plainBody,
 		BillingReq:     billingReq,
 		IsWhitelisted:  isWhitelisted,
+		Sealed:         sealed,
 	}
 
 	var enqueueErr error
@@ -269,11 +285,24 @@ func (c *Ctrl) processAsyncJob(params asyncJobParams) {
 	svcType := params.ServiceType
 	reqBody := params.RequestBody
 
+	// fail marks the job failed. A sealed job's row stores only a fixed code
+	// (0g-pc SPEC §7.5.2) and msg goes to the log alone, so no msg below may
+	// carry upstream text for a sealed job; the plaintext path stores msg as
+	// it always has.
+	fail := func(sealedCode, msg string) {
+		if params.Sealed != nil {
+			c.logger.Errorf("Async job failed: jobID=%s, code=%s, detail=%s", jobID, sealedCode, msg)
+			c.storeAsyncJobFailed(jobID, sealedCode)
+			return
+		}
+		c.markAsyncJobFailed(jobID, msg)
+	}
+
 	// Mark as processing
 	if err := c.asyncDB.UpdateAsyncJobStatus(jobID, model.AsyncJobStatusProcessing, nil, nil, ""); err != nil {
 		c.logger.Errorf("Failed to mark async job %s as processing: %v", jobID, err)
 		// Try to mark as failed so user knows
-		c.markAsyncJobFailed(jobID, "failed to update status: "+err.Error())
+		fail(sealedAsyncErrBroker, "failed to update status: "+err.Error())
 		return
 	}
 
@@ -283,8 +312,12 @@ func (c *Ctrl) processAsyncJob(params asyncJobParams) {
 	// captures what the caller originally asked for so we can re-rewrite the response
 	// below. reqBody (forwarded to provider) is mutated; params.RequestBody stays
 	// untouched so TEE signing binds the client's original bytes.
+	//
+	// Not for a sealed job: the async-image profile pins response_format to
+	// b64_json in the envelope's cleartext (checked when it was opened), so there
+	// is nothing to rewrite, and url mode could not be served sealed anyway.
 	var clientResponseFormat string
-	if (svcType == "text-to-image" || svcType == "image-editing") && len(reqBody) > 0 {
+	if params.Sealed == nil && (svcType == "text-to-image" || svcType == "image-editing") && len(reqBody) > 0 {
 		contentType := extractContentType(params.RequestHeaders)
 		var (
 			orig      string
@@ -302,7 +335,7 @@ func (c *Ctrl) processAsyncJob(params asyncJobParams) {
 		// and because clientResponseFormat stays "" the downstream refuse-guard
 		// never fires — the exact leak the rewrite exists to prevent.
 		if rwErr != nil {
-			c.markAsyncJobFailed(jobID, "normalise image request body: "+rwErr.Error())
+			fail(sealedAsyncErrBroker, "normalise image request body: "+rwErr.Error())
 			return
 		}
 		clientResponseFormat = orig
@@ -317,7 +350,7 @@ func (c *Ctrl) processAsyncJob(params asyncJobParams) {
 		// Force wait=true for text-to-image
 		parsedURL, err := url.Parse(targetURL)
 		if err != nil {
-			c.markAsyncJobFailed(jobID, "invalid target URL: "+err.Error())
+			fail(sealedAsyncErrBroker, "invalid target URL: "+err.Error())
 			return
 		}
 		q := parsedURL.Query()
@@ -338,7 +371,7 @@ func (c *Ctrl) processAsyncJob(params asyncJobParams) {
 	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, body)
 	if err != nil {
-		c.markAsyncJobFailed(jobID, "failed to create HTTP request: "+err.Error())
+		fail(sealedAsyncErrBroker, "failed to create HTTP request: "+err.Error())
 		return
 	}
 
@@ -386,12 +419,18 @@ func (c *Ctrl) processAsyncJob(params asyncJobParams) {
 	// Execute the request
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
-		c.markAsyncJobFailed(jobID, "provider request failed: "+err.Error())
+		fail(sealedAsyncRequestErrCode(err), "provider request failed: "+err.Error())
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		// A sealed job never reads, stores or logs the error body: a moderation
+		// error can echo the prompt. The status alone is the code.
+		if params.Sealed != nil {
+			fail(sealedAsyncUpstreamStatus(resp.StatusCode), "provider returned status "+resp.Status)
+			return
+		}
 		respBody, _ := io.ReadAll(resp.Body)
 		detail := string(respBody)
 		// Forwarder providers hide their upstream, but an upstream error body can
@@ -403,14 +442,14 @@ func (c *Ctrl) processAsyncJob(params asyncJobParams) {
 				detail = string(sanitized)
 			}
 		}
-		c.markAsyncJobFailed(jobID, "provider returned status "+resp.Status+": "+detail)
+		fail(sealedAsyncErrUpstream, "provider returned status "+resp.Status+": "+detail)
 		return
 	}
 
 	// Read response body (original provider bytes, before any URL rewrite).
 	providerRespBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		c.markAsyncJobFailed(jobID, "failed to read provider response: "+err.Error())
+		fail(sealedAsyncErrUpstream, "failed to read provider response: "+err.Error())
 		return
 	}
 	// For forwarder providers, strip #184 upstream identity/cost leak fields before
@@ -425,75 +464,97 @@ func (c *Ctrl) processAsyncJob(params asyncJobParams) {
 	}
 	respBody := providerRespBody
 
-	// For image services, try to extract b64 images once — used for both URL
-	// rewriting and TEE signing (image-byte binding). extractOK stays false for
-	// non-image services or when the provider did not return a b64 envelope.
-	var (
-		images    [][]byte
-		extractOK bool
-	)
-	if svcType == "text-to-image" || svcType == "image-editing" {
-		decoded, exErr := extractB64Images(providerRespBody, int(params.BillingReq.OutputCount))
-		if exErr == nil {
-			images = decoded
-			extractOK = true
-		} else if clientResponseFormat == "url" {
-			// Refuse rather than pass through: provider bytes may carry LAN URLs
-			// the client can't reach, which is exactly what rewriting prevents.
-			c.markAsyncJobFailed(jobID, "provider returned non-b64 image response, refusing to forward: "+exErr.Error())
-			return
-		}
-	}
-
-	// If the caller asked for response_format=url, persist decoded images locally
-	// and rewrite data[].b64_json → data[].url. jobID doubles as the chatKey —
-	// /v1/proxy/images/{jobID}/{i} resolves to the stored bytes. Store / build
-	// failures fall back to b64 (safe — body is confirmed b64 above).
-	if clientResponseFormat == "url" && extractOK {
-		// Fail-closed when store is nil: silently storing b64 violates the
-		// client's explicit contract. See handleTextToImageResponse.
-		if c.imageStore == nil {
-			c.logger.Errorf("Async job %s: URL requested but imageStore is nil (check newImageStore startup warning)", jobID)
-			c.markAsyncJobFailed(jobID, "response_format=url requested but image store is disabled")
-			return
-		}
-		if stErr := c.imageStore.store(jobID, images); stErr != nil {
-			c.logger.Warnf("Async job %s: store images failed, returning b64: %v", jobID, stErr)
-		} else if rewritten, bErr := buildURLResponse(providerRespBody, jobID, len(images), c.Service.ServingURL); bErr != nil {
-			c.logger.Warnf("Async job %s: build URL response failed, returning b64: %v", jobID, bErr)
-		} else {
-			respBody = rewritten
-		}
-	}
-
-	// TEE response signing — mirrors the sync path in text_to_image.go /
-	// image_editing.go. Dispatch on the trust model:
-	//   - Centralized: routing proof binds the TLS fingerprint to req/resp
-	//     hashes. Content cannot be attested because the provider is a black box.
-	//   - Decentralized !TargetSeparated: sign decoded image bytes directly
-	//     (image services) or full response (others).
-	//   - Decentralized TargetSeparated: no signing; the remote TEE signs.
-	// The signed body for image services is providerRespBody (original bytes),
-	// never the rewritten URL envelope.
+	// A sealed job takes a separate route from here to the store: the result is
+	// sealed once (completeSealedAsyncJob writes the frame and ciphertext), the
+	// row gets no ResponseBody, and the job is billed on the images actually
+	// delivered, since that is the count the frame publishes for the router to
+	// bill on. Everything below the plaintext block — header serialization,
+	// the completion write, billing — is shared.
 	var chatKey string
-	switch {
-	case c.Service.IsCentralized():
-		chatKey = uuid.NewString()
-		if err := c.signCentralizedRoutingProof(params.RequestBody, providerRespBody, chatKey, c.upstreamCertFingerprint(resp.Header, resp.TLS), params.BillingReq.Upstream); err != nil {
-			c.logger.Warnf("Async job %s: routing proof not created (TEE verification unavailable): %v", jobID, err)
-			chatKey = ""
+	if params.Sealed != nil {
+		key, delivered, sErr := c.completeSealedAsyncJob(params, providerRespBody, c.upstreamCertFingerprint(resp.Header, resp.TLS))
+		if sErr != nil {
+			var se *errSealedAsync
+			if errors.As(sErr, &se) {
+				fail(se.code, se.detail)
+			} else {
+				fail(sealedAsyncErrBroker, sErr.Error())
+			}
+			return
 		}
-	case !c.Service.TargetSeparated:
-		chatKey = uuid.NewString()
-		var signErr error
-		if extractOK && len(images) > 0 {
-			signErr = c.signImageResponse(params.RequestBody, images, chatKey)
-		} else {
-			signErr = c.signChatWithKey(params.RequestBody, providerRespBody, chatKey)
+		chatKey = key
+		params.BillingReq.OutputCount = delivered
+		respBody = nil
+	} else {
+		// For image services, try to extract b64 images once — used for both URL
+		// rewriting and TEE signing (image-byte binding). extractOK stays false for
+		// non-image services or when the provider did not return a b64 envelope.
+		var (
+			images    [][]byte
+			extractOK bool
+		)
+		if svcType == "text-to-image" || svcType == "image-editing" {
+			decoded, exErr := extractB64Images(providerRespBody, int(params.BillingReq.OutputCount))
+			if exErr == nil {
+				images = decoded
+				extractOK = true
+			} else if clientResponseFormat == "url" {
+				// Refuse rather than pass through: provider bytes may carry LAN URLs
+				// the client can't reach, which is exactly what rewriting prevents.
+				fail(sealedAsyncErrUpstream, "provider returned non-b64 image response, refusing to forward: "+exErr.Error())
+				return
+			}
 		}
-		if signErr != nil {
-			c.logger.Warnf("Failed to sign async job %s response (TEE verification will be unavailable): %v", jobID, signErr)
-			chatKey = "" // don't store an unusable key
+
+		// If the caller asked for response_format=url, persist decoded images locally
+		// and rewrite data[].b64_json → data[].url. jobID doubles as the chatKey —
+		// /v1/proxy/images/{jobID}/{i} resolves to the stored bytes. Store / build
+		// failures fall back to b64 (safe — body is confirmed b64 above).
+		if clientResponseFormat == "url" && extractOK {
+			// Fail-closed when store is nil: silently storing b64 violates the
+			// client's explicit contract. See handleTextToImageResponse.
+			if c.imageStore == nil {
+				c.logger.Errorf("Async job %s: URL requested but imageStore is nil (check newImageStore startup warning)", jobID)
+				fail(sealedAsyncErrBroker, "response_format=url requested but image store is disabled")
+				return
+			}
+			if stErr := c.imageStore.store(jobID, images); stErr != nil {
+				c.logger.Warnf("Async job %s: store images failed, returning b64: %v", jobID, stErr)
+			} else if rewritten, bErr := buildURLResponse(providerRespBody, jobID, len(images), c.Service.ServingURL); bErr != nil {
+				c.logger.Warnf("Async job %s: build URL response failed, returning b64: %v", jobID, bErr)
+			} else {
+				respBody = rewritten
+			}
+		}
+
+		// TEE response signing — mirrors the sync path in text_to_image.go /
+		// image_editing.go. Dispatch on the trust model:
+		//   - Centralized: routing proof binds the TLS fingerprint to req/resp
+		//     hashes. Content cannot be attested because the provider is a black box.
+		//   - Decentralized !TargetSeparated: sign decoded image bytes directly
+		//     (image services) or full response (others).
+		//   - Decentralized TargetSeparated: no signing; the remote TEE signs.
+		// The signed body for image services is providerRespBody (original bytes),
+		// never the rewritten URL envelope.
+		switch {
+		case c.Service.IsCentralized():
+			chatKey = uuid.NewString()
+			if err := c.signCentralizedRoutingProof(params.RequestBody, providerRespBody, chatKey, c.upstreamCertFingerprint(resp.Header, resp.TLS), params.BillingReq.Upstream); err != nil {
+				c.logger.Warnf("Async job %s: routing proof not created (TEE verification unavailable): %v", jobID, err)
+				chatKey = ""
+			}
+		case !c.Service.TargetSeparated:
+			chatKey = uuid.NewString()
+			var signErr error
+			if extractOK && len(images) > 0 {
+				signErr = c.signImageResponse(params.RequestBody, images, chatKey)
+			} else {
+				signErr = c.signChatWithKey(params.RequestBody, providerRespBody, chatKey)
+			}
+			if signErr != nil {
+				c.logger.Warnf("Failed to sign async job %s response (TEE verification will be unavailable): %v", jobID, signErr)
+				chatKey = "" // don't store an unusable key
+			}
 		}
 	}
 
@@ -514,7 +575,7 @@ func (c *Ctrl) processAsyncJob(params asyncJobParams) {
 	}
 	headerBytes, err := json.Marshal(headerMap)
 	if err != nil {
-		c.markAsyncJobFailed(jobID, "failed to marshal response headers: "+err.Error())
+		fail(sealedAsyncErrBroker, "failed to marshal response headers: "+err.Error())
 		return
 	}
 
@@ -526,7 +587,7 @@ func (c *Ctrl) processAsyncJob(params asyncJobParams) {
 		// Whitelisted users: just store the result, no billing
 		if err := c.asyncDB.UpdateAsyncJobStatus(jobID, model.AsyncJobStatusCompleted, respBody, headerBytes, ""); err != nil {
 			c.logger.Errorf("Failed to store result for async job %s, marking as failed: %v", jobID, err)
-			c.markAsyncJobFailed(jobID, "failed to store result: "+err.Error())
+			fail(sealedAsyncErrBroker, "failed to store result: "+err.Error())
 			return
 		}
 		if err := c.asyncDB.UpdateAsyncJobExpiry(jobID, &expiresAt); err != nil {
@@ -537,7 +598,7 @@ func (c *Ctrl) processAsyncJob(params asyncJobParams) {
 		outputFeeStr, totalFeeStr, err := c.calculateAsyncJobFees(params.BillingReq, svcType)
 		if err != nil {
 			c.logger.Errorf("Failed to calculate fees for async job %s, marking as failed: %v", jobID, err)
-			c.markAsyncJobFailed(jobID, "failed to calculate fees: "+err.Error())
+			fail(sealedAsyncErrBroker, "failed to calculate fees: "+err.Error())
 			return
 		}
 
@@ -546,7 +607,7 @@ func (c *Ctrl) processAsyncJob(params asyncJobParams) {
 			params.BillingReq.RequestHash, outputFeeStr, totalFeeStr, params.BillingReq.OutputCount,
 		); err != nil {
 			c.logger.Errorf("Failed to store result and bill async job %s, marking as failed (user will not be billed): %v", jobID, err)
-			c.markAsyncJobFailed(jobID, "failed to store result: "+err.Error())
+			fail(sealedAsyncErrBroker, "failed to store result: "+err.Error())
 			return
 		}
 	}
@@ -582,6 +643,13 @@ func (c *Ctrl) calculateAsyncJobFees(billingReq model.Request, svcType string) (
 // markAsyncJobFailed is a helper to mark a job as failed with an error message.
 func (c *Ctrl) markAsyncJobFailed(jobID, errMsg string) {
 	c.logger.Errorf("Async job failed: jobID=%s, error=%s", jobID, errMsg)
+	c.storeAsyncJobFailed(jobID, errMsg)
+}
+
+// storeAsyncJobFailed writes the failed status and errMsg without logging errMsg,
+// for a caller that has logged what it may (a sealed job logs its detail, never
+// the upstream text the row is kept free of).
+func (c *Ctrl) storeAsyncJobFailed(jobID, errMsg string) {
 	if err := c.asyncDB.UpdateAsyncJobStatus(jobID, model.AsyncJobStatusFailed, nil, nil, errMsg); err != nil {
 		c.logger.Errorf("Failed to mark async job %s as failed: %v", jobID, err)
 	}
