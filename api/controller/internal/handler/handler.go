@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
 
@@ -31,6 +32,7 @@ func (h *Handler) RegisterRoutes(v1 *gin.RouterGroup) {
 	{
 		containers.GET("", h.ListContainers)
 		containers.GET("/:name", h.GetContainer)
+		containers.GET("/:name/logs", h.GetContainerLogs)
 		containers.POST("/:name/start", h.StartContainer)
 		containers.POST("/:name/stop", h.StopContainer)
 		containers.POST("/:name/restart", h.RestartContainer)
@@ -119,6 +121,34 @@ func (h *Handler) GetContainer(ctx *gin.Context) {
 	}
 
 	ctx.JSON(http.StatusOK, status)
+}
+
+// GetContainerLogs returns the tail of a container's stdout and stderr as text.
+//
+// ?tail=N, default 200, at most 5000: enough to read a crash loop, bounded so a
+// single call cannot pull a whole log volume through the gateway.
+func (h *Handler) GetContainerLogs(ctx *gin.Context) {
+	name := ctx.Param("name")
+	tail := 200
+	if raw := ctx.Query("tail"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 || n > 5000 {
+			ctx.JSON(http.StatusBadRequest, gin.H{"error": "tail must be an integer between 1 and 5000"})
+			return
+		}
+		tail = n
+	}
+
+	logs, err := h.ctrl.GetContainerLogs(ctx, name, tail)
+	if err != nil {
+		if _, ok := err.(*ctrl.InvalidContainerError); ok {
+			ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	ctx.Data(http.StatusOK, "text/plain; charset=utf-8", []byte(logs))
 }
 
 // StartContainer starts a container

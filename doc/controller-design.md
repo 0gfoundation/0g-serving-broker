@@ -180,8 +180,8 @@ The controller can serve those instead, on a second socket, forwarding two read-
 methods and answering three more itself:
 
 ```
-POST /GetQuote       forwarded — the attestation itself
-POST /Info           forwarded — tcb_info, which TdxQuote assembles into its response
+GET|POST /GetQuote   forwarded — the attestation itself
+GET|POST /Info       forwarded — tcb_info, which TdxQuote assembles into its response
 POST /Sign           answered here — {hash} → 65 raw signature bytes under the running image's key
 POST /SignerAddress  answered here — the address of that key
 POST /GetEncKey      answered here — the running image's enclave encryption key
@@ -190,6 +190,15 @@ POST /GetKey         NOT forwarded
 
 `/EmitEvent` is never forwarded, and the set is a fixed allowlist rather than a denylist — a
 denylist is wrong by default the moment dstack adds a method.
+
+The two forwarded methods accept `GET` as well as `POST` for the ingress's sake.
+`dstack-ingress` reads `/Info` (the app id it writes into the `_dstack-app-address` TXT
+record) and `/GetQuote?report_data=…` (the certificate evidence it serves) with a plain
+`curl` on `/var/run/dstack.sock` — nothing else, and no `GetTlsKey`: its certificate comes
+from Let's Encrypt. Mounted the usual way it holds the same socket as everything else and
+can append to RTMR3. The compose instead mounts the `zg-tee` volume into it and symlinks
+`/var/run/dstack.sock` to the proxy socket before its entrypoint runs, so the socket-holder
+set is the controller alone.
 
 `/GetKey` is withheld for a second, independent reason: it derives keys by path, so a broker
 holding it could derive the *previous* image's signing key and keep signing with it after an
@@ -370,6 +379,7 @@ may go.
 | ------ | ----------------------------- | ------------------------- |
 | GET    | `/v1/containers`              | Get status of all managed containers |
 | GET    | `/v1/containers/:name`        | Get status of specific container |
+| GET    | `/v1/containers/:name/logs`   | Tail of stdout+stderr as text (`?tail=N`, default 200, max 5000); read-only, for a CVM with no SSH and public logs off |
 | POST   | `/v1/containers/:name/start`  | Start container           |
 | POST   | `/v1/containers/:name/stop`   | Stop container            |
 | POST   | `/v1/containers/:name/restart`| Restart container         |

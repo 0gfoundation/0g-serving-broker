@@ -12,6 +12,16 @@
 // can write — the controller being the one container whose image compose_hash pins and
 // which cannot upgrade itself.
 //
+// The same goes for the ingress. dstack-ingress reads /Info for the app id it writes into
+// the _dstack-app-address TXT record and /GetQuote for the certificate evidence it serves,
+// both with a plain curl GET on /var/run/dstack.sock — and so, mounted the usual way, it
+// too could append to RTMR3. It gets a socket of its own (ReadOnlySocketEnvVar), serving
+// the two forwarded methods and nothing local: the broker's socket also answers /Sign
+// under the running image's key, and an ingress holding that could mint response proofs
+// instead of ledger records, which is no improvement. A symlink at the path its scripts
+// hard-code points it at the read-only socket, and the deployment takes the dstack mount
+// away from it as well. That is why the forwarded methods accept GET and not only POST.
+//
 // The proxy is not what provides the property. Removing the mount is. A modified broker
 // image does not run our code, so nothing written here constrains it; what this does is
 // make the removal possible, by giving an honest broker somewhere else to ask. And a
@@ -42,6 +52,14 @@ import (
 // this proxy. A deployment with a controller but no proxy would record something no quote can
 // ever match, so it refuses to record at all.
 const SocketEnvVar = "ATTEST_PROXY_SOCKET"
+
+// ReadOnlySocketEnvVar names where the ingress's socket is served, if at all.
+//
+// A second socket rather than a second mount of the first: what distinguishes the two
+// is not who may connect but what is answered. This one forwards GetQuote and Info and
+// answers nothing itself — no /Sign, no /GetEncKey — so the container holding it can
+// neither write the ledger nor sign as the broker.
+const ReadOnlySocketEnvVar = "ATTEST_PROXY_READONLY_SOCKET"
 
 // forwarded is every dstack method this proxy will pass on.
 //
@@ -80,15 +98,31 @@ type Proxy struct {
 	// per response.
 	keyClient         *http.Client
 	currentIdentityFn CurrentKeyIdentityFunc
-	server            *http.Server
-	listener          net.Listener
-	logger            log.Logger
+	// signing is whether the local signing operations are served at all. False on the
+	// ingress's socket, where only the forwarded methods exist.
+	signing  bool
+	server   *http.Server
+	listener net.Listener
+	logger   log.Logger
 }
 
-// New prepares a proxy that listens on listenPath and forwards to dstackPath.
+// New prepares a proxy that listens on listenPath and forwards to dstackPath, answering
+// the signing operations itself.
 //
 // Nothing is dialled or created yet; Serve does that.
 func New(listenPath, dstackPath string, currentIdentity CurrentKeyIdentityFunc, logger log.Logger) *Proxy {
+	p := newProxy(listenPath, dstackPath, logger)
+	p.currentIdentityFn = currentIdentity
+	p.signing = true
+	return p
+}
+
+// NewReadOnly prepares the ingress's proxy: the forwarded methods and nothing local.
+func NewReadOnly(listenPath, dstackPath string, logger log.Logger) *Proxy {
+	return newProxy(listenPath, dstackPath, logger)
+}
+
+func newProxy(listenPath, dstackPath string, logger log.Logger) *Proxy {
 	// A fixed host: the transport below ignores it and dials the socket, but net/http
 	// still needs a syntactically valid URL to build requests against.
 	target, _ := url.Parse("http://dstack")
@@ -105,10 +139,9 @@ func New(listenPath, dstackPath string, currentIdentity CurrentKeyIdentityFunc, 
 	}
 
 	p := &Proxy{
-		listenPath:        listenPath,
-		dstackPath:        dstackPath,
-		currentIdentityFn: currentIdentity,
-		logger:            logger,
+		listenPath: listenPath,
+		dstackPath: dstackPath,
+		logger:     logger,
 		keyClient: &http.Client{Transport: &http.Transport{
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 				return (&net.Dialer{}).DialContext(ctx, "unix", dstackPath)
@@ -125,11 +158,16 @@ func New(listenPath, dstackPath string, currentIdentity CurrentKeyIdentityFunc, 
 // guard refuses everything outside the allowlist before the request can reach dstack.
 func (p *Proxy) guard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// dstack's RPC is POST-only, so anything else is not a call this proxy is for.
-		if r.Method == http.MethodPost && p.handleLocal(w, r) {
+		// The signing operations are POST-only, like the rest of dstack's RPC, and exist
+		// on the broker's socket only.
+		if p.signing && r.Method == http.MethodPost && p.handleLocal(w, r) {
 			return
 		}
-		if r.Method != http.MethodPost || !forwarded[r.URL.Path] {
+		// GET as well as POST, because the ingress asks with curl's default verb and a
+		// query string (/GetQuote?report_data=…), and dstack answers either. Only these
+		// two verbs: the path alone would also admit whatever a future dstack serves on
+		// some other one.
+		if (r.Method != http.MethodPost && r.Method != http.MethodGet) || !forwarded[r.URL.Path] {
 			// Logged at warning: on a correctly deployed CVM nothing should ever ask.
 			// A request for /EmitEvent in particular means something is trying to write
 			// the ledger through the one path built to keep it from doing that.
@@ -174,7 +212,11 @@ func (p *Proxy) Serve(ctx context.Context) error {
 		_ = p.server.Shutdown(shutdownCtx)
 	}()
 
-	p.logger.Infof("[attestproxy] serving %v on %s", forwardedPaths(), p.listenPath)
+	mode := "read-only"
+	if p.signing {
+		mode = "signing"
+	}
+	p.logger.Infof("[attestproxy] serving %v (%s) on %s", forwardedPaths(), mode, p.listenPath)
 	if err := p.server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
