@@ -12,6 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net"
 	"strconv"
 	"time"
 
@@ -53,11 +54,15 @@ func sealedAsyncUpstreamStatus(status int) string {
 	return sealedAsyncErrUpstream + ":" + strconv.Itoa(status)
 }
 
-// sealedAsyncRequestErrCode is the code for a provider call that never got an
-// answer: a timeout is worth telling apart (the client may retry with a smaller
-// n); everything else is the upstream's.
+// sealedAsyncRequestErrCode is the code for a provider call that failed before
+// a complete answer arrived: a timeout is worth telling apart (the client may
+// retry with a smaller n); everything else is the upstream's. Both shapes of
+// timeout count: the job's context deadline, and a transport timeout
+// (http.Client.Timeout), which surfaces as a net.Error rather than as
+// context.DeadlineExceeded.
 func sealedAsyncRequestErrCode(err error) string {
-	if errors.Is(err, context.DeadlineExceeded) {
+	var netErr net.Error
+	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()) {
 		return sealedAsyncErrTimeout
 	}
 	return sealedAsyncErrUpstream

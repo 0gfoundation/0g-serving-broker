@@ -301,8 +301,8 @@ func isSealedJSON(reqBody []byte) bool {
 // without a message, and no caller can fall through a switch into serving one.
 //
 // The one exception is async TEXT-TO-IMAGE, which has a profile of its own
-// (async-image, SPEC §7.5): the worker opens the request in the enclave and
-// seals the result once at completion, so the store holds only ciphertext.
+// (async-image, SPEC §7.5): the request is opened in the enclave at submit and
+// the result sealed once at completion, so the store holds only ciphertext.
 // It is admitted here and opened by UnsealAsyncRequest, which refuses it if
 // this broker is not a text-to-image provider. Edits stay refused: their
 // endpoint is multipart and has no JSON-ified profile.
