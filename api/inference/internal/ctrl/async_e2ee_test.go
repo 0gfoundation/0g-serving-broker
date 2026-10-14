@@ -2,6 +2,7 @@ package ctrl
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -363,5 +364,37 @@ func TestRefuseAsync_AdmitsSealedTextToImageOnly(t *testing.T) {
 	}
 	if why := (&Ctrl{}).RefuseAsync(constant.ServiceTypeImageEditing, "application/json", env); !strings.Contains(why, "e2ee") {
 		t.Errorf("sealed edit not refused: %q", why)
+	}
+}
+
+// A call that times out — the job deadline or the client's transport timeout —
+// is coded `timeout`; any other failure is the upstream's.
+func TestSealedAsyncRequestErrCode(t *testing.T) {
+	hang := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(200 * time.Millisecond)
+	}))
+	defer hang.Close()
+	_, clientErr := (&http.Client{Timeout: 20 * time.Millisecond}).Get(hang.URL)
+	if clientErr == nil {
+		t.Fatal("expected a client timeout")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, hang.URL, nil)
+	_, ctxErr := http.DefaultClient.Do(req)
+	if ctxErr == nil {
+		t.Fatal("expected a deadline error")
+	}
+	for name, tc := range map[string]struct {
+		err  error
+		want string
+	}{
+		"client timeout": {clientErr, "timeout"},
+		"job deadline":   {ctxErr, "timeout"},
+		"refused":        {errors.New("dial tcp: connection refused"), "upstream_error"},
+	} {
+		if got := sealedAsyncRequestErrCode(tc.err); got != tc.want {
+			t.Errorf("%s: code = %q, want %q", name, got, tc.want)
+		}
 	}
 }

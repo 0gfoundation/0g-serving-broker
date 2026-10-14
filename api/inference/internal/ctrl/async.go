@@ -449,7 +449,7 @@ func (c *Ctrl) processAsyncJob(params asyncJobParams) {
 	// Read response body (original provider bytes, before any URL rewrite).
 	providerRespBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		fail(sealedAsyncErrUpstream, "failed to read provider response: "+err.Error())
+		fail(sealedAsyncRequestErrCode(err), "failed to read provider response: "+err.Error())
 		return
 	}
 	// For forwarder providers, strip #184 upstream identity/cost leak fields before
