@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+
+	constant "github.com/0glabs/0g-serving-broker/inference/const"
 )
 
 // SPEC §5.3.1: a body that cannot be parsed as an envelope is not thereby an
@@ -69,7 +71,7 @@ func TestMultipartCarryingTheEnvelopeIsRefused(t *testing.T) {
 	if _, err := unsealOn(&Ctrl{}, ginCtxWithContentType(contentType), body); err == nil {
 		t.Error("the sync proxy must refuse a multipart body carrying the envelope")
 	}
-	if why := (&Ctrl{}).RefuseAsync(contentType, body); why == "" {
+	if why := (&Ctrl{}).RefuseAsync(constant.ServiceTypeImageEditing, contentType, body); why == "" {
 		t.Error("the async routes must refuse it too")
 	}
 }
@@ -109,7 +111,7 @@ func TestTheMarkerPartIsFoundWhereverItSits(t *testing.T) {
 			if _, err := unsealOn(&Ctrl{}, ginCtxWithContentType(contentType), body); err == nil {
 				t.Error("must refuse rather than forward")
 			}
-			if why := (&Ctrl{}).RefuseAsync(contentType, body); why == "" {
+			if why := (&Ctrl{}).RefuseAsync(constant.ServiceTypeImageEditing, contentType, body); why == "" {
 				t.Error("the async routes must refuse it too")
 			}
 		})
@@ -150,7 +152,7 @@ func TestAnOrdinaryTranscriptionIsForwarded(t *testing.T) {
 			if !bytes.Equal(got, body) {
 				t.Error("forwarded means forwarded unchanged, not rewritten")
 			}
-			if why := (&Ctrl{}).RefuseAsync(contentType, body); why != "" {
+			if why := (&Ctrl{}).RefuseAsync(constant.ServiceTypeImageEditing, contentType, body); why != "" {
 				t.Errorf("the async routes must accept it too, got %q", why)
 			}
 		})
@@ -214,7 +216,7 @@ func TestMalformedAndExoticBodiesAreForwarded(t *testing.T) {
 			if _, err := unsealOn(&Ctrl{}, ginCtxWithContentType(tt.contentType), []byte(tt.body)); err != nil {
 				t.Errorf("this shape is knowingly out of scope and must forward, got %v", err)
 			}
-			if why := (&Ctrl{}).RefuseAsync(tt.contentType, []byte(tt.body)); why != "" {
+			if why := (&Ctrl{}).RefuseAsync(constant.ServiceTypeImageEditing, tt.contentType, []byte(tt.body)); why != "" {
 				t.Errorf("both entry points must agree it is out of scope, got %q", why)
 			}
 		})
@@ -225,17 +227,17 @@ func TestMalformedAndExoticBodiesAreForwarded(t *testing.T) {
 // Content-Type must not send the body down the multipart path.
 func TestTheJSONPathIsUnaffected(t *testing.T) {
 	envelope := []byte(`{"model":"gpt-4","_e2ee":{"v":1}}`)
-	if why := (&Ctrl{}).RefuseAsync("application/json", envelope); why == "" {
+	if why := (&Ctrl{}).RefuseAsync(constant.ServiceTypeImageEditing, "application/json", envelope); why == "" {
 		t.Error("a JSON envelope must still be refused on the async routes")
 	}
 	// Mislabelled as multipart: not a multipart body, so the multipart check
 	// declines, and the JSON check still recognises the envelope.
-	if why := (&Ctrl{}).RefuseAsync("multipart/form-data; boundary=B", envelope); why == "" {
+	if why := (&Ctrl{}).RefuseAsync(constant.ServiceTypeImageEditing, "multipart/form-data; boundary=B", envelope); why == "" {
 		t.Error("an envelope mislabelled multipart must still be refused")
 	}
 	// And a body that merely mentions the marker in its content is not sealed.
 	plain := []byte(`{"model":"gpt-4","messages":[{"role":"user","content":"what is _e2ee?"}]}`)
-	if why := (&Ctrl{}).RefuseAsync("application/json", plain); why != "" {
+	if why := (&Ctrl{}).RefuseAsync(constant.ServiceTypeImageEditing, "application/json", plain); why != "" {
 		t.Errorf("mentioning the marker is not sending one, got %q", why)
 	}
 	got, err := unsealOn(&Ctrl{}, ginCtxWithContentType("application/json"), plain)

@@ -40,7 +40,26 @@ type mockDB struct {
 	errOnDeleteExpired        error
 	errOnUpdateExpiry         error
 	errOnCompleteWithBilling  error
+	errOnStoreSealed          error
 	deleteExpiredCallCount    int32
+	// billedOutputCount is the outputCount the last CompleteAsyncJobWithBilling
+	// was called with.
+	billedOutputCount int64
+}
+
+func (m *mockDB) StoreSealedAsyncResult(jobID string, frame, ciphertext []byte) error {
+	if m.errOnStoreSealed != nil {
+		return m.errOnStoreSealed
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	job, ok := m.jobs[jobID]
+	if !ok {
+		return fmt.Errorf("job not found: %s", jobID)
+	}
+	job.SealedFrame = frame
+	job.SealedResult = ciphertext
+	return nil
 }
 
 func newMockDB() *mockDB {
@@ -144,6 +163,7 @@ func (m *mockDB) CompleteAsyncJobWithBilling(jobID string, responseBody []byte, 
 	job.ResponseHeaders = responseHeaders
 	job.ExpiresAt = expiresAt
 	job.ErrorMessage = ""
+	m.billedOutputCount = outputCount
 	return nil
 }
 
@@ -397,7 +417,7 @@ func TestGetAsyncResultTTL(t *testing.T) {
 func TestSubmitAsyncJob_NotEnabled(t *testing.T) {
 	ctrl := &Ctrl{asyncEnabled: false}
 	ctx := newTestGinContext()
-	_, err := ctrl.SubmitAsyncJob(ctx, "0x1234", "text-to-image", nil, []byte(`{}`), true)
+	_, err := ctrl.SubmitAsyncJob(ctx, "0x1234", "text-to-image", nil, []byte(`{}`), true, nil)
 	if err == nil || !strings.Contains(err.Error(), "not enabled") {
 		t.Errorf("expected 'not enabled' error, got: %v", err)
 	}
@@ -406,7 +426,7 @@ func TestSubmitAsyncJob_NotEnabled(t *testing.T) {
 func TestSubmitAsyncJob_InvalidServiceType(t *testing.T) {
 	ctrl := newTestCtrl(newMockDB(), "")
 	ctx := newTestGinContext()
-	_, err := ctrl.SubmitAsyncJob(ctx, "0x1234", "chatbot", nil, []byte(`{}`), true)
+	_, err := ctrl.SubmitAsyncJob(ctx, "0x1234", "chatbot", nil, []byte(`{}`), true, nil)
 	if err == nil || !strings.Contains(err.Error(), "only support") {
 		t.Errorf("expected 'only support' error, got: %v", err)
 	}
@@ -422,7 +442,7 @@ func TestSubmitAsyncJob_QueueFull(t *testing.T) {
 
 	ctx := newTestGinContext()
 	body := []byte(`{"prompt":"test","n":1,"size":"1024x1024"}`)
-	_, err := ctrl.SubmitAsyncJob(ctx, "0x1234", "text-to-image", nil, body, true)
+	_, err := ctrl.SubmitAsyncJob(ctx, "0x1234", "text-to-image", nil, body, true, nil)
 	if err == nil || !strings.Contains(err.Error(), "queue is full") {
 		t.Errorf("expected 'queue is full' error, got: %v", err)
 	}
@@ -438,7 +458,7 @@ func TestSubmitAsyncJob_QueueFullRace(t *testing.T) {
 	body := []byte(`{"prompt":"test","n":1,"size":"1024x1024"}`)
 
 	// First submit succeeds
-	jobID1, err := ctrl.SubmitAsyncJob(ctx, "0x1234", "text-to-image", nil, body, true)
+	jobID1, err := ctrl.SubmitAsyncJob(ctx, "0x1234", "text-to-image", nil, body, true, nil)
 	if err != nil {
 		t.Fatalf("first submit should succeed: %v", err)
 	}
@@ -447,7 +467,7 @@ func TestSubmitAsyncJob_QueueFullRace(t *testing.T) {
 	}
 
 	// Second submit: queue is now full (first job not consumed)
-	_, err = ctrl.SubmitAsyncJob(ctx, "0x1234", "text-to-image", nil, body, true)
+	_, err = ctrl.SubmitAsyncJob(ctx, "0x1234", "text-to-image", nil, body, true, nil)
 	if err == nil || !strings.Contains(err.Error(), "queue is full") {
 		t.Errorf("expected 'queue is full' error, got: %v", err)
 	}
@@ -456,7 +476,7 @@ func TestSubmitAsyncJob_QueueFullRace(t *testing.T) {
 func TestSubmitAsyncJob_InvalidRequestBody(t *testing.T) {
 	ctrl := newTestCtrl(newMockDB(), "")
 	ctx := newTestGinContext()
-	_, err := ctrl.SubmitAsyncJob(ctx, "0x1234", "text-to-image", nil, []byte(`not json`), true)
+	_, err := ctrl.SubmitAsyncJob(ctx, "0x1234", "text-to-image", nil, []byte(`not json`), true, nil)
 	if err == nil || !strings.Contains(err.Error(), "parse text-to-image") {
 		t.Errorf("expected parse error, got: %v", err)
 	}
@@ -470,7 +490,7 @@ func TestSubmitAsyncJob_TextToImage_Whitelisted(t *testing.T) {
 	body := []byte(`{"prompt":"a cat","n":2,"size":"1024x1024"}`)
 	headers, _ := json.Marshal(map[string][]string{"Content-Type": {"application/json"}})
 
-	jobID, err := ctrl.SubmitAsyncJob(ctx, "0xUser1", "text-to-image", headers, body, true)
+	jobID, err := ctrl.SubmitAsyncJob(ctx, "0xUser1", "text-to-image", headers, body, true, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -506,7 +526,7 @@ func TestSubmitAsyncJob_ImageEditing_Whitelisted(t *testing.T) {
 	ctx := newTestGinContext()
 
 	body := []byte(`{"prompt":"make it blue","n":1}`)
-	jobID, err := ctrl.SubmitAsyncJob(ctx, "0xUser2", "image-editing", nil, body, true)
+	jobID, err := ctrl.SubmitAsyncJob(ctx, "0xUser2", "image-editing", nil, body, true, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -524,7 +544,7 @@ func TestSubmitAsyncJob_CreateJobDBError(t *testing.T) {
 	ctx := newTestGinContext()
 
 	body := []byte(`{"prompt":"test","n":1,"size":"1024x1024"}`)
-	_, err := ctrl.SubmitAsyncJob(ctx, "0x1234", "text-to-image", nil, body, true)
+	_, err := ctrl.SubmitAsyncJob(ctx, "0x1234", "text-to-image", nil, body, true, nil)
 	if err == nil || !strings.Contains(err.Error(), "create async job in db") {
 		t.Errorf("expected 'create async job in db' error, got: %v", err)
 	}
@@ -1929,6 +1949,9 @@ func (c *countingMockDB) DeleteExpiredAsyncJobs() error {
 }
 func (c *countingMockDB) UpdateAsyncJobExpiry(jobID string, expiresAt *time.Time) error {
 	return c.inner.UpdateAsyncJobExpiry(jobID, expiresAt)
+}
+func (c *countingMockDB) StoreSealedAsyncResult(jobID string, frame, ciphertext []byte) error {
+	return c.inner.StoreSealedAsyncResult(jobID, frame, ciphertext)
 }
 func (c *countingMockDB) CompleteAsyncJobWithBilling(jobID string, responseBody []byte, responseHeaders []byte, expiresAt *time.Time, requestHash string, outputFee string, totalFee string, outputCount int64) error {
 	return c.inner.CompleteAsyncJobWithBilling(jobID, responseBody, responseHeaders, expiresAt, requestHash, outputFee, totalFee, outputCount)

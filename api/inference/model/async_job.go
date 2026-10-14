@@ -32,6 +32,12 @@ type AsyncJob struct {
 	RequestHash     string         `gorm:"type:varchar(255);not null;index" json:"requestHash"`
 	OutputCount  int64          `gorm:"type:bigint;not null;default:1" json:"outputCount"`
 	ExpiresAt    *time.Time     `gorm:"type:datetime;index" json:"expiresAt,omitempty"`
+	// SealedFrame and SealedResult hold a completed SEALED (E2EE) job's result
+	// (0g-pc SPEC §7.5): the poll response with its ciphertext emptied, and that
+	// ciphertext as raw bytes. A sealed job never has a ResponseBody. Both are
+	// NULL for every other job.
+	SealedFrame  []byte `gorm:"type:blob" json:"-"`
+	SealedResult []byte `gorm:"type:longblob" json:"-"`
 }
 
 // AsyncJobResponse is the JSON response returned when polling a job.

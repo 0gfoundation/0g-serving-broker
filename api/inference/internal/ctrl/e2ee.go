@@ -299,12 +299,19 @@ func isSealedJSON(reqBody []byte) bool {
 //
 // A reason string rather than a verdict enum, so a new refusal cannot be added
 // without a message, and no caller can fall through a switch into serving one.
-func (c *Ctrl) RefuseAsync(contentType string, reqBody []byte) string {
+//
+// The one exception is async TEXT-TO-IMAGE, which has a profile of its own
+// (async-image, SPEC §7.5): the worker opens the request in the enclave and
+// seals the result once at completion, so the store holds only ciphertext.
+// It is admitted here and opened by UnsealAsyncRequest, which refuses it if
+// this broker is not a text-to-image provider. Edits stay refused: their
+// endpoint is multipart and has no JSON-ified profile.
+func (c *Ctrl) RefuseAsync(svcType, contentType string, reqBody []byte) string {
 	switch {
 	case multipartNamesE2EEPart(contentType, reqBody):
 		return fmt.Sprintf("e2ee: this multipart request declares a part named %q. A sealed request is sent as JSON, and no multipart endpoint can serve one", e2eeBodyMarker)
-	case isSealedJSON(reqBody):
-		return "e2ee: a sealed request cannot be served on the async endpoints, which enqueue the body and serve the result from a store in plaintext. Send it to the synchronous endpoint instead"
+	case isSealedJSON(reqBody) && svcType != constant.ServiceTypeTextToImage:
+		return "e2ee: a sealed request can only be served on the async endpoint for image generation (/v1/async/images/generations). Send this one to the synchronous endpoint instead"
 	}
 	return ""
 }
@@ -393,27 +400,9 @@ func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, targetPath string, reqBody [
 	}
 
 	// Confirmed sealed from here on: fail-closed on any error.
-	if len(c.teeService.EncPrivateKey) == 0 {
-		return nil, fmt.Errorf("received a sealed request but the enclave enc key is not available")
-	}
-	e2ee, err := env.E2EE()
+	e2ee, err := c.checkSealedEnvelope(env)
 	if err != nil {
-		return nil, fmt.Errorf("sealed request has a malformed %q envelope: %w", e2eeBodyMarker, err)
-	}
-
-	// Select the enc key by key_id (SPEC §6). The broker holds a single current
-	// enc key; a mismatch means the client sealed to a rotated/foreign key we
-	// cannot open, so reject with a clear error rather than a raw HPKE failure.
-	if err := c.verifyEncKeyID(e2ee.KeyID); err != nil {
 		return nil, err
-	}
-
-	// Enforce provider pinning (SPEC §5/§6): the enclave rejects a request pinned
-	// to a different provider. The pin is the provider's TEE signer address
-	// (renamed provider_id → signer_addr upstream in 0g-pc-e2ee #17; same value).
-	// OpenRequest deliberately does not check this — the broker knows its own identity.
-	if !strings.EqualFold(e2ee.SignerAddr, c.teeService.Address.Hex()) {
-		return nil, fmt.Errorf("sealed request signer_addr %q does not match this enclave", e2ee.SignerAddr)
 	}
 
 	// Everything the receiver is responsible for now runs inside
@@ -452,44 +441,9 @@ func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, targetPath string, reqBody [
 		return nil, fmt.Errorf("a sealed %s request is only accepted on %s, not %q (SPEC §7.4)", profile, embeddingRoute, ctx.Request.URL.Path)
 	}
 
-	// Extract the client's response ephemeral key before opening, so the response
-	// path can seal even though the field lives in the (now consumed) envelope.
-	// Validate its length here, BEFORE the request is forwarded upstream: an
-	// invalid key only breaks response sealing, which happens after inference has
-	// already run — so a malformed key would otherwise buy free (unbilled) compute
-	// and fail closed only at seal time. Reject it fail-closed pre-inference.
-	clientEphPub, err := base64.RawURLEncoding.DecodeString(e2ee.ClientEphPub)
+	reconstructed, clientEphPub, reqBindHash, err := c.openSealedEnvelope(profile, env, e2ee)
 	if err != nil {
-		return nil, fmt.Errorf("sealed request has invalid client_eph_pub: %w", err)
-	}
-	if len(clientEphPub) != clientEphPubLen {
-		return nil, fmt.Errorf("sealed request client_eph_pub must be %d bytes (X25519), got %d", clientEphPubLen, len(clientEphPub))
-	}
-	// Length alone is not enough: a 32-byte value can still be a low-order/invalid
-	// X25519 point that only fails at response-seal time (post-inference), which
-	// would buy free unbilled compute. Probe HPKE setup now — fail closed here,
-	// before forwarding upstream. The probe sealer is discarded; the response path
-	// creates its own.
-	if _, err := wire.NewResponseSealer(pccrypto.PublicKey(clientEphPub)); err != nil {
-		return nil, fmt.Errorf("sealed request client_eph_pub is not a usable X25519 key: %w", err)
-	}
-
-	// §8 request binding: hash the on-wire aad‖ciphertext of the sealed request
-	// NOW, while we still hold the envelope. The proxy replaces reqBody with the
-	// reconstructed plaintext before forwarding upstream, so the response-signing
-	// path (which runs post-inference) can no longer see these bytes. Stash the
-	// 32-byte binding so signChatE2EE can combine it with the response hash.
-	reqBindHash, err := proof.FrameBindingHash(env)
-	if err != nil {
-		return nil, fmt.Errorf("compute e2ee request binding: %w", err)
-	}
-
-	// Open (verifies v/kem_id, recomputes AAD, HPKE-Open fail-closed, checks
-	// decrypted keys == sealed_fields with no cleartext collision, and reconstructs
-	// the original request = cleartext ∪ decrypted). SPEC §6.
-	reconstructed, err := wire.OpenRequestFor(profile, c.teeService.EncPrivateKey, env)
-	if err != nil {
-		return nil, fmt.Errorf("unseal request: %w", err)
+		return nil, err
 	}
 
 	plaintext, err := json.Marshal(reconstructed)
@@ -521,10 +475,89 @@ func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, targetPath string, reqBody [
 
 	ctx.Set(CtxKeyE2EESealed, true)
 	ctx.Set(CtxKeyE2EEProfile, profile)
-	ctx.Set(CtxKeyE2EEClientEphPub, pccrypto.PublicKey(clientEphPub))
+	ctx.Set(CtxKeyE2EEClientEphPub, clientEphPub)
 	ctx.Set(CtxKeyE2EEReqBindHash, reqBindHash)
 	c.logger.Debugf("E2EE: unsealed request (sealed_fields=%v, key_id=%s)", e2ee.SealedFields, e2ee.KeyID)
 	return forward, nil
+}
+
+// checkSealedEnvelope runs the receiver checks that need no profile, on a body
+// already confirmed to be an envelope: the enclave has an enc key, the `_e2ee`
+// object parses, it selects this enclave's current key, and it is pinned to this
+// enclave. Shared by the synchronous proxy (MaybeUnsealRequest) and the async
+// submit (UnsealAsyncRequest), so the two cannot disagree about what an
+// openable envelope is. A key_id mismatch wraps ErrE2EEKeyMismatch (→ 409).
+func (c *Ctrl) checkSealedEnvelope(env wire.Request) (wire.E2EE, error) {
+	if len(c.teeService.EncPrivateKey) == 0 {
+		return wire.E2EE{}, fmt.Errorf("received a sealed request but the enclave enc key is not available")
+	}
+	e2ee, err := env.E2EE()
+	if err != nil {
+		return wire.E2EE{}, fmt.Errorf("sealed request has a malformed %q envelope: %w", e2eeBodyMarker, err)
+	}
+
+	// Select the enc key by key_id (SPEC §6). The broker holds a single current
+	// enc key; a mismatch means the client sealed to a rotated/foreign key we
+	// cannot open, so reject with a clear error rather than a raw HPKE failure.
+	if err := c.verifyEncKeyID(e2ee.KeyID); err != nil {
+		return wire.E2EE{}, err
+	}
+
+	// Enforce provider pinning (SPEC §5/§6): the enclave rejects a request pinned
+	// to a different provider. The pin is the provider's TEE signer address
+	// (renamed provider_id → signer_addr upstream in 0g-pc-e2ee #17; same value).
+	// OpenRequest deliberately does not check this — the broker knows its own identity.
+	if !strings.EqualFold(e2ee.SignerAddr, c.teeService.Address.Hex()) {
+		return wire.E2EE{}, fmt.Errorf("sealed request signer_addr %q does not match this enclave", e2ee.SignerAddr)
+	}
+	return e2ee, nil
+}
+
+// openSealedEnvelope opens an envelope that passed checkSealedEnvelope under
+// profile, returning the reconstructed request, the client's response key, and
+// the §8 request binding hash. Shared by the sync and async entry points.
+func (c *Ctrl) openSealedEnvelope(profile wire.Profile, env wire.Request, e2ee wire.E2EE) (wire.Request, pccrypto.PublicKey, [32]byte, error) {
+	var reqBindHash [32]byte
+	// Extract the client's response ephemeral key before opening, so the response
+	// path can seal even though the field lives in the (now consumed) envelope.
+	// Validate its length here, BEFORE the request is forwarded upstream: an
+	// invalid key only breaks response sealing, which happens after inference has
+	// already run — so a malformed key would otherwise buy free (unbilled) compute
+	// and fail closed only at seal time. Reject it fail-closed pre-inference.
+	clientEphPub, err := base64.RawURLEncoding.DecodeString(e2ee.ClientEphPub)
+	if err != nil {
+		return nil, nil, reqBindHash, fmt.Errorf("sealed request has invalid client_eph_pub: %w", err)
+	}
+	if len(clientEphPub) != clientEphPubLen {
+		return nil, nil, reqBindHash, fmt.Errorf("sealed request client_eph_pub must be %d bytes (X25519), got %d", clientEphPubLen, len(clientEphPub))
+	}
+	// Length alone is not enough: a 32-byte value can still be a low-order/invalid
+	// X25519 point that only fails at response-seal time (post-inference), which
+	// would buy free unbilled compute. Probe HPKE setup now — fail closed here,
+	// before forwarding upstream. The probe sealer is discarded; the response path
+	// creates its own.
+	if _, err := wire.NewResponseSealer(pccrypto.PublicKey(clientEphPub)); err != nil {
+		return nil, nil, reqBindHash, fmt.Errorf("sealed request client_eph_pub is not a usable X25519 key: %w", err)
+	}
+
+	// §8 request binding: hash the on-wire aad‖ciphertext of the sealed request
+	// NOW, while we still hold the envelope. The proxy replaces reqBody with the
+	// reconstructed plaintext before forwarding upstream, so the response-signing
+	// path (which runs post-inference) can no longer see these bytes. Stash the
+	// 32-byte binding so signChatE2EE can combine it with the response hash.
+	reqBindHash, err = proof.FrameBindingHash(env)
+	if err != nil {
+		return nil, nil, reqBindHash, fmt.Errorf("compute e2ee request binding: %w", err)
+	}
+
+	// Open (verifies v/kem_id, recomputes AAD, HPKE-Open fail-closed, checks
+	// decrypted keys == sealed_fields with no cleartext collision, and reconstructs
+	// the original request = cleartext ∪ decrypted). SPEC §6.
+	reconstructed, err := wire.OpenRequestFor(profile, c.teeService.EncPrivateKey, env)
+	if err != nil {
+		return nil, nil, reqBindHash, fmt.Errorf("unseal request: %w", err)
+	}
+	return reconstructed, pccrypto.PublicKey(clientEphPub), reqBindHash, nil
 }
 
 // profileForRequest maps the endpoint this broker serves — service type AND the

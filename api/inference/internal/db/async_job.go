@@ -53,6 +53,19 @@ func (d *DB) UpdateAsyncJobStatus(jobID string, status model.AsyncJobStatus, res
 		Updates(updates).Error
 }
 
+// StoreSealedAsyncResult writes a sealed job's result (the frame with its
+// ciphertext emptied, and the ciphertext). Called before the job is marked
+// completed: the poll serves the frame only for a completed job, so the status
+// flip remains the commit point and a failure in between leaves nothing served.
+func (d *DB) StoreSealedAsyncResult(jobID string, frame, ciphertext []byte) error {
+	return d.db.Model(&model.AsyncJob{}).
+		Where("job_id = ?", jobID).
+		Updates(map[string]interface{}{
+			"sealed_frame":  frame,
+			"sealed_result": ciphertext,
+		}).Error
+}
+
 // MarkProcessingAsyncJobsAsFailed marks all pending and processing jobs as failed.
 // This is used on startup to recover from broker crashes. Both statuses must be
 // covered because pending jobs lived in the in-memory channel queue which is lost

@@ -34,6 +34,7 @@ type asyncDB interface {
 	DeleteExpiredAsyncJobs() error
 	UpdateAsyncJobExpiry(jobID string, expiresAt *time.Time) error
 	CompleteAsyncJobWithBilling(jobID string, responseBody []byte, responseHeaders []byte, expiresAt *time.Time, requestHash string, outputFee string, totalFee string, outputCount int64) error
+	StoreSealedAsyncResult(jobID string, frame, ciphertext []byte) error
 }
 
 // videoPollDB is the interface for database operations used by the video-generation
