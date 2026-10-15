@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -60,7 +61,7 @@ type scanChecks struct {
 	Uki         bool `json:"uki"`          // expected.uki is among the measured uki entries (true when not configured)
 	Replay      bool `json:"replay"`       // eventlog replay reproduces the RTMRs
 	Tcb         bool `json:"tcb"`          // tcb_status in requireTcb
-	Clean       bool `json:"clean"`        // no note, no advisories
+	Clean       bool `json:"clean"`        // no note, every advisory in allowAdvisories
 	TlsKey      bool `json:"tls_key"`      // attested tls key == what the assay serves right now
 	Fresh       bool `json:"fresh"`        // record's checked_at within tappscan.maxAgeSeconds
 }
@@ -92,16 +93,17 @@ type scanEval struct {
 // scanInputs is everything evaluateScanRecord needs besides the record, so the
 // evaluation is a pure function and the fixtures can drive it.
 type scanInputs struct {
-	now           time.Time
-	pinOK         bool // the fetch completed through the pinned transport
-	chainSigner   string
-	chainErr      error
-	liveTLS       string
-	liveErr       error
-	expectedImage string
-	expectedUki   string
-	requireTcb    []string
-	maxRecordAge  time.Duration
+	now             time.Time
+	pinOK           bool // the fetch completed through the pinned transport
+	chainSigner     string
+	chainErr        error
+	liveTLS         string
+	liveErr         error
+	expectedImage   string
+	expectedUki     string
+	requireTcb      []string
+	allowAdvisories []string
+	maxRecordAge    time.Duration
 }
 
 // scanRecord is the subset of tappscan's /api/apps/<id> we read. Unknown
@@ -346,9 +348,17 @@ func evaluateScanRecord(raw []byte, in scanInputs) scanEval {
 	if !ev.checks.Tcb {
 		fail("tcb", fmt.Sprintf("tcb_status=%s not in %v", a.TcbStatus, in.requireTcb))
 	}
-	ev.checks.Clean = a.Note == "" && len(a.Advisories) == 0
+	var unlisted []string
+	for _, raw := range a.Advisories {
+		id := string(raw) // a non-string entry stays raw JSON and never matches
+		_ = json.Unmarshal(raw, &id)
+		if !slices.Contains(in.allowAdvisories, id) {
+			unlisted = append(unlisted, id)
+		}
+	}
+	ev.checks.Clean = a.Note == "" && len(unlisted) == 0
 	if !ev.checks.Clean {
-		fail("clean", fmt.Sprintf("note=%q advisories=%d", a.Note, len(a.Advisories)))
+		fail("clean", fmt.Sprintf("note=%q unlisted advisories=%v", a.Note, unlisted))
 	}
 	ev.checks.TlsKey = in.liveErr == nil && eqHex(a.TlsPublicKey, in.liveTLS)
 	if !ev.checks.TlsKey {
@@ -374,7 +384,7 @@ func (s *scanSource) verifyOnce(ctx context.Context) attestedAssay {
 	raw, ferr := s.fetch(ctx)
 	in := scanInputs{now: now, pinOK: ferr == nil,
 		expectedImage: s.cfg.Expected.Image, expectedUki: s.cfg.Expected.Uki,
-		requireTcb: s.cfg.RequireTcb, maxRecordAge: s.cfg.TappscanMaxAge()}
+		requireTcb: s.cfg.RequireTcb, allowAdvisories: s.cfg.AllowAdvisories, maxRecordAge: s.cfg.TappscanMaxAge()}
 	in.chainSigner, in.chainErr = s.chainSigner(ctx)
 	in.liveTLS, in.liveErr = liveSPKI(ctx, s.verifierHost)
 	ev := evaluateScanRecord(raw, in)

@@ -103,6 +103,21 @@ func TestScanUkiMatchesAnyMeasuredEntry(t *testing.T) {
 	}
 }
 
+// The live GCP fleet: tcb_status=OutOfDate carrying three listed advisories.
+func TestScanAllowedAdvisoriesPass(t *testing.T) {
+	_, m := loadScanFixture(t)
+	a := currentStatus(m)["attested"].(map[string]any)
+	a["tcb_status"] = "OutOfDate"
+	a["advisories"] = []any{"INTEL-DOC-10003", "INTEL-SA-01439", "INTEL-SA-01442"}
+	in := goodInputs(m)
+	in.requireTcb = []string{"UpToDate", "OutOfDate"}
+	in.allowAdvisories = []string{"INTEL-DOC-10003", "INTEL-SA-01439", "INTEL-SA-01442"}
+	ev := evaluateScanRecord(remarshal(t, m), in)
+	if !ev.ok {
+		t.Fatalf("expected pass, got %s", ev.detail)
+	}
+}
+
 func TestScanUkiOptional(t *testing.T) {
 	raw, m := loadScanFixture(t)
 	in := goodInputs(m)
@@ -138,6 +153,17 @@ func TestScanEachCheckFails(t *testing.T) {
 		}, "replay"},
 		{"note", func(in *scanInputs, m map[string]any) {
 			currentStatus(m)["attested"].(map[string]any)["note"] = "freshness unproven"
+		}, "clean"},
+		{"advisory_unlisted", func(in *scanInputs, m map[string]any) {
+			currentStatus(m)["attested"].(map[string]any)["advisories"] = []any{"INTEL-SA-01439"}
+		}, "clean"},
+		{"advisory_partly_listed", func(in *scanInputs, m map[string]any) {
+			in.allowAdvisories = []string{"INTEL-SA-01439"}
+			currentStatus(m)["attested"].(map[string]any)["advisories"] = []any{"INTEL-SA-01439", "INTEL-SA-01442"}
+		}, "clean"},
+		{"advisory_non_string", func(in *scanInputs, m map[string]any) {
+			in.allowAdvisories = []string{"INTEL-SA-01439"}
+			currentStatus(m)["attested"].(map[string]any)["advisories"] = []any{map[string]any{"id": "INTEL-SA-01439"}}
 		}, "clean"},
 	}
 	for _, tc := range cases {
