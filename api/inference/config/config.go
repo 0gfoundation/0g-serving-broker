@@ -1138,6 +1138,11 @@ type AssayAttestation struct {
 	// RequireTcb is the allowed tcb_status set (e.g. ["UpToDate"]). Widen it
 	// deliberately, listing each accepted advisory state.
 	RequireTcb []string `yaml:"requireTcb"`
+	// AllowAdvisories lists the Intel advisory IDs (e.g. INTEL-SA-01439) an
+	// attested record may carry and still pass the clean gate. Empty means
+	// none: any advisory blocks. Pair with a widened RequireTcb — OutOfDate
+	// always comes with advisories.
+	AllowAdvisories []string `yaml:"allowAdvisories"`
 	// MaxAgeSeconds: how long the last successful verification stays valid
 	// (default 3600). Interval: re-check period (default 10m).
 	MaxAgeSeconds int           `yaml:"maxAgeSeconds"`
