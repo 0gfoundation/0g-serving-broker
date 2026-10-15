@@ -1,0 +1,24 @@
+{
+  "source": "testnet-gateway-rehearsal CVM da119d701936c44a8628d58317ed5c8f9cabdbd5, GET /v1/quote?legacy=false on 2026-10-15, broker v0.5.4",
+  "quote_rtmr3": "360c9db6ebc058a936c758d24bae92569b3bb8d31a0b62903815823bcf84a19c51f286c746d6d4ed7fb083d35db2249b",
+  "quote_mr_config_id": "019b0de348d56a36391d4474913efd75dcdaf109e4c11ccb79d5cd08f424bcade3000000000000000000000000000000",
+  "compose_hash": "9b0de348d56a36391d4474913efd75dcdaf109e4c11ccb79d5cd08f424bcade3",
+  "sha256_app_compose": "9b0de348d56a36391d4474913efd75dcdaf109e4c11ccb79d5cd08f424bcade3",
+  "report_data_enc_pub": "fd96547a0fb4a0d8131638fa921b23505da111fc8403e6d2026caca77cfe9e62",
+  "report_data_signer": "0x11209fda00f37775da95dcc81d4f65eeb58ab5ee",
+  "report_data_version": "00000001",
+  "runtime_events_after_system_ready": [
+    "zg-upstream-set",
+    "zg-image-update"
+  ],
+  "broker_digest": "sha256:951f4c7971f87377ab077639a5a84d2aed8945460494da076ff8466ea1ee90b5",
+  "broker_digest_source": "event",
+  "broker_signer": "0x11209fda00f37775da95dcc81d4f65eeb58ab5ee",
+  "broker_enc_pub": "fd96547a0fb4a0d8131638fa921b23505da111fc8403e6d2026caca77cfe9e62",
+  "upstreams": [
+    [
+      "0gm-sglang",
+      "http://0gm-sglang:8000/v1"
+    ]
+  ]
+}

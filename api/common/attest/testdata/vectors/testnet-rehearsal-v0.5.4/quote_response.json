@@ -1,0 +1,467 @@
+{
+ "quote": "040002008100000000000000939a7233f79c4ca9940a0db3957f06071eadadc7f30fb7f911d24aa522afc590000000000b0104000000000000000000000000007bf063280e94fb051f5dd7b1fc59ce9aac42bb961df8d44b709c9b0ff87a7b4df648657ba6d1189589feab1d5a3c9a9d00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001000000000e702060000000000b24d3b24e9e3c16012376b52362ca09856c4adecb709d5fac33addf1c47e193da075b125b6c364115771390a5461e217019b0de348d56a36391d4474913efd75dcdaf109e4c11ccb79d5cd08f424bcade30000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000006ffe4a2c12f07eccb857f70f370a5af848a7062905cd95adc43abb1f62c39e330aa3c8aeb8f162656c025f3f527600f107e6f51aa763abfe75c3ddfbf4f425fe3f0ceff66d807a75e049303dce9addf68e7218729bd419638af63a370f65878cf1c82667a354194467cd8419efd14a714560dd9b85b4c13b25c11e44bf4e126248c2255fad58c303fb0ca2921765d53a360c9db6ebc058a936c758d24bae92569b3bb8d31a0b62903815823bcf84a19c51f286c746d6d4ed7fb083d35db2249bfd96547a0fb4a0d8131638fa921b23505da111fc8403e6d2026caca77cfe9e6211209fda00f37775da95dcc81d4f65eeb58ab5ee000000010000000000000000cc1000006c2cd14b62af365aad865dbddebf53cd4ce2ddcd9744483d2ec8ba61f0839e5c6fb6892883c1d2d16f50bddb75244995c5af3812f1fe7c946cf5edc579fe84ee2982655d89dbd3867e7370e8b1b27bbae5eb5f24dfaceea8a2ff9ad71161930c379cef3c7360ef97468031741483798585c1befb2f1d9827d2eb7a22299a01270600461000000404191b04ff0006000000000000000000000000000000000000000000000000000000000000000000000000000000001500000000000000e700000000000000e5a3a7b5d830c2953b98534c6c59a3a34fdc34e933f7f5898f0a85cf08846bca0000000000000000000000000000000000000000000000000000000000000000dc9e2a7c6f948f17474e34a7fc43ed030f7c1563f1babddf6340c82e0e54a8c5000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000020006000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000005be61ea67e69e2411dd59d258969727c5cd13f082b59b3dcc4721e2f7c3b7a4e00000000000000000000000000000000000000000000000000000000000000007498df6fb18b047ab5b60dfba9b5a954e08226befee05562a714552c37d9e05eba2a1f0d123465bf0fee8df489a6a690974b07f1079e7debfafd3c8337b714102000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f05005e0e00002d2d2d2d2d424547494e2043455254494649434154452d2d2d2d2d0a4d49494538544343424a65674177494241674956414c7142567a73712f787369354e387578426f59356c3641515a31444d416f4743437147534d343942414d430a4d484178496a416742674e5642414d4d47556c756447567349464e4857434251513073675547786864475a76636d306751304578476a415942674e5642416f4d0a45556c756447567349454e76636e4276636d4630615739754d5251774567594456515148444174545957353059534244624746795954454c4d416b47413155450a4341774351304578437a414a42674e5642415954416c56544d423458445449324d4445794f5441324d4441304d466f5844544d7a4d4445794f5441324d4441300a4d466f77634445694d434147413155454177775a535735305a5777675530645949464244537942445a584a3061575a70593246305a5445614d426747413155450a43677752535735305a577767513239796347397959585270623234784644415342674e564241634d43314e68626e526849454e7359584a684d517377435159440a5651514944414a445154454c4d416b474131554542684d4356564d775754415442676371686b6a4f5051494242676771686b6a4f50514d4242774e43414151380a39455a4b755278457952677a5a5873542b3079304346342b31683453582f6a54554c644f6771637275466b5033354750346562383634517361797779345877440a42755a65434b664569484e57356f3431353959646f3449444444434341776777487759445652306a42426777466f41556c5739647a62306234656c4153636e550a3944504f4156634c336c5177617759445652306642475177596a42676f46366758495a616148523063484d364c79396863476b7564484a316333526c5a484e6c0a636e5a705932567a4c6d6c75644756734c6d4e766253397a5a3367765932567964476c6d61574e6864476c76626939324e4339775932746a636d772f593245390a6347786864475a76636d306d5a57356a62325270626d63395a4756794d42304741315564446751574242525a63752f70597452454655736837726857544952750a2b446974786a414f42674e56485138424166384542414d434273417744415944565230544151482f4241497741444343416a6b4743537147534962345451454e0a4151534341696f776767496d4d42344743697147534962345451454e4151454545496c395072647571496533672f6d7450516478413073776767466a42676f710a686b69472b453042445145434d494942557a415142677371686b69472b45304244514543415149424244415142677371686b69472b45304244514543416749420a4244415142677371686b69472b4530424451454341774942416a415142677371686b69472b4530424451454342414942416a415142677371686b69472b4530420a44514543425149424244415142677371686b69472b45304244514543426749424154415142677371686b69472b453042445145434277494241444151426773710a686b69472b45304244514543434149424254415142677371686b69472b45304244514543435149424144415142677371686b69472b45304244514543436749420a4144415142677371686b69472b45304244514543437749424144415142677371686b69472b45304244514543444149424144415142677371686b69472b4530420a44514543445149424144415142677371686b69472b45304244514543446749424144415142677371686b69472b453042445145434477494241444151426773710a686b69472b45304244514543454149424144415142677371686b69472b45304244514543455149424454416642677371686b69472b45304244514543456751510a42415143416751424141554141414141414141414144415142676f71686b69472b45304244514544424149414144415542676f71686b69472b453042445145450a4241615177473841414141774477594b4b6f5a496876684e4151304242516f424154416542676f71686b69472b45304244514547424243764f3535314c75626a0a2b49363352564e713558734e4d45514743697147534962345451454e415163774e6a415142677371686b69472b45304244514548415145422f7a4151426773710a686b69472b45304244514548416745422f7a415142677371686b69472b45304244514548417745422f7a414b42676771686b6a4f5051514441674e49414442460a41694541316f492f70424544544d6a45352f30685a33417a622b55564559576d584b4f5a516d52452b3635704d593843494453676f63336d7a46766b555a526c0a546b764155344237394c31674453436b43785047334f337365546c730a2d2d2d2d2d454e442043455254494649434154452d2d2d2d2d0a2d2d2d2d2d424547494e2043455254494649434154452d2d2d2d2d0a4d4949436c6a4343416a32674177494241674956414a567658633239472b487051456e4a3150517a7a674658433935554d416f4743437147534d343942414d430a4d476778476a415942674e5642414d4d45556c756447567349464e48574342536232393049454e424d526f77474159445651514b4442464a626e526c624342440a62334a7762334a6864476c76626a45554d424947413155454277774c553246756447456751327868636d4578437a414a42674e564241674d416b4e424d5173770a435159445651514745774a56557a4165467730784f4441314d6a45784d4455774d5442614677307a4d7a41314d6a45784d4455774d5442614d484178496a41670a42674e5642414d4d47556c756447567349464e4857434251513073675547786864475a76636d306751304578476a415942674e5642416f4d45556c75644756730a49454e76636e4276636d4630615739754d5251774567594456515148444174545957353059534244624746795954454c4d416b474131554543417743513045780a437a414a42674e5642415954416c56544d466b77457759484b6f5a497a6a3043415159494b6f5a497a6a304441516344516741454e53422f377432316c58534f0a3243757a7078773734654a423732457944476757357258437478327456544c7136684b6b367a2b5569525a436e71523770734f766771466553786c6d546c4a6c0a65546d693257597a33714f42757a43427544416642674e5648534d4547444157674251695a517a575770303069664f44744a5653763141624f536347724442530a42674e5648523845537a424a4d45656752614244686b466f64485277637a6f764c324e6c636e52705a6d6c6a5958526c63793530636e567a6447566b633256790a646d6c6a5a584d75615735305a577775593239744c306c756447567355306459556d397664454e424c6d526c636a416442674e5648513445466751556c5739640a7a62306234656c4153636e553944504f4156634c336c517744675944565230504151482f42415144416745474d42494741315564457745422f7751494d4159420a4166384341514177436759494b6f5a497a6a30454177494452774177524149675873566b6930772b6936565947573355462f32327561586530594a446a3155650a6e412b546a44316169356343494359623153416d4435786b66545670766f34556f79695359787244574c6d5552344349394e4b7966504e2b0a2d2d2d2d2d454e442043455254494649434154452d2d2d2d2d0a2d2d2d2d2d424547494e2043455254494649434154452d2d2d2d2d0a4d4949436a7a4343416a53674177494241674955496d554d316c71644e496e7a6737535655723951477a6b6e42717777436759494b6f5a497a6a3045417749770a614445614d4267474131554541777752535735305a5777675530645949464a766233516751304578476a415942674e5642416f4d45556c756447567349454e760a636e4276636d4630615739754d5251774567594456515148444174545957353059534244624746795954454c4d416b47413155454341774351304578437a414a0a42674e5642415954416c56544d423458445445344d4455794d5445774e4455784d466f58445451354d54497a4d54497a4e546b314f566f77614445614d4267470a4131554541777752535735305a5777675530645949464a766233516751304578476a415942674e5642416f4d45556c756447567349454e76636e4276636d46300a615739754d5251774567594456515148444174545957353059534244624746795954454c4d416b47413155454341774351304578437a414a42674e56424159540a416c56544d466b77457759484b6f5a497a6a3043415159494b6f5a497a6a3044415163445167414543366e45774d4449595a4f6a2f69505773437a61454b69370a314f694f534c52466857476a626e42564a66566e6b59347533496a6b4459594c304d784f346d717379596a6c42616c54565978465032734a424b357a6c4b4f420a757a43427544416642674e5648534d4547444157674251695a517a575770303069664f44744a5653763141624f5363477244425342674e5648523845537a424a0a4d45656752614244686b466f64485277637a6f764c324e6c636e52705a6d6c6a5958526c63793530636e567a6447566b63325679646d6c6a5a584d75615735300a5a577775593239744c306c756447567355306459556d397664454e424c6d526c636a416442674e564851344546675155496d554d316c71644e496e7a673753560a55723951477a6b6e4271777744675944565230504151482f42415144416745474d42494741315564457745422f7751494d4159424166384341514577436759490a4b6f5a497a6a3045417749445351417752674968414f572f35516b522b533943695344634e6f6f774c7550524c735747662f59693747535839344267775477670a41694541344a306c72486f4d732b586f356f2f7358364f39515778485241765a55474f6452513763767152586171493d0a2d2d2d2d2d454e442043455254494649434154452d2d2d2d2d0a0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+ "event_log": [
+  {
+   "imr": 0,
+   "event_type": 2147483659,
+   "digest": "09abe9c7656a145f4836445d09a426176e96f55a1da01ca06657b14cb9dfcd9f1104f07bf333a2aa2166fa6713217430",
+   "event": "",
+   "event_payload": ""
+  },
+  {
+   "imr": 0,
+   "event_type": 2147483658,
+   "digest": "344bc51c980ba621aaa00da3ed7436f7d6e549197dfe699515dfa2c6583d95e6412af21c097d473155875ffd561d6790",
+   "event": "",
+   "event_payload": ""
+  },
+  {
+   "imr": 0,
+   "event_type": 2147483649,
+   "digest": "9dc3a1f80bcec915391dcda5ffbb15e7419f77eab462bbf72b42166fb70d50325e37b36f93537a863769bcf9bedae6fb",
+   "event": "",
+   "event_payload": ""
+  },
+  {
+   "imr": 0,
+   "event_type": 2147483649,
+   "digest": "6f2e3cbc14f9def86980f5f66fd85e99d63e69a73014ed8a5633ce56eca5b64b692108c56110e22acadcef58c3250f1b",
+   "event": "",
+   "event_payload": ""
+  },
+  {
+   "imr": 0,
+   "event_type": 2147483649,
+   "digest": "d607c0efb41c0d757d69bca0615c3a9ac0b1db06c557d992e906c6b7dee40e0e031640c7bfd7bcd35844ef9edeadc6f9",
+   "event": "",
+   "event_payload": ""
+  },
+  {
+   "imr": 0,
+   "event_type": 2147483649,
+   "digest": "08a74f8963b337acb6c93682f934496373679dd26af1089cb4eaf0c30cf260a12e814856385ab8843e56a9acea19e127",
+   "event": "",
+   "event_payload": ""
+  },
+  {
+   "imr": 0,
+   "event_type": 2147483649,
+   "digest": "18cc6e01f0c6ea99aa23f8a280423e94ad81d96d0aeb5180504fc0f7a40cb3619dd39bd6a95ec1680a86ed6ab0f9828d",
+   "event": "",
+   "event_payload": ""
+  },
+  {
+   "imr": 0,
+   "event_type": 4,
+   "digest": "394341b7182cd227c5c6b07ef8000cdfd86136c4292b8e576573ad7ed9ae41019f5818b4b971c9effc60e1ad9f1289f0",
+   "event": "",
+   "event_payload": ""
+  },
+  {
+   "imr": 0,
+   "event_type": 10,
+   "digest": "9780b5b4fa7424d321dc913ab5ad99f1f57c808fcacec09fe517b098aba89e60b8f568e475fe8b688b4b7ac71794ad9d",
+   "event": "",
+   "event_payload": ""
+  },
+  {
+   "imr": 0,
+   "event_type": 10,
+   "digest": "6e8b7dbc4fb706be7247233646229f12e762a3a935640b2e49a4ee7c90237380cc9628f682ac052849e620ff5da5812f",
+   "event": "",
+   "event_payload": ""
+  },
+  {
+   "imr": 0,
+   "event_type": 10,
+   "digest": "43393f9c7dad8f8cf823233859adccdb13bd971e8b6b42425308ec18a5591ba512f0abbb6af0b9c110367689a1f29035",
+   "event": "",
+   "event_payload": ""
+  },
+  {
+   "imr": 1,
+   "event_type": 2147483651,
+   "digest": "90e278aa4d688f4f05bf76f1786fea174abcea0d6b44e81cea5b3327f3f211e5c465a9c34b513283bed2512bca6d4a19",
+   "event": "",
+   "event_payload": ""
+  },
+  {
+   "imr": 0,
+   "event_type": 2147483650,
+   "digest": "1dd6f7b457ad880d840d41c961283bab688e94e4b59359ea45686581e90feccea3c624b1226113f824f315eb60ae0a7c",
+   "event": "",
+   "event_payload": ""
+  },
+  {
+   "imr": 0,
+   "event_type": 2147483650,
+   "digest": "23ada07f5261f12f34a0bd8e46760962d6b4d576a416f1fea1c64bc656b1d28eacf7047ae6e967c58fd2a98bfa74c298",
+   "event": "",
+   "event_payload": ""
+  },
+  {
+   "imr": 1,
+   "event_type": 2147483655,
+   "digest": "77a0dab2312b4e1e57a84d865a21e5b2ee8d677a21012ada819d0a98988078d3d740f6346bfe0abaa938ca20439a8d71",
+   "event": "",
+   "event_payload": ""
+  },
+  {
+   "imr": 1,
+   "event_type": 4,
+   "digest": "394341b7182cd227c5c6b07ef8000cdfd86136c4292b8e576573ad7ed9ae41019f5818b4b971c9effc60e1ad9f1289f0",
+   "event": "",
+   "event_payload": ""
+  },
+  {
+   "imr": 2,
+   "event_type": 6,
+   "digest": "54983860ea19cf4eb8a3395dcdf5c57f2590d9c5979e8caaeda27be435670e052c43585f986e90962a5ce3f6efef067e",
+   "event": "",
+   "event_payload": ""
+  },
+  {
+   "imr": 2,
+   "event_type": 6,
+   "digest": "5eb4f34f2ec49071551c5562ebaab9f86408f4a0eadaa3d7f05157e37ab04a1f040a82eaae94015d628a7ea4aa482cd2",
+   "event": "",
+   "event_payload": ""
+  },
+  {
+   "imr": 1,
+   "event_type": 2147483655,
+   "digest": "214b0bef1379756011344877743fdc2a5382bac6e70362d624ccf3f654407c1b4badf7d8f9295dd3dabdef65b27677e0",
+   "event": "",
+   "event_payload": ""
+  },
+  {
+   "imr": 1,
+   "event_type": 2147483655,
+   "digest": "0a2e01c85deae718a530ad8c6d20a84009babe6c8989269e950d8cf440c6e997695e64d455c4174a652cd080f6230b74",
+   "event": "",
+   "event_payload": ""
+  },
+  {
+   "imr": 3,
+   "event_type": 134217729,
+   "digest": "",
+   "event": "system-preparing",
+   "event_payload": ""
+  },
+  {
+   "imr": 3,
+   "event_type": 134217729,
+   "digest": "",
+   "event": "app-id",
+   "event_payload": "da119d701936c44a8628d58317ed5c8f9cabdbd5"
+  },
+  {
+   "imr": 3,
+   "event_type": 134217729,
+   "digest": "",
+   "event": "compose-hash",
+   "event_payload": "9b0de348d56a36391d4474913efd75dcdaf109e4c11ccb79d5cd08f424bcade3"
+  },
+  {
+   "imr": 3,
+   "event_type": 134217729,
+   "digest": "",
+   "event": "instance-id",
+   "event_payload": "c2b38163754caefde1e5a95e9fd61e3085adfee0"
+  },
+  {
+   "imr": 3,
+   "event_type": 134217729,
+   "digest": "",
+   "event": "boot-mr-done",
+   "event_payload": ""
+  },
+  {
+   "imr": 3,
+   "event_type": 134217729,
+   "digest": "",
+   "event": "mr-kms",
+   "event_payload": "89c2714125e7583fe5b2cd4303cf874126d5e14210d230e04772586e90358b2e"
+  },
+  {
+   "imr": 3,
+   "event_type": 134217729,
+   "digest": "",
+   "event": "os-image-hash",
+   "event_payload": "806a352e16175d90568de97dff563f31f680239e6b90e9b5b2e9141d0955b0d9"
+  },
+  {
+   "imr": 3,
+   "event_type": 134217729,
+   "digest": "",
+   "event": "key-provider",
+   "event_payload": "7b226e616d65223a226b6d73222c226964223a223330353933303133303630373261383634386365336430323031303630383261383634386365336430333031303730333432303030343838343465623432636364663863353266643466313734663336326663623962626431396334356664343866316564656332643866316361323335333665633161373430323162346365653631306330373466383239346434333162326237666565326333396535333333666461663061343532326434336662313539643966227d"
+  },
+  {
+   "imr": 3,
+   "event_type": 134217729,
+   "digest": "",
+   "event": "storage-fs",
+   "event_payload": "7a6673"
+  },
+  {
+   "imr": 3,
+   "event_type": 134217729,
+   "digest": "",
+   "event": "system-ready",
+   "event_payload": ""
+  },
+  {
+   "imr": 3,
+   "event_type": 134217729,
+   "digest": "",
+   "event": "zg-upstream-set",
+   "event_payload": "636f756e743d310a30676d2d73676c616e6720687474703a2f2f30676d2d73676c616e673a383030302f7631"
+  },
+  {
+   "imr": 3,
+   "event_type": 134217729,
+   "digest": "",
+   "event": "zg-image-update",
+   "event_payload": "676863722e696f2f3067666f756e646174696f6e2f30672d73657276696e672d62726f6b6572407368613235363a39353166346337393731663837333737616230373736333961356138346432616564383934353436303439346461303736666638343636656131656539306235203078313132303966646130306633373737356461393564636338316434663635656562353861623565652066643936353437613066623461306438313331363338666139323162323335303564613131316663383430336536643230323663616361373763666539653632"
+  }
+ ],
+ "tcb_info": {
+  "mrtd": "b24d3b24e9e3c16012376b52362ca09856c4adecb709d5fac33addf1c47e193da075b125b6c364115771390a5461e217",
+  "rtmr0": "6ffe4a2c12f07eccb857f70f370a5af848a7062905cd95adc43abb1f62c39e330aa3c8aeb8f162656c025f3f527600f1",
+  "rtmr1": "07e6f51aa763abfe75c3ddfbf4f425fe3f0ceff66d807a75e049303dce9addf68e7218729bd419638af63a370f65878c",
+  "rtmr2": "f1c82667a354194467cd8419efd14a714560dd9b85b4c13b25c11e44bf4e126248c2255fad58c303fb0ca2921765d53a",
+  "rtmr3": "360c9db6ebc058a936c758d24bae92569b3bb8d31a0b62903815823bcf84a19c51f286c746d6d4ed7fb083d35db2249b",
+  "mr_aggregated": "2896a949e328dda4a8170dba95fd6fbd6be60360242d69b4dff3474648fa50db",
+  "os_image_hash": "806a352e16175d90568de97dff563f31f680239e6b90e9b5b2e9141d0955b0d9",
+  "compose_hash": "9b0de348d56a36391d4474913efd75dcdaf109e4c11ccb79d5cd08f424bcade3",
+  "device_id": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "event_log": [
+   {
+    "imr": 0,
+    "event_type": 2147483659,
+    "digest": "09abe9c7656a145f4836445d09a426176e96f55a1da01ca06657b14cb9dfcd9f1104f07bf333a2aa2166fa6713217430",
+    "event": "",
+    "event_payload": "095464785461626c65000100000000000000af96bb93f2b9b84e9462e0ba745642360090800000000000"
+   },
+   {
+    "imr": 0,
+    "event_type": 2147483658,
+    "digest": "344bc51c980ba621aaa00da3ed7436f7d6e549197dfe699515dfa2c6583d95e6412af21c097d473155875ffd561d6790",
+    "event": "",
+    "event_payload": "2946762858585858585858582d585858582d585858582d585858582d58585858585858585858585829000000c0ff000000000040080000000000"
+   },
+   {
+    "imr": 0,
+    "event_type": 2147483649,
+    "digest": "9dc3a1f80bcec915391dcda5ffbb15e7419f77eab462bbf72b42166fb70d50325e37b36f93537a863769bcf9bedae6fb",
+    "event": "",
+    "event_payload": "61dfe48bca93d211aa0d00e098032b8c0a00000000000000000000000000000053006500630075007200650042006f006f007400"
+   },
+   {
+    "imr": 0,
+    "event_type": 2147483649,
+    "digest": "6f2e3cbc14f9def86980f5f66fd85e99d63e69a73014ed8a5633ce56eca5b64b692108c56110e22acadcef58c3250f1b",
+    "event": "",
+    "event_payload": "61dfe48bca93d211aa0d00e098032b8c0200000000000000000000000000000050004b00"
+   },
+   {
+    "imr": 0,
+    "event_type": 2147483649,
+    "digest": "d607c0efb41c0d757d69bca0615c3a9ac0b1db06c557d992e906c6b7dee40e0e031640c7bfd7bcd35844ef9edeadc6f9",
+    "event": "",
+    "event_payload": "61dfe48bca93d211aa0d00e098032b8c030000000000000000000000000000004b0045004b00"
+   },
+   {
+    "imr": 0,
+    "event_type": 2147483649,
+    "digest": "08a74f8963b337acb6c93682f934496373679dd26af1089cb4eaf0c30cf260a12e814856385ab8843e56a9acea19e127",
+    "event": "",
+    "event_payload": "cbb219d73a3d9645a3bcdad00e67656f0200000000000000000000000000000064006200"
+   },
+   {
+    "imr": 0,
+    "event_type": 2147483649,
+    "digest": "18cc6e01f0c6ea99aa23f8a280423e94ad81d96d0aeb5180504fc0f7a40cb3619dd39bd6a95ec1680a86ed6ab0f9828d",
+    "event": "",
+    "event_payload": "cbb219d73a3d9645a3bcdad00e67656f03000000000000000000000000000000640062007800"
+   },
+   {
+    "imr": 0,
+    "event_type": 4,
+    "digest": "394341b7182cd227c5c6b07ef8000cdfd86136c4292b8e576573ad7ed9ae41019f5818b4b971c9effc60e1ad9f1289f0",
+    "event": "",
+    "event_payload": "00000000"
+   },
+   {
+    "imr": 0,
+    "event_type": 10,
+    "digest": "9780b5b4fa7424d321dc913ab5ad99f1f57c808fcacec09fe517b098aba89e60b8f568e475fe8b688b4b7ac71794ad9d",
+    "event": "",
+    "event_payload": "414350492044415441"
+   },
+   {
+    "imr": 0,
+    "event_type": 10,
+    "digest": "6e8b7dbc4fb706be7247233646229f12e762a3a935640b2e49a4ee7c90237380cc9628f682ac052849e620ff5da5812f",
+    "event": "",
+    "event_payload": "414350492044415441"
+   },
+   {
+    "imr": 0,
+    "event_type": 10,
+    "digest": "43393f9c7dad8f8cf823233859adccdb13bd971e8b6b42425308ec18a5591ba512f0abbb6af0b9c110367689a1f29035",
+    "event": "",
+    "event_payload": "414350492044415441"
+   },
+   {
+    "imr": 1,
+    "event_type": 2147483651,
+    "digest": "90e278aa4d688f4f05bf76f1786fea174abcea0d6b44e81cea5b3327f3f211e5c465a9c34b513283bed2512bca6d4a19",
+    "event": "",
+    "event_payload": "1860fd7a0000000000c485000000000000000000000000002a000000000000000403140072f728144ab61e44b8c39ebdd7f893c7040412006b00650072006e0065006c0000007fff0400"
+   },
+   {
+    "imr": 0,
+    "event_type": 2147483650,
+    "digest": "1dd6f7b457ad880d840d41c961283bab688e94e4b59359ea45686581e90feccea3c624b1226113f824f315eb60ae0a7c",
+    "event": "",
+    "event_payload": "61dfe48bca93d211aa0d00e098032b8c0900000000000000020000000000000042006f006f0074004f0072006400650072000000"
+   },
+   {
+    "imr": 0,
+    "event_type": 2147483650,
+    "digest": "23ada07f5261f12f34a0bd8e46760962d6b4d576a416f1fea1c64bc656b1d28eacf7047ae6e967c58fd2a98bfa74c298",
+    "event": "",
+    "event_payload": "61dfe48bca93d211aa0d00e098032b8c08000000000000003e0000000000000042006f006f0074003000300030003000090100002c0055006900410070007000000004071400c9bdb87cebf8344faaea3ee4af6516a10406140021aa2c4614760345836e8ab6f46623317fff0400"
+   },
+   {
+    "imr": 1,
+    "event_type": 2147483655,
+    "digest": "77a0dab2312b4e1e57a84d865a21e5b2ee8d677a21012ada819d0a98988078d3d740f6346bfe0abaa938ca20439a8d71",
+    "event": "",
+    "event_payload": "43616c6c696e6720454649204170706c69636174696f6e2066726f6d20426f6f74204f7074696f6e"
+   },
+   {
+    "imr": 1,
+    "event_type": 4,
+    "digest": "394341b7182cd227c5c6b07ef8000cdfd86136c4292b8e576573ad7ed9ae41019f5818b4b971c9effc60e1ad9f1289f0",
+    "event": "",
+    "event_payload": "00000000"
+   },
+   {
+    "imr": 2,
+    "event_type": 6,
+    "digest": "54983860ea19cf4eb8a3395dcdf5c57f2590d9c5979e8caaeda27be435670e052c43585f986e90962a5ce3f6efef067e",
+    "event": "",
+    "event_payload": "ed223b8f1a0000004c4f414445445f494d4147453a3a4c6f61644f7074696f6e7300"
+   },
+   {
+    "imr": 2,
+    "event_type": 6,
+    "digest": "5eb4f34f2ec49071551c5562ebaab9f86408f4a0eadaa3d7f05157e37ab04a1f040a82eaae94015d628a7ea4aa482cd2",
+    "event": "",
+    "event_payload": "ec223b8f0d0000004c696e757820696e6974726400"
+   },
+   {
+    "imr": 1,
+    "event_type": 2147483655,
+    "digest": "214b0bef1379756011344877743fdc2a5382bac6e70362d624ccf3f654407c1b4badf7d8f9295dd3dabdef65b27677e0",
+    "event": "",
+    "event_payload": "4578697420426f6f7420536572766963657320496e766f636174696f6e"
+   },
+   {
+    "imr": 1,
+    "event_type": 2147483655,
+    "digest": "0a2e01c85deae718a530ad8c6d20a84009babe6c8989269e950d8cf440c6e997695e64d455c4174a652cd080f6230b74",
+    "event": "",
+    "event_payload": "4578697420426f6f742053657276696365732052657475726e656420776974682053756363657373"
+   },
+   {
+    "imr": 3,
+    "event_type": 134217729,
+    "digest": "f9974020ef507068183313d0ca808e0d1ca9b2d1ad0c61f5784e7157c362c06536f5ddacdad4451693f48fcc72fff624",
+    "event": "system-preparing",
+    "event_payload": ""
+   },
+   {
+    "imr": 3,
+    "event_type": 134217729,
+    "digest": "47184473d2bc87a37128729c3fed90660bbc3fe03b952a74bce73a555abaac2220af81705fde120da796eea4365408b1",
+    "event": "app-id",
+    "event_payload": "da119d701936c44a8628d58317ed5c8f9cabdbd5"
+   },
+   {
+    "imr": 3,
+    "event_type": 134217729,
+    "digest": "c5d8b01b42bf682f9c8bf33c3f9829e14ed52970eef29dbb5230ae3b052120806b43eb362e6940a2daa7bf9b2105c52b",
+    "event": "compose-hash",
+    "event_payload": "9b0de348d56a36391d4474913efd75dcdaf109e4c11ccb79d5cd08f424bcade3"
+   },
+   {
+    "imr": 3,
+    "event_type": 134217729,
+    "digest": "b4d8e3bfc93c50f9e5e53e12c0988f738ac9bb3f68a62e6a78095ee9037539642e81a114c11830657500cad3b0cd6280",
+    "event": "instance-id",
+    "event_payload": "c2b38163754caefde1e5a95e9fd61e3085adfee0"
+   },
+   {
+    "imr": 3,
+    "event_type": 134217729,
+    "digest": "98bd7e6bd3952720b65027fd494834045d06b4a714bf737a06b874638b3ea00ff402f7f583e3e3b05e921c8570433ac6",
+    "event": "boot-mr-done",
+    "event_payload": ""
+   },
+   {
+    "imr": 3,
+    "event_type": 134217729,
+    "digest": "41e663758658fe2fd1b8f283e7ae7b369831bd88f2a2a666d6277e89d42162445ffe08dccd12a638c9c2bdabba5f48b7",
+    "event": "mr-kms",
+    "event_payload": "89c2714125e7583fe5b2cd4303cf874126d5e14210d230e04772586e90358b2e"
+   },
+   {
+    "imr": 3,
+    "event_type": 134217729,
+    "digest": "87cd7e9dd097fa5ccdadf01c77ae4d86eb69debae40c7c9ecd2b0e0ff8ddb37ceeafd3607a0f49c7cfb81eeeaffa17c1",
+    "event": "os-image-hash",
+    "event_payload": "806a352e16175d90568de97dff563f31f680239e6b90e9b5b2e9141d0955b0d9"
+   },
+   {
+    "imr": 3,
+    "event_type": 134217729,
+    "digest": "83368b43a0fc6f824f5a9220592df85fd30e2d405ecbd253a5c6354af63e6c9b41aec557c38a38e348ab87f9ac8fc68c",
+    "event": "key-provider",
+    "event_payload": "7b226e616d65223a226b6d73222c226964223a223330353933303133303630373261383634386365336430323031303630383261383634386365336430333031303730333432303030343838343465623432636364663863353266643466313734663336326663623962626431396334356664343866316564656332643866316361323335333665633161373430323162346365653631306330373466383239346434333162326237666565326333396535333333666461663061343532326434336662313539643966227d"
+   },
+   {
+    "imr": 3,
+    "event_type": 134217729,
+    "digest": "ba51104636900268b0e059fa3d266419d079d1e94aea26fb9fcbb8d764bf4c89a67ac271b8a0d1a3989945132a111fc7",
+    "event": "storage-fs",
+    "event_payload": "7a6673"
+   },
+   {
+    "imr": 3,
+    "event_type": 134217729,
+    "digest": "1a76b2a80a0be71eae59f80945d876351a7a3fb8e9fd1ff1cede5734aa84ea11fd72b4edfbb6f04e5a85edd114c751bd",
+    "event": "system-ready",
+    "event_payload": ""
+   },
+   {
+    "imr": 3,
+    "event_type": 134217729,
+    "digest": "1835cf68a49ace36c078aec9ce2c96b10dd14b62d9c9b06846dd8d81e6304230ad8351c6affeac4cc5ee874f381c8ed5",
+    "event": "zg-upstream-set",
+    "event_payload": "636f756e743d310a30676d2d73676c616e6720687474703a2f2f30676d2d73676c616e673a383030302f7631"
+   },
+   {
+    "imr": 3,
+    "event_type": 134217729,
+    "digest": "5d29c30f782fd24477ef469d0d39645c5cd38aa9dccf79ab7bbe7f607567dfdf7773fc496ee3792b87d980a7c3f1855d",
+    "event": "zg-image-update",
+    "event_payload": "676863722e696f2f3067666f756e646174696f6e2f30672d73657276696e672d62726f6b6572407368613235363a39353166346337393731663837333737616230373736333961356138346432616564383934353436303439346461303736666638343636656131656539306235203078313132303966646130306633373737356461393564636338316434663635656562353861623565652066643936353437613066623461306438313331363338666139323162323335303564613131316663383430336536643230323663616361373763666539653632"
+   }
+  ],
+  "app_compose": "{\"allowed_envs\":[\"TESTNET_BROKER_CONFIG\",\"TESTNET_PRIVATE_KEY\",\"COINGECKO_API_KEY\",\"TESTNET_PROMETHEUS_CONFIG\",\"TESTNET_CLOUDFLARE_API_TOKEN\",\"TESTNET_CERTBOT_EMAIL\",\"TESTNET_DSTACK_GATEWAY_DOMAIN\",\"TESTNET_DOMAIN\"],\"docker_compose_file\":\"# testnet rehearsal of cn-20 for gateway integration: broker v0.5.3, provider 0x1cB9\u20267C85, prod OS\\n# Every container gets a bounded log, because an unbounded one is bounded by the disk.\\n# dstack only touches /etc/docker/daemon.json to add a registry mirror and never writes\\n# log-opts, so a service without this block inherits Docker's own default: json-file with\\n# no size or file limit. The ingress on an earlier deployment reached 2.8 million lines\\n# that way, on the same volume that holds 67 GB of model weights and the database.\\n#\\n# An anchor rather than a copy per service: the value is one decision, and a reader\\n# checking compose_hash should see it stated once.\\n#\\n# 50m x 3 rather than something roomier, because public_logs is on: the guest agent\\n# serves /logs/<container> to anyone, with no credential and no rate limit, so this\\n# number is also the most a single unauthenticated request can pull. Across twelve\\n# containers that caps a full sweep at 1.8 GB instead of 6 GB. Enough history to\\n# diagnose a crash loop, which is what these logs are read for.\\nservices:\\n  broker-ingress:\\n    logging:\\n      driver: \\\"json-file\\\"\\n      options:\\n        max-size: \\\"50m\\\"\\n        max-file: \\\"3\\\"\\n    # Pinned by digest: this container terminates TLS for our hostname, so it is on the\\n    # plaintext path, and it is one of the two images (with sglang) that a verifier's\\n    # reviewed-image allowlist has to name. A tag would let it be replaced without\\n    # compose_hash moving.\\n    #\\n    #   docker buildx imagetools inspect dstacktee/dstack-ingress:2.2\\n    image: dstacktee/dstack-ingress:2.2@sha256:d05a7b343c37c1cca1bba8dbf7e8f3c6d2118158af2d41c455103796db4f67f0\\n    ports:\\n      - \\\"443:443\\\"\\n    environment:\\n      - CLOUDFLARE_API_TOKEN=${TESTNET_CLOUDFLARE_API_TOKEN}\\n      # No default, deliberately: this container's first act is to point\\n      # _dstack-app-address.$DOMAIN at this CVM, so a default of production's hostname\\n      # would take production's traffic. ${VAR:?} fails at render time instead.\\n      - DOMAIN=${TESTNET_DOMAIN:?set TESTNET_DOMAIN \u2014 there is no default, so that a missing value cannot point this deployment at production}\\n      - TARGET_ENDPOINT=http://0g-serving-provider-broker:3080\\n      - CERTBOT_EMAIL=${TESTNET_CERTBOT_EMAIL}\\n      - GATEWAY_DOMAIN=_.${TESTNET_DSTACK_GATEWAY_DOMAIN}\\n      - SET_CAA=true\\n      - PORT=443\\n      - TIMEOUT_CONNECT=10s\\n      - TIMEOUT_SERVER=900s\\n    volumes:\\n      # NOT /var/run/dstack.sock. The ingress reads /Info (the app id for its TXT record)\\n      # and /GetQuote (the evidence it serves) with a curl GET on the path its scripts\\n      # hard-code \u2014 and dstack's socket also serves EmitEvent, so holding it would let\\n      # this container append RTMR3 records that a reader takes as the truth. It gets\\n      # the controller's read-only proxy instead: those two methods, forwarded, and\\n      # nothing else (no /Sign either, which the broker's zg-tee socket answers).\\n      - zg-tee-ro:/var/run/zg-tee-ro\\n      - testnet-cert-data:/etc/letsencrypt\\n    # The symlink is what makes the unmodified image ask the proxy: its scripts test\\n    # `-S /var/run/dstack.sock` and curl that path, both of which follow a symlink.\\n    # Then the image's own ENTRYPOINT runs with its own CMD (overriding entrypoint\\n    # discards the image CMD, so it is restated below \u2014 2.2 is haproxy, not nginx;\\n    # re-read it with `docker image inspect` when the digest changes).\\n    entrypoint:\\n      - bash\\n      - -c\\n      - ln -sfn /var/run/zg-tee-ro/tee.sock /var/run/dstack.sock && exec /scripts/entrypoint.sh \\\"$@\\\"\\n      - --\\n    command: [\\\"haproxy\\\", \\\"-W\\\", \\\"-f\\\", \\\"/etc/haproxy/haproxy.cfg\\\"]\\n    restart: unless-stopped\\n    depends_on:\\n      # Nothing fronts the broker until the broker can answer. This container's first\\n      # act is to point _dstack-app-address.$DOMAIN at this CVM, which is what moves\\n      # traffic here \u2014 so it must not run until the broker behind it reports healthy.\\n      # The broker being healthy also means the controller (and its sockets) is up.\\n      0g-serving-provider-broker:\\n        condition: service_healthy\\n  0gm-sglang:\\n    # Pinned for the same reason as the broker's: this container receives the request\\n    # after the broker unseals it, so it is inside the confidentiality boundary, and it\\n    # is the code that enforces --revision below. A tag leaves both unattested.\\n    #\\n    # Owned by the model team like the flags are \u2014 only the digest is added here.\\n    image: lmsysorg/sglang:v0.5.17-cu129@sha256:220bb1a1a4b38e604ebd33c876a279f6d2519035de141200720417407c9b967d\\n    container_name: 0gm-sglang\\n    restart: unless-stopped\\n    init: true\\n    ipc: host\\n    shm_size: 32gb\\n    runtime: nvidia\\n    environment:\\n      NVIDIA_VISIBLE_DEVICES: \\\"${NVIDIA_VISIBLE_DEVICES:-all}\\\"\\n      NVIDIA_DRIVER_CAPABILITIES: \\\"compute,utility\\\"\\n      # Where the weights land. Must point inside the mounted volume below,\\n      # or every restart re-downloads 72 GB into the container's layer.\\n      HF_HOME: /dstack/persistent/hf-cache\\n      # Only needed for private or gated repos; harmless when unset.\\n      HF_TOKEN: \\\"${HF_TOKEN:-}\\\"\\n    volumes:\\n      # Narrowed to the cache HF_HOME names, rather than the whole persistent volume\\n      # read-write: the download needs somewhere to write and nothing more, and every\\n      # other container's data lives under that same root.\\n      - /dstack/persistent/hf-cache:/dstack/persistent/hf-cache\\n      - /dstack/persistent/benchmark/sglang_0gm_logs:/logs\\n    command:\\n      - python3\\n      - -m\\n      - sglang.launch_server\\n      # A HuggingFace repo id, not a local path \u2014 this is what makes the\\n      # download automatic. Swap it to serve a different model.\\n      - --model-path\\n      - 0G-AI/0GM-1.0-35B-A3B-0427\\n      # Pinned, for the reason the broker image is pinned by digest: a repo id names\\n      # which weights were asked for, not which ones arrive. compose_hash covers this\\n      # file, so it covers the name \u2014 and only a revision makes the name mean one\\n      # thing. Bump it deliberately when the model moves; HF's current head is\\n      # reported by https://huggingface.co/api/models/0G-AI/0GM-1.0-35B-A3B-0427\\n      - --revision\\n      - 802e58f5c8211f04079bfb5c27fb2c6ab629b686\\n      - --served-model-name\\n      - 0GM-1.0-35B-A3B-0427\\n      - --host\\n      - 0.0.0.0\\n      - --port\\n      - \\\"8000\\\"\\n      - --tp-size\\n      - \\\"1\\\"\\n      - --mem-fraction-static\\n      - \\\"0.90\\\"\\n      - --context-length\\n      - \\\"262144\\\"\\n      # Both parsers are model-specific. qwen3_coder matches this model's\\n      # template (<tool_call><function=..><parameter=..>); the similar-looking\\n      # <tool_call>{\\\"name\\\":..} JSON form would need qwen/hermes instead, and a\\n      # mismatch fails silently \u2014 raw markup is left in the message content.\\n      - --reasoning-parser\\n      - qwen3\\n      - --tool-call-parser\\n      - qwen3_coder\\n      # MTP speculative decoding. This model ships the draft weights\\n      # (mtp_num_hidden_layers=1), so NEXTN is usable.\\n      - --speculative-algorithm\\n      - NEXTN\\n      - --speculative-num-steps\\n      - \\\"3\\\"\\n      - --speculative-eagle-topk\\n      - \\\"1\\\"\\n      - --speculative-num-draft-tokens\\n      - \\\"4\\\"\\n      - --mamba-scheduler-strategy\\n      - extra_buffer\\n      - --enable-metrics\\n      # Without this, prompt caching still works but cached_tokens and\\n      # cache_read_input_tokens are never populated \u2014 indistinguishable from\\n      # a cache that never hits.\\n      - --enable-cache-report\\n    # /health_generate, not /health. Both return 503 while the engine is loading, so\\n    # either one keeps the broker \u2014 and behind it the ingress, and with it the domain \u2014\\n    # from coming up early. They differ afterwards: with\\n    # SGLANG_ENABLE_HEALTH_ENDPOINT_GENERATION unset, /health returns 200 on engine\\n    # state alone, while /health_generate pushes one token through the scheduler and\\n    # detokenizer. A wedged scheduler is invisible to the first and caught by the\\n    # second, and the ingress points a public hostname at whatever answers here.\\n    healthcheck:\\n      test:\\n        [\\n          \\\"CMD-SHELL\\\",\\n          'python3 -c \\\"import urllib.request;urllib.request.urlopen(''http://localhost:8000/health_generate'',timeout=15)\\\"',\\n        ]\\n      interval: 30s\\n      # Longer than the 15s inside the probe, so a slow generation is reported as a\\n      # failed check rather than killed by docker before it can answer.\\n      timeout: 20s\\n      # Sized for a cold start: 67 GB at 13 MB/s, plus the load. Long is the safe\\n      # direction \u2014 during the start period a failing check does not count, while the\\n      # first success marks the container healthy immediately, so a generous value\\n      # costs nothing when things work. Too short is a hard failure instead: the\\n      # container goes unhealthy mid-download, restart: unless-stopped does not fire\\n      # on unhealthy, and the broker's depends_on: service_healthy never releases.\\n      start_period: 90m\\n      retries: 3\\n    # Host-level limits kept from this deployment's previous block: pinned memory and a\\n    # large stack are what the CUDA path needs. The log cap moved to x-logging, which\\n    # every service now shares.\\n    ulimits:\\n      memlock: -1\\n      stack: 67108864\\n    logging:\\n      driver: \\\"json-file\\\"\\n      options:\\n        max-size: \\\"50m\\\"\\n        max-file: \\\"3\\\"\\n    networks:\\n      default:\\n        aliases:\\n          # The broker reaches this service by name, and the deployment generator in\\n          # 0g-serving-broker emits a compose that names \\\"vllm\\\".\\n          - sglang\\n          - vllm\\n\\n  mysql:\\n    logging:\\n      driver: \\\"json-file\\\"\\n      options:\\n        max-size: \\\"50m\\\"\\n        max-file: \\\"3\\\"\\n    # Pinned: async_job persists RequestBody and ResponseBody as mediumblobs, so this\\n    # container holds request and response plaintext, not just billing metadata.\\n    #\\n    # Re-resolve when upgrading:\\n    #   docker buildx imagetools inspect mysql:8.0\\n    image: mysql:8.0@sha256:7dcddc01f13bab2f15cde676d44d01f61fc9f99fe7785e86196dfc07d358ae2b\\n    # No ports. The dstack gateway accepts every published port at\\n    # <app-id>-<port>.<gateway-domain>, so publishing this put root:123456 one\\n    # hostname away from the internet. Only the broker and event containers reach\\n    # it, and they do that over the compose network.\\n    restart: unless-stopped\\n    environment:\\n      - MYSQL_ROOT_PASSWORD=123456\\n      - MYSQL_DATABASE=provider\\n      - MYSQL_USER=provider\\n      - MYSQL_PASSWORD=provider\\n    volumes:\\n      - testnet-mysql-data:/var/lib/mysql\\n    healthcheck:\\n      test: [\\\"CMD-SHELL\\\", \\\"mysql -uroot -p123456 -e 'USE provider'\\\"]\\n      interval: 15s\\n      timeout: 5s\\n      retries: 15\\n      start_period: 60s\\n    networks:\\n      - default\\n\\n  # Materialises the broker config, because the deploy path has nowhere to put a\\n  # file: Phala takes a compose file and encrypted environment variables, and\\n  # nothing else. So the config travels as one base64 variable and is written here.\\n  #\\n  # BROKER_CONFIG carries no secrets \u2014 it keeps ${PRIVATE_KEY} and\\n  # ${COINGECKO_API_KEY} as literals and they are substituted below, inside the\\n  # CVM. That split matters because Phala refuses partial secret updates: had the\\n  # blob contained the resolved key, every config change would mean handling the\\n  # provider wallet key again. This way it is set once and never touched, and\\n  # BROKER_CONFIG stays reviewable and diffable.\\n  broker-config-init:\\n    logging:\\n      driver: \\\"json-file\\\"\\n      options:\\n        max-size: \\\"50m\\\"\\n        max-file: \\\"3\\\"\\n    # Pinned, like every other container inside the trust boundary. This one holds\\n    # PRIVATE_KEY and sits on a network with egress, and dstack re-resolves tags on\\n    # every boot (app-compose.sh pulls, then prunes unused images), so a tag here means\\n    # the same compose_hash can run different code against the provider's wallet key.\\n    #\\n    # Re-resolve when upgrading:\\n    #   docker buildx imagetools inspect alpine:3.18\\n    image: alpine:3.18@sha256:de0eb0b3f2a47ba1eb89389859a9bd88b28e82f5826b6969ad604979713c2d4f\\n    environment:\\n      - TESTNET_BROKER_CONFIG=${TESTNET_BROKER_CONFIG:-}\\n      - TESTNET_PRIVATE_KEY=${TESTNET_PRIVATE_KEY:-}\\n      - COINGECKO_API_KEY=${COINGECKO_API_KEY:-}\\n    volumes:\\n      - testnet-broker-config:/config\\n    command:\\n      - sh\\n      - -c\\n      - |\\n        set -e\\n        # First boot only. The controller's PUT /v1/config/core writes this same\\n        # file and records the change in RTMR3, so rewriting it on every start\\n        # would silently undo an operator change that is already on-chain \u2014 the\\n        # same guard dstack's own boot script puts on docker-compose.yaml.\\n        if [ ! -f /config/config.yaml ]; then\\n          if [ -z \\\"$$TESTNET_BROKER_CONFIG\\\" ]; then\\n            echo \\\"BROKER_CONFIG is empty and no config exists yet\\\" >&2\\n            exit 1\\n          fi\\n          printf '%s' \\\"$$TESTNET_BROKER_CONFIG\\\" | base64 -d \\\\\\n            | sed -e \\\"s#\\\\$${PRIVATE_KEY}#$$TESTNET_PRIVATE_KEY#\\\" \\\\\\n                  -e \\\"s#\\\\$${COINGECKO_API_KEY}#$$COINGECKO_API_KEY#\\\" \\\\\\n            > /config/config.yaml.tmp\\n          # Rename last, so a container killed mid-write leaves no half-file that\\n          # the guard above would then accept as complete.\\n          mv /config/config.yaml.tmp /config/config.yaml\\n        fi\\n    restart: \\\"no\\\"\\n\\n\\n  # Main broker service\\n  0g-serving-provider-broker:\\n    logging:\\n      driver: \\\"json-file\\\"\\n      options:\\n        max-size: \\\"50m\\\"\\n        max-file: \\\"3\\\"\\n    # Pinned, because the controller finds this container by exact name and refuses\\n    # to act on anything else. Without it compose names the container\\n    # <project>-0g-serving-provider-broker-1 and every upgrade is refused.\\n    container_name: 0g-serving-provider-broker\\n    # A digest, never a tag. A tag says which name was asked for, not which image\\n    # answers, and it is resolved by this host's own daemon \u2014 the party a verifier\\n    # is checking.\\n    #\\n    # Built from main after the controller stack landed and pushed as :dev-amd64 on\\n    # 2026-08-14. Verified to contain it rather than assumed from the tag: the\\n    # binary carries 0g-controller, ATTEST_PROXY_SOCKET, the enc-key derivation and\\n    # the container-label invalidation, and `docker run <digest> 0g-controller`\\n    # starts the controller instead of reporting an unknown command.\\n    #\\n    # :dev-amd64 is a shared, moving tag \u2014 that is exactly why this line names the\\n    # digest instead. Re-resolve after every push, and update all five places\\n    # together (this image:, IMAGE_DIGEST below, and the same pair on the event and\\n    # controller services); they must be identical or the digest the broker\\n    # announces on-chain is not the one it is running:\\n    #\\n    #   docker buildx imagetools inspect ghcr.io/0gfoundation/0g-serving-broker:dev-amd64\\n    image: ghcr.io/0gfoundation/0g-serving-broker@sha256:951f4c7971f87377ab077639a5a84d2aed8945460494da076ff8466ea1ee90b5\\n    # No ports: only the ingress (by service name) and the controller reach it. A\\n    # published 80 would be served at <app-id>-80.<gateway-domain> with TLS terminated\\n    # at the dstack gateway \u2014 a plaintext hop outside the CVM for any client that used\\n    # that hostname instead of ours.\\n    environment:\\n      - PORT=3080\\n      - CONFIG_FILE=/etc/config/config.yaml\\n      # A literal, not ${TARGET_URL}: this is the value a verifier reads to learn where\\n      # the broker forwards a request after unsealing it, and only a literal is inside\\n      # what compose_hash covers. A reference would put it back in the encrypted-env\\n      # channel the config file already uses, which is measured nowhere.\\n      #\\n      # Takes precedence over service.targetUrl in the config file \u2014 see loadConfig.\\n      - TARGET_URL=http://0gm-sglang:8000/v1\\n      # Also a literal, for the same reason: async_job persists unsealed request and\\n      # response bodies, so this string decides where plaintext is written. Left in the\\n      # config file it sits outside compose_hash, and a verifier could confirm the compose\\n      # declares an in-CVM mysql while the broker connected somewhere else.\\n      - DATABASE_DSN=root:123456@tcp(mysql:3306)/provider?parseTime=true\\n      - NETWORK=phala\\n      # What this container reports on-chain as the image it runs. The controller\\n      # rewrites both whenever it recreates this container on a new digest, so the\\n      # pair moves with the image; a recreated container inherits the old\\n      # environment, and without them the broker would come up on the new image\\n      # still announcing the previous digest. Must match image: above.\\n      - IMAGE_REPO=ghcr.io/0gfoundation/0g-serving-broker\\n      - IMAGE_DIGEST=sha256:951f4c7971f87377ab077639a5a84d2aed8945460494da076ff8466ea1ee90b5\\n      # Quotes, response signatures and the enclave encryption key all come from\\n      # the controller now, not from dstack directly. Setting this is only what\\n      # makes the two missing mounts below workable; the missing mounts are what\\n      # provide the property.\\n      - TEE_SOCKET=/var/run/zg-tee/tee.sock\\n    volumes:\\n      # Read-only, so the only writer of this file is the controller \u2014 which is\\n      # what makes zg-config-update a complete account of it rather than an audit\\n      # trail of one route among several.\\n      - testnet-broker-config:/etc/config:ro\\n      - testnet-broker-logs:/var/log/inference\\n      - testnet-event-logs:/var/log/event\\n      # Neither dstack's socket nor docker's. That is the point, and it is the only\\n      # part of this file that provides a property rather than describing one:\\n      #\\n      #   - dstack serves EmitEvent from the same unauthenticated handler as\\n      #     GetQuote and binds that socket 0777, so a container holding it can\\n      #     append to RTMR3 \u2014 including a record about the image it is itself\\n      #     running, which is what would make such a record unable to describe it.\\n      #   - it also serves GetKey, so a container holding it can derive the\\n      #     previous image's signing key and keep signing with it after an upgrade.\\n      #   - docker's socket lets a container stop, remove and recreate any other,\\n      #     which is what would make this file unable to say who may change what.\\n      #\\n      # Adding either back silently voids the attestation chain.\\n      - zg-tee:/var/run/zg-tee\\n    command: 0g-inference-server\\n    networks:\\n      - default\\n    healthcheck:\\n      test:\\n        [\\n          \\\"CMD-SHELL\\\",\\n          \\\"test -L /proc/1/exe && readlink /proc/1/exe | grep -q broker\\\",\\n        ]\\n      interval: 30s\\n      timeout: 10s\\n      retries: 3\\n      start_period: 60s\\n    deploy:\\n      resources:\\n        reservations:\\n          devices:\\n            - driver: nvidia\\n              count: all\\n              capabilities: [gpu]\\n    restart: unless-stopped\\n    depends_on:\\n      # With TEE_SOCKET set this container cannot finish starting until the\\n      # controller answers /SignerAddress, and it panics rather than falling back\\n      # to a local key. service_started (not service_healthy) and only in this\\n      # direction \u2014 the controller has no reverse dependency, so there is no cycle.\\n      # Without it the broker crash-loops until it happens to win the race.\\n      0g-controller:\\n        condition: service_started\\n      mysql:\\n        condition: service_healthy\\n      0gm-sglang:\\n        # Block broker from accepting traffic until SGLang passes /v1/models;\\n        # there is no LiteLLM in the middle, so a not-ready engine would\\n        # surface as 502s on /v1/messages.\\n        condition: service_healthy\\n      broker-config-init:\\n        # There is no config file at all until this has run, so this is a hard\\n        # prerequisite rather than an ordering preference.\\n        condition: service_completed_successfully\\n\\n  # Event service starts after broker is ready\\n  0g-serving-provider-event:\\n    logging:\\n      driver: \\\"json-file\\\"\\n      options:\\n        max-size: \\\"50m\\\"\\n        max-file: \\\"3\\\"\\n    container_name: 0g-serving-provider-event\\n    image: ghcr.io/0gfoundation/0g-serving-broker@sha256:951f4c7971f87377ab077639a5a84d2aed8945460494da076ff8466ea1ee90b5\\n    environment:\\n      - CONFIG_FILE=/etc/config/config.yaml\\n      # Same as the broker's. cmd/event picks its TEE client from this and falls\\n      # back to Phala when unset \u2014 right on this node, but only by accident, and\\n      # silently wrong the day this deployment moves to gcp or alicloud.\\n      - NETWORK=phala\\n      - IMAGE_REPO=ghcr.io/0gfoundation/0g-serving-broker\\n      - IMAGE_DIGEST=sha256:951f4c7971f87377ab077639a5a84d2aed8945460494da076ff8466ea1ee90b5\\n      - TEE_SOCKET=/var/run/zg-tee/tee.sock\\n    volumes:\\n      - testnet-broker-config:/etc/config:ro\\n      - testnet-event-logs:/var/log/inference\\n      # Same reasoning as the broker: no dstack socket, quotes through the\\n      # controller. The controller upgrades this container alongside the broker,\\n      # so the two always run the same digest.\\n      - zg-tee:/var/run/zg-tee\\n    command: 0g-inference-event\\n    networks:\\n      - default\\n    healthcheck:\\n      test: [\\\"CMD-SHELL\\\", \\\"grep -q '0g-inference-event' /proc/1/cmdline\\\"]\\n      interval: 30s\\n      timeout: 5s\\n      retries: 3\\n      start_period: 30s\\n    restart: unless-stopped\\n    depends_on:\\n      0g-controller:\\n        condition: service_started\\n      0g-serving-provider-broker:\\n        condition: service_healthy\\n\\n  # The only container that holds dstack's socket, and the only one that holds\\n  # docker's. It serves the broker and the event service GetQuote, Info, Sign,\\n  # SignerAddress and GetEncKey over zg-tee \u2014 and deliberately NOT GetKey, so a\\n  # broker image cannot derive a key it could keep across an upgrade.\\n  #\\n  # Its own image is pinned here and nowhere else: nothing measures the\\n  # controller, so this line is what a reviewer is trusting. Review this digest\\n  # with the same care as the broker's.\\n  0g-controller:\\n    logging:\\n      driver: \\\"json-file\\\"\\n      options:\\n        max-size: \\\"50m\\\"\\n        max-file: \\\"3\\\"\\n    container_name: 0g-controller\\n    # Published so an upgrade can be triggered without SSH into the CVM. Reachable\\n    # through the dstack gateway as <app-id>-3090.<gateway-domain> on 443.\\n    #\\n    # What guards it is the admin signature alone: AuthMiddleware requires an\\n    # EIP-191 signature by a controller.adminAddresses entry. controller.allowedIPs\\n    # does NOT help here \u2014 traffic arrives via the gateway, so the source address\\n    # the controller sees is the gateway's, not the caller's.\\n    #\\n    # And the admin key is provider-level control, not just an image switch:\\n    # PUT /v1/config/core takes the WHOLE config file and validates only that it is\\n    # YAML, and no baseline for that file is published anywhere\\n    # (see 0gfoundation/0g-router#728).\\n    # Until that is fixed, treat this key exactly like the SSH key it replaces, and\\n    # prefer terminating this at an ingress that can expose /v1/images/update alone.\\n    ports:\\n      - \\\"3090:3090\\\"\\n    image: ghcr.io/0gfoundation/0g-serving-broker@sha256:951f4c7971f87377ab077639a5a84d2aed8945460494da076ff8466ea1ee90b5\\n    environment:\\n      - CONFIG_FILE=/etc/config/config.yaml\\n      # Where it serves the attestation proxy. Also the switch that makes\\n      # UpdateImages willing to record anything: with this unset the broker would\\n      # derive its own key at a fixed path and no record written here could ever\\n      # match a quote, so the controller refuses to upgrade at all.\\n      - ATTEST_PROXY_SOCKET=/var/run/zg-tee/tee.sock\\n      # The ingress's socket: GetQuote and Info forwarded, nothing answered locally \u2014\\n      # no /Sign. See the zg-tee-ro volume.\\n      - ATTEST_PROXY_READONLY_SOCKET=/var/run/zg-tee-ro/tee.sock\\n    volumes:\\n      # Writable, unlike the broker's: the controller is the writer, and\\n      # ApplyCoreConfig rewrites this file after recording the change in RTMR3.\\n      #\\n      # A named volume, not /dstack/user_config, and not an inline compose config:\\n      # both of those are re-materialised from the deployment's copy whenever the\\n      # container is recreated, which would silently revert a change the controller\\n      # had already recorded in RTMR3 and leave the on-chain record describing a\\n      # file that no longer says that. broker-config-init writes into this volume\\n      # once and then leaves it alone.\\n      - testnet-broker-config:/etc/config\\n      - /var/run/dstack.sock:/var/run/dstack.sock\\n      - /var/run/docker.sock:/var/run/docker.sock\\n      - zg-tee:/var/run/zg-tee\\n      - zg-tee-ro:/var/run/zg-tee-ro\\n      - testnet-controller-logs:/var/log/inference\\n    depends_on:\\n      # Without this the controller can start before its config exists, and a\\n      # missing config file is not an error to loadConfig \u2014 it returns defaults,\\n      # where controller.enable is false and adminAddresses is empty. The container\\n      # would look healthy while serving nothing, which is the whole deployment.\\n      broker-config-init:\\n        condition: service_completed_successfully\\n    command: 0g-controller\\n    networks:\\n      - default\\n    healthcheck:\\n      test: [\\\"CMD-SHELL\\\", \\\"grep -q '0g-controller' /proc/1/cmdline\\\"]\\n      interval: 30s\\n      timeout: 5s\\n      retries: 3\\n      start_period: 30s\\n    restart: unless-stopped\\n\\n  prometheus-init:\\n    logging:\\n      driver: \\\"json-file\\\"\\n      options:\\n        max-size: \\\"50m\\\"\\n        max-file: \\\"3\\\"\\n    # Same digest as broker-config-init, so pinning costs nothing extra to maintain.\\n    # This one holds the ARMS credentials the rendered PROMETHEUS_CONFIG carries.\\n    image: alpine:3.18@sha256:de0eb0b3f2a47ba1eb89389859a9bd88b28e82f5826b6969ad604979713c2d4f\\n    environment:\\n      - TESTNET_PROMETHEUS_CONFIG=${TESTNET_PROMETHEUS_CONFIG:-}\\n    volumes:\\n      - testnet-prometheus-config:/tmp\\n    command: |\\n      sh -c 'if [ -n \\\"$$TESTNET_PROMETHEUS_CONFIG\\\" ]; then\\n        echo \\\"$$TESTNET_PROMETHEUS_CONFIG\\\" | base64 -d > /tmp/prometheus.yml\\n      else\\n        cat > /tmp/prometheus.yml << \\\"EOF\\\"\\n      global:\\n        scrape_interval: 15s\\n      scrape_configs:\\n        - job_name: \\\"0g-serving\\\"\\n          static_configs:\\n            - targets: [\\\"0g-serving-provider-broker:3080\\\", \\\"0g-serving-provider-event:3081\\\"]\\n      EOF\\n      fi'\\n\\n  prometheus:\\n    logging:\\n      driver: \\\"json-file\\\"\\n      options:\\n        max-size: \\\"50m\\\"\\n        max-file: \\\"3\\\"\\n    image: prom/prometheus:v2.45.2@sha256:8cf63a779c484564428c8ab5aa61899f41b72e92232d930b2b001661d978bed8\\n    restart: unless-stopped\\n    volumes:\\n      - testnet-prometheus-config:/etc/prometheus\\n    # No ports, same reason as mysql \u2014 and Prometheus has no authentication at\\n    # all, so publishing it served /api/v1/query to anyone. Grafana queries it\\n    # over the compose network; remote_write pushes out, nothing needs to reach in.\\n    networks:\\n      - default\\n    healthcheck:\\n      test:\\n        [\\n          \\\"CMD\\\",\\n          \\\"wget\\\",\\n          \\\"--no-verbose\\\",\\n          \\\"--tries=1\\\",\\n          \\\"--spider\\\",\\n          \\\"http://localhost:9090/-/healthy\\\",\\n        ]\\n      interval: 30s\\n      timeout: 10s\\n      retries: 3\\n      start_period: 30s\\n    depends_on:\\n      prometheus-init:\\n        condition: service_completed_successfully\\n\\n  grafana:\\n    logging:\\n      driver: \\\"json-file\\\"\\n      options:\\n        max-size: \\\"50m\\\"\\n        max-file: \\\"3\\\"\\n    image: grafana/grafana-oss:11.4.0@sha256:d8ea37798ccc41061a62ab080f2676dda6bf7815558499f901bdb0f533a456fb\\n    restart: unless-stopped\\n    volumes:\\n      - ./grafana/provisioning:/etc/grafana/provisioning\\n      - ./grafana/dashboards:/var/lib/grafana/dashboards\\n    # No ports. Published, this was admin/admin on the public internet by way of\\n    # the gateway. Reach it by forwarding the port over the phala CLI, or publish\\n    # it again only together with the gateway's restrict mode and a real password\\n    # in GF_SECURITY_ADMIN_PASSWORD.\\n    environment:\\n      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}\\n    networks:\\n      - default\\n    healthcheck:\\n      test:\\n        [\\n          \\\"CMD-SHELL\\\",\\n          \\\"curl -f http://localhost:3000/api/health || wget -q --spider http://localhost:3000/api/health\\\",\\n        ]\\n      interval: 30s\\n      timeout: 10s\\n      retries: 3\\n      start_period: 60s\\n    depends_on:\\n      prometheus:\\n        condition: service_healthy\\n\\n  # NVIDIA GPU metrics exporter. Scraped by prometheus at dcgm-exporter:9400.\\n  # Exposes GPU utilization, memory used, temperature, power, PCIe throughput.\\n  dcgm-exporter:\\n    logging:\\n      driver: \\\"json-file\\\"\\n      options:\\n        max-size: \\\"50m\\\"\\n        max-file: \\\"3\\\"\\n    image: nvcr.io/nvidia/k8s/dcgm-exporter:3.3.5-3.4.0-ubuntu22.04@sha256:ab1e183c2ccd5820db379027f58cb928af29c2e8a87dd6decc39afac9f15d677\\n    restart: unless-stopped\\n    runtime: nvidia\\n    environment:\\n      - NVIDIA_VISIBLE_DEVICES=all\\n      - DCGM_EXPORTER_NO_HOSTNAME=1\\n    # No cap_add: SYS_ADMIN only unlocks the DCP profiling metrics (SM occupancy,\\n    # tensor-core activity). Utilisation, memory, temperature and power do not need it,\\n    # and a capability beyond the default set is a blocking finding in the compose review.\\n    networks:\\n      - default\\n    expose:\\n      - 9400\\n    depends_on:\\n      prometheus:\\n        condition: service_healthy\\n\\nvolumes:\\n  testnet-broker-config:\\n  # Named rather than ./logs/* bind mounts: a relative path depends on the directory the\\n  # deployment was brought up from, which the manifest does not state.\\n  testnet-broker-logs:\\n  testnet-event-logs:\\n  testnet-controller-logs:\\n  testnet-mysql-data:\\n  testnet-prometheus-config:\\n  # Carries the controller's attestation socket. Exactly three services may mount\\n  # it: the controller that serves it, and the broker and event service that use\\n  # it. That socket signs any 32-byte hash under the running broker image's key,\\n  # so a fourth container mounting it could mint response proofs attributed to a\\n  # reviewed image \u2014 and nothing in RTMR3 would record that container's existence.\\n  zg-tee:\\n  # The ingress's socket from the same controller: GetQuote and Info forwarded and\\n  # nothing answered locally, so the one container that mounts it can neither write\\n  # RTMR3 (no dstack.sock) nor sign as the broker (no /Sign).\\n  zg-tee-ro:\\n  testnet-cert-data:\\n\\nnetworks:\\n  default:\\n    name: 0g-serving-network\\n    external: false\\n\\n# rev 5: v0.5.4 release image\\n\",\"features\":[\"kms\",\"tproxy-net\"],\"gateway_enabled\":true,\"kms_enabled\":true,\"local_key_provider_enabled\":false,\"manifest_version\":2,\"name\":\"\",\"no_instance_id\":false,\"pre_launch_script\":\"#!/bin/bash\\necho \\\"----------------------------------------------\\\"\\necho \\\"Running Phala Cloud Pre-Launch Script v0.0.20\\\"\\necho \\\"----------------------------------------------\\\"\\nset -e\\n\\n# Function: notify host\\n\\nnotify_host() {\\n    if command -v dstack-util >/dev/null 2>&1; then\\n        dstack-util notify-host -e \\\"$1\\\" -d \\\"$2\\\"\\n    else\\n        tdxctl notify-host -e \\\"$1\\\" -d \\\"$2\\\"\\n    fi\\n}\\n\\nnotify_host_hoot_info() {\\n    notify_host \\\"boot.progress\\\" \\\"$1\\\"\\n}\\n\\nnotify_host_hoot_error() {\\n    notify_host \\\"boot.error\\\" \\\"$1\\\"\\n}\\n\\n# Function: Perform Docker cleanup\\nperform_cleanup() {\\n    echo \\\"Pruning unused images\\\"\\n    docker image prune -af\\n    echo \\\"Pruning unused volumes\\\"\\n    docker volume prune -f\\n    notify_host_hoot_info \\\"docker cleanup completed\\\"\\n}\\n\\n# Function: Check Docker login status without exposing credentials\\ncheck_docker_login() {\\n    local registry=\\\"${1-}\\\"\\n\\n    # When registry is specified, check auth entry for that registry in Docker config\\n    if [[ -n \\\"$registry\\\" ]]; then\\n        local docker_config_path=\\\"${DOCKER_CONFIG:-${HOME:-}/.docker}/config.json\\\"\\n        if [[ -f \\\"$docker_config_path\\\" ]] && grep -q \\\"$registry\\\" \\\"$docker_config_path\\\"; then\\n            return 0\\n        else\\n            return 1\\n        fi\\n    fi\\n\\n    # Fallback check when no explicit registry is provided\\n    if docker info 2>/dev/null | grep -q \\\"Username\\\"; then\\n        return 0\\n    else\\n        return 1\\n    fi\\n}\\n\\n# Function: print the SHA256 fingerprint of every authorized key\\n#\\n# Output matches `ssh-keygen -lf` and the fingerprints GitHub and Phala Cloud\\n# display, so an operator can match the boot log against the account's key list.\\n# The guest image ships neither ssh-keygen nor a base64 applet (BusyBox has\\n# base32 only), so openssl does both the decode and the digest.\\nprint_authorized_key_fingerprints() {\\n    local file=\\\"$1\\\"\\n    if ! command -v openssl >/dev/null 2>&1; then\\n        echo \\\"openssl not available; skipping SSH key fingerprints\\\"\\n        return 0\\n    fi\\n\\n    # Locals start unset under bash; initialize so set -u (inherited from\\n    # dstack app-compose.sh source) does not trip the read loop guard.\\n    local key_type=\\\"\\\" blob=\\\"\\\" comment=\\\"\\\" decoded_bytes=\\\"\\\" fingerprint=\\\"\\\"\\n    # `|| [[ -n \\\"$key_type\\\" ]]` keeps the final line when the file does not end\\n    # with a newline; read returns non-zero there but still fills the variables.\\n    while read -r key_type blob comment || [[ -n \\\"$key_type\\\" ]]; do\\n        if [[ -z \\\"$blob\\\" ]]; then\\n            continue\\n        fi\\n        # openssl exits 0 on undecodable input and emits nothing, which would\\n        # otherwise print the SHA256 of the empty string as a real fingerprint.\\n        decoded_bytes=$(printf '%s' \\\"$blob\\\" | openssl base64 -d -A 2>/dev/null | wc -c || true)\\n        if [[ \\\"$decoded_bytes\\\" -eq 0 ]]; then\\n            echo \\\"  $key_type <unreadable key>\\\"\\n            continue\\n        fi\\n        fingerprint=$(printf '%s' \\\"$blob\\\" | openssl base64 -d -A 2>/dev/null | openssl dgst -sha256 -binary 2>/dev/null | openssl base64 -A 2>/dev/null | tr -d '=' || true)\\n        echo \\\"  $key_type SHA256:$fingerprint\\\"\\n    done < \\\"$file\\\"\\n}\\n\\n# Main logic starts here\\necho \\\"Starting login process...\\\"\\n\\n# Optional env vars below use ${VAR-} / ${VAR:-} so this script stays safe when\\n# app-compose.sh sources it under `set -euo pipefail` without registry/SSH/root\\n# credentials set. Bare \\\"$VAR\\\" throws \\\"unbound variable\\\" under nounset.\\nDOCKER_REGISTRY_TARGET=\\\"${DSTACK_DOCKER_REGISTRY:-docker.io}\\\"\\n\\n# Check if Docker credentials exist\\nif [[ -n \\\"${DSTACK_DOCKER_USERNAME-}\\\" && -n \\\"${DSTACK_DOCKER_PASSWORD-}\\\" ]]; then\\n    echo \\\"Docker credentials found\\\"\\n    echo \\\"Target Docker registry: $DOCKER_REGISTRY_TARGET\\\"\\n\\n    # Check if already logged in\\n    if check_docker_login \\\"${DSTACK_DOCKER_REGISTRY-}\\\"; then\\n        echo \\\"Already logged in to Docker registry: $DOCKER_REGISTRY_TARGET\\\"\\n    else\\n        echo \\\"Logging in to Docker registry: $DOCKER_REGISTRY_TARGET\\\"\\n        # Login without exposing password in process list\\n        if [[ -n \\\"${DSTACK_DOCKER_REGISTRY-}\\\" ]]; then\\n            if ! echo \\\"$DSTACK_DOCKER_PASSWORD\\\" | docker login -u \\\"$DSTACK_DOCKER_USERNAME\\\" --password-stdin \\\"$DSTACK_DOCKER_REGISTRY\\\"; then\\n                echo \\\"Docker login failed: $DOCKER_REGISTRY_TARGET\\\"\\n                notify_host_hoot_error \\\"docker login failed\\\"\\n                exit 1\\n            fi\\n        elif ! echo \\\"$DSTACK_DOCKER_PASSWORD\\\" | docker login -u \\\"$DSTACK_DOCKER_USERNAME\\\" --password-stdin; then\\n            echo \\\"Docker login failed: $DOCKER_REGISTRY_TARGET\\\"\\n            notify_host_hoot_error \\\"docker login failed\\\"\\n            exit 1\\n        fi\\n        echo \\\"Docker login successful: $DOCKER_REGISTRY_TARGET\\\"\\n    fi\\n# Check if AWS ECR credentials exist\\nelif [[ -n \\\"${DSTACK_AWS_ACCESS_KEY_ID-}\\\" && -n \\\"${DSTACK_AWS_SECRET_ACCESS_KEY-}\\\" && -n \\\"${DSTACK_AWS_REGION-}\\\" && -n \\\"${DSTACK_AWS_ECR_REGISTRY-}\\\" ]]; then\\n    echo \\\"AWS ECR credentials found\\\"\\n\\n    # Check if AWS CLI is installed\\n    if [ ! -f \\\"./aws/dist/aws\\\" ]; then\\n        notify_host_hoot_info \\\"awscli not installed, installing...\\\"\\n        echo \\\"AWS CLI not installed, installing...\\\"\\n        if ! curl \\\"https://awscli.amazonaws.com/awscli-exe-linux-x86_64-2.24.14.zip\\\" -o \\\"awscliv2.zip\\\"; then\\n            echo \\\"AWS CLI download failed\\\"\\n            notify_host_hoot_error \\\"awscli install failed\\\"\\n            exit 1\\n        fi\\n        if ! echo \\\"6ff031a26df7daebbfa3ccddc9af1450 awscliv2.zip\\\" | md5sum -c; then\\n            echo \\\"MD5 checksum failed\\\"\\n            notify_host_hoot_error \\\"awscli install failed\\\"\\n            exit 1\\n        fi\\n        unzip awscliv2.zip &> /dev/null\\n    else\\n        echo \\\"AWS CLI is already installed: ./aws/dist/aws\\\"\\n    fi\\n\\n    # Set AWS credentials as environment variables\\n    export AWS_ACCESS_KEY_ID=\\\"$DSTACK_AWS_ACCESS_KEY_ID\\\"\\n    export AWS_SECRET_ACCESS_KEY=\\\"$DSTACK_AWS_SECRET_ACCESS_KEY\\\"\\n    export AWS_DEFAULT_REGION=\\\"$DSTACK_AWS_REGION\\\"\\n\\n    # Set session token if provided (for temporary credentials)\\n    if [[ -n \\\"${DSTACK_AWS_SESSION_TOKEN-}\\\" ]]; then\\n        echo \\\"AWS session token found, using temporary credentials\\\"\\n        export AWS_SESSION_TOKEN=\\\"$DSTACK_AWS_SESSION_TOKEN\\\"\\n    fi\\n\\n    # Test AWS credentials before attempting ECR login\\n    echo \\\"Testing AWS credentials...\\\"\\n    if ! ./aws/dist/aws sts get-caller-identity &> /dev/null; then\\n        echo \\\"AWS credentials test failed\\\"\\n        # For session token credentials, this might be expected if they're expired\\n        # Log warning but don't fail startup\\n        if [[ -n \\\"${DSTACK_AWS_SESSION_TOKEN-}\\\" ]]; then\\n            echo \\\"Warning: AWS temporary credentials may have expired, continuing startup\\\"\\n            notify_host_hoot_info \\\"AWS temporary credentials may have expired\\\"\\n        else\\n            echo \\\"AWS credentials test failed\\\"\\n            notify_host_hoot_error \\\"Invalid AWS credentials\\\"\\n            exit 1\\n        fi\\n    else\\n        echo \\\"Logging in to AWS ECR...\\\"\\n        if ./aws/dist/aws ecr get-login-password --region \\\"$DSTACK_AWS_REGION\\\" | docker login --username AWS --password-stdin \\\"$DSTACK_AWS_ECR_REGISTRY\\\"; then\\n            echo \\\"AWS ECR login successful\\\"\\n            notify_host_hoot_info \\\"AWS ECR login successful\\\"\\n        else\\n            echo \\\"AWS ECR login failed\\\"\\n            # For session token credentials, don't fail startup if login fails\\n            if [[ -n \\\"${DSTACK_AWS_SESSION_TOKEN-}\\\" ]]; then\\n                echo \\\"Warning: AWS ECR login failed with temporary credentials, continuing startup\\\"\\n                notify_host_hoot_info \\\"AWS ECR login failed with temporary credentials\\\"\\n            else\\n                notify_host_hoot_error \\\"AWS ECR login failed\\\"\\n                exit 1\\n            fi\\n        fi\\n    fi\\nfi\\n\\nperform_cleanup\\n\\n#\\n# GHCR image pull access verification (pure HTTP, no docker daemon)\\n#\\nif [[ \\\"$DOCKER_REGISTRY_TARGET\\\" == \\\"ghcr.io\\\" && -n \\\"${DSTACK_DOCKER_USERNAME-}\\\" && -n \\\"${DSTACK_DOCKER_PASSWORD-}\\\" ]]; then\\n    # Strip surrounding quotes from compose image refs. Two tr calls keep the\\n    # intent obvious inside this Python string (no quote-concatenation idiom).\\n    COMPOSE_IMAGES=$(grep 'image:' /dstack/docker-compose.yaml 2>/dev/null | awk '{print $2}' | tr -d '\\\"' | tr -d \\\"'\\\" || true)\\n    HEADER=\\\"Accept: application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.docker.distribution.manifest.v2+json\\\"\\n    for img in $COMPOSE_IMAGES; do\\n        [[ \\\"$img\\\" != ghcr.io/* ]] && continue\\n        ref=\\\"${img#ghcr.io/}\\\"\\n        # Digest-pinned refs (repo@sha256:...) use the digest as the manifest\\n        # reference; tag refs (repo:tag) use the tag, defaulting to latest.\\n        if [[ \\\"$ref\\\" == *@* ]]; then\\n            repo=\\\"${ref%%@*}\\\"\\n            reference=\\\"${ref#*@}\\\"\\n        else\\n            repo=\\\"${ref%%:*}\\\"\\n            reference=\\\"${ref##*:}\\\"\\n            [[ \\\"$reference\\\" == \\\"$ref\\\" ]] && reference=\\\"latest\\\"\\n        fi\\n        echo \\\"Verifying GHCR pull access: $img\\\"\\n        token=$(curl -sf -u \\\"$DSTACK_DOCKER_USERNAME:$DSTACK_DOCKER_PASSWORD\\\" \\\"https://ghcr.io/token?service=ghcr.io&scope=repository:${repo}:pull\\\" | jq -r '.token // empty' || true)\\n        if [[ -z \\\"${token-}\\\" ]]; then\\n            echo \\\"ERROR: GHCR token exchange failed for $img\\\"\\n            notify_host_hoot_error \\\"GHCR token exchange failed: $img\\\"\\n            exit 1\\n        fi\\n        http_code=$(curl -s -o /dev/null -w \\\"%{http_code}\\\" -H \\\"Authorization: Bearer $token\\\" -H \\\"$HEADER\\\" \\\"https://ghcr.io/v2/${repo}/manifests/${reference}\\\")\\n        if [[ \\\"$http_code\\\" != \\\"200\\\" ]]; then\\n            echo \\\"ERROR: GHCR pull access denied for $img (HTTP $http_code)\\\"\\n            notify_host_hoot_error \\\"GHCR pull access denied: $img (HTTP $http_code)\\\"\\n            exit 1\\n        fi\\n        echo \\\"GHCR pull access OK: $img\\\"\\n    done\\nfi\\n\\n#\\n# Pull latest images from docker-compose.yaml so existing CVMs pick up new tags.\\n# Pull is fail-soft: short-lived tokens may expire between login and pull, but\\n# falling back to already-cached images is preferable to blocking boot.\\n#\\necho \\\"Images before pull:\\\"\\ndocker images --format '{{.Repository}}:{{.Tag}} {{.ID}} ({{.CreatedSince}})'\\n\\necho \\\"Pulling latest images from /dstack/docker-compose.yaml...\\\"\\nif docker compose -f /dstack/docker-compose.yaml pull; then\\n    echo \\\"docker compose pull completed\\\"\\n    notify_host_hoot_info \\\"docker compose pull completed\\\"\\nelse\\n    echo \\\"WARNING: docker compose pull failed; continuing with existing images\\\"\\n    notify_host_hoot_info \\\"docker compose pull failed; using existing images\\\"\\nfi\\n\\necho \\\"Images after pull:\\\"\\ndocker images --format '{{.Repository}}:{{.Tag}} {{.ID}} ({{.CreatedSince}})'\\n\\n#\\n# Set root password.\\n#\\necho \\\"Setting root password..\\\"\\n\\n# Check if password files are writable\\nPASSWD_WRITABLE=true\\nif [ ! -w /etc/passwd ]; then\\n    echo \\\"Warning: /etc/passwd is read-only\\\"\\n    PASSWD_WRITABLE=false\\nfi\\nif [ ! -w /etc/shadow ]; then\\n    echo \\\"Warning: /etc/shadow is read-only\\\"\\n    PASSWD_WRITABLE=false\\nfi\\n\\nif [ \\\"$PASSWD_WRITABLE\\\" = \\\"false\\\" ]; then\\n    echo \\\"Skipping password setup due to read-only file system\\\"\\nelse\\n    # Check if chpasswd is available\\n    if command -v chpasswd >/dev/null 2>&1; then\\n        echo \\\"Using chpasswd method\\\"\\n\\n        if [ -n \\\"${DSTACK_ROOT_PASSWORD-}\\\" ]; then\\n            echo \\\"Setting root password from user..\\\"\\n            echo \\\"root:$DSTACK_ROOT_PASSWORD\\\" | chpasswd\\n            unset DSTACK_ROOT_PASSWORD\\n            echo \\\"Root password set/updated from DSTACK_ROOT_PASSWORD\\\"\\n        elif [ -z \\\"$(grep '^root:' /etc/shadow 2>/dev/null | cut -d: -f2)\\\" ]; then\\n            echo \\\"Setting random root password..\\\"\\n            # dstack guest busybox lacks head -c (FANCY_HEAD off); dd is the\\n            # last pipeline command, so its 0 status masks tr's SIGPIPE exit.\\n            DSTACK_ROOT_PASSWORD=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | dd bs=1 count=32 2>/dev/null)\\n            echo \\\"root:$DSTACK_ROOT_PASSWORD\\\" | chpasswd\\n            unset DSTACK_ROOT_PASSWORD\\n            echo \\\"Root password set (random auto-init)\\\"\\n        else\\n            echo \\\"Root password already set; no changes.\\\"\\n        fi\\n    else\\n        # No chpasswd: do not pipe into interactive passwd(1). It often reads\\n        # /dev/tty and fails with \\\"password for root is unchanged\\\" during boot.\\n        echo \\\"Using passwd method\\\"\\n\\n        if [ -n \\\"${DSTACK_ROOT_PASSWORD-}\\\" ]; then\\n            echo \\\"Setting root password from user..\\\"\\n            if command -v passwd >/dev/null 2>&1 && passwd --help 2>&1 | grep -q -- '--stdin'; then\\n                echo \\\"$DSTACK_ROOT_PASSWORD\\\" | passwd --stdin root\\n            elif command -v openssl >/dev/null 2>&1; then\\n                # busybox passwd has no --stdin; write the SHA-512 crypt hash\\n                # into /etc/shadow directly instead of driving interactive passwd.\\n                HASHED_ROOT_PASSWORD=$(openssl passwd -6 \\\"$DSTACK_ROOT_PASSWORD\\\")\\n                sed -i \\\"s|^root:[^:]*:|root:${HASHED_ROOT_PASSWORD}:|\\\" /etc/shadow\\n                unset HASHED_ROOT_PASSWORD\\n            else\\n                echo \\\"Error: cannot set DSTACK_ROOT_PASSWORD non-interactively\\\"\\n                echo \\\"Need chpasswd, passwd --stdin, or openssl\\\"\\n                exit 1\\n            fi\\n            unset DSTACK_ROOT_PASSWORD\\n            echo \\\"Root password set/updated from DSTACK_ROOT_PASSWORD\\\"\\n        elif [ -z \\\"$(grep '^root:' /etc/shadow 2>/dev/null | cut -d: -f2)\\\" ]; then\\n            # Never lock the account here: sshd built without PAM (dstack dev\\n            # images) treats a locked account as \\\"deny all authentication\\\",\\n            # which breaks public-key SSH too. Set a discarded random password\\n            # by writing its crypt hash into /etc/shadow directly.\\n            if command -v openssl >/dev/null 2>&1; then\\n                echo \\\"Setting random root password..\\\"\\n                DSTACK_ROOT_PASSWORD=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | dd bs=1 count=32 2>/dev/null)\\n                HASHED_ROOT_PASSWORD=$(openssl passwd -6 \\\"$DSTACK_ROOT_PASSWORD\\\")\\n                sed -i \\\"s|^root:[^:]*:|root:${HASHED_ROOT_PASSWORD}:|\\\" /etc/shadow\\n                unset DSTACK_ROOT_PASSWORD HASHED_ROOT_PASSWORD\\n                echo \\\"Root password set (random auto-init)\\\"\\n            else\\n                echo \\\"Warning: no openssl to hash a random password; leaving root password empty\\\"\\n            fi\\n        else\\n            echo \\\"Root password already set; no changes.\\\"\\n        fi\\n    fi\\nfi\\n\\n#\\n# Set SSH authorized keys\\n#\\nif mkdir -p /home/root/.ssh 2>/dev/null; then\\n    if [[ -n \\\"${DSTACK_ROOT_PUBLIC_KEY-}\\\" ]]; then\\n        echo \\\"$DSTACK_ROOT_PUBLIC_KEY\\\" > /home/root/.ssh/authorized_keys\\n        unset DSTACK_ROOT_PUBLIC_KEY\\n        echo \\\"Root public key set\\\"\\n    fi\\n    if [[ -n \\\"${DSTACK_AUTHORIZED_KEYS-}\\\" ]]; then\\n        echo \\\"$DSTACK_AUTHORIZED_KEYS\\\" > /home/root/.ssh/authorized_keys\\n        unset DSTACK_AUTHORIZED_KEYS\\n        echo \\\"Root authorized_keys set\\\"\\n    fi\\n\\n    if [[ -f /dstack/user_config ]] && jq empty /dstack/user_config 2>/dev/null; then\\n        if [[ $(jq 'has(\\\"ssh_authorized_keys\\\")' /dstack/user_config 2>/dev/null) == \\\"true\\\" ]]; then\\n            # jq -r terminates the value with a newline; jq -j does not, which\\n            # both concatenated the next appended key onto the same line and\\n            # made line-based counting report one key fewer than the file holds.\\n            jq -r '.ssh_authorized_keys' /dstack/user_config >> /home/root/.ssh/authorized_keys\\n            # Drop duplicates and the blank line an empty key list produces.\\n            sort -u /home/root/.ssh/authorized_keys > /home/root/.ssh/authorized_keys.tmp\\n            mv /home/root/.ssh/authorized_keys.tmp /home/root/.ssh/authorized_keys\\n            KEY_COUNT=$(grep -c '^[^[:space:]]' /home/root/.ssh/authorized_keys || true)\\n            echo \\\"Set root authorized_keys from user preferences, total $KEY_COUNT keys\\\"\\n            print_authorized_key_fingerprints /home/root/.ssh/authorized_keys\\n        fi\\n    fi\\nelse\\n    echo \\\"Warning: Cannot create /home/root/.ssh directory (read-only file system?)\\\"\\n    echo \\\"Skipping SSH key setup\\\"\\nfi\\n\\nif [[ -S /var/run/dstack.sock ]]; then\\n    export DSTACK_APP_ID=$(curl -s --unix-socket /var/run/dstack.sock http://dstack/Info | jq -j .app_id)\\nelif [[ -S /var/run/tappd.sock ]]; then\\n    export DSTACK_APP_ID=$(curl -s --unix-socket /var/run/tappd.sock http://dstack/prpc/Tappd.Info | jq -j .app_id)\\nfi\\n# Check if DSTACK_GATEWAY_DOMAIN is not set, try to get it from user_config or app-compose.json\\n# Priority: user_config > app-compose.json\\nif [[ -z \\\"${DSTACK_GATEWAY_DOMAIN-}\\\" ]]; then\\n    # First try to get from /dstack/user_config if it exists and is valid JSON\\n    if [[ -f /dstack/user_config ]] && jq empty /dstack/user_config 2>/dev/null; then\\n        if [[ $(jq 'has(\\\"default_gateway_domain\\\")' /dstack/user_config 2>/dev/null) == \\\"true\\\" ]]; then\\n            export DSTACK_GATEWAY_DOMAIN=$(jq -j '.default_gateway_domain' /dstack/user_config)\\n        fi\\n    fi\\n\\n    # If still not set, try to get from app-compose.json\\n    if [[ -z \\\"${DSTACK_GATEWAY_DOMAIN-}\\\" ]] && [[ -f app-compose.json ]] && [[ $(jq 'has(\\\"default_gateway_domain\\\")' app-compose.json) == \\\"true\\\" ]]; then\\n        export DSTACK_GATEWAY_DOMAIN=$(jq -j '.default_gateway_domain' app-compose.json)\\n    fi\\nfi\\nif [[ -n \\\"${DSTACK_GATEWAY_DOMAIN-}\\\" && -n \\\"${DSTACK_APP_ID-}\\\" ]]; then\\n    export DSTACK_APP_DOMAIN=$DSTACK_APP_ID\\\".\\\"$DSTACK_GATEWAY_DOMAIN\\nfi\\n\\necho \\\"----------------------------------------------\\\"\\necho \\\"Script execution completed\\\"\\necho \\\"----------------------------------------------\\\"\\n\",\"public_logs\":false,\"public_sysinfo\":true,\"public_tcbinfo\":true,\"runner\":\"docker-compose\",\"secure_time\":false,\"storage_fs\":\"zfs\",\"tproxy_enabled\":true}"
+ }
+}
