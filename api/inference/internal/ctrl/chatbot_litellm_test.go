@@ -1,6 +1,12 @@
 package ctrl
 
-import "testing"
+import (
+	"context"
+	"testing"
+
+	"github.com/0glabs/0g-serving-broker/inference/config"
+	"github.com/0glabs/0g-serving-broker/inference/model"
+)
 
 func TestLiteLLMUsageToUsage(t *testing.T) {
 	cases := []struct {
@@ -143,5 +149,38 @@ func TestMergeLiteLLMUsage_CacheCreationBreakdown(t *testing.T) {
 	usage := acc.toUsage()
 	if usage.CacheWriteTokens != 200 || usage.CacheWrite1hTokens != 300 {
 		t.Errorf("write split = %d/%d, want 200/300", usage.CacheWriteTokens, usage.CacheWrite1hTokens)
+	}
+}
+
+// An Anthropic /v1/messages stream whose FIRST line is an SSE comment — what
+// RedPill emits (": PROCESSING") while a long prompt prefills — must still be
+// detected as Anthropic. Detection used to look at the first non-empty line
+// only, so the comment defaulted it to OpenAI and "event: message_start" hit
+// json.Unmarshal ("invalid character 'e' looking for beginning of value"),
+// dropping the whitelisted request's usage from reconciliation.
+func TestDecodeAndProcess_AnthropicStreamLeadingComment(t *testing.T) {
+	c := newChatbotTestCtrl(t, config.Service{})
+	db := &mockReconciliationDB{}
+	c.reconciliationDB = db
+
+	body := ": PROCESSING\n\n" +
+		"event: message_start\n" +
+		`data: {"type":"message_start","message":{"id":"req_1","type":"message","role":"assistant","content":[],"model":"z-ai/glm-5.3","usage":{"input_tokens":0,"output_tokens":0}}}` + "\n\n" +
+		"event: content_block_delta\n" +
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}` + "\n\n" +
+		"event: message_delta\n" +
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":14,"output_tokens":45}}` + "\n\n" +
+		"event: message_stop\n" +
+		`data: {"type": "message_stop"}` + "\n\n"
+
+	reqModel := model.Request{IsWhitelisted: true, ServiceName: "chatbot", RequestHash: "h"}
+	if err := c.decodeAndProcess(context.Background(), []byte(body), "", model.User{}, "0", true, reqModel); err != nil {
+		t.Fatalf("decodeAndProcess: %v", err)
+	}
+	if len(db.calls) != 1 {
+		t.Fatalf("want 1 reconciliation row, got %d", len(db.calls))
+	}
+	if got := db.calls[0]; got.InputCount != 14 || got.OutputCount != 45 {
+		t.Fatalf("usage = in %d / out %d, want 14 / 45", got.InputCount, got.OutputCount)
 	}
 }
