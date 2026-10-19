@@ -37,7 +37,7 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 		if err != nil {
 			return nil, errors.Wrap(err, "ensure stream options")
 		}
-		reqBody = modifiedBody
+		reqBody = developerAsSystem(modifiedBody)
 
 		// LoRA request rewriting: rewrite ft-* model to base model + lora_adapter_name.
 		// This must happen BEFORE EnforceConfiguredModel so the model field matches the base model.
@@ -1157,6 +1157,57 @@ func (c *Ctrl) StripBodyFields(body []byte, resolvedModel string) ([]byte, error
 // by several upstreams strips ITS upstream's per-entry fields, not the first
 // entry's. identity=="" is byte-identical to StripBodyFields (single-entry /
 // legacy paths).
+// developerAsSystem renames chat messages with role "developer" to "system".
+//
+// "developer" is OpenAI's name for system instructions, and clients built on
+// the OpenAI SDK send it. The upstreams behind this broker mostly do not know
+// it: the GLM chat template SGLang renders drops the message silently (the
+// model never sees the instructions; prompt_tokens shows it), and Tencent
+// TokenHub drops it on short requests and answers 400 "rejected by an
+// internal MaaS component" on long ones. For upstreams that do know it
+// (OpenAI, Baidu) the two roles mean the same thing, so the rename needs no
+// per-model switch.
+//
+// Runs on the plaintext after E2EE unsealing, so it covers sealed requests;
+// their response signature binds the ciphertext, not this body. Only the role
+// value changes; every other byte of each message is kept as sent. Bodies
+// without a messages array (Responses input, embeddings) and Anthropic
+// /v1/messages (no developer role) pass through unchanged.
+func developerAsSystem(body []byte) []byte {
+	if !bytes.Contains(body, []byte(`"developer"`)) {
+		return body
+	}
+	var top map[string]json.RawMessage
+	if json.Unmarshal(body, &top) != nil {
+		return body
+	}
+	var msgs []map[string]json.RawMessage
+	if json.Unmarshal(top["messages"], &msgs) != nil {
+		return body
+	}
+	changed := false
+	for _, m := range msgs {
+		var role string
+		if json.Unmarshal(m["role"], &role) == nil && role == "developer" {
+			m["role"] = json.RawMessage(`"system"`)
+			changed = true
+		}
+	}
+	if !changed {
+		return body
+	}
+	raw, err := json.Marshal(msgs)
+	if err != nil {
+		return body
+	}
+	top["messages"] = raw
+	out, err := json.Marshal(top)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
 func (c *Ctrl) StripBodyFieldsFor(body []byte, resolvedModel, identity string) ([]byte, error) {
 	fields := c.Service.EffectiveStripBodyFieldsFor(resolvedModel, identity)
 	if len(fields) == 0 || len(body) == 0 {
