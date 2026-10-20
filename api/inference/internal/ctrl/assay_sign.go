@@ -17,7 +17,7 @@ import (
 // keccak256(exact body bytes) by the TEE settlement key — the address already
 // bound into the broker's quote report_data AND registered on-chain as the
 // service's teeSigner, so the assay verifies against getService(provider)
-// with zero new trust roots (做法 B, docs/spml-tls-implplan.md §5).
+// with zero new trust roots (做法 B, docs/spml-design.en.md §5).
 //
 // What this buys: the assay stops answering unauthenticated /v1/payout/invoice
 // and /v1/settlement/check callers — anti info-leak, anti noise, and a signed

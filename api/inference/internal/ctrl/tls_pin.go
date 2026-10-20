@@ -12,7 +12,7 @@ import (
 // pinnedTLSConfig returns a tls.Config that authenticates the peer by
 // comparing sha256(leaf SubjectPublicKeyInfo) against pin, REPLACING CA and
 // hostname validation — the assay verifier's TLS key is attested through the
-// tapp KMS derivation (docs/spml-broker-assay-tls.md §2), so no CA will ever
+// tapp KMS derivation (docs/spml-design.en.md §5), so no CA will ever
 // vouch for it. The pin applies to every TLS connection the transport makes;
 // in this deployment the shared provider client only ever dials the verifier.
 // A nil getter returns nil: default CA validation, plain http unaffected.
