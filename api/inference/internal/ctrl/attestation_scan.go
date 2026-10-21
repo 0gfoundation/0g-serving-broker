@@ -27,7 +27,7 @@ import (
 )
 
 // scanSource is the tappscan-backed attestation source
-// (assay repo docs/spml-design.en.md §7.3, chosen 2026-09-09). Instead of exec'ing
+// (assay repo docs/spml-design.md §7.3, chosen 2026-09-09). Instead of exec'ing
 // tapp-cli against the shared attestation service's policy library — a piece
 // of runtime state that was overwritten under us — the broker reads tappscan's
 // record for the assay app, checks it against two things tappscan cannot fake

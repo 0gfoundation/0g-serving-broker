@@ -93,7 +93,7 @@ func (c *Ctrl) gateSettlementWithAssay(ctx context.Context, reqs []model.Request
 	// and all nodes, and the unsettled list is not even the settlement batch,
 	// so one REJECT could void an arbitrarily large backlog. That handed any
 	// single node a way to zero the provider's revenue indefinitely at no cost
-	// to itself: cheat once per cycle. spml-design.en.md §4 step 9 always
+	// to itself: cheat once per cycle. spml-design.md §4 step 9 always
 	// specified "non-cheat requests only".
 	void := append([]string{}, invalidSigHashes...)
 
