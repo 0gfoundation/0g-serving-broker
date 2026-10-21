@@ -27,7 +27,7 @@ it.
 >   attestation_assay,tls_pin,assay_sign,settlement_assay}.go`,
 >   `internal/handler/payout.go`, `internal/db/assay_payout.go`,
 >   `model/assay_payout.go`.
-> - **Live rollout record**: the Assay repo's `docs/spml-testnet-run.md`.
+> - **Live rollout record**: the Assay repo's `docs/spml-testnet-changelog.md` (current state: `docs/spml-testnet-run.md`).
 
 ---
 
