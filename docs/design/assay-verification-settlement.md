@@ -21,7 +21,7 @@ it.
 > `spml-assay-payout` branch) and *does* change the GPU node. None of it is
 > described below.
 >
-> - **Specification**: the Assay repo's `docs/spml-design.en.md` — §4 the money
+> - **Specification**: the Assay repo's `docs/spml-design.md` — §4 the money
 >   path, §5 the three communication layers, §7 attestation gating.
 > - **Implementation here**: `internal/ctrl/{payout_assay,payout_relay,
 >   attestation_assay,tls_pin,assay_sign,settlement_assay}.go`,

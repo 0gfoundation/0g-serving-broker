@@ -1294,7 +1294,7 @@ type Config struct {
 		// threshold judgement, so it withholds settlement regardless.
 		RejectGatesSettlement bool `yaml:"rejectGatesSettlement"`
 		// VerifierKeyPin authenticates the TLS connection to the verifier
-		// (docs/spml-design.en.md §5 (TLS layer)): 0x-hex sha256 of the
+		// (docs/spml-design.md §5 (TLS layer)): 0x-hex sha256 of the
 		// verifier endpoint's SubjectPublicKeyInfo, whose authoritative
 		// source is `tapp-cli verify-app`. When set, every TLS connection
 		// the shared provider client makes checks the presented leaf
@@ -1313,7 +1313,7 @@ type Config struct {
 			// settled amount (also enforced on-chain via the cut cap).
 			VerifierCutBps int64 `yaml:"verifierCutBps"`
 		} `yaml:"payout"`
-		// Attestation (docs/spml-design.en.md §7 (attestation gate)): periodically
+		// Attestation (docs/spml-design.md §7 (attestation gate)): periodically
 		// re-attest the verifier by exec'ing `tapp-cli verify-app` and
 		// PARSING ITS OUTPUT (its exit code lies). While the latest verified
 		// snapshot is fresh, its attested "tls key" replaces VerifierKeyPin

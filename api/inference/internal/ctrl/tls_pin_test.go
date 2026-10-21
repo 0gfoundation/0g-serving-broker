@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// The acceptance checklist's "wrong pin must fail" (spml-design.en.md §7, "wrong pin must fail")
+// The acceptance checklist's "wrong pin must fail" (spml-design.md §7, "wrong pin must fail")
 // as a unit test: if someone ever drops the VerifyPeerCertificate callback,
 // InsecureSkipVerify alone would accept anything and every OTHER test would
 // still pass — this one exists to fail loudly in that world.

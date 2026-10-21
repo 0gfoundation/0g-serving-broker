@@ -116,7 +116,7 @@ func newSPMLSetup(cfg *config.Config, teeService *tee.TeeService, logger log.Log
 		assayKeyPin = pin
 	}
 
-	// Phase-2 attestor (docs/spml-design.en.md §7). Misconfig
+	// Phase-2 attestor (docs/spml-design.md §7). Misconfig
 	// panics at boot: a gate that silently never engages is worse than none.
 	var attestor *assayAttestor
 	if cfg.Assay.Attestation.Enabled {
