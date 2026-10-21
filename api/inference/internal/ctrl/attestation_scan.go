@@ -1,6 +1,7 @@
 package ctrl
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
@@ -23,6 +24,7 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient"
 
 	"github.com/0glabs/0g-serving-broker/common/log"
+	"github.com/0glabs/0g-serving-broker/common/tapp"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 )
 
@@ -39,9 +41,9 @@ import (
 // settlement and invoicing do not know which source is behind them.
 type scanSource struct {
 	cfg          config.AssayAttestation
-	provider     string // our provider address, echoed into the statement
-	verifierHost string // host:port of the assay's https endpoint (live SPKI probe)
-	scanPin      []byte
+	provider     string        // our provider address, echoed into the statement
+	verifierHost string        // host:port of the assay's https endpoint (live SPKI probe)
+	pins         *tappscanPins // tappscan's TLS pin: bootstrapped from the chain, or the config value
 	client       *http.Client
 	sign         func(hash []byte) ([]byte, error) // personal_sign by the TEE key; nil = unsigned
 	logger       log.Logger
@@ -73,6 +75,17 @@ type scanFacts struct {
 	LiveTLS       string `json:"live_tls_pubkey_sha256"`
 	ExpectedImage string `json:"expected_image"`
 	ExpectedUki   string `json:"expected_uki,omitempty"`
+	// Where tappscan's own pin came from: "chain" (bootstrapped from the
+	// TappRegistry + its attested evidence, see attestation_tappscan_pin.go),
+	// "config" (tappscan.pubkeyPin) or "none" (no pin; the fetch fails closed).
+	TappscanPinSource string `json:"tappscan_pin_source"`
+	// Present under pinSource: chain — the registry's signer and teeUrl for
+	// tappscan, when its key was verified, and the check table of that
+	// verification, so a reader can see why this pin is believed.
+	TappscanSigner     string       `json:"tappscan_signer,omitempty"`
+	TappscanTeeURL     string       `json:"tappscan_tee_url,omitempty"`
+	TappscanVerifiedAt int64        `json:"tappscan_verified_at,omitempty"`
+	TappscanBootstrap  *tapp.Result `json:"tappscan_bootstrap,omitempty"`
 }
 
 type scanEval struct {
@@ -134,9 +147,13 @@ type scanRecord struct {
 }
 
 func newScanSource(cfg config.AssayAttestation, verifierURL string, sign func([]byte) ([]byte, error), logger log.Logger) (*scanSource, error) {
-	pin, err := hex.DecodeString(strings.TrimPrefix(cfg.Tappscan.PubkeyPin, "0x"))
-	if err != nil || len(pin) != sha256.Size {
-		return nil, fmt.Errorf("assay.attestation.tappscan.pubkeyPin must be 32 bytes of hex (sha256 of tappscan's SPKI), got %q", cfg.Tappscan.PubkeyPin)
+	var pin []byte
+	if cfg.Tappscan.PubkeyPin != "" || !cfg.TappscanPinFromChain() {
+		var err error
+		pin, err = hex.DecodeString(strings.TrimPrefix(cfg.Tappscan.PubkeyPin, "0x"))
+		if err != nil || len(pin) != sha256.Size {
+			return nil, fmt.Errorf("assay.attestation.tappscan.pubkeyPin must be 32 bytes of hex (sha256 of tappscan's SPKI), got %q", cfg.Tappscan.PubkeyPin)
+		}
 	}
 	u, err := url.Parse(verifierURL)
 	if err != nil || u.Host == "" {
@@ -146,10 +163,10 @@ func newScanSource(cfg config.AssayAttestation, verifierURL string, sign func([]
 	if u.Port() == "" {
 		host += ":443"
 	}
-	s := &scanSource{cfg: cfg, verifierHost: host, scanPin: pin, sign: sign, logger: logger}
+	s := &scanSource{cfg: cfg, verifierHost: host, pins: &tappscanPins{static: pin}, sign: sign, logger: logger}
 	s.client = &http.Client{
 		Timeout:   20 * time.Second,
-		Transport: &http.Transport{TLSClientConfig: pinnedTLSConfig(func() []byte { return s.scanPin })},
+		Transport: &http.Transport{TLSClientConfig: pinnedTLSConfig(s.pins.get)},
 	}
 	return s, nil
 }
@@ -189,9 +206,15 @@ func mustABI(s string) abi.ABI {
 	return a
 }
 
-// chainSigner reads the app's current node list off the TappRegistry. Exactly
-// one node is accepted: with several, one bad quote could hide behind a good one.
+// chainSigner reads the assay app's admitted signer off the TappRegistry.
 func (s *scanSource) chainSigner(ctx context.Context) (string, error) {
+	return s.registrySingleNode(ctx, s.cfg.AppID)
+}
+
+// registrySingleNode reads an app's current node list off the TappRegistry.
+// Exactly one node is accepted: with several, one bad quote could hide behind
+// a good one.
+func (s *scanSource) registrySingleNode(ctx context.Context, appID string) (string, error) {
 	cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	cl, err := ethclient.DialContext(cctx, s.cfg.RpcURL)
@@ -199,7 +222,7 @@ func (s *scanSource) chainSigner(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("rpc: %w", err)
 	}
 	defer cl.Close()
-	data, err := tappRegistryABI.Pack("getNodeList", s.cfg.AppID)
+	data, err := tappRegistryABI.Pack("getNodeList", appID)
 	if err != nil {
 		return "", err
 	}
@@ -214,7 +237,7 @@ func (s *scanSource) chainSigner(ctx context.Context) (string, error) {
 	}
 	nodes, _ := vals[0].([]common.Address)
 	if len(nodes) != 1 {
-		return "", fmt.Errorf("registry lists %d nodes for %s; exactly 1 accepted", len(nodes), s.cfg.AppID)
+		return "", fmt.Errorf("registry lists %d nodes for %s; exactly 1 accepted", len(nodes), appID)
 	}
 	return strings.ToLower(nodes[0].Hex()), nil
 }
@@ -381,6 +404,20 @@ func evaluateScanRecord(raw []byte, in scanInputs) scanEval {
 // verifyOnce is the loop body: fetch, observe, evaluate, remember.
 func (s *scanSource) verifyOnce(ctx context.Context) attestedAssay {
 	now := time.Now()
+	if s.cfg.TappscanPinFromChain() {
+		prev := s.pins.state()
+		st := s.bootstrapTappscanPin(ctx)
+		s.pins.set(st)
+		cur := s.pins.state()
+		switch {
+		case cur.ok && (!prev.ok || !bytes.Equal(prev.pin, cur.pin)):
+			s.logger.Infof("tappscan pin bootstrapped from the chain: signer %s teeUrl %s pin %x (%s)", cur.signer, cur.teeURL, cur.pin, st.detail)
+		case !cur.ok:
+			s.logger.Warnf("tappscan pin bootstrap failed, falling back to %s pin: %s", s.pins.source(), st.detail)
+		case !st.ok:
+			s.logger.Warnf("tappscan pin bootstrap failed this cycle: %s", st.detail)
+		}
+	}
 	raw, ferr := s.fetch(ctx)
 	in := scanInputs{now: now, pinOK: ferr == nil,
 		expectedImage: s.cfg.Expected.Image, expectedUki: s.cfg.Expected.Uki,
@@ -390,6 +427,15 @@ func (s *scanSource) verifyOnce(ctx context.Context) attestedAssay {
 	ev := evaluateScanRecord(raw, in)
 	if ferr != nil {
 		ev.detail = "tappscan fetch: " + ferr.Error() + "; " + ev.detail
+	}
+	ev.facts.TappscanPinSource = s.pins.source()
+	if s.cfg.TappscanPinFromChain() {
+		ps := s.pins.state()
+		ev.facts.TappscanSigner, ev.facts.TappscanTeeURL = ps.signer, ps.teeURL
+		if ps.ok {
+			ev.facts.TappscanVerifiedAt = ps.checkedAt.Unix()
+		}
+		ev.facts.TappscanBootstrap = ps.result
 	}
 	s.mu.Lock()
 	s.last = &ev
@@ -453,7 +499,7 @@ func (s *scanSource) statement(nonce string, gatesSettlement bool) ([]byte, []by
 		ObservedAt: ev.observedAt.Unix(), Nonce: nonce,
 		Checks: ev.checks, OK: ev.ok, Detail: ev.detail, Facts: ev.facts}
 	st.Scan.URL = s.recordURL()
-	st.Scan.TlsPubkey = "0x" + hex.EncodeToString(s.scanPin)
+	st.Scan.TlsPubkey = "0x" + hex.EncodeToString(s.pins.get())
 	st.Scan.RecordSha256 = ev.recordSha
 	st.Scan.Record = string(ev.raw)
 	st.Scan.CheckedAt = ev.checkedAt

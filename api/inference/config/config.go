@@ -1164,6 +1164,30 @@ type AssayAttestation struct {
 		URL           string `yaml:"url"`
 		PubkeyPin     string `yaml:"pubkeyPin"`
 		MaxAgeSeconds int    `yaml:"maxAgeSeconds"`
+		// PinSource decides where tappscan's pin comes from. "config" (the
+		// default): PubkeyPin, maintained by hand. "chain": the broker
+		// bootstraps it itself every cycle — TappRegistry.getNodeList(AppID)
+		// names tappscan's admitted signer and teeUrl, GetEvidence there
+		// returns a nonce-bound TDX quote, and common/tapp verifies it
+		// locally (Intel signature chain, report_data binding, event-log
+		// replay, UKI against Expected.Uki, PCS TCB under RequireTcb /
+		// AllowAdvisories); the attested tls_public_key becomes the pin.
+		// PubkeyPin is then an optional fallback for when the bootstrap has
+		// not succeeded yet.
+		PinSource string `yaml:"pinSource"`
+		// AppID is tappscan's own app id on the TappRegistry (default
+		// "0g-tappscan").
+		AppID string `yaml:"appId"`
+		// Expected pins tappscan's image: Uki lists acceptable
+		// measurement.uki.SHA-384 digests from 0g-tapp's reference values
+		// (required for pinSource=chain); MrTd optionally pins the firmware.
+		Expected struct {
+			Uki  []string `yaml:"uki"`
+			MrTd []string `yaml:"mrtd"`
+		} `yaml:"expected"`
+		// PCSUpdate is Intel's TCB evaluation track for the bootstrap:
+		// "early" (default; what tappscan itself reports) or "standard".
+		PCSUpdate string `yaml:"pcsUpdate"`
 	} `yaml:"tappscan"`
 	// Expected is what the record must say about the assay's boot chain:
 	// Image is the reference-values path tappscan reports as matched (e.g.
@@ -1172,6 +1196,20 @@ type AssayAttestation struct {
 		Image string `yaml:"image"`
 		Uki   string `yaml:"uki"`
 	} `yaml:"expected"`
+}
+
+// TappscanPinFromChain reports whether the tappscan pin is bootstrapped from
+// the TappRegistry rather than read from PubkeyPin.
+func (a AssayAttestation) TappscanPinFromChain() bool {
+	return a.Tappscan.PinSource == "chain"
+}
+
+// TappscanAppID is tappscan's app id on the registry (default "0g-tappscan").
+func (a AssayAttestation) TappscanAppID() string {
+	if a.Tappscan.AppID == "" {
+		return "0g-tappscan"
+	}
+	return a.Tappscan.AppID
 }
 
 // MaxAge of the tappscan record's own checked_at (default 6h).
@@ -1937,8 +1975,23 @@ func validateSPMLService(cfg *Config) error {
 		if at.AppID == "" || at.Registry == "" || at.RpcURL == "" {
 			return fmt.Errorf("invalid config: assay.attestation.source=tappscan needs appId, registry and rpcUrl — the record's signer is checked against TappRegistry.getNodeList, which is the check tappscan cannot fake")
 		}
-		if at.Tappscan.URL == "" || at.Tappscan.PubkeyPin == "" {
-			return fmt.Errorf("invalid config: assay.attestation.source=tappscan needs tappscan.url and tappscan.pubkeyPin — unpinned, anyone on the path can hand back a passing record")
+		switch at.Tappscan.PinSource {
+		case "", "config":
+			if at.Tappscan.URL == "" || at.Tappscan.PubkeyPin == "" {
+				return fmt.Errorf("invalid config: assay.attestation.source=tappscan needs tappscan.url and tappscan.pubkeyPin — unpinned, anyone on the path can hand back a passing record (or set tappscan.pinSource: chain to bootstrap the pin from the TappRegistry)")
+			}
+		case "chain":
+			if at.Tappscan.URL == "" {
+				return fmt.Errorf("invalid config: assay.attestation.tappscan.pinSource=chain still needs tappscan.url — the registry gives tappscan's tapp-server, not its web endpoint")
+			}
+			if len(at.Tappscan.Expected.Uki) == 0 {
+				return fmt.Errorf("invalid config: assay.attestation.tappscan.pinSource=chain needs tappscan.expected.uki — without a reference UKI any TD claiming tappscan's signer would be believed; take the digest from 0g-tapp/verifier/reference-values for tappscan's image")
+			}
+			if at.Tappscan.PCSUpdate != "" && at.Tappscan.PCSUpdate != "early" && at.Tappscan.PCSUpdate != "standard" {
+				return fmt.Errorf("invalid config: assay.attestation.tappscan.pcsUpdate must be early or standard, got %q", at.Tappscan.PCSUpdate)
+			}
+		default:
+			return fmt.Errorf("invalid config: assay.attestation.tappscan.pinSource must be config or chain, got %q", at.Tappscan.PinSource)
 		}
 		if at.Expected.Image == "" {
 			return fmt.Errorf("invalid config: assay.attestation.source=tappscan needs expected.image (the reference-values path the assay's boot chain must match, e.g. gcp/uki/v0.7.0/dev.json)")

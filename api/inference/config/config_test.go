@@ -4419,3 +4419,50 @@ func TestSPMLPredicates(t *testing.T) {
 		}
 	}
 }
+
+// tappscan.pinSource: chain replaces the hand-maintained pubkeyPin with a pin
+// bootstrapped from the TappRegistry and tappscan's own attested evidence.
+// What it cannot do without is a reference UKI: without one, any TD that
+// claims tappscan's signer in its report_data would be believed.
+func TestSPML_TappscanPinSourceChain(t *testing.T) {
+	base := `
+assay:
+  verifierUrl: "http://verifier:8200"
+  verifierAddress: "0x1111111111111111111111111111111111111111"
+  attestation:
+    enabled: true
+    source: "tappscan"
+    appId: "assay-verifier"
+    registry: "0x2222222222222222222222222222222222222222"
+    rpcUrl: "https://rpc.example"
+    expected:
+      image: "uki/v0.10.0/dev.json"
+    tappscan:
+      url: "https://scan.example"
+`
+	if err := loadSPML(t, base+`      pinSource: "chain"
+`); err == nil || !strings.Contains(err.Error(), "tappscan.expected.uki") {
+		t.Errorf("chain without a reference uki must be refused, got: %v", err)
+	}
+	if err := loadSPML(t, base+`      pinSource: "chain"
+      expected:
+        uki: ["9aaf061e68eaa6b35ba44cf7362b0b6987bad29c2aa76291debcf28aecc0beb08748171c7994976704461d18b15a018b"]
+`); err != nil {
+		t.Errorf("chain with a reference uki needs no pubkeyPin, got: %v", err)
+	}
+	if err := loadSPML(t, base+`      pinSource: "chain"
+      pcsUpdate: "sometimes"
+      expected:
+        uki: ["9aaf061e68eaa6b35ba44cf7362b0b6987bad29c2aa76291debcf28aecc0beb08748171c7994976704461d18b15a018b"]
+`); err == nil || !strings.Contains(err.Error(), "pcsUpdate") {
+		t.Errorf("unknown pcsUpdate must be refused, got: %v", err)
+	}
+	if err := loadSPML(t, base+`      pinSource: "dns"
+      pubkeyPin: "0xbb"
+`); err == nil || !strings.Contains(err.Error(), "pinSource") {
+		t.Errorf("unknown pinSource must be refused, got: %v", err)
+	}
+	if err := loadSPML(t, base); err == nil || !strings.Contains(err.Error(), "pubkeyPin") {
+		t.Errorf("default pinSource still needs pubkeyPin, got: %v", err)
+	}
+}

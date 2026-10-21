@@ -133,8 +133,9 @@ func newSPMLSetup(cfg *config.Config, teeService *tee.TeeService, logger log.Log
 		attestor = newAssayAttestor(at, logger)
 		{
 			if at.AppID == "" || at.Registry == "" || at.RpcURL == "" ||
-				at.Tappscan.URL == "" || at.Tappscan.PubkeyPin == "" || at.Expected.Image == "" {
-				panic("assay.attestation needs appId, registry, rpcUrl, tappscan.url, tappscan.pubkeyPin and expected.image")
+				at.Tappscan.URL == "" || at.Expected.Image == "" ||
+				(at.Tappscan.PubkeyPin == "" && !at.TappscanPinFromChain()) {
+				panic("assay.attestation needs appId, registry, rpcUrl, tappscan.url, expected.image and either tappscan.pubkeyPin or tappscan.pinSource: chain")
 			}
 			var sign func([]byte) ([]byte, error)
 			if teeService != nil {
