@@ -12,6 +12,7 @@ import (
 	"github.com/patrickmn/go-cache"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/sirupsen/logrus"
 
 	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/common/tee"
@@ -50,11 +51,19 @@ func (i *instance) shutdown() {
 }
 
 // startInstance builds one provider instance from config and starts its
-// background work, ready to serve once its engine is mounted. It panics on any
-// startup failure, as the broker always has: a provider that cannot sync its
-// service or accounts must not serve.
-func startInstance(ctx context.Context, config *cfg.Config, teeService *tee.TeeService, logger log.Logger) *instance {
+// background work, ready to serve once its engine is mounted. name is "" for
+// the primary (CONFIG_FILE) instance and the extra instance's name otherwise.
+// It panics on any startup failure, as the broker always has: a provider that
+// cannot sync its service or accounts must not serve.
+func startInstance(ctx context.Context, name string, config *cfg.Config, teeService *tee.TeeService, logger log.Logger) *instance {
 	inst := &instance{config: config}
+
+	if name != "" {
+		logger = logger.WithFields(logrus.Fields{"instance": name})
+		if err := database.EnsureDatabase(config.Database.DSN); err != nil {
+			panic(err)
+		}
+	}
 
 	db, err := database.NewDB(config)
 	if err != nil {

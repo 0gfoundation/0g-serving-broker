@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/sirupsen/logrus"
 	"k8s.io/client-go/rest"
 	controller "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -26,6 +27,11 @@ import (
 func Main() {
 	conf := config.GetConfig()
 	logger, err := log.GetLogger(conf.Logger)
+	if err != nil {
+		panic(err)
+	}
+
+	extras, err := config.LoadInstances(conf)
 	if err != nil {
 		panic(err)
 	}
@@ -59,7 +65,10 @@ func Main() {
 		panic(err)
 	}
 
-	addInstance(mgr, conf, teeService, logger)
+	addInstance(mgr, "", conf, teeService, logger)
+	for _, extra := range extras {
+		addInstance(mgr, extra.Name, extra.Config, teeService, logger)
+	}
 
 	if err := mgr.Start(ctx); err != nil {
 		panic(err)
@@ -67,9 +76,17 @@ func Main() {
 }
 
 // addInstance builds one provider instance's settlement, reconciliation and
-// revenue-transfer processors and adds them to mgr. The TEE service is the
-// process's and is shared by every instance.
-func addInstance(mgr manager.Manager, conf *config.Config, teeService *tee.TeeService, logger log.Logger) {
+// revenue-transfer processors and adds them to mgr. name is "" for the primary
+// (CONFIG_FILE) instance and the extra instance's name otherwise. The TEE
+// service is the process's and is shared by every instance.
+func addInstance(mgr manager.Manager, name string, conf *config.Config, teeService *tee.TeeService, logger log.Logger) {
+	if name != "" {
+		logger = logger.WithFields(logrus.Fields{"instance": name})
+		if err := database.EnsureDatabase(conf.Database.DSN); err != nil {
+			panic(err)
+		}
+	}
+
 	var metrics *monitor.EventMetrics
 	if conf.Monitor.Enable {
 		metrics = monitor.NewEventMetrics(conf.Service.ServingURL, prometheus.DefaultRegisterer)

@@ -1339,7 +1339,7 @@ func (c *Ctrl) EnforceConfiguredModel(body []byte, userAddr string) ([]byte, err
 			// router in particular multiplexes every end user onto one address,
 			// so a block there punishes everyone for one client's bad name.
 			if userAddr != "" && !c.IsWhitelistedUser(userAddr) {
-				rateLimiter := GetRateLimiter()
+				rateLimiter := c.MismatchLimiter()
 				shouldBlock, blockedUntil := rateLimiter.RecordModelMismatch(userAddr, requestModelStr)
 				if shouldBlock {
 					c.logger.Warnf("User will be blocked due to excessive model mismatch: user=%s, model=%s, blocked_until=%s",
@@ -1709,7 +1709,7 @@ func (c *Ctrl) ResolveModelForBilling(ctx *gin.Context, body []byte, contentType
 func (c *Ctrl) recordModelMismatch(userAddr, requestModel string) {
 	c.logger.Warnf("Model allowlist rejected: user=%s, requested=%s", userAddr, requestModel)
 	if userAddr != "" && !c.IsWhitelistedUser(userAddr) {
-		rateLimiter := GetRateLimiter()
+		rateLimiter := c.MismatchLimiter()
 		shouldBlock, blockedUntil := rateLimiter.RecordModelMismatch(userAddr, requestModel)
 		if shouldBlock {
 			c.logger.Warnf("User will be blocked due to excessive invalid model requests: user=%s, model=%s, blocked_until=%s",

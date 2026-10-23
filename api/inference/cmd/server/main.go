@@ -42,12 +42,41 @@ func Main() {
 		panic(err)
 	}
 
+	// Every extra instance's config is loaded and checked before any instance
+	// starts, so a bad one stops the process before anything is written on chain.
+	extras, err := cfg.LoadInstances(config)
+	if err != nil {
+		panic(err)
+	}
+
 	ctx := context.Background()
 	if err := teeService.SyncQuote(ctx, config.NvGPU); err != nil {
 		panic(err)
 	}
 
-	inst := startInstance(ctx, config, teeService, logger)
+	primary := startInstance(ctx, "", config, teeService, logger)
+	instances := []*instance{primary}
+	router := &hostRouter{byHost: map[string]http.Handler{}, primary: primary.engine}
+	for _, extra := range extras {
+		inst := startInstance(ctx, extra.Name, extra.Config, teeService, logger)
+		instances = append(instances, inst)
+		host, err := cfg.ServingHost(extra.Config.Service.ServingURL)
+		if err != nil {
+			panic(err)
+		}
+		router.byHost[host] = inst.engine
+		logger.Infof("instance %s: serving %s for host %s", extra.Name, extra.Config.Service.Type, host)
+	}
+	// The primary is matched by its host too, though it also catches everything
+	// unmatched: with extra instances configured its servingUrl is checked to
+	// have a host of its own.
+	if len(extras) > 0 {
+		host, err := cfg.ServingHost(config.Service.ServingURL)
+		if err != nil {
+			panic(err)
+		}
+		router.byHost[host] = primary.engine
+	}
 
 	// Listen and Serve with graceful shutdown
 	port := os.Getenv("PORT")
@@ -56,7 +85,7 @@ func Main() {
 	}
 	srv := &http.Server{
 		Addr:    ":" + port,
-		Handler: inst.engine,
+		Handler: router,
 	}
 
 	quit := make(chan os.Signal, 1)
@@ -79,7 +108,9 @@ func Main() {
 		logger.Errorf("Server forced to shutdown: %v", err)
 	}
 
-	inst.shutdown()
+	for _, inst := range instances {
+		inst.shutdown()
+	}
 
 	logger.Info("Server exited")
 }
