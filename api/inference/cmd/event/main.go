@@ -2,6 +2,7 @@ package event
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"time"
 
@@ -88,9 +89,6 @@ func Main() {
 func addInstance(mgr manager.Manager, name string, conf *config.Config, teeService *tee.TeeService, logger log.Logger) {
 	if name != "" {
 		logger = logger.WithFields(logrus.Fields{"instance": name})
-		if err := database.EnsureDatabase(conf.Database.DSN); err != nil {
-			panic(err)
-		}
 	}
 
 	var metrics *monitor.EventMetrics
@@ -98,7 +96,7 @@ func addInstance(mgr manager.Manager, name string, conf *config.Config, teeServi
 		metrics = monitor.NewEventMetrics(conf.Service.ServingURL, prometheus.DefaultRegisterer)
 	}
 
-	db, err := database.NewDB(conf)
+	db, err := openDatabase(conf, name, logger)
 	if err != nil {
 		panic(err)
 	}
@@ -163,5 +161,32 @@ func addInstance(mgr manager.Manager, name string, conf *config.Config, teeServi
 				panic(err)
 			}
 		}
+	}
+}
+
+// extraDatabaseWait bounds how long the event process waits for the broker to
+// create an extra instance's database.
+const extraDatabaseWait = 5 * time.Minute
+
+// openDatabase opens the instance's database. The primary's is opened at once,
+// as always. An extra instance's database is created and migrated by the broker
+// — the one process that does either, so the two never race on a migration — and
+// on a first deployment the event process can start before the broker has made
+// it, so it waits for it to appear instead of failing or creating an empty one.
+func openDatabase(conf *config.Config, name string, logger log.Logger) (*database.DB, error) {
+	if name == "" {
+		return database.NewDB(conf)
+	}
+	deadline := time.Now().Add(extraDatabaseWait)
+	for {
+		db, err := database.NewDB(conf)
+		if err == nil {
+			return db, nil
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("instance %s: its database did not become reachable within %s (the broker creates it on start): %w", name, extraDatabaseWait, err)
+		}
+		logger.Infof("waiting for the broker to create this instance's database: %v", err)
+		time.Sleep(5 * time.Second)
 	}
 }

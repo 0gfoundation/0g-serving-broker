@@ -107,7 +107,6 @@ func startInstance(ctx context.Context, name string, config *cfg.Config, teeServ
 				TotalUniqueUsers:  s.TotalUniqueUsers,
 			}, nil
 		}, 1*time.Minute, logger)
-		engine.GET("/metrics", gin.WrapH(promhttp.Handler()))
 	}
 
 	// Build the USD price-feed stack (cache + aggregator) when the provider
@@ -347,7 +346,7 @@ func startInstance(ctx context.Context, name string, config *cfg.Config, teeServ
 		logger.Infof("hourly_usage_stat retention pruner started: %d-day retention, every %s", retentionDays, interval)
 	}
 
-	proxy := proxy.New(ctrl, engine, config.AllowOrigins, config.Monitor.Enable, config.ConcurrencyLimit, logger)
+	proxy := proxy.New(ctrl, engine, config.AllowOrigins, config.ConcurrencyLimit, logger)
 	if guard := overload.Start(ctx, config.OverloadGuard, logger, metrics); guard != nil {
 		proxy.SetOverloadGuard(guard)
 		logger.Infof("overload guard enabled: %s, maxQueueRequests=%d maxTokenUsage=%v",
@@ -410,4 +409,19 @@ func startInstance(ctx context.Context, name string, config *cfg.Config, teeServ
 		contract.Close,
 	}
 	return inst
+}
+
+// mountMetrics serves /metrics on the primary's engine when any instance has
+// monitoring on. Scrapes arrive by the compose service name, which matches no
+// instance's host and so always reaches the primary; the handler serves the
+// default registry, which holds every instance's series. Mounting it only where
+// the primary enables monitoring would leave an extra instance's series
+// unscrapeable behind a 404.
+func mountMetrics(primary *gin.Engine, instances []*instance) {
+	for _, inst := range instances {
+		if inst.config.Monitor.Enable {
+			primary.GET("/metrics", gin.WrapH(promhttp.Handler()))
+			return
+		}
+	}
 }

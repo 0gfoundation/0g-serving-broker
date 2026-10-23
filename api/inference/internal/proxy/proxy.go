@@ -62,7 +62,7 @@ type Proxy struct {
 	overloadGuard *overload.Guard
 }
 
-func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonitor bool, concurrencyConfig config.ConcurrencyLimitConfig, logger log.Logger) *Proxy {
+func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, concurrencyConfig config.ConcurrencyLimitConfig, logger log.Logger) *Proxy {
 	// Ensure allowOrigins is not empty
 	if len(allowOrigins) == 0 {
 		allowOrigins = []string{"*"}
@@ -215,7 +215,8 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 	// per-user 429s are emitted inside the handler, so those were already
 	// wrapped regardless of order.) Registered AFTER cors so cross-origin
 	// preflight OPTIONS that cors short-circuits are not counted as traffic.
-	if enableMonitor {
+	// Monitoring is on exactly when the controller holds this instance's metrics.
+	if p.metrics != nil {
 		p.serviceGroup.Use(p.metrics.TrackMetrics())
 	}
 

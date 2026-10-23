@@ -151,27 +151,22 @@ func TestServingHost(t *testing.T) {
 	}
 }
 
-// Without DATABASE_DSN an extra instance must name its database: the default
-// DSN is the primary's, and two instances in one database collide.
-func TestLoadInstancesRequiresADatabaseWithoutTheAttestedOne(t *testing.T) {
+// Extra instances need DATABASE_DSN, even when their file names a database:
+// otherwise the broker and event containers, each with its own environment,
+// could open different databases for one instance.
+func TestLoadInstancesRequireTheAttestedDatabase(t *testing.T) {
 	t.Setenv(databaseDSNEnvVar, "")
 	primary := primaryForInstances(t)
-	t.Setenv(InstancesDirEnvVar, writeInstanceDir(t, map[string]string{
-		"b.yaml": instanceYAML("https://b.example", testKeyB, ""),
-	}))
-	if _, err := LoadInstances(primary); err == nil || !strings.Contains(err.Error(), "database.dsn is required") {
-		t.Fatalf("LoadInstances error = %v, want database.dsn is required", err)
-	}
-
-	t.Setenv(InstancesDirEnvVar, writeInstanceDir(t, map[string]string{
-		"b.yaml": instanceYAML("https://b.example", testKeyB, "database:\n  dsn: root:pw@tcp(mysql:3306)/provider_b\n"),
-	}))
-	got, err := LoadInstances(primary)
-	if err != nil {
-		t.Fatalf("LoadInstances: %v", err)
-	}
-	if want := "root:pw@tcp(mysql:3306)/provider_b"; got[0].Config.Database.DSN != want {
-		t.Errorf("dsn = %q, want %q", got[0].Config.Database.DSN, want)
+	for name, extra := range map[string]string{
+		"naming no database": "",
+		"naming its own":     "database:\n  dsn: root:pw@tcp(mysql:3306)/provider_b\n",
+	} {
+		t.Setenv(InstancesDirEnvVar, writeInstanceDir(t, map[string]string{
+			"b.yaml": instanceYAML("https://b.example", testKeyB, extra),
+		}))
+		if _, err := LoadInstances(primary); err == nil || !strings.Contains(err.Error(), "extra instances need DATABASE_DSN") {
+			t.Errorf("%s: LoadInstances error = %v, want DATABASE_DSN required", name, err)
+		}
 	}
 }
 
@@ -216,9 +211,9 @@ func TestValidateInstanceSetUsesTheBrokersDatabase(t *testing.T) {
 	if err := ValidateInstanceSet(dir, primaryContent, "b", onPrimary, brokerDSN); err == nil || !strings.Contains(err.Error(), "same database") {
 		t.Errorf("an instance onto the primary's database = %v, want refused", err)
 	}
-	// A broker without DATABASE_DSN refuses an instance naming no database.
-	if err := ValidateInstanceSet(dir, primaryContent, "", nil, ""); err == nil || !strings.Contains(err.Error(), "database.dsn is required") {
-		t.Errorf("no database without DATABASE_DSN = %v, want refused", err)
+	// A broker without DATABASE_DSN refuses extra instances, so the controller does.
+	if err := ValidateInstanceSet(dir, primaryContent, "", nil, ""); err == nil || !strings.Contains(err.Error(), "extra instances need DATABASE_DSN") {
+		t.Errorf("a broker without DATABASE_DSN = %v, want refused", err)
 	}
 }
 
@@ -235,5 +230,25 @@ func TestInProcessUpstreamSourcesReadsTheLegacyNetworksMap(t *testing.T) {
 	got, err := InProcessUpstreamSources(dir, []byte(instanceYAML("https://a.example", testKeyA, "")), "", nil)
 	if err != nil || len(got) != 2 || got[1].Provider == "" {
 		t.Fatalf("InProcessUpstreamSources = %+v, %v; want both providers", got, err)
+	}
+}
+
+// Every reader of the directory refuses the file names the broker refuses, so
+// the upstream record cannot name an instance the broker would not load.
+func TestInstanceDirectoryReadersAgreeOnNames(t *testing.T) {
+	t.Setenv(databaseDSNEnvVar, "root:pw@tcp(mysql:3306)/provider")
+	primaryContent := []byte(instanceYAML("https://a.example", testKeyA, ""))
+	for _, file := range []string{"Primary.yaml", "primary.yaml", "b_1.yaml"} {
+		dir := writeInstanceDir(t, map[string]string{file: instanceYAML("https://b.example", testKeyB, "")})
+		t.Setenv(InstancesDirEnvVar, dir)
+		if _, err := LoadInstances(primaryForInstances(t)); err == nil {
+			t.Errorf("%s: LoadInstances accepted it", file)
+		}
+		if err := ValidateInstanceSet(dir, primaryContent, "", nil, "root:pw@tcp(mysql:3306)/provider"); err == nil {
+			t.Errorf("%s: ValidateInstanceSet accepted it", file)
+		}
+		if _, err := InProcessUpstreamSources(dir, primaryContent, "", nil); err == nil {
+			t.Errorf("%s: InProcessUpstreamSources recorded it", file)
+		}
 	}
 }

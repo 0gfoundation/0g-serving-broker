@@ -216,7 +216,8 @@ func TestInProcessInstanceChangeRecordsTheNewSetBeforeTheWrite(t *testing.T) {
 
 // The broker and the controller must agree on whether there are in-process
 // instances, or the controller records a set that leaves some of the broker's
-// destinations out. Either direction is refused before anything is recorded.
+// destinations out. A controller that serves them refuses a change before
+// anything is recorded when the broker does not.
 func TestConfigChangesRefusedWhenBrokerAndControllerDisagreeOnConfigDir(t *testing.T) {
 	var unconfirmed *UnconfirmedConfigError
 
@@ -227,11 +228,15 @@ func TestConfigChangesRefusedWhenBrokerAndControllerDisagreeOnConfigDir(t *testi
 		t.Errorf("controller with CONFIG_DIR, broker without: %v, want UnconfirmedConfigError", err)
 	}
 
-	c.configDir = ""
-	c.dockerClient = fakeFaultyDaemon(t, l, daemonFaults{env: map[string][]string{containerBroker: {config.InstancesDirEnvVar + "=/etc/config/instances"}}})
-	if err := c.ApplyCoreConfig(context.Background(), inProcConfig("https://a.example", inProcKeyA, "x")); !errors.As(err, &unconfirmed) {
-		t.Errorf("broker with CONFIG_DIR, controller without: %v, want UnconfirmedConfigError", err)
+	// The same with no instance files yet: the controller still expects them.
+	if err := os.Remove(filepath.Join(c.configDir, "img.yaml")); err != nil {
+		t.Fatal(err)
 	}
+	if err := c.ApplyCoreConfig(context.Background(), inProcConfig("https://a.example", inProcKeyA, "x")); !errors.As(err, &unconfirmed) {
+		t.Errorf("controller with CONFIG_DIR and no instances yet, broker without: %v, want UnconfirmedConfigError", err)
+	}
+	// A controller without CONFIG_DIR does not look at the broker at all; that side
+	// of a mismatch is the compose's to get right (controller-design.md §3.3a).
 	if ops := l.all(); len(ops) != 0 {
 		t.Errorf("ops = %v, want nothing recorded", ops)
 	}

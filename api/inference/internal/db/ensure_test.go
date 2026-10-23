@@ -14,8 +14,7 @@ import (
 )
 
 // An extra instance's database does not exist until EnsureDatabase creates it,
-// and creating it again is a no-op: every restart, and the event process
-// starting beside the broker, call it.
+// and creating it again is a no-op: every broker restart calls it.
 func TestEnsureDatabaseCreatesOnceAndIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	container, err := tcmysql.Run(ctx, "mysql:8.0",
