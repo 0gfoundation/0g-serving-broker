@@ -14,6 +14,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
+	"github.com/0glabs/0g-serving-broker/inference/internal/modalprice"
 	"github.com/0glabs/0g-serving-broker/inference/internal/pricefeed"
 )
 
@@ -147,6 +148,15 @@ func newModelCacheTokenBilling(cfg config.CacheTokenBillingConfig) *ModelCacheTo
 	return out
 }
 
+// publishedModality is the shape to publish: nil (omitted) when it prices
+// nothing differently from the flat price, e.g. a per-model `{}` override.
+func publishedModality(m *modalprice.Published) *modalprice.Published {
+	if p, err := m.Parse(); err != nil || p.Empty() {
+		return nil
+	}
+	return m
+}
+
 // ModelPricing holds per-token pricing in the smallest unit (wei).
 type ModelPricing struct {
 	Prompt     string `json:"prompt"`
@@ -158,6 +168,10 @@ type ModelPricing struct {
 	VideoUnit         string                  `json:"video_unit,omitempty"`
 	TieredPricing     []ModelPricingTier      `json:"tiered_pricing,omitempty"`
 	CacheTokenBilling *ModelCacheTokenBilling `json:"cache_token_billing,omitempty"`
+	// ModalityPricing is the model's per-modality price shape, exactly as
+	// configured (see internal/modalprice); omitted when it bills flat. The
+	// 0g-router reads it to charge users the fee this broker settles.
+	ModalityPricing *modalprice.Published `json:"modality_pricing,omitempty"`
 	// Variants lists NATIVE (wei) per-resolution/per-bucket prices for a
 	// non-flat billing shape (video-generation today). Omitted when the model
 	// has no per-model billing config with resolution/table variance — see
@@ -562,6 +576,7 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 		// Cache token billing: service-level default, overridable per-model below
 		// (matches billing's per-model resolution in GetBillingPrices).
 		cacheCfg := h.modelsCtrl.GetCacheTokenBillingConfig()
+		modalityCfg := h.modelsCtrl.GetModalityPricingConfig()
 
 		// For USD providers, fetch the rate snapshot once to convert each model's
 		// USD price to wei and to surface the shared price-feed state.
@@ -601,6 +616,10 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 				effCache = *mp.CacheTokenBilling
 			}
 			modelCacheBilling := newModelCacheTokenBilling(effCache)
+			effModality := modalityCfg
+			if mp.ModalityPricing != nil {
+				effModality = mp.ModalityPricing
+			}
 			// Per-model upstream: a multi-upstream provider points each model at its
 			// own targetUrl / identity, so identity (and, for centralized, the serving
 			// domain) is resolved per entry.
@@ -652,7 +671,7 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 				Verifiability:    svc.Verifiability,
 				TeeAttested:      teeAttested,
 				TeeVerifier:      teeVerifier,
-				Pricing:          &ModelPricing{CacheTokenBilling: modelCacheBilling},
+				Pricing:          &ModelPricing{CacheTokenBilling: modelCacheBilling, ModalityPricing: publishedModality(effModality)},
 				ProviderType:     providerType,
 				ProviderIdentity: providerIdentity,
 				ProviderName:     providerName,
@@ -863,6 +882,7 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 
 	// Populate cache token billing from config
 	obj.Pricing.CacheTokenBilling = newModelCacheTokenBilling(h.modelsCtrl.GetCacheTokenBillingConfig())
+	obj.Pricing.ModalityPricing = publishedModality(h.modelsCtrl.GetModalityPricingConfig())
 
 	// Extract TEE verifier from on-chain additionalInfo JSON
 	obj.TeeVerifier = parseTeeVerifier(svc.AdditionalInfo)

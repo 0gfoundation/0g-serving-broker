@@ -26,6 +26,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
+	"github.com/0glabs/0g-serving-broker/inference/internal/modalprice"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
@@ -126,13 +127,28 @@ type PromptTokensDetails struct {
 	// omitempty: this field is decode-only, so keeping it out of any re-marshalled
 	// usage object leaves the response shape clients see exactly as it was.
 	CacheWriteTokens int `json:"cache_write_tokens,omitempty"`
+	// The prompt's modality split (Qwen omni and other OpenAI-compatible
+	// multimodal upstreams report it). Read only by modality pricing — see
+	// modalityUsage. Decode-only, omitempty for the same reason as above.
+	TextTokens  int `json:"text_tokens,omitempty"`
+	ImageTokens int `json:"image_tokens,omitempty"`
+	VideoTokens int `json:"video_tokens,omitempty"`
+	AudioTokens int `json:"audio_tokens,omitempty"`
+}
+
+// CompletionTokensDetails is the completion's modality split; audio_tokens
+// drives modality pricing's audio-output rate. Decode-only.
+type CompletionTokensDetails struct {
+	TextTokens  int `json:"text_tokens,omitempty"`
+	AudioTokens int `json:"audio_tokens,omitempty"`
 }
 
 type Usage struct {
-	PromptTokens        int                  `json:"prompt_tokens"`
-	CompletionTokens    int                  `json:"completion_tokens"`
-	TotalTokens         int                  `json:"total_tokens"`
-	PromptTokensDetails *PromptTokensDetails `json:"prompt_tokens_details,omitempty"`
+	PromptTokens            int                      `json:"prompt_tokens"`
+	CompletionTokens        int                      `json:"completion_tokens"`
+	TotalTokens             int                      `json:"total_tokens"`
+	PromptTokensDetails     *PromptTokensDetails     `json:"prompt_tokens_details,omitempty"`
+	CompletionTokensDetails *CompletionTokensDetails `json:"completion_tokens_details,omitempty"`
 	// CacheWriteTokens is the number of DEFAULT-tier (5-minute) cache-creation
 	// ("cache write") input tokens: a subset of PromptTokens that the upstream
 	// charged a write premium for. On the Anthropic path toUsage populates it from
@@ -775,7 +791,7 @@ func (c *Ctrl) processSingleResponse(ctx context.Context, decodedBody []byte, ou
 		if err != nil {
 			return errors.Wrap(err, "get billing prices for single response billing")
 		}
-		return c.updateAccountWithUsage(ctx, chunk.Usage, prices.OutputPrice, requestHash, prices.InputPrice, prices.Tiers, prices.CacheTokenBilling)
+		return c.updateAccountWithUsage(ctx, chunk.Usage, prices.OutputPrice, requestHash, prices.InputPrice, prices.Tiers, prices.CacheTokenBilling, prices.ModalityPricing)
 	}
 
 	return c.updateAccountWithOutput(ctx, *output, outputPrice, requestHash)
@@ -817,8 +833,8 @@ func (c *Ctrl) extractUsageFromLine(line []byte) *Usage {
 }
 
 // finalizeResponseWithUsage updates the account with accurate token counts from LLM
-func (c *Ctrl) finalizeResponseWithUsage(ctx context.Context, usage *Usage, outputPrice string, requestHash string, inputPrice string, tiers []config.PricingTier, cacheBilling config.CacheTokenBillingConfig) error {
-	return c.updateAccountWithUsage(ctx, usage, outputPrice, requestHash, inputPrice, tiers, cacheBilling)
+func (c *Ctrl) finalizeResponseWithUsage(ctx context.Context, usage *Usage, outputPrice string, requestHash string, inputPrice string, tiers []config.PricingTier, cacheBilling config.CacheTokenBillingConfig, modality modalprice.Pricing) error {
+	return c.updateAccountWithUsage(ctx, usage, outputPrice, requestHash, inputPrice, tiers, cacheBilling, modality)
 }
 
 // matchedTier returns the pricing tier selected for the given prompt token count.
@@ -1023,7 +1039,7 @@ func computeInputFee(inputPrice string, usage *Usage, cacheBilling config.CacheT
 // updateAccountWithUsage updates the request with accurate token counts from the LLM response.
 // tiers is the model-specific tier table (from per-model pricing); when empty the
 // service-level tieredPricing applies if enabled.
-func (c *Ctrl) updateAccountWithUsage(ctx context.Context, usage *Usage, outputPrice string, requestHash string, inputPrice string, tiers []config.PricingTier, cacheBilling config.CacheTokenBillingConfig) error {
+func (c *Ctrl) updateAccountWithUsage(ctx context.Context, usage *Usage, outputPrice string, requestHash string, inputPrice string, tiers []config.PricingTier, cacheBilling config.CacheTokenBillingConfig, modality modalprice.Pricing) error {
 	// Resolve the effective tier set: model-specific tiers win; otherwise fall
 	// back to the service-level tieredPricing when enabled.
 	tiers = c.effectiveTiers(tiers)
@@ -1044,6 +1060,18 @@ func (c *Ctrl) updateAccountWithUsage(ctx context.Context, usage *Usage, outputP
 			c.logger.Infof("Tiered pricing: prompt_tokens=%d, inputMultiplier=%d/%d, outputMultiplier=%d/%d, effectiveInputPrice=%s, effectiveOutputPrice=%s",
 				usage.PromptTokens, inNum, inDen, outNum, outDen, inputPrice, outputPrice)
 		}
+	}
+
+	// Per-modality pricing (never combined with tiers or a cache discount —
+	// config validation refuses that) scales the two per-token prices for
+	// this usage's modality split.
+	var err error
+	if !modality.Empty() {
+		if inputPrice, outputPrice, err = modalityPrices(modality, usage, inputPrice, outputPrice); err != nil {
+			return err
+		}
+		c.logger.Infof("Modality pricing: prompt_tokens=%d, completion_tokens=%d, effectiveInputPrice=%s, effectiveOutputPrice=%s",
+			usage.PromptTokens, usage.CompletionTokens, inputPrice, outputPrice)
 	}
 
 	// Calculate actual fees based on LLM-provided token counts. When
@@ -1296,7 +1324,7 @@ func (c *Ctrl) finalizeChatStream(ctx context.Context, output string, usage *Usa
 		if err != nil {
 			return errors.Wrap(err, "get billing prices for stream response billing")
 		}
-		if err := c.finalizeResponseWithUsage(ctx, usage, prices.OutputPrice, requestHash, prices.InputPrice, prices.Tiers, prices.CacheTokenBilling); err != nil {
+		if err := c.finalizeResponseWithUsage(ctx, usage, prices.OutputPrice, requestHash, prices.InputPrice, prices.Tiers, prices.CacheTokenBilling, prices.ModalityPricing); err != nil {
 			c.logger.Errorf("stream billing failed for request %s: %v", requestHash, err)
 			return err
 		}

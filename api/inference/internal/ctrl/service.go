@@ -13,6 +13,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	"github.com/0glabs/0g-serving-broker/inference/contract"
 	providercontract "github.com/0glabs/0g-serving-broker/inference/internal/contract"
+	"github.com/0glabs/0g-serving-broker/inference/internal/modalprice"
 	"github.com/0glabs/0g-serving-broker/inference/internal/pricefeed"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
@@ -161,7 +162,7 @@ func (c *Ctrl) SyncServiceWithPrices(ctx context.Context, inputWei, outputWei *b
 	overlaid.OutputPrice = outputWei.String()
 
 	// Attempt the pure-rate-drift skip before spending a transaction.
-	nonPriceMatches, onChain, cmpErr := c.contract.CompareServiceExceptPrice(ctx, overlaid, c.tieredPricing, c.cacheTokenBilling)
+	nonPriceMatches, onChain, cmpErr := c.contract.CompareServiceExceptPrice(ctx, overlaid, c.tieredPricing, c.cacheTokenBilling, c.modalityPricing)
 	notFound := cmpErr != nil && errors.Is(cmpErr, providercontract.ErrServiceNotFound)
 	if cmpErr != nil && !notFound {
 		c.logger.Warnf("SyncServiceWithPrices: non-price comparison failed, proceeding with full sync: %v", cmpErr)
@@ -215,7 +216,7 @@ func (c *Ctrl) syncServiceOnceLocked(ctx context.Context, svc config.Service) er
 		return nil
 	}
 
-	if err := c.contract.SyncService(ctx, svc, c.tieredPricing, c.cacheTokenBilling); err != nil {
+	if err := c.contract.SyncService(ctx, svc, c.tieredPricing, c.cacheTokenBilling, c.modalityPricing); err != nil {
 		// Reset the flag if sync failed so it can be retried
 		c.serviceSynced.Store(false)
 		return errors.Wrap(err, "sync services")
@@ -318,7 +319,7 @@ func (c *Ctrl) SyncServicePrices(ctx context.Context, inputWei, outputWei *big.I
 	updated.InputPrice = inputWei.String()
 	updated.OutputPrice = outputWei.String()
 
-	if err := c.contract.SyncService(ctx, updated, c.tieredPricing, c.cacheTokenBilling); err != nil {
+	if err := c.contract.SyncService(ctx, updated, c.tieredPricing, c.cacheTokenBilling, c.modalityPricing); err != nil {
 		return nil, nil, errors.Wrap(err, "sync service prices on chain")
 	}
 
@@ -357,6 +358,11 @@ type BillingPrices struct {
 	// once here so billing reads a single source (never c.cacheTokenBilling
 	// directly on the multi-model path).
 	CacheTokenBilling config.CacheTokenBillingConfig
+	// ModalityPricing is the per-modality price shape resolved for this
+	// request (the per-model override, else the service level); the zero
+	// value bills every token flat. Config validation guarantees it is never
+	// combined with Tiers or a cache discount.
+	ModalityPricing modalprice.Pricing
 }
 
 // CtxKeyResolvedModel is the gin.Context key under which the request path stores
@@ -513,15 +519,26 @@ func (c *Ctrl) GetBillingPrices(ctx context.Context) (BillingPrices, error) {
 			if entry.CacheTokenBilling != nil {
 				cache = *entry.CacheTokenBilling
 			}
+			shape := c.modalityPricing
+			if entry.ModalityPricing != nil {
+				shape = entry.ModalityPricing
+			}
+			modality, err := shape.Parse()
+			if err != nil { // validated at config load; unreachable
+				return BillingPrices{}, errors.Wrap(err, "parse modality pricing")
+			}
 			if c.Service.IsUSDDenominated() {
 				inputWei, outputWei, err := c.modelUSDPricesToWei(entry)
 				if err != nil {
 					return BillingPrices{}, errors.Wrap(err, "convert per-model USD price to wei")
 				}
-				return BillingPrices{InputPrice: inputWei, OutputPrice: outputWei, Tiers: entry.Tiers, CacheTokenBilling: cache}, nil
+				return BillingPrices{InputPrice: inputWei, OutputPrice: outputWei, Tiers: entry.Tiers, CacheTokenBilling: cache, ModalityPricing: modality}, nil
 			}
-			return BillingPrices{InputPrice: entry.InputPrice, OutputPrice: entry.OutputPrice, Tiers: entry.Tiers, CacheTokenBilling: cache}, nil
+			return BillingPrices{InputPrice: entry.InputPrice, OutputPrice: entry.OutputPrice, Tiers: entry.Tiers, CacheTokenBilling: cache, ModalityPricing: modality}, nil
 		}
+		// The multi-model fallback below bills at the on-chain ceiling, which
+		// already folds in every model's maximum modality multiplier, so no
+		// shape is applied on top of it.
 	}
 	// Fallback: on-chain prices (any single-model provider, or the
 	// invariant-violation cases above — always >= any per-model price). For USD
@@ -530,7 +547,13 @@ func (c *Ctrl) GetBillingPrices(ctx context.Context) (BillingPrices, error) {
 	if err != nil {
 		return BillingPrices{}, errors.Wrap(err, "get billing prices")
 	}
-	return BillingPrices{InputPrice: svc.InputPrice, OutputPrice: svc.OutputPrice, CacheTokenBilling: c.cacheTokenBilling}, nil
+	prices := BillingPrices{InputPrice: svc.InputPrice, OutputPrice: svc.OutputPrice, CacheTokenBilling: c.cacheTokenBilling}
+	if !c.Service.HasMultiModelPricing() {
+		if prices.ModalityPricing, err = c.modalityPricing.Parse(); err != nil { // validated at config load
+			return BillingPrices{}, errors.Wrap(err, "parse modality pricing")
+		}
+	}
+	return prices, nil
 }
 
 // resolveModelPricing reads the validated request model from the gin.Context and

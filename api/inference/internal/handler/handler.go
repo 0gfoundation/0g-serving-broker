@@ -14,6 +14,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/middleware"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
+	"github.com/0glabs/0g-serving-broker/inference/internal/modalprice"
 	"github.com/0glabs/0g-serving-broker/inference/internal/pricefeed"
 	"github.com/0glabs/0g-serving-broker/inference/internal/proxy"
 	"github.com/0glabs/0g-serving-broker/inference/model"
@@ -39,6 +40,7 @@ type modelsCtrl interface {
 	GetServiceConfig() config.Service
 	GetTieredPricingConfig() config.TieredPricingConfig
 	GetCacheTokenBillingConfig() config.CacheTokenBillingConfig
+	GetModalityPricingConfig() *modalprice.Published
 	GetConcurrencyLimitConfig() config.ConcurrencyLimitConfig
 	GetPriceFeedSnapshot() (snap pricefeed.Snapshot, stalenessThreshold, updateInterval time.Duration, isUSD bool)
 }

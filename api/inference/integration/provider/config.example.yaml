@@ -71,6 +71,20 @@ service:
   #   supportedFormats:
   #     - openai
   #     - anthropic
+# Optional: per-modality chat pricing, as multiples ("num" or "num/den", no
+# spaces) of inputPrice / outputPrice. Billed from the upstream's
+# prompt_tokens_details (text/image/video/audio_tokens) and
+# completion_tokens_details.audio_tokens; a response without that split bills
+# flat. input: image / video / audio, each in [1, 100]. output: text_only_input
+# in (0, 1] (output rate when the input had no media) and audio in [1, 100]
+# (audio output; the response's other completion tokens are then free).
+# Cannot be combined with tieredPricing or cacheTokenBilling (divisor > 1).
+# A service.modelPricing entry may set its own modalityPricing.
+# Example: Alibaba qwen3-omni-flash (text 1.8, image/video 3.3, audio 15.8;
+# output 12.7, text-only 6.9, audio 62.6 per 1M tokens):
+# modalityPricing:
+#   input:  {image: "11/6", video: "11/6", audio: "79/9"}
+#   output: {text_only_input: "69/127", audio: "626/127"}
 # Optional: rate limiting and concurrency configuration.
 # concurrencyLimit:
 #   maxGlobalConcurrent: 20    # Max total concurrent requests to backend (default: 20)

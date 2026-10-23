@@ -19,6 +19,7 @@ import (
 	providercontract "github.com/0glabs/0g-serving-broker/inference/internal/contract"
 	"github.com/0glabs/0g-serving-broker/inference/internal/db"
 	"github.com/0glabs/0g-serving-broker/inference/internal/lora"
+	"github.com/0glabs/0g-serving-broker/inference/internal/modalprice"
 	"github.com/0glabs/0g-serving-broker/inference/internal/pricefeed"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 )
@@ -108,6 +109,7 @@ type Ctrl struct {
 
 	Service           config.Service
 	cacheTokenBilling config.CacheTokenBillingConfig
+	modalityPricing   *modalprice.Published
 	tieredPricing     config.TieredPricingConfig
 	priceFeed         config.PriceFeedConfig
 	concurrencyLimit  config.ConcurrencyLimitConfig
@@ -365,6 +367,7 @@ func New(
 		contract:             contract,
 		Service:              cfg.Service,
 		cacheTokenBilling:    cfg.CacheTokenBilling,
+		modalityPricing:      cfg.ModalityPricing,
 		tieredPricing:        cfg.TieredPricing,
 		priceFeed:            cfg.PriceFeed,
 		concurrencyLimit:     cfg.ConcurrencyLimit,
@@ -463,6 +466,12 @@ func (c *Ctrl) GetConcurrencyLimitConfig() config.ConcurrencyLimitConfig {
 // GetTieredPricingConfig returns the tiered pricing configuration.
 func (c *Ctrl) GetTieredPricingConfig() config.TieredPricingConfig {
 	return c.tieredPricing
+}
+
+// GetModalityPricingConfig returns the service-level modality price shape
+// (nil when unset).
+func (c *Ctrl) GetModalityPricingConfig() *modalprice.Published {
+	return c.modalityPricing
 }
 
 // GetCacheTokenBillingConfig returns the cache token billing configuration.

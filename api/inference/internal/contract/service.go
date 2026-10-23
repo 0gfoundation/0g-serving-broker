@@ -16,6 +16,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	"github.com/0glabs/0g-serving-broker/inference/contract"
+	"github.com/0glabs/0g-serving-broker/inference/internal/modalprice"
 )
 
 var ErrServiceNotFound = errors.New("service not found")
@@ -41,7 +42,7 @@ func isServiceNotFoundMessage(msg string) bool {
 var DefaultProviderStake = new(big.Int).Mul(big.NewInt(100), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
 
 // buildAdditionalInfo creates the additionalInfo JSON string for a service
-func buildAdditionalInfo(service config.Service, imageName, imageDigest string, tieredPricing config.TieredPricingConfig, cacheTokenBilling config.CacheTokenBillingConfig) (string, error) {
+func buildAdditionalInfo(service config.Service, imageName, imageDigest string, tieredPricing config.TieredPricingConfig, cacheTokenBilling config.CacheTokenBillingConfig, modalityPricing *modalprice.Published) (string, error) {
 	// Determine TEE verifier based on NETWORK environment variable. A standard
 	// provider performs no TEE verification, so it publishes no verifier: leaving
 	// TEEVerifier/VerifierURL empty means a client has nothing to call even if it
@@ -132,6 +133,13 @@ func buildAdditionalInfo(service config.Service, imageName, imageDigest string, 
 			cacheInfo["write1hMultiplierDenominator"] = cacheTokenBilling.WriteMultiplierDenominator
 		}
 		additionalInfo["cacheTokenBilling"] = cacheInfo
+	}
+
+	// Include the service-level modality price shape (internal/modalprice) like
+	// tiers and cache above, so user-broker can display per-modality prices.
+	// Omitted when it bills flat, so a service without one is unchanged.
+	if p, err := modalityPricing.Parse(); err == nil && !p.Empty() {
+		additionalInfo["modalityPricing"] = modalityPricing
 	}
 
 	// Multi-model: publish only a compact summary on-chain — the MultiModel flag and
@@ -275,7 +283,7 @@ func (c *ProviderContract) GetService(ctx context.Context) (*contract.Service, e
 	return &service, nil
 }
 
-func (c *ProviderContract) SyncService(ctx context.Context, new config.Service, tieredPricing config.TieredPricingConfig, cacheTokenBilling config.CacheTokenBillingConfig) error {
+func (c *ProviderContract) SyncService(ctx context.Context, new config.Service, tieredPricing config.TieredPricingConfig, cacheTokenBilling config.CacheTokenBillingConfig, modalityPricing *modalprice.Published) error {
 	if new.HasMultiModelPricing() {
 		c.logger.Infof("[SyncService] Multi-model pricing configured (%d models), on-chain prices set to max(inputPrice=%s, outputPrice=%s)",
 			len(new.ModelPricing), new.InputPrice, new.OutputPrice)
@@ -304,7 +312,7 @@ func (c *ProviderContract) SyncService(ctx context.Context, new config.Service, 
 	imageName, imageDigest := c.GetImageInfo(ctx)
 
 	// Build additionalInfo for comparison
-	newAdditionalInfo, err := buildAdditionalInfo(new, imageName, imageDigest, tieredPricing, cacheTokenBilling)
+	newAdditionalInfo, err := buildAdditionalInfo(new, imageName, imageDigest, tieredPricing, cacheTokenBilling, modalityPricing)
 	if err != nil {
 		c.logger.Errorf("[SyncService] Failed to build additional info - error=%v", err)
 		return err
@@ -386,13 +394,13 @@ func identicalServiceExceptPrice(old contract.Service, new config.Service, teeSi
 // If the service is not yet registered on-chain, returns (false, nil,
 // ErrServiceNotFound) — callers that want "not equal, no error" should
 // check errors.Is(err, ErrServiceNotFound) and translate.
-func (c *ProviderContract) CompareServiceExceptPrice(ctx context.Context, new config.Service, tieredPricing config.TieredPricingConfig, cacheTokenBilling config.CacheTokenBillingConfig) (bool, *contract.Service, error) {
+func (c *ProviderContract) CompareServiceExceptPrice(ctx context.Context, new config.Service, tieredPricing config.TieredPricingConfig, cacheTokenBilling config.CacheTokenBillingConfig, modalityPricing *modalprice.Published) (bool, *contract.Service, error) {
 	old, err := c.GetService(ctx)
 	if err != nil {
 		return false, nil, err
 	}
 	imageName, imageDigest := c.GetImageInfo(ctx)
-	newAdditionalInfo, err := buildAdditionalInfo(new, imageName, imageDigest, tieredPricing, cacheTokenBilling)
+	newAdditionalInfo, err := buildAdditionalInfo(new, imageName, imageDigest, tieredPricing, cacheTokenBilling, modalityPricing)
 	if err != nil {
 		return false, old, errors.Wrap(err, "build additional info")
 	}

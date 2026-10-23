@@ -2,9 +2,11 @@ package providercontract
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/0glabs/0g-serving-broker/inference/config"
+	"github.com/0glabs/0g-serving-broker/inference/internal/modalprice"
 )
 
 // TestBuildAdditionalInfo_ProviderTypeGating verifies the on-chain additionalInfo
@@ -42,7 +44,7 @@ func TestBuildAdditionalInfo_ProviderTypeGating(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			raw, err := buildAdditionalInfo(tc.service, "", "", config.TieredPricingConfig{}, config.CacheTokenBillingConfig{})
+			raw, err := buildAdditionalInfo(tc.service, "", "", config.TieredPricingConfig{}, config.CacheTokenBillingConfig{}, nil)
 			if err != nil {
 				t.Fatalf("buildAdditionalInfo: %v", err)
 			}
@@ -106,5 +108,27 @@ func TestIsServiceNotFoundMessage(t *testing.T) {
 				t.Errorf("isServiceNotFoundMessage(%q) = %v, want %v", tc.msg, got, tc.want)
 			}
 		})
+	}
+}
+
+// The service-level modality shape is published like tiers / cache; without
+// one (or with a flat {}), additionalInfo is unchanged.
+func TestBuildAdditionalInfo_ModalityPricing(t *testing.T) {
+	svc := config.Service{ProviderType: "decentralized"}
+	flat, err := buildAdditionalInfo(svc, "", "", config.TieredPricingConfig{}, config.CacheTokenBillingConfig{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	empty, err := buildAdditionalInfo(svc, "", "", config.TieredPricingConfig{}, config.CacheTokenBillingConfig{}, &modalprice.Published{})
+	if err != nil || empty != flat {
+		t.Fatalf("flat shape changed additionalInfo: %s vs %s (%v)", empty, flat, err)
+	}
+	shaped, err := buildAdditionalInfo(svc, "", "", config.TieredPricingConfig{}, config.CacheTokenBillingConfig{},
+		&modalprice.Published{Input: map[string]string{"audio": "79/9"}, Output: map[string]string{"audio": "626/127"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `"modalityPricing":{"input":{"audio":"79/9"},"output":{"audio":"626/127"}}`; !strings.Contains(shaped, want) {
+		t.Fatalf("want %s in %s", want, shaped)
 	}
 }
