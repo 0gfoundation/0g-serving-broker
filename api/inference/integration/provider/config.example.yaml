@@ -47,6 +47,7 @@ service:
   #     modality: "text->text"
   #     inputModalities: ["text"]
   #     outputModalities: ["text"]
+  #     # urlInputModalities: ["image"]  # media the upstream also takes as a link (not only a base64 data: URI); list only after a real link request worked on every API format served
   #     instructType: "chatml"  # Instruction format: "none", "alpaca", "chatml", etc.
   #     tokenizer: "llama3"    # Tokenizer identifier: "cl100k_base", "o200k_base", "llama3", etc.
   #   defaultParameters:

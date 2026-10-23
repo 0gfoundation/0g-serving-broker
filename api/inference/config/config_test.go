@@ -4419,3 +4419,36 @@ func TestSPMLPredicates(t *testing.T) {
 		}
 	}
 }
+
+func TestModelInfo_Validate_URLInputModalities(t *testing.T) {
+	cases := []struct {
+		name    string
+		in, url []string
+		wantErr bool
+	}{
+		{"unset ok", []string{"text", "image"}, nil, false},
+		{"image and video ok", []string{"text", "image", "video"}, []string{"image", "video"}, false},
+		{"not an input modality rejected", []string{"text", "image"}, []string{"video"}, true},
+		{"text rejected", []string{"text", "image"}, []string{"text"}, true},
+		{"typo rejected", []string{"text", "image"}, []string{"imgae"}, true},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			m := validModelInfo()
+			m.Architecture.InputModalities = tt.in
+			m.Architecture.URLInputModalities = tt.url
+			err := m.Validate("chatbot")
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("wantErr=%v, got %v", tt.wantErr, err)
+			}
+		})
+	}
+	b, _ := json.Marshal(&ModelArchitecture{InputModalities: []string{"text", "image"}, URLInputModalities: []string{"image"}})
+	if !strings.Contains(string(b), `"url_input_modalities":["image"]`) {
+		t.Fatalf("published architecture lacks url_input_modalities: %s", b)
+	}
+	b, _ = json.Marshal(&ModelArchitecture{InputModalities: []string{"text"}})
+	if strings.Contains(string(b), "url_input_modalities") {
+		t.Fatalf("unset url_input_modalities must be omitted: %s", b)
+	}
+}

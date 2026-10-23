@@ -212,12 +212,22 @@ func tokenBilledSTTCanonicalName(svc *Service) string {
 
 // ModelArchitecture describes the model's input/output modalities.
 type ModelArchitecture struct {
-	Modality         string   `yaml:"modality" json:"modality"`                    // Required. e.g., "text->text", "text+image->text"
-	InputModalities  []string `yaml:"inputModalities" json:"input_modalities"`     // Required. e.g., ["text"], ["text", "image"]
-	OutputModalities []string `yaml:"outputModalities" json:"output_modalities"`   // Required. e.g., ["text"]
-	InstructType     string   `yaml:"instructType" json:"instruct_type,omitempty"` // Optional. e.g., "none", "alpaca", "chatml"
-	Tokenizer        string   `yaml:"tokenizer" json:"tokenizer,omitempty"`        // Optional. Tokenizer identifier, e.g., "cl100k_base", "o200k_base", "llama3"
+	Modality         string   `yaml:"modality" json:"modality"`                  // Required. e.g., "text->text", "text+image->text"
+	InputModalities  []string `yaml:"inputModalities" json:"input_modalities"`   // Required. e.g., ["text"], ["text", "image"]
+	OutputModalities []string `yaml:"outputModalities" json:"output_modalities"` // Required. e.g., ["text"]
+	// URLInputModalities is optional: the media input modalities (image, video)
+	// the upstream also accepts as a link it downloads itself, not only inline
+	// as a base64 data: URI. Inline is assumed for every input modality; list a
+	// modality here only after a real request with a link worked on every API
+	// format this service serves. The router routes link requests only to
+	// services declaring it. Each entry must also be in InputModalities.
+	URLInputModalities []string `yaml:"urlInputModalities" json:"url_input_modalities,omitempty"`
+	InstructType       string   `yaml:"instructType" json:"instruct_type,omitempty"` // Optional. e.g., "none", "alpaca", "chatml"
+	Tokenizer          string   `yaml:"tokenizer" json:"tokenizer,omitempty"`        // Optional. Tokenizer identifier, e.g., "cl100k_base", "o200k_base", "llama3"
 }
+
+// urlInputModalities are the input modalities a link can carry.
+var urlInputModalities = map[string]bool{"image": true, "video": true}
 
 // Validate checks that all required ModelArchitecture fields are set.
 func (a *ModelArchitecture) Validate() error {
@@ -229,6 +239,14 @@ func (a *ModelArchitecture) Validate() error {
 	}
 	if len(a.OutputModalities) == 0 {
 		return fmt.Errorf("service.modelInfo.architecture.outputModalities is required")
+	}
+	for _, m := range a.URLInputModalities {
+		if !urlInputModalities[m] {
+			return fmt.Errorf("service.modelInfo.architecture.urlInputModalities: %q is not image or video", m)
+		}
+		if !slices.Contains(a.InputModalities, m) {
+			return fmt.Errorf("service.modelInfo.architecture.urlInputModalities: %q is not in inputModalities", m)
+		}
 	}
 	return nil
 }
