@@ -2869,24 +2869,9 @@ func IgnoredConfigKeys(data []byte) ([]IgnoredKey, error) {
 	return decodeConfig(data, defaultConfig())
 }
 
-// applyAndValidate is everything loadConfig does after the bytes are parsed: the
-// deprecation migration, the environment overrides, every default, and every validation
-// rule.
-//
-// It exists as its own function for one reason: PUT /v1/config/core has to be able to
-// refuse a config the broker could not load. Measured on a live deployment — a config
-// with service.modelPricing and no providerType passed the endpoint's YAML-syntax check,
-// so the change was recorded in RTMR3, the signing key rotated, the file was written and
-// the broker was restarted into a crash loop, and the endpoint answered 200. The ledger,
-// the key and the on-chain acknowledgement were then describing three different states.
-//
-// Hand-picking a subset of the rules for the controller to check would drift from what
-// the broker enforces, so both callers run this.
-func applyAndValidate(cfg *Config, raw map[string]interface{}) error {
-	if err := migrateDeprecated(cfg, raw); err != nil {
-		return err
-	}
-
+// applyPrimaryEnvOverrides applies the compose-file overrides that name the
+// primary instance's upstream and database.
+func applyPrimaryEnvOverrides(cfg *Config) error {
 	// TARGET_URL takes precedence over the file, so that the deployment can put this
 	// value where a verifier can read it.
 	//
@@ -2936,6 +2921,38 @@ func applyAndValidate(cfg *Config, raw map[string]interface{}) error {
 		// the attested one; migrateDeprecated runs before this and prefers DSN, but a
 		// stale Provider left behind reads like a second answer.
 		cfg.Database.Provider = ""
+	}
+	return nil
+}
+
+// applyAndValidate is everything loadConfig does after the bytes are parsed: the
+// deprecation migration, the environment overrides, every default, and every validation
+// rule.
+//
+// It exists as its own function for one reason: PUT /v1/config/core has to be able to
+// refuse a config the broker could not load. Measured on a live deployment — a config
+// with service.modelPricing and no providerType passed the endpoint's YAML-syntax check,
+// so the change was recorded in RTMR3, the signing key rotated, the file was written and
+// the broker was restarted into a crash loop, and the endpoint answered 200. The ledger,
+// the key and the on-chain acknowledgement were then describing three different states.
+//
+// Hand-picking a subset of the rules for the controller to check would drift from what
+// the broker enforces, so both callers run this.
+func applyAndValidate(cfg *Config, raw map[string]interface{}) error {
+	return applyAndValidateWith(cfg, raw, applyPrimaryEnvOverrides)
+}
+
+// applyAndValidateWith is applyAndValidate with the environment overrides
+// supplied by the caller: the primary instance's are applyPrimaryEnvOverrides,
+// an extra instance's are in LoadInstanceConfig. They run after the deprecation
+// migration and before validation, which is where the primary's always ran.
+func applyAndValidateWith(cfg *Config, raw map[string]interface{}, overrides func(*Config) error) error {
+	if err := migrateDeprecated(cfg, raw); err != nil {
+		return err
+	}
+
+	if err := overrides(cfg); err != nil {
+		return err
 	}
 
 	if cfg.Service.ModelInfo != nil {

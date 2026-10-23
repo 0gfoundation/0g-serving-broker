@@ -829,7 +829,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		if blockModel == "" {
 			blockModel = p.ctrl.Service.ModelType
 		}
-		rateLimiter := ctrl.GetRateLimiter()
+		rateLimiter := p.ctrl.MismatchLimiter()
 		if blocked, blockedUntil := rateLimiter.IsBlocked(userAddress, blockModel); blocked {
 			// User is blocked - return error immediately without processing.
 			// Recorded (not per-event logged) because a blocked client that keeps

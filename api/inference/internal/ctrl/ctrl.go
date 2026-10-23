@@ -105,6 +105,10 @@ type Ctrl struct {
 	logger           log.Logger
 	// metrics is this instance's broker metrics; nil when monitoring is off.
 	metrics *monitor.Metrics
+	// mismatchLimiter blocks callers repeatedly requesting a model this instance
+	// does not serve; see MismatchLimiter.
+	mismatchLimiter     *ModelMismatchLimiter
+	mismatchLimiterOnce sync.Once
 
 	autoSettleBufferTime time.Duration
 	minSettlementFee     *big.Int
