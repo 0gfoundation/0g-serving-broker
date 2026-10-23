@@ -656,10 +656,15 @@ func (c *Ctrl) ApplyCoreConfig(ctx context.Context, configContent string) error 
 		if err := c.validateInProcessSet(ctx, []byte(configContent), "", nil); err != nil {
 			return err
 		}
-	} else if _, brokerConfigDir, err := c.brokerInstanceEnv(ctx); err == nil {
-		// Best effort, so a single-instance deployment changes nothing when the
-		// broker cannot be inspected: a broker serving instances this controller
-		// does not know of would record a set that leaves theirs out.
+	} else if c.configDir != "" {
+		// No instance files yet, but this controller expects them: the broker must
+		// read the same directory, or the set recorded once they appear would leave
+		// the broker's instances out. A controller without CONFIG_DIR does not look —
+		// a single-instance deployment's config change touches nothing new.
+		_, brokerConfigDir, err := c.brokerInstanceEnv(ctx)
+		if err != nil {
+			return &UnconfirmedConfigError{Err: fmt.Errorf("reading the broker container's environment: %w", err)}
+		}
 		if err := c.checkConfigDirAgrees(brokerConfigDir); err != nil {
 			return err
 		}

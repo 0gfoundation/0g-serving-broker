@@ -70,6 +70,7 @@ func Main() {
 		router.byHost[host] = inst.engine
 		logger.Infof("instance %s: serving %s for host %s", extra.Name, extra.Config.Service.Type, host)
 	}
+	mountMetrics(primary.engine, instances)
 	// The primary is matched by its host too, though it also catches everything
 	// unmatched: with extra instances configured its servingUrl is checked to
 	// have a host of its own.

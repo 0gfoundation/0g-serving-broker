@@ -337,9 +337,14 @@ verifier's baseline cover every such machine.
   its own domain (no path); the ingress gets them all in `DOMAIN` + `DOMAINS` and keeps a
   literal `TARGET_ENDPOINT`. The broker picks the instance by `Host`; anything matching
   none goes to the primary.
-- **Attested overrides.** `DATABASE_DSN` decides every instance's database server; an
-  instance's database is the one its `database.dsn` names, else
-  `<primary database>_<name>`, created on start. `TARGET_URL` is the primary's only.
+- **Attested overrides.** `DATABASE_DSN` decides every instance's database server, and
+  is **required** once there are extra instances — on the broker and the event service
+  alike, so the two can never open different databases for one instance. An instance's
+  database is the one its `database.dsn` names, else `<primary database>_<name>`; the
+  broker creates and migrates it on start, and the event service waits for it rather
+  than creating it. `TARGET_URL` is the primary's only.
+- **Metrics.** One `/metrics` on the primary (scrapes arrive by the compose service
+  name), mounted when any instance enables monitoring, serving every instance's series.
 - **Controller.** `GET|PUT /v1/config/core?instance=<name>` reads and replaces
   `<name>.yaml`, recorded as `zg-instance-config-update`. The whole set is validated
   first — a change that would collide with another instance's host, wallet or database
@@ -348,8 +353,11 @@ verifier's baseline cover every such machine.
   A primary config change is validated against the instances too. The validation runs
   under the change lock, with the `DATABASE_DSN` the **broker container** runs with (read
   over the docker socket, since the controller's own environment need not carry it), and
-  a change is refused when the broker's `CONFIG_DIR` and the controller's disagree —
-  otherwise the recorded upstream set would leave the broker's other instances out.
+  a controller with `CONFIG_DIR` refuses a change when the broker has none — otherwise
+  the recorded upstream set would leave the broker's instances out. A controller
+  without `CONFIG_DIR` does not inspect the broker, so the reverse mismatch (the broker
+  serving instances the controller does not know of) is the compose's to get right:
+  set `CONFIG_DIR` on all three services or none.
 - **One trust domain.** The instances share the signer and the E2EE key, so a sealed
   request's `signer_addr` pins it to the CVM, not to a provider; what keeps a request at
   the provider it is for is the session token, which names its provider. At most one
@@ -421,9 +429,9 @@ broker-config-init:
     - CONFIG_DIR=/etc/config/instances   # added: its own mount of the same volume
 ```
 
-The event service needs the broker's `DATABASE_DSN` literal: without it an instance config
-that names no database is refused there while the broker derives one, and the two
-processes would disagree about where the instance's rows live. Like the primary's config,
+The event service needs the broker's `DATABASE_DSN` literal: with extra instances it
+refuses to start without one, rather than risk settling an instance from a different
+database than the broker writes it to. Like the primary's config,
 an instance file is written once and then belongs to the controller
 (`PUT /v1/config/core?instance=`); a later boot does not overwrite it from the
 environment, and dropping an instance from `EXTRA_BROKER_CONFIGS` does not remove its

@@ -209,7 +209,7 @@ func TestOverloadGuard_RegisteredByNewBehindTrackMetrics(t *testing.T) {
 	engine := gin.New()
 	c := &ctrl.Ctrl{}
 	c.SetMetrics(monitor.Default)
-	p := New(c, engine, nil, true, config.ConcurrencyLimitConfig{}, noopLogger{})
+	p := New(c, engine, nil, config.ConcurrencyLimitConfig{}, noopLogger{})
 	p.SetOverloadGuard(g)
 	reached := false
 	p.serviceGroup.POST("/chat/completions", func(c *gin.Context) {

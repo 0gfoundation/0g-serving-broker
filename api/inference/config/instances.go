@@ -56,12 +56,41 @@ func LoadInstances(primary *Config) ([]Instance, error) {
 	if dir == "" {
 		return nil, nil
 	}
+	files, err := listInstanceFiles(dir)
+	if err != nil {
+		return nil, err
+	}
+	var instances []Instance
+	for _, f := range files {
+		cfg, err := LoadInstanceConfig(f.path, f.name)
+		if err != nil {
+			return nil, fmt.Errorf("instance %q: %w", f.name, err)
+		}
+		instances = append(instances, Instance{Name: f.name, Config: cfg})
+	}
+	if err := checkInstances(primary, instances); err != nil {
+		return nil, err
+	}
+	return instances, nil
+}
+
+// instanceFile is one instance config in the instance directory.
+type instanceFile struct {
+	name, path string
+}
+
+// listInstanceFiles lists the instance configs in dir, sorted by name, and
+// refuses a file whose name cannot name an instance. Every reader of the
+// directory goes through it — the broker loading it, the controller validating a
+// change, the upstream record — so all three agree on which files are instances
+// and none of them takes one the others refuse.
+func listInstanceFiles(dir string) ([]instanceFile, error) {
 	paths, err := filepath.Glob(filepath.Join(dir, "*.yaml"))
 	if err != nil {
 		return nil, fmt.Errorf("listing %s=%q: %w", InstancesDirEnvVar, dir, err)
 	}
 	sort.Strings(paths)
-	var instances []Instance
+	files := make([]instanceFile, 0, len(paths))
 	for _, path := range paths {
 		name := strings.TrimSuffix(filepath.Base(path), ".yaml")
 		if !instanceNamePattern.MatchString(name) {
@@ -70,16 +99,9 @@ func LoadInstances(primary *Config) ([]Instance, error) {
 		if name == primaryInstanceName {
 			return nil, fmt.Errorf("instance config %q: %q names the CONFIG_FILE instance and cannot name an extra one", path, primaryInstanceName)
 		}
-		cfg, err := LoadInstanceConfig(path, name)
-		if err != nil {
-			return nil, fmt.Errorf("instance %q: %w", name, err)
-		}
-		instances = append(instances, Instance{Name: name, Config: cfg})
+		files = append(files, instanceFile{name: name, path: path})
 	}
-	if err := checkInstances(primary, instances); err != nil {
-		return nil, err
-	}
-	return instances, nil
+	return files, nil
 }
 
 // LoadInstanceConfig loads an extra instance's config from path: the same
@@ -94,7 +116,8 @@ func LoadInstances(primary *Config) ([]Instance, error) {
 // credentials are what keep unsealed request bodies inside the CVM, and they
 // must come from the measured compose literal for every instance, not only the
 // primary. The database is the one named by database.dsn in the instance's
-// config, or <primary database>_<instance> when the config names none.
+// config, or <primary database>_<instance> when the config names none. It is
+// required: an extra instance does not load without it.
 func LoadInstanceConfig(path, name string) (*Config, error) {
 	data, missing, err := config.ReadConfigFile(path)
 	if err != nil {
@@ -179,31 +202,24 @@ func ValidateInstanceSet(dir string, primaryContent []byte, name string, content
 	if err != nil {
 		return err
 	}
-	paths, err := filepath.Glob(filepath.Join(dir, "*.yaml"))
+	files, err := listInstanceFiles(dir)
 	if err != nil {
-		return fmt.Errorf("listing %q: %w", dir, err)
+		return err
 	}
-	sort.Strings(paths)
 	var instances []Instance
 	found := name == ""
-	for _, path := range paths {
-		n := strings.TrimSuffix(filepath.Base(path), ".yaml")
-		if !instanceNamePattern.MatchString(n) || n == primaryInstanceName {
-			return fmt.Errorf("instance config %q has a name the broker refuses", path)
-		}
+	for _, f := range files {
 		data := content
-		if n == name {
+		if f.name == name {
 			found = true
-		} else {
-			if data, err = os.ReadFile(path); err != nil {
-				return err
-			}
+		} else if data, err = os.ReadFile(f.path); err != nil {
+			return err
 		}
-		cfg, err := instanceConfigFromContent(data, path, n, brokerDSN, false)
+		cfg, err := instanceConfigFromContent(data, f.path, f.name, brokerDSN, false)
 		if err != nil {
-			return fmt.Errorf("instance %q: %w", n, err)
+			return fmt.Errorf("instance %q: %w", f.name, err)
 		}
-		instances = append(instances, Instance{Name: n, Config: cfg})
+		instances = append(instances, Instance{Name: f.name, Config: cfg})
 	}
 	if !found {
 		return fmt.Errorf("no instance named %q in %s", name, dir)
@@ -212,15 +228,19 @@ func ValidateInstanceSet(dir string, primaryContent []byte, name string, content
 }
 
 // applyInstanceDSN points an extra instance at the attested database server.
-// envDSN is the primary's DATABASE_DSN; empty leaves the config's own DSN, as
-// the primary's is left when the compose sets none. ownDatabase says whether
+// envDSN is the DATABASE_DSN of the process loading it; ownDatabase says whether
 // the instance's file named a database at all.
+//
+// Extra instances require DATABASE_DSN. Without it each process would take the
+// database from the file, and the broker and event processes — separate
+// containers, each with its own environment — could disagree on the server: the
+// broker writing an instance's requests to one database while the event process
+// settles from another, so its fees never reach the chain and nothing reports
+// it. With it required, every process that loads an instance derives the same
+// database from the one compose literal, and one that lacks it refuses to start.
 func applyInstanceDSN(cfg *Config, name, envDSN string, ownDatabase bool) error {
 	if envDSN == "" {
-		if !ownDatabase {
-			return fmt.Errorf("invalid config: database.dsn is required for an extra instance when %s is unset; the default names the primary's database", databaseDSNEnvVar)
-		}
-		return nil
+		return fmt.Errorf("invalid config: extra instances need %s: it decides every instance's database server, and without it this process and the other one serving the instance could open different databases", databaseDSNEnvVar)
 	}
 	attested, err := mysql.ParseDSN(envDSN)
 	if err != nil {
@@ -369,26 +389,24 @@ func InProcessUpstreamSources(dir string, primaryContent []byte, name string, co
 	}
 	out := []ProviderUpstreams{{Provider: strings.ToLower(addr), Service: &primary.Service}}
 
-	paths, err := filepath.Glob(filepath.Join(dir, "*.yaml"))
+	files, err := listInstanceFiles(dir)
 	if err != nil {
-		return nil, fmt.Errorf("listing %q: %w", dir, err)
+		return nil, err
 	}
-	sort.Strings(paths)
-	for _, path := range paths {
-		n := strings.TrimSuffix(filepath.Base(path), ".yaml")
+	for _, f := range files {
 		data := content
-		if n != name {
-			if data, err = os.ReadFile(path); err != nil {
+		if f.name != name {
+			if data, err = os.ReadFile(f.path); err != nil {
 				return nil, err
 			}
 		}
 		var cfg Config
 		if err := decodeAndMigrate(data, &cfg); err != nil {
-			return nil, fmt.Errorf("parsing instance %q: %w", n, err)
+			return nil, fmt.Errorf("parsing instance %q: %w", f.name, err)
 		}
 		addr, err := walletAddress(&cfg)
 		if err != nil {
-			return nil, fmt.Errorf("instance %q: %w", n, err)
+			return nil, fmt.Errorf("instance %q: %w", f.name, err)
 		}
 		out = append(out, ProviderUpstreams{Provider: strings.ToLower(addr), Service: &cfg.Service})
 	}
