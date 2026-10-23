@@ -34,5 +34,6 @@ func requestHost(hostport string) string {
 	if h, _, err := net.SplitHostPort(hostport); err == nil {
 		host = h
 	}
+	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
 	return strings.ToLower(strings.TrimSuffix(host, "."))
 }

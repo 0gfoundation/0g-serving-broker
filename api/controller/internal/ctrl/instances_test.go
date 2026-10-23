@@ -116,6 +116,8 @@ type daemonFaults struct {
 	// failSecondStop fails a container's second stop — the one RecreateContainer does
 	// before it removes, after the upgrade's own stop has succeeded.
 	failSecondStop map[string]bool
+	// env is each container's environment, as KEY=value entries.
+	env map[string][]string
 }
 
 func fakeInstanceDaemon(t *testing.T, l *opLog, failCreate map[string]bool) *docker.Client {
@@ -220,7 +222,7 @@ func fakeFaultyDaemon(t *testing.T, l *opLog, f daemonFaults) *docker.Client {
 				"Name":        "/" + n,
 				"RepoDigests": []string{imageRepo + "@" + testDigest},
 				"Created":     "2026-01-01T00:00:00Z",
-				"Config":      map[string]any{"Image": img},
+				"Config":      map[string]any{"Image": img, "Env": f.env[n]},
 				"State":       stateOf(state, f.health[n]),
 				"NetworkSettings": map[string]any{
 					"Networks": map[string]any{"default": map[string]any{}},

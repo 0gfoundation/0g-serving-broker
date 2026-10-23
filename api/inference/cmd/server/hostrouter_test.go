@@ -14,7 +14,7 @@ func named(name string) http.Handler {
 
 func TestHostRouterDispatchesByServingHost(t *testing.T) {
 	r := &hostRouter{
-		byHost:  map[string]http.Handler{"a.example": named("a"), "b.example": named("b")},
+		byHost:  map[string]http.Handler{"a.example": named("a"), "b.example": named("b"), "::2": named("b")},
 		primary: named("a"),
 	}
 	for host, want := range map[string]string{

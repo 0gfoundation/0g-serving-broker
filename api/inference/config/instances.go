@@ -48,7 +48,9 @@ type Instance struct {
 //
 // Any failure is returned rather than skipped: an instance whose config cannot
 // be served must stop the process before anything is written on chain, or the
-// chain would advertise a service nothing serves.
+// chain would advertise a service nothing serves. Only the config is checked
+// here; failures that need the chain or the network surface when the instance
+// starts.
 func LoadInstances(primary *Config) ([]Instance, error) {
 	dir := strings.TrimSpace(os.Getenv(InstancesDirEnvVar))
 	if dir == "" {
@@ -101,7 +103,7 @@ func LoadInstanceConfig(path, name string) (*Config, error) {
 	if missing {
 		return nil, fmt.Errorf("config file %q does not exist", path)
 	}
-	cfg, err := instanceConfigFromContent(data, path, name, true)
+	cfg, err := instanceConfigFromContent(data, path, name, strings.TrimSpace(os.Getenv(databaseDSNEnvVar)), true)
 	if err != nil {
 		return nil, err
 	}
@@ -109,12 +111,13 @@ func LoadInstanceConfig(path, name string) (*Config, error) {
 	return cfg, nil
 }
 
-// instanceConfigFromContent is LoadInstanceConfig over bytes. serving is true
-// when the process is loading the instance to serve it, false when the
-// controller validates a candidate: the controller's environment need not carry
-// the broker's DATABASE_DSN, so without it the database is left as the file
-// names it rather than refused for naming none.
-func instanceConfigFromContent(data []byte, path, name string, serving bool) (*Config, error) {
+// instanceConfigFromContent is LoadInstanceConfig over bytes, with envDSN the
+// DATABASE_DSN of the broker that will serve it ("" for none). The broker passes
+// its own environment's; the controller passes the one it read from the broker
+// container, so both apply the same rule to the same value. serving is true when
+// the process is loading the instance to serve it, which is when its notes are
+// logged.
+func instanceConfigFromContent(data []byte, path, name, envDSN string, serving bool) (*Config, error) {
 	cfg := defaultConfig()
 	cfg.Controller.ConfigFile = path
 	raw := config.RawYAMLKeys(data)
@@ -122,7 +125,6 @@ func instanceConfigFromContent(data []byte, path, name string, serving bool) (*C
 	if err != nil {
 		return nil, err
 	}
-	envDSN := strings.TrimSpace(os.Getenv(databaseDSNEnvVar))
 	if serving {
 		for _, k := range ignored {
 			log.Printf("[CONFIG-IGNORED] instance %s: unknown key %s: this broker version does not read it, so the setting has no effect (a typo, or a key for a newer broker)", name, k)
@@ -135,9 +137,6 @@ func instanceConfigFromContent(data []byte, path, name string, serving bool) (*C
 	// one: the defaults carry a DSN, and that is the primary's database.
 	ownDatabase := config.RawHasKey(raw, "database", "dsn") || config.RawHasKey(raw, "database", "provider")
 	err = applyAndValidateWith(cfg, raw, func(cfg *Config) error {
-		if !serving && envDSN == "" {
-			return nil
-		}
 		return applyInstanceDSN(cfg, name, envDSN, ownDatabase)
 	})
 	if err != nil {
@@ -156,19 +155,28 @@ func instanceConfigFromContent(data []byte, path, name string, serving bool) (*C
 // created by redeploying, never through the controller.
 //
 // It is ValidateConfigContent for the set. A change one instance's loader
-// accepts can still stop the process — a servingUrl host or wallet another
-// instance already uses — and the process holds every instance, so that would
-// take all of them down after the change is already recorded.
+// accepts can still stop the process — a servingUrl host, wallet or database
+// another instance already uses — and the process holds every instance, so that
+// would take all of them down after the change is already recorded.
 //
-// The databases are checked only when this process has DATABASE_DSN: without
-// it the controller cannot know which database the broker will derive.
-func ValidateInstanceSet(dir string, primaryContent []byte, name string, content []byte) error {
+// brokerDSN is the DATABASE_DSN the broker runs with ("" for none), which decides
+// every instance's database: the controller reads it from the broker container,
+// since its own environment need not carry it.
+func ValidateInstanceSet(dir string, primaryContent []byte, name string, content []byte, brokerDSN string) error {
 	primary := defaultConfig()
 	raw := config.RawYAMLKeys(primaryContent)
 	if _, err := decodeConfig(primaryContent, primary); err != nil {
 		return err
 	}
-	if err := applyAndValidate(primary, raw); err != nil {
+	err := applyAndValidateWith(primary, raw, func(cfg *Config) error {
+		applyTargetURLEnv(cfg)
+		if brokerDSN != "" {
+			cfg.Database.DSN = brokerDSN
+			cfg.Database.Provider = ""
+		}
+		return nil
+	})
+	if err != nil {
 		return err
 	}
 	paths, err := filepath.Glob(filepath.Join(dir, "*.yaml"))
@@ -191,7 +199,7 @@ func ValidateInstanceSet(dir string, primaryContent []byte, name string, content
 				return err
 			}
 		}
-		cfg, err := instanceConfigFromContent(data, path, n, false)
+		cfg, err := instanceConfigFromContent(data, path, n, brokerDSN, false)
 		if err != nil {
 			return fmt.Errorf("instance %q: %w", n, err)
 		}
@@ -200,7 +208,7 @@ func ValidateInstanceSet(dir string, primaryContent []byte, name string, content
 	if !found {
 		return fmt.Errorf("no instance named %q in %s", name, dir)
 	}
-	return checkInstancesWith(primary, instances, strings.TrimSpace(os.Getenv(databaseDSNEnvVar)) != "")
+	return checkInstances(primary, instances)
 }
 
 // applyInstanceDSN points an extra instance at the attested database server.
@@ -239,17 +247,12 @@ func applyInstanceDSN(cfg *Config, name, envDSN string, ownDatabase bool) error 
 
 // checkInstances refuses a set of instances one process cannot serve together.
 func checkInstances(primary *Config, instances []Instance) error {
-	return checkInstancesWith(primary, instances, true)
-}
-
-// checkInstancesWith is checkInstances, comparing databases only when
-// checkDatabases is set.
-func checkInstancesWith(primary *Config, instances []Instance, checkDatabases bool) error {
 	if len(instances) == 0 {
 		return nil
 	}
-	type seenAs struct{ host, wallet, dsn map[string]string }
-	seen := seenAs{host: map[string]string{}, wallet: map[string]string{}, dsn: map[string]string{}}
+	type seenAs struct{ host, wallet, db map[string]string }
+	seen := seenAs{host: map[string]string{}, wallet: map[string]string{}, db: map[string]string{}}
+	lora := ""
 	all := append([]Instance{{Name: primaryInstanceName, Config: primary}}, instances...)
 	for _, in := range all {
 		c := in.Config
@@ -263,6 +266,14 @@ func checkInstancesWith(primary *Config, instances []Instance, checkDatabases bo
 			if c.NvGPU != primary.NvGPU {
 				return fmt.Errorf("instance %q: nvGPU %v differs from the primary's %v; the process has one TEE quote, taken with the primary's setting", in.Name, c.NvGPU, primary.NvGPU)
 			}
+		}
+		// LoRA keeps adapters in one directory and reads one LORA_ECIES_PRIVATE_KEY
+		// per process, so two instances serving adapters would share both.
+		if c.LoRA.Enable {
+			if lora != "" {
+				return fmt.Errorf("instances %q and %q both enable lora; one process serves LoRA adapters for one instance", lora, in.Name)
+			}
+			lora = in.Name
 		}
 		host, err := ServingHost(c.Service.ServingURL)
 		if err != nil {
@@ -280,15 +291,25 @@ func checkInstancesWith(primary *Config, instances []Instance, checkDatabases bo
 			return fmt.Errorf("instances %q and %q use the same wallet %s; the chain holds one service per provider address", other, in.Name, wallet)
 		}
 		seen.wallet[wallet] = in.Name
-		if !checkDatabases {
-			continue
-		}
-		if other, dup := seen.dsn[c.Database.DSN]; dup && c.Database.DSN != "" {
+		db := databaseIdentity(c.Database.DSN)
+		if other, dup := seen.db[db]; dup {
 			return fmt.Errorf("instances %q and %q use the same database; request and account tables have no provider column, so each instance needs its own", other, in.Name)
 		}
-		seen.dsn[c.Database.DSN] = in.Name
+		seen.db[db] = in.Name
 	}
 	return nil
+}
+
+// databaseIdentity is which database a DSN opens: the server address and the
+// database name, as the driver resolves them. Compared instead of the DSN text,
+// which differs between spellings of one database — a default port written out
+// or not, parameters in another order — while both connections share the tables.
+func databaseIdentity(dsn string) string {
+	c, err := mysql.ParseDSN(dsn)
+	if err != nil {
+		return dsn
+	}
+	return c.Net + "(" + strings.ToLower(c.Addr) + ")/" + c.DBName
 }
 
 // ServingHost is the host requests for a service arrive with: the lower-cased
@@ -302,7 +323,7 @@ func ServingHost(servingURL string) (string, error) {
 	if u.Path != "" && u.Path != "/" {
 		return "", fmt.Errorf("service.servingUrl %q has a path; an instance is chosen by host and served at the root", servingURL)
 	}
-	return strings.ToLower(u.Hostname()), nil
+	return strings.ToLower(strings.TrimSuffix(u.Hostname(), ".")), nil
 }
 
 // walletAddress is the provider address the config's first private key signs
@@ -338,7 +359,7 @@ type ProviderUpstreams struct {
 // reader needs is where any of them may send plaintext.
 func InProcessUpstreamSources(dir string, primaryContent []byte, name string, content []byte) ([]ProviderUpstreams, error) {
 	var primary Config
-	if _, err := decodeConfig(primaryContent, &primary); err != nil {
+	if err := decodeAndMigrate(primaryContent, &primary); err != nil {
 		return nil, fmt.Errorf("parsing the primary config: %w", err)
 	}
 	applyTargetURLEnv(&primary)
@@ -362,7 +383,7 @@ func InProcessUpstreamSources(dir string, primaryContent []byte, name string, co
 			}
 		}
 		var cfg Config
-		if _, err := decodeConfig(data, &cfg); err != nil {
+		if err := decodeAndMigrate(data, &cfg); err != nil {
 			return nil, fmt.Errorf("parsing instance %q: %w", n, err)
 		}
 		addr, err := walletAddress(&cfg)
@@ -372,4 +393,15 @@ func InProcessUpstreamSources(dir string, primaryContent []byte, name string, co
 		out = append(out, ProviderUpstreams{Provider: strings.ToLower(addr), Service: &cfg.Service})
 	}
 	return out, nil
+}
+
+// decodeAndMigrate decodes config content and moves deprecated keys to their
+// replacements, without defaults or validation. The provider address is read
+// from network.privateKeys, which a config may still spell under the legacy
+// networks map; the broker migrates it, so this has to as well.
+func decodeAndMigrate(data []byte, out *Config) error {
+	if _, err := decodeConfig(data, out); err != nil {
+		return err
+	}
+	return migrateDeprecated(out, config.RawYAMLKeys(data))
 }

@@ -639,15 +639,6 @@ func (c *Ctrl) ApplyCoreConfig(ctx context.Context, configContent string) error 
 	if err := config.ValidateConfigContent([]byte(configContent)); err != nil {
 		return &InvalidConfigError{Err: err}
 	}
-	// With in-process instances the primary config is one of a set the same
-	// process serves, and a change it accepts alone — a servingUrl host or wallet
-	// an instance already uses — still stops every instance.
-	if c.hasInProcessInstances() {
-		if err := c.validateInProcessSet([]byte(configContent), "", nil); err != nil {
-			return err
-		}
-	}
-
 	if !c.changing.TryLock() {
 		return ErrChangeInProgress
 	}
@@ -656,6 +647,23 @@ func (c *Ctrl) ApplyCoreConfig(ctx context.Context, configContent string) error 
 	// Detached and bounded for the same reasons as UpdateImages.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), configChangeTimeout)
 	defer cancel()
+
+	// With in-process instances the primary config is one of a set the same
+	// process serves, and a change it accepts alone — a servingUrl host, wallet or
+	// database an instance already uses — still stops every instance. Under the
+	// lock, so the instance files cannot move between this check and the write.
+	if c.hasInProcessInstances() {
+		if err := c.validateInProcessSet(ctx, []byte(configContent), "", nil); err != nil {
+			return err
+		}
+	} else if _, brokerConfigDir, err := c.brokerInstanceEnv(ctx); err == nil {
+		// Best effort, so a single-instance deployment changes nothing when the
+		// broker cannot be inspected: a broker serving instances this controller
+		// does not know of would record a set that leaves theirs out.
+		if err := c.checkConfigDirAgrees(brokerConfigDir); err != nil {
+			return err
+		}
+	}
 
 	// Keys this controller's broker code does not know are ignored rather than refused
 	// (config.decodeConfig), and their values are not validated by this code at all. That

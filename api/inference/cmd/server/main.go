@@ -43,7 +43,10 @@ func Main() {
 	}
 
 	// Every extra instance's config is loaded and checked before any instance
-	// starts, so a bad one stops the process before anything is written on chain.
+	// starts, so what LoadInstances checks stops the process before anything is
+	// written on chain. A failure it cannot see — an instance's RPC, its price
+	// feed, its account sync — still panics during startInstance, after earlier
+	// instances have synced their services, and takes the whole process down.
 	extras, err := cfg.LoadInstances(config)
 	if err != nil {
 		panic(err)
