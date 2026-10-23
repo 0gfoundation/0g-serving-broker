@@ -180,7 +180,8 @@ variable to be absent will never see this record and may refuse it if it does.
 ```
 
 A config change to one of the extra broker instances the controller manages
-(`ZG_CONTROLLER_INSTANCES`). `unknown` is what an aborted change writes; a reader refuses the
+(`ZG_CONTROLLER_INSTANCES`), or to one of the in-process instances the primary broker
+serves from `CONFIG_DIR` (controller-design.md §3.3a) — the record is the same either way. `unknown` is what an aborted change writes; a reader refuses the
 whole CVM until a later record for that instance succeeds. Instances share the primary's
 signing and encryption keys (one trust domain). **The upstream set (§4.3) is derived from the
 primary config only**, which is why the controller refuses `recordUpstreamSet` together with

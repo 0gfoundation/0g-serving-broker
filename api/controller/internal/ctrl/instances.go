@@ -206,16 +206,20 @@ type InvalidInstanceError struct {
 }
 
 func (e *InvalidInstanceError) Error() string {
-	return fmt.Sprintf("no instance named %q; this controller manages the primary broker and the ones %s declares", e.Name, InstancesEnvVar)
+	return fmt.Sprintf("no instance named %q; this controller manages the primary broker and the ones %s declares or %s holds", e.Name, InstancesEnvVar, config.InstancesDirEnvVar)
 }
 
 // GetInstanceConfig reads an extra instance's config file.
 func (c *Ctrl) GetInstanceConfig(name string) (string, error) {
-	in, ok := c.instanceNamed(name)
-	if !ok {
+	path := ""
+	if in, ok := c.instanceNamed(name); ok {
+		path = in.ConfigFile
+	} else if p, ok := c.inProcessConfigFile(name); ok {
+		path = p
+	} else {
 		return "", &InvalidInstanceError{Name: name}
 	}
-	data, err := os.ReadFile(in.ConfigFile)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", err
 	}
@@ -230,9 +234,14 @@ func (c *Ctrl) GetInstanceConfig(name string) (string, error) {
 // Recorded as EventInstanceConfigUpdate, never as EventConfigUpdate — see that event.
 // No upstream-set record: parseInstances refuses extra instances whenever that record
 // is on.
+//
+// An in-process instance (CONFIG_DIR) goes to applyInProcessInstanceConfig instead.
 func (c *Ctrl) ApplyInstanceConfig(ctx context.Context, name, content string) error {
 	in, ok := c.instanceNamed(name)
 	if !ok {
+		if path, ok := c.inProcessConfigFile(name); ok {
+			return c.applyInProcessInstanceConfig(ctx, name, path, content)
+		}
 		return &InvalidInstanceError{Name: name}
 	}
 	if err := config.ValidateConfigContent([]byte(content)); err != nil {

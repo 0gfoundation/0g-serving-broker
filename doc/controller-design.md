@@ -323,6 +323,34 @@ Things to know before relying on it:
   as the instances take (each up to the 2-minute health wait). That order is what
   keeps a later primary failure from stranding an instance half-upgraded.
 
+#### 3.3a In-process instances (`CONFIG_DIR`)
+
+The alternative to extra containers: the primary broker and event processes serve the
+extra providers themselves. Set `CONFIG_DIR` (a compose literal) on the broker, the
+event service and the controller, each naming its own mount of one directory; every
+`<name>.yaml` in it is one provider instance beside the `CONFIG_FILE` one, with its own
+wallet, on-chain service and database. The compose then has the same services whatever
+number of providers the machine runs, which is what lets one recorded deployment in a
+verifier's baseline cover every such machine.
+
+- **Routing.** One ingress, one port. Each instance's `service.servingUrl` host must be
+  its own domain (no path); the ingress gets them all in `DOMAIN` + `DOMAINS` and keeps a
+  literal `TARGET_ENDPOINT`. The broker picks the instance by `Host`; anything matching
+  none goes to the primary.
+- **Attested overrides.** `DATABASE_DSN` decides every instance's database server; an
+  instance's database is the one its `database.dsn` names, else
+  `<primary database>_<name>`, created on start. `TARGET_URL` is the primary's only.
+- **Controller.** `GET|PUT /v1/config/core?instance=<name>` reads and replaces
+  `<name>.yaml`, recorded as `zg-instance-config-update`. The whole set is validated
+  first — a change that would collide with another instance's host, wallet or database
+  is refused before anything is recorded — and the primary broker and event restart,
+  so every instance restarts with them. The API never creates or removes an instance;
+  that is a redeploy. A primary config change is validated against the instances too.
+- Refused together with `ZG_CONTROLLER_INSTANCES`, and, like it, with
+  `controller.recordUpstreamSet` until that record covers every instance.
+- **No in-band upgrade work.** The instances run in the primary's containers, so an
+  image update moves them with nothing more to plan.
+
 ### 3.4 What the controller does with the docker socket
 
 The controller is the only service in a deployment that mounts
