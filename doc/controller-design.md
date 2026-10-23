@@ -355,6 +355,68 @@ verifier's baseline cover every such machine.
 - **No in-band upgrade work.** The instances run in the primary's containers, so an
   image update moves them with nothing more to plan.
 
+**Compose.** Against a single-instance compose, five services change, and none is added.
+The values that differ between machines arrive as environment variables whose *names*
+are fixed (add them to `allowed_envs`), so the service blocks — what a verifier's
+per-service baseline compares — are the same on every machine:
+
+```yaml
+broker-ingress:
+  environment:
+    - DOMAIN=${DOMAIN:?...}             # unchanged: the primary instance's domain
+    - DOMAINS=${EXTRA_DOMAINS:-}        # added: one per extra instance, comma-separated
+    - TARGET_ENDPOINT=http://0g-serving-provider-broker:3080   # unchanged, a literal
+
+broker-config-init:
+  environment:
+    - EXTRA_BROKER_CONFIGS=${EXTRA_BROKER_CONFIGS:-}   # one line per instance: <name>=<base64 config>
+    - EXTRA_PRIVATE_KEYS=${EXTRA_PRIVATE_KEYS:-}       # one line per instance: <name>=<private key>
+  command:
+    - sh
+    - -c
+    - |
+      set -e
+      # ...the existing primary block, unchanged...
+      mkdir -p /config/instances
+      printf '%s\n' "$$EXTRA_BROKER_CONFIGS" | while read -r line; do
+        [ -n "$$line" ] || continue
+        name="$${line%%=*}"
+        b64="$${line#*=}"
+        case "$$name" in
+          ''|*[!a-z0-9-]*|[!a-z]*) echo "EXTRA_BROKER_CONFIGS: bad instance name '$$name'" >&2; exit 1 ;;
+        esac
+        [ -f "/config/instances/$$name.yaml" ] && continue
+        key="$$(printf '%s\n' "$$EXTRA_PRIVATE_KEYS" | sed -n "s/^$$name=//p")"
+        if [ -z "$$key" ]; then echo "EXTRA_PRIVATE_KEYS has no key for instance '$$name'" >&2; exit 1; fi
+        printf '%s' "$$b64" | base64 -d \
+          | sed -e "s#\$${PRIVATE_KEY}#$$key#" \
+                -e "s#\$${COINGECKO_API_KEY}#$$COINGECKO_API_KEY#" \
+          > "/config/instances/$$name.yaml.tmp"
+        mv "/config/instances/$$name.yaml.tmp" "/config/instances/$$name.yaml"
+      done
+
+0g-serving-provider-broker:
+  environment:
+    - CONFIG_DIR=/etc/config/instances   # added
+
+0g-serving-provider-event:
+  environment:
+    - CONFIG_DIR=/etc/config/instances   # added
+    - DATABASE_DSN=root:...@tcp(mysql:3306)/provider?parseTime=true   # added: the broker's literal, verbatim
+
+0g-controller:
+  environment:
+    - CONFIG_DIR=/etc/config/instances   # added: its own mount of the same volume
+```
+
+The event service needs the broker's `DATABASE_DSN` literal: without it an instance config
+that names no database is refused there while the broker derives one, and the two
+processes would disagree about where the instance's rows live. Like the primary's config,
+an instance file is written once and then belongs to the controller
+(`PUT /v1/config/core?instance=`); a later boot does not overwrite it from the
+environment. A machine serving one provider sets the three variables empty, and the
+processes behave exactly as without `CONFIG_DIR`.
+
 ### 3.4 What the controller does with the docker socket
 
 The controller is the only service in a deployment that mounts
