@@ -305,7 +305,7 @@ func setupTestEnvOpts(t *testing.T, e2eeEnabled bool, opts ...func(*config.Confi
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
 
-	p := proxy.New(c, engine, []string{"*"}, false, cfg.ConcurrencyLimit, logger)
+	p := proxy.New(c, engine, []string{"*"}, cfg.ConcurrencyLimit, logger)
 	if err := p.Start(); err != nil {
 		t.Fatalf("start proxy: %v", err)
 	}
