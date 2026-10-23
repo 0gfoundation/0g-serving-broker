@@ -101,6 +101,20 @@ func LoadInstanceConfig(path, name string) (*Config, error) {
 	if missing {
 		return nil, fmt.Errorf("config file %q does not exist", path)
 	}
+	cfg, err := instanceConfigFromContent(data, path, name, true)
+	if err != nil {
+		return nil, err
+	}
+	cfg.Network.PrivateKeyStore = config.NewPrivateKeyStore(&cfg.Network)
+	return cfg, nil
+}
+
+// instanceConfigFromContent is LoadInstanceConfig over bytes. serving is true
+// when the process is loading the instance to serve it, false when the
+// controller validates a candidate: the controller's environment need not carry
+// the broker's DATABASE_DSN, so without it the database is left as the file
+// names it rather than refused for naming none.
+func instanceConfigFromContent(data []byte, path, name string, serving bool) (*Config, error) {
 	cfg := defaultConfig()
 	cfg.Controller.ConfigFile = path
 	raw := config.RawYAMLKeys(data)
@@ -108,23 +122,85 @@ func LoadInstanceConfig(path, name string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	for _, k := range ignored {
-		log.Printf("[CONFIG-IGNORED] instance %s: unknown key %s: this broker version does not read it, so the setting has no effect (a typo, or a key for a newer broker)", name, k)
-	}
-	if strings.TrimSpace(os.Getenv(targetURLEnvVar)) != "" {
-		log.Printf("[CONFIG] instance %s: %s names the primary instance's upstream; this instance uses service.targetUrl from its own config", name, targetURLEnvVar)
+	envDSN := strings.TrimSpace(os.Getenv(databaseDSNEnvVar))
+	if serving {
+		for _, k := range ignored {
+			log.Printf("[CONFIG-IGNORED] instance %s: unknown key %s: this broker version does not read it, so the setting has no effect (a typo, or a key for a newer broker)", name, k)
+		}
+		if strings.TrimSpace(os.Getenv(targetURLEnvVar)) != "" {
+			log.Printf("[CONFIG] instance %s: %s names the primary instance's upstream; this instance uses service.targetUrl from its own config", name, targetURLEnvVar)
+		}
 	}
 	// Whether the file named a database, not whether the migrated config holds
 	// one: the defaults carry a DSN, and that is the primary's database.
 	ownDatabase := config.RawHasKey(raw, "database", "dsn") || config.RawHasKey(raw, "database", "provider")
 	err = applyAndValidateWith(cfg, raw, func(cfg *Config) error {
-		return applyInstanceDSN(cfg, name, strings.TrimSpace(os.Getenv(databaseDSNEnvVar)), ownDatabase)
+		if !serving && envDSN == "" {
+			return nil
+		}
+		return applyInstanceDSN(cfg, name, envDSN, ownDatabase)
 	})
 	if err != nil {
 		return nil, err
 	}
-	cfg.Network.PrivateKeyStore = config.NewPrivateKeyStore(&cfg.Network)
 	return cfg, nil
+}
+
+// ValidateInstanceSet is what the controller runs before changing a config of a
+// process that serves extra instances: it checks that the process could load
+// and serve the whole set with the change applied, on throwaway Configs.
+//
+// primaryContent is the primary config as it will be, and dir the CONFIG_DIR
+// directory as the controller mounts it. When name is not empty, content
+// replaces that instance's file, which must already exist: instances are
+// created by redeploying, never through the controller.
+//
+// It is ValidateConfigContent for the set. A change one instance's loader
+// accepts can still stop the process — a servingUrl host or wallet another
+// instance already uses — and the process holds every instance, so that would
+// take all of them down after the change is already recorded.
+//
+// The databases are checked only when this process has DATABASE_DSN: without
+// it the controller cannot know which database the broker will derive.
+func ValidateInstanceSet(dir string, primaryContent []byte, name string, content []byte) error {
+	primary := defaultConfig()
+	raw := config.RawYAMLKeys(primaryContent)
+	if _, err := decodeConfig(primaryContent, primary); err != nil {
+		return err
+	}
+	if err := applyAndValidate(primary, raw); err != nil {
+		return err
+	}
+	paths, err := filepath.Glob(filepath.Join(dir, "*.yaml"))
+	if err != nil {
+		return fmt.Errorf("listing %q: %w", dir, err)
+	}
+	sort.Strings(paths)
+	var instances []Instance
+	found := name == ""
+	for _, path := range paths {
+		n := strings.TrimSuffix(filepath.Base(path), ".yaml")
+		if !instanceNamePattern.MatchString(n) || n == primaryInstanceName {
+			return fmt.Errorf("instance config %q has a name the broker refuses", path)
+		}
+		data := content
+		if n == name {
+			found = true
+		} else {
+			if data, err = os.ReadFile(path); err != nil {
+				return err
+			}
+		}
+		cfg, err := instanceConfigFromContent(data, path, n, false)
+		if err != nil {
+			return fmt.Errorf("instance %q: %w", n, err)
+		}
+		instances = append(instances, Instance{Name: n, Config: cfg})
+	}
+	if !found {
+		return fmt.Errorf("no instance named %q in %s", name, dir)
+	}
+	return checkInstancesWith(primary, instances, strings.TrimSpace(os.Getenv(databaseDSNEnvVar)) != "")
 }
 
 // applyInstanceDSN points an extra instance at the attested database server.
@@ -163,6 +239,12 @@ func applyInstanceDSN(cfg *Config, name, envDSN string, ownDatabase bool) error 
 
 // checkInstances refuses a set of instances one process cannot serve together.
 func checkInstances(primary *Config, instances []Instance) error {
+	return checkInstancesWith(primary, instances, true)
+}
+
+// checkInstancesWith is checkInstances, comparing databases only when
+// checkDatabases is set.
+func checkInstancesWith(primary *Config, instances []Instance, checkDatabases bool) error {
 	if len(instances) == 0 {
 		return nil
 	}
@@ -198,6 +280,9 @@ func checkInstances(primary *Config, instances []Instance) error {
 			return fmt.Errorf("instances %q and %q use the same wallet %s; the chain holds one service per provider address", other, in.Name, wallet)
 		}
 		seen.wallet[wallet] = in.Name
+		if !checkDatabases {
+			continue
+		}
 		if other, dup := seen.dsn[c.Database.DSN]; dup && c.Database.DSN != "" {
 			return fmt.Errorf("instances %q and %q use the same database; request and account tables have no provider column, so each instance needs its own", other, in.Name)
 		}

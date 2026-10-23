@@ -252,6 +252,12 @@ type Ctrl struct {
 	// primary one (InstancesEnvVar). Fixed at startup, like the admin list.
 	instances []Instance
 
+	// configDir is the directory of in-process instance configs
+	// (config.InstancesDirEnvVar), read from the controller's own environment; ""
+	// when the primary processes serve the primary instance alone. See
+	// inprocess.go.
+	configDir string
+
 	// enginesEnabled is EnginesEnvVar, read once at startup. See CreateEngine.
 	enginesEnabled bool
 }
@@ -330,6 +336,13 @@ func NewCtrl(fullConfig *config.Config, logger log.Logger) (*Ctrl, error) {
 		return nil, err
 	}
 	ctrl.instances = instances
+	ctrl.configDir = strings.TrimSpace(os.Getenv(config.InstancesDirEnvVar))
+	if err := checkConfigDir(ctrl.configDir, instances, cfg.RecordUpstreamSet); err != nil {
+		return nil, err
+	}
+	if ctrl.configDir != "" {
+		logger.Infof("Serving in-process instances from %s", ctrl.configDir)
+	}
 	ctrl.enginesEnabled = os.Getenv(EnginesEnvVar) == "on"
 	for _, in := range instances {
 		logger.Infof("Managing extra instance %q: broker=%s event=%s ingress=%s config=%s", in.Name, in.Broker, in.Event, in.Ingress, in.ConfigFile)
@@ -625,6 +638,14 @@ func (c *Ctrl) ApplyCoreConfig(ctx context.Context, configContent string) error 
 	// drift from what the broker enforces, which is how this hole opened.
 	if err := config.ValidateConfigContent([]byte(configContent)); err != nil {
 		return &InvalidConfigError{Err: err}
+	}
+	// With in-process instances the primary config is one of a set the same
+	// process serves, and a change it accepts alone — a servingUrl host or wallet
+	// an instance already uses — still stops every instance.
+	if c.hasInProcessInstances() {
+		if err := c.validateInProcessSet([]byte(configContent), "", nil); err != nil {
+			return err
+		}
 	}
 
 	if !c.changing.TryLock() {
