@@ -135,6 +135,7 @@ func TestLoadInstancesRefusesWhatOneProcessCannotServe(t *testing.T) {
 func TestServingHost(t *testing.T) {
 	for in, want := range map[string]string{
 		"https://A.Example":       "a.example",
+		"https://a.example.":      "a.example",
 		"https://a.example/":      "a.example",
 		"http://a.example:3080":   "a.example",
 		" https://a.example:443 ": "a.example",
@@ -171,5 +172,68 @@ func TestLoadInstancesRequiresADatabaseWithoutTheAttestedOne(t *testing.T) {
 	}
 	if want := "root:pw@tcp(mysql:3306)/provider_b"; got[0].Config.Database.DSN != want {
 		t.Errorf("dsn = %q, want %q", got[0].Config.Database.DSN, want)
+	}
+}
+
+// Two spellings of one database are one database: the primary keeps
+// DATABASE_DSN's text while an instance's DSN is rebuilt by the driver, which
+// writes the default port and orders parameters its own way.
+func TestLoadInstancesRefusesOneDatabaseSpelledTwoWays(t *testing.T) {
+	t.Setenv(databaseDSNEnvVar, "root:pw@tcp(mysql)/provider?parseTime=true")
+	primary := primaryForInstances(t)
+	t.Setenv(InstancesDirEnvVar, writeInstanceDir(t, map[string]string{
+		"b.yaml": instanceYAML("https://b.example", testKeyB, "database:\n  dsn: root:pw@tcp(mysql:3306)/provider\n"),
+	}))
+	if _, err := LoadInstances(primary); err == nil || !strings.Contains(err.Error(), "same database") {
+		t.Fatalf("LoadInstances error = %v, want the shared database refused", err)
+	}
+}
+
+func TestLoadInstancesRefusesTwoLoRAInstances(t *testing.T) {
+	t.Setenv(databaseDSNEnvVar, "root:pw@tcp(mysql:3306)/provider")
+	primary := primaryForInstances(t)
+	primary.LoRA.Enable = true
+	t.Setenv(InstancesDirEnvVar, writeInstanceDir(t, map[string]string{
+		"b.yaml": instanceYAML("https://b.example", testKeyB, "lora:\n  enable: true\n"),
+	}))
+	if _, err := LoadInstances(primary); err == nil || !strings.Contains(err.Error(), "both enable lora") {
+		t.Fatalf("LoadInstances error = %v, want two LoRA instances refused", err)
+	}
+}
+
+// The controller validates with the DATABASE_DSN the broker runs with, so it
+// refuses what the broker would refuse at start, whatever its own environment.
+func TestValidateInstanceSetUsesTheBrokersDatabase(t *testing.T) {
+	t.Setenv(databaseDSNEnvVar, "") // the controller's own: unset
+	dir := writeInstanceDir(t, map[string]string{"b.yaml": instanceYAML("https://b.example", testKeyB, "")})
+	primaryContent := []byte(instanceYAML("https://a.example", testKeyA, ""))
+	brokerDSN := "root:pw@tcp(mysql:3306)/provider?parseTime=true"
+
+	if err := ValidateInstanceSet(dir, primaryContent, "", nil, brokerDSN); err != nil {
+		t.Fatalf("a set the broker serves = %v", err)
+	}
+	onPrimary := []byte(instanceYAML("https://b.example", testKeyB, "database:\n  dsn: x:y@tcp(z)/provider\n"))
+	if err := ValidateInstanceSet(dir, primaryContent, "b", onPrimary, brokerDSN); err == nil || !strings.Contains(err.Error(), "same database") {
+		t.Errorf("an instance onto the primary's database = %v, want refused", err)
+	}
+	// A broker without DATABASE_DSN refuses an instance naming no database.
+	if err := ValidateInstanceSet(dir, primaryContent, "", nil, ""); err == nil || !strings.Contains(err.Error(), "database.dsn is required") {
+		t.Errorf("no database without DATABASE_DSN = %v, want refused", err)
+	}
+}
+
+// A config still using the legacy networks map is served by the broker, so the
+// upstream record must read its wallet from it too.
+func TestInProcessUpstreamSourcesReadsTheLegacyNetworksMap(t *testing.T) {
+	legacy := strings.Replace(instanceYAML("https://b.example", testKeyB, ""),
+		"network:\n  url: http://rpc\n  chainID: 16661\n  privateKeys: [\""+testKeyB+"\"]\n",
+		"networks:\n  ethereum0g:\n    url: http://rpc\n    chainID: 16661\n    privateKeys: [\""+testKeyB+"\"]\n", 1)
+	if !strings.Contains(legacy, "networks:") {
+		t.Fatal("the legacy fixture did not take the legacy shape")
+	}
+	dir := writeInstanceDir(t, map[string]string{"b.yaml": legacy})
+	got, err := InProcessUpstreamSources(dir, []byte(instanceYAML("https://a.example", testKeyA, "")), "", nil)
+	if err != nil || len(got) != 2 || got[1].Provider == "" {
+		t.Fatalf("InProcessUpstreamSources = %+v, %v; want both providers", got, err)
 	}
 }

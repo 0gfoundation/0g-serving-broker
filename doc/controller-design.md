@@ -344,8 +344,20 @@ verifier's baseline cover every such machine.
   `<name>.yaml`, recorded as `zg-instance-config-update`. The whole set is validated
   first — a change that would collide with another instance's host, wallet or database
   is refused before anything is recorded — and the primary broker and event restart,
-  so every instance restarts with them. The API never creates or removes an instance;
-  that is a redeploy. A primary config change is validated against the instances too.
+  so every instance restarts with them. The API never creates or removes an instance.
+  A primary config change is validated against the instances too. The validation runs
+  under the change lock, with the `DATABASE_DSN` the **broker container** runs with (read
+  over the docker socket, since the controller's own environment need not carry it), and
+  a change is refused when the broker's `CONFIG_DIR` and the controller's disagree —
+  otherwise the recorded upstream set would leave the broker's other instances out.
+- **One trust domain.** The instances share the signer and the E2EE key, so a sealed
+  request's `signer_addr` pins it to the CVM, not to a provider; what keeps a request at
+  the provider it is for is the session token, which names its provider. At most one
+  instance may enable LoRA (one adapter directory, one `LORA_ECIES_PRIVATE_KEY`).
+- **Startup.** Config problems across instances (hosts, wallets, databases, chain) stop
+  the process before anything is written on chain; a failure that needs the network — an
+  instance's RPC, price feed or account sync — panics while starting, after earlier
+  instances have synced, and takes every instance down with it.
 - Refused together with `ZG_CONTROLLER_INSTANCES`. Unlike it, combines with
   `controller.recordUpstreamSet`: the recorded set covers every instance, each member tagged
   `provider=<address>` (rtmr3-records.md §4.3). Because the instances share one signer, a
@@ -414,7 +426,8 @@ that names no database is refused there while the broker derives one, and the tw
 processes would disagree about where the instance's rows live. Like the primary's config,
 an instance file is written once and then belongs to the controller
 (`PUT /v1/config/core?instance=`); a later boot does not overwrite it from the
-environment. A machine serving one provider sets the three variables empty, and the
+environment, and dropping an instance from `EXTRA_BROKER_CONFIGS` does not remove its
+file — delete it from the volume to stop serving it. A machine serving one provider sets the three variables empty, and the
 processes behave exactly as without `CONFIG_DIR`.
 
 ### 3.4 What the controller does with the docker socket

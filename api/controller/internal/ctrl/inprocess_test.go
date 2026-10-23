@@ -60,9 +60,12 @@ func newInProcessCtrl(t *testing.T, l *opLog) (c *Ctrl, primary, img string) {
 	t.Setenv("DATABASE_DSN", "")
 	t.Cleanup(docker.SetHostnameForTests(selfHost))
 	t.Setenv(attestproxy.SocketEnvVar, "/var/run/zg-tee/tee.sock")
+	// The broker container's environment, which the controller reads: it serves the
+	// same instance directory, and its DATABASE_DSN decides every instance's database.
+	brokerEnv := []string{config.InstancesDirEnvVar + "=/etc/config/instances", "DATABASE_DSN=root:pw@tcp(mysql:3306)/provider?parseTime=true"}
 	return &Ctrl{
 		config:       config.ControllerConfig{ImageRepo: imageRepo, ConfigFile: primary},
-		dockerClient: fakeInstanceDaemon(t, l, nil),
+		dockerClient: fakeFaultyDaemon(t, l, daemonFaults{env: map[string][]string{containerBroker: brokerEnv}}),
 		emitter:      &fakeEmitter{log: l},
 		deriver:      &fakeDeriver{log: l},
 		logger:       testLogger(t),
@@ -208,5 +211,56 @@ func TestInProcessInstanceChangeRecordsTheNewSetBeforeTheWrite(t *testing.T) {
 	}
 	if i, j := l.indexOf("emit "+attest.EventInstanceConfigUpdate), l.indexOf("emit "+attest.EventUpstreamSet); i < 0 || j < i {
 		t.Errorf("ops = %v, want the instance's config record before the set", l.all())
+	}
+}
+
+// The broker and the controller must agree on whether there are in-process
+// instances, or the controller records a set that leaves some of the broker's
+// destinations out. Either direction is refused before anything is recorded.
+func TestConfigChangesRefusedWhenBrokerAndControllerDisagreeOnConfigDir(t *testing.T) {
+	var unconfirmed *UnconfirmedConfigError
+
+	l := &opLog{}
+	c, primary, _ := newInProcessCtrl(t, l)
+	c.dockerClient = fakeFaultyDaemon(t, l, daemonFaults{env: map[string][]string{containerBroker: {"DATABASE_DSN=root:pw@tcp(mysql:3306)/provider"}}})
+	if err := c.ApplyInstanceConfig(context.Background(), "img", inProcConfig("https://b.example", inProcKeyB, "x")); !errors.As(err, &unconfirmed) {
+		t.Errorf("controller with CONFIG_DIR, broker without: %v, want UnconfirmedConfigError", err)
+	}
+
+	c.configDir = ""
+	c.dockerClient = fakeFaultyDaemon(t, l, daemonFaults{env: map[string][]string{containerBroker: {config.InstancesDirEnvVar + "=/etc/config/instances"}}})
+	if err := c.ApplyCoreConfig(context.Background(), inProcConfig("https://a.example", inProcKeyA, "x")); !errors.As(err, &unconfirmed) {
+		t.Errorf("broker with CONFIG_DIR, controller without: %v, want UnconfirmedConfigError", err)
+	}
+	if ops := l.all(); len(ops) != 0 {
+		t.Errorf("ops = %v, want nothing recorded", ops)
+	}
+	_ = primary
+}
+
+// A set recorded for content that then fails to be written is superseded by the
+// set the files on disk permit, so the ledger does not name a config nothing runs.
+func TestFailedInProcessWriteRestoresTheUpstreamSet(t *testing.T) {
+	l := &opLog{}
+	c, _, img := newInProcessCtrl(t, l)
+	c.config.RecordUpstreamSet = true
+	// A file the write cannot replace, even as root: it stats as a regular file, so
+	// the instance is found, and the write after both records fails.
+	if err := os.Remove(img); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/proc/self/status", img); err != nil {
+		t.Fatal(err)
+	}
+
+	moved := strings.Replace(inProcConfig("https://b.example", inProcKeyB, "after"), "http://engine:8000/v1", "http://img-engine:8000/v1", 1)
+	if err := c.ApplyInstanceConfig(context.Background(), "img", moved); err == nil {
+		t.Fatal("ApplyInstanceConfig() = nil, want the write to fail")
+	}
+	sets := emitted(l)
+	// What is on disk is not a config, so the restored record is the unreadable one —
+	// never the set of the content that was not written.
+	if len(sets) != 2 || !strings.Contains(sets[0], "img-engine") || sets[1] != upstreamSetInvalidated {
+		t.Fatalf("recorded sets %q, want the new set and then the one on disk", sets)
 	}
 }

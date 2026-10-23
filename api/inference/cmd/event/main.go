@@ -36,7 +36,13 @@ func Main() {
 		panic(err)
 	}
 
-	if conf.Monitor.Enable {
+	// One metrics server for the process, on the primary's address, whenever any
+	// instance exports metrics.
+	monitorOn := conf.Monitor.Enable
+	for _, extra := range extras {
+		monitorOn = monitorOn || extra.Config.Monitor.Enable
+	}
+	if monitorOn {
 		go monitor.StartMetricsServer(conf.Monitor.EventAddress)
 	}
 
