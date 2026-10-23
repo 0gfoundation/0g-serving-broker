@@ -96,6 +96,15 @@ const maxUpstreamLine = 4096
 // member's first field can start with this.
 const upstreamCountPrefix = "count="
 
+// upstreamProviderPrefix tags a member's optional provider field. Tagged rather than
+// positional because the identity before it is optional too: "<name> <URL> <x>" must
+// mean one thing, and an identity cannot contain '=' (upstreamIdentityPattern).
+const upstreamProviderPrefix = "provider="
+
+// upstreamProviderPattern is a provider field's value: the provider's address in one
+// spelling only, so a set has one rendering and one hash.
+var upstreamProviderPattern = regexp.MustCompile(`^0x[0-9a-f]{40}$`)
+
 // parseUpstreamSet reads one EventUpstreamSet payload into the set it names.
 //
 // The payload is the WHOLE set:
@@ -167,6 +176,7 @@ func parseUpstreamSet(payload string) ([]Upstream, error) {
 	// validate a count before the loop that counts.
 	var members []Upstream
 	seen := map[string]struct{}{}
+	withProvider := 0
 	// want stays negative until the header is read, which is what makes "no header at
 	// all" distinguishable from "count=0". A header of count=-1 is refused below, so a
 	// non-negative want always means the header was seen.
@@ -182,7 +192,7 @@ func parseUpstreamSet(payload string) ([]Upstream, error) {
 		// it to carry, and strings.Fields over whitespace allocates nothing. The position
 		// earns its keep on the field bound alone.
 		if len(line) > maxUpstreamLine {
-			return nil, fmt.Errorf("%s payload has a %d-byte line, over the %d-byte limit; a member is a name, a base URL and an optional identity", EventUpstreamSet, len(line), maxUpstreamLine)
+			return nil, fmt.Errorf("%s payload has a %d-byte line, over the %d-byte limit; a member is a name, a base URL, an optional identity and an optional provider", EventUpstreamSet, len(line), maxUpstreamLine)
 		}
 		fields := strings.Fields(line)
 		if len(fields) == 0 {
@@ -211,27 +221,49 @@ func parseUpstreamSet(payload string) ([]Upstream, error) {
 			want = n
 			continue
 		}
+		// The provider field is the last one when present, and tagged, so it is taken off
+		// before the positional fields are read.
+		provider := ""
+		if last := fields[len(fields)-1]; len(fields) > 2 && strings.HasPrefix(last, upstreamProviderPrefix) {
+			provider = strings.TrimPrefix(last, upstreamProviderPrefix)
+			if !upstreamProviderPattern.MatchString(provider) {
+				return nil, fmt.Errorf("%s payload line %q carries provider %q, which is not 0x and 40 lowercase hex digits", EventUpstreamSet, line, provider)
+			}
+			fields = fields[:len(fields)-1]
+		}
 		if len(fields) < 2 || len(fields) > 3 {
-			return nil, fmt.Errorf("%s payload line %q has %d fields, want a name, a base URL and an optional identity", EventUpstreamSet, line, len(fields))
+			return nil, fmt.Errorf("%s payload line %q has %d fields, want a name, a base URL, an optional identity and an optional provider=<address>", EventUpstreamSet, line, len(fields))
 		}
 		name := fields[0]
 		if !upstreamNamePattern.MatchString(name) {
 			return nil, fmt.Errorf("%s payload line %q names %q, which is not a lowercase alphanumeric name (dashes and underscores allowed, 63 bytes max)", EventUpstreamSet, line, name)
+		}
+		// All members carry a provider or none does. A member without one in a set that
+		// names providers belongs to nobody the record says, so it could be read as any
+		// provider's destination — or as none's.
+		if (provider != "") != (withProvider > 0) && len(members) > 0 {
+			return nil, fmt.Errorf("%s payload line %q mixes members with and without a provider; a set names the provider of every member or of none", EventUpstreamSet, line)
+		}
+		if provider != "" {
+			withProvider++
 		}
 		// A name twice in one set is refused rather than resolved by last-wins. Inside a
 		// single record there is no ordering to appeal to — both lines are equally current
 		// — so a name meaning two URLs makes the config's model mapping unreadable, which
 		// is the one thing recording the set is for. Between records last-wins still
 		// applies; that is a different question, and there the log says which came later.
-		if _, dup := seen[name]; dup {
-			return nil, fmt.Errorf("%s payload names %q twice; within one set a name has one destination", EventUpstreamSet, name)
+		//
+		// Within one provider: two providers' configs naming the same upstream (both
+		// fronting one vendor) are two members, each provider's own.
+		if _, dup := seen[provider+" "+name]; dup {
+			return nil, fmt.Errorf("%s payload names %q twice for one provider; within one set a name has one destination", EventUpstreamSet, name)
 		}
-		seen[name] = struct{}{}
+		seen[provider+" "+name] = struct{}{}
 		base := fields[1]
 		if err := validUpstreamURL(base); err != nil {
 			return nil, fmt.Errorf("%s payload line %q: %w", EventUpstreamSet, line, err)
 		}
-		member := Upstream{Name: name, URL: base}
+		member := Upstream{Name: name, URL: base, Provider: provider}
 		if len(fields) == 3 {
 			if !upstreamIdentityPattern.MatchString(fields[2]) {
 				return nil, fmt.Errorf("%s payload line %q carries identity %q, which is not lowercase alphanumeric with optional hyphens", EventUpstreamSet, line, fields[2])
@@ -331,7 +363,7 @@ func ValidUpstreamName(s string) bool {
 //
 // # What the record does and does not carry
 //
-// Exactly Name, URL and Identity — the three fields the grammar has. Upstream's other
+// Exactly Name, URL, Identity and Provider — the fields the grammar has. Upstream's other
 // fields are what a READER derives about a member (which compose service it matches,
 // which image that service pins); they are not claims a writer gets to make, so they
 // are not rendered, and the comparison below deliberately names the three fields
@@ -340,7 +372,7 @@ func ValidUpstreamName(s string) bool {
 //
 // # Order
 //
-// Sorted by name, so the payload is a function of the SET and not of the order the
+// Sorted by provider, then name, so the payload is a function of the SET and not of the order the
 // caller happened to assemble it in. Without this, a config file whose upstreams were
 // reordered would produce a different payload — a new record, a new RTMR3 digest, and
 // a record that looks like a change when nothing changed. Callers that want the
@@ -359,7 +391,12 @@ func RenderUpstreamSet(members []Upstream) (string, error) {
 
 	sorted := make([]Upstream, len(members))
 	copy(sorted, members)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].Provider != sorted[j].Provider {
+			return sorted[i].Provider < sorted[j].Provider
+		}
+		return sorted[i].Name < sorted[j].Name
+	})
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s%d", upstreamCountPrefix, len(sorted))
@@ -380,8 +417,11 @@ func RenderUpstreamSet(members []Upstream) (string, error) {
 		if u.Identity != "" {
 			line += 1 + len(u.Identity)
 		}
+		if u.Provider != "" {
+			line += 1 + len(upstreamProviderPrefix) + len(u.Provider)
+		}
 		if line > maxUpstreamLine {
-			return "", fmt.Errorf("upstream %q renders a %d-byte line, over the %d-byte limit: a member is a name, a base URL and an optional identity", u.Name, line, maxUpstreamLine)
+			return "", fmt.Errorf("upstream %q renders a %d-byte line, over the %d-byte limit: a member is a name, a base URL, an optional identity and an optional provider", u.Name, line, maxUpstreamLine)
 		}
 		b.WriteString("\n")
 		b.WriteString(u.Name)
@@ -390,6 +430,11 @@ func RenderUpstreamSet(members []Upstream) (string, error) {
 		if u.Identity != "" {
 			b.WriteString(" ")
 			b.WriteString(u.Identity)
+		}
+		if u.Provider != "" {
+			b.WriteString(" ")
+			b.WriteString(upstreamProviderPrefix)
+			b.WriteString(u.Provider)
 		}
 	}
 	payload := b.String()
@@ -412,16 +457,17 @@ func RenderUpstreamSet(members []Upstream) (string, error) {
 		return "", fmt.Errorf("rendering %d upstreams produced a record of %d: the encoding here and the one in parseUpstreamSet disagree", len(sorted), len(back))
 	}
 	for i := range sorted {
-		if back[i].Name != sorted[i].Name || back[i].URL != sorted[i].URL || back[i].Identity != sorted[i].Identity {
-			return "", fmt.Errorf("upstream %q rendered as %q %q %q and read back as %q %q %q: the encoding here and the one in parseUpstreamSet disagree",
-				sorted[i].Name, sorted[i].Name, sorted[i].URL, sorted[i].Identity, back[i].Name, back[i].URL, back[i].Identity)
+		if back[i].Name != sorted[i].Name || back[i].URL != sorted[i].URL || back[i].Identity != sorted[i].Identity || back[i].Provider != sorted[i].Provider {
+			return "", fmt.Errorf("upstream %q rendered as %q %q %q %q and read back as %q %q %q %q: the encoding here and the one in parseUpstreamSet disagree",
+				sorted[i].Name, sorted[i].Name, sorted[i].URL, sorted[i].Identity, sorted[i].Provider, back[i].Name, back[i].URL, back[i].Identity, back[i].Provider)
 		}
 	}
 	return payload, nil
 }
 
 // upstreamChanges reports how the set moved from prev to next, one line per name that
-// the two do not bind the same way, sorted by name:
+// the two do not bind the same way, sorted by name — by <provider>/<name> in a set that
+// names providers, since each provider's names are its own:
 //
 //	"<name>: added as <URL> (<identity>)"
 //	"<name>: <old URL> (<old identity>) -> <new URL> (<new identity>)"
@@ -440,22 +486,28 @@ func RenderUpstreamSet(members []Upstream) (string, error) {
 // earlier. Telling a caller to walk the raw events instead is no answer when neither
 // value they use does that.
 func upstreamChanges(prev, next []Upstream) []string {
+	key := func(u Upstream) string {
+		if u.Provider == "" {
+			return u.Name
+		}
+		return u.Provider + "/" + u.Name
+	}
 	before := make(map[string]Upstream, len(prev))
 	for _, u := range prev {
-		before[u.Name] = u
+		before[key(u)] = u
 	}
 	var lines []string
 	for _, u := range next {
-		switch old, existed := before[u.Name]; {
+		switch old, existed := before[key(u)]; {
 		case !existed:
-			lines = append(lines, fmt.Sprintf("%s: added as %s", u.Name, describeUpstream(u)))
+			lines = append(lines, fmt.Sprintf("%s: added as %s", key(u), describeUpstream(u)))
 		case old != u:
-			lines = append(lines, fmt.Sprintf("%s: %s -> %s", u.Name, describeUpstream(old), describeUpstream(u)))
+			lines = append(lines, fmt.Sprintf("%s: %s -> %s", key(u), describeUpstream(old), describeUpstream(u)))
 		}
-		delete(before, u.Name)
+		delete(before, key(u))
 	}
 	for _, u := range before {
-		lines = append(lines, fmt.Sprintf("%s: %s -> withdrawn", u.Name, describeUpstream(u)))
+		lines = append(lines, fmt.Sprintf("%s: %s -> withdrawn", key(u), describeUpstream(u)))
 	}
 	// Sorted because the withdrawal lines come out of a map, so without this the same
 	// pair of snapshots would produce a different order on every run.
@@ -745,7 +797,11 @@ func validUpstreamURL(raw string) error {
 }
 
 // UpstreamSetHash is the identity of the permitted set: hex SHA-256 over one line
-// per upstream, "<name> <URL> <identity>\n", sorted by name.
+// per upstream, "<name> <URL> <identity>\n" — "<name> <URL> <identity>
+// provider=<address>\n" in a set that names providers — sorted.
+//
+// A set without providers hashes exactly as it did before providers existed, so a
+// single-provider deployment's keys do not move when its broker learns the field.
 //
 // Sorted rather than in the order the record listed them, and hashing the set rather
 // than the log, because it answers "where may plaintext go now" — two deployments
@@ -783,18 +839,29 @@ func (r *RunningState) UpstreamSetHash() (string, error) {
 	// to is worse than no hash at all.
 	lines := make([]string, 0, len(r.Upstreams))
 	seen := make(map[string]struct{}, len(r.Upstreams))
+	withProvider := 0
 	for _, u := range r.Upstreams {
-		if strings.ContainsAny(u.Name+u.URL+u.Identity, " \t\n") {
+		if strings.ContainsAny(u.Name+u.URL+u.Identity+u.Provider, " \t\n") {
 			return "", fmt.Errorf("upstream %q has whitespace in a field, so the set cannot be encoded unambiguously", u.Name)
 		}
 		// Refused for the same reason parseUpstreamSet refuses it, and reachable the same
 		// way the whitespace above is: a name bound to two destinations at once is not a
 		// set, so hashing it would produce an identity for something that has none.
-		if _, dup := seen[u.Name]; dup {
+		if _, dup := seen[u.Provider+" "+u.Name]; dup {
 			return "", fmt.Errorf("upstream %q appears twice, so this is not a set and has no identity to hash", u.Name)
 		}
-		seen[u.Name] = struct{}{}
-		lines = append(lines, u.Name+" "+u.URL+" "+u.Identity+"\n")
+		seen[u.Provider+" "+u.Name] = struct{}{}
+		line := u.Name + " " + u.URL + " " + u.Identity
+		if u.Provider != "" {
+			withProvider++
+			line += " " + upstreamProviderPrefix + u.Provider
+		}
+		lines = append(lines, line+"\n")
+	}
+	// The same all-or-none rule the parser holds a record to, for the same transported
+	// RunningState the whitespace check above guards against.
+	if withProvider != 0 && withProvider != len(r.Upstreams) {
+		return "", fmt.Errorf("the set names the provider of %d of its %d members; a set names every member's or none", withProvider, len(r.Upstreams))
 	}
 	sort.Strings(lines)
 	sum := sha256.Sum256([]byte(upstreamSetHashPrefix + strings.Join(lines, "")))

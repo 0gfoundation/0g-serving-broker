@@ -27,19 +27,15 @@ import (
 // primary's, fixed constants, so there is no container name here a list would
 // have to pin down — the reason InstancesEnvVar must be a compose literal.
 
-// checkConfigDir refuses an in-process instance directory alongside what it
-// cannot be combined with.
-func checkConfigDir(configDir string, instances []Instance, recordUpstreamSet bool) error {
-	if configDir == "" {
-		return nil
-	}
-	if len(instances) > 0 {
+// checkConfigDir refuses an in-process instance directory alongside container
+// instances: extra instances run in one place or the other.
+//
+// Unlike container instances, in-process ones combine with
+// controller.recordUpstreamSet: the set is recorded over every instance's config,
+// each member tagged with its provider (inProcessUpstreams).
+func checkConfigDir(configDir string, instances []Instance) error {
+	if configDir != "" && len(instances) > 0 {
 		return fmt.Errorf("%s and %s are both set: extra instances run either in the primary processes or in containers of their own, not both", config.InstancesDirEnvVar, InstancesEnvVar)
-	}
-	// For the reason parseInstances refuses the combination: the recorded set is
-	// derived from the primary config alone.
-	if recordUpstreamSet {
-		return fmt.Errorf("%s is set, but controller.recordUpstreamSet is on and the recorded set would cover the primary instance only", config.InstancesDirEnvVar)
 	}
 	return nil
 }
@@ -79,9 +75,10 @@ func (c *Ctrl) validateInProcessSet(primaryContent []byte, name string, content 
 
 // applyInProcessInstanceConfig is ApplyInstanceConfig for an in-process
 // instance: validated with the whole set, recorded in RTMR3 as
-// EventInstanceConfigUpdate before the write, the record restored if the write
-// fails, then the primary broker and event restarted — they are the processes
-// that serve it, so every instance restarts with them.
+// EventInstanceConfigUpdate before the write — and, with recordUpstreamSet on,
+// the process's whole upstream set recorded again — the config record restored
+// if either fails, then the primary broker and event restarted: they are the
+// processes that serve it, so every instance restarts with them.
 func (c *Ctrl) applyInProcessInstanceConfig(ctx context.Context, name, path, content string) error {
 	primaryContent, err := os.ReadFile(c.config.ConfigFile)
 	if err != nil {
@@ -111,6 +108,12 @@ func (c *Ctrl) applyInProcessInstanceConfig(ctx context.Context, name, path, con
 	}
 
 	in := Instance{Name: name, ConfigFile: path}
+	// Before the write, as ApplyCoreConfig records the primary's: the set covers every
+	// instance, so this change can move it, and the record must not still name the old
+	// set once the processes restart onto the new file.
+	if err := c.recordInProcessInstanceUpstreamSet(ctx, name, content); err != nil {
+		return c.abortInstanceConfigChange(ctx, in, err)
+	}
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		return c.abortInstanceConfigChange(ctx, in, err)
 	}

@@ -337,7 +337,7 @@ func NewCtrl(fullConfig *config.Config, logger log.Logger) (*Ctrl, error) {
 	}
 	ctrl.instances = instances
 	ctrl.configDir = strings.TrimSpace(os.Getenv(config.InstancesDirEnvVar))
-	if err := checkConfigDir(ctrl.configDir, instances, cfg.RecordUpstreamSet); err != nil {
+	if err := checkConfigDir(ctrl.configDir, instances); err != nil {
 		return nil, err
 	}
 	if ctrl.configDir != "" {

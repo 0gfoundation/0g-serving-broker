@@ -317,3 +317,59 @@ func walletAddress(c *Config) (string, error) {
 	}
 	return crypto.PubkeyToAddress(*key.Public().(*ecdsa.PublicKey)).Hex(), nil
 }
+
+// ProviderUpstreams is one provider's share of an upstream set: the address its
+// wallet signs as, 0x + 40 lowercase hex, and the service config whose
+// destinations it permits.
+type ProviderUpstreams struct {
+	Provider string
+	Service  *Service
+}
+
+// InProcessUpstreamSources is what the controller records the upstream set of a
+// process serving in-process instances from: the primary's Service as
+// ServiceFromYAML reads it, and each instance's in dir as the broker reads it —
+// without TARGET_URL, which is the primary's — each with its provider address.
+// When name is not empty, content replaces that instance's file, as in
+// ValidateInstanceSet.
+//
+// Every provider's destinations are recorded, not the primary's alone: the
+// instances run in the same processes under the same signer, so the set a
+// reader needs is where any of them may send plaintext.
+func InProcessUpstreamSources(dir string, primaryContent []byte, name string, content []byte) ([]ProviderUpstreams, error) {
+	var primary Config
+	if _, err := decodeConfig(primaryContent, &primary); err != nil {
+		return nil, fmt.Errorf("parsing the primary config: %w", err)
+	}
+	applyTargetURLEnv(&primary)
+	addr, err := walletAddress(&primary)
+	if err != nil {
+		return nil, fmt.Errorf("the primary config: %w", err)
+	}
+	out := []ProviderUpstreams{{Provider: strings.ToLower(addr), Service: &primary.Service}}
+
+	paths, err := filepath.Glob(filepath.Join(dir, "*.yaml"))
+	if err != nil {
+		return nil, fmt.Errorf("listing %q: %w", dir, err)
+	}
+	sort.Strings(paths)
+	for _, path := range paths {
+		n := strings.TrimSuffix(filepath.Base(path), ".yaml")
+		data := content
+		if n != name {
+			if data, err = os.ReadFile(path); err != nil {
+				return nil, err
+			}
+		}
+		var cfg Config
+		if _, err := decodeConfig(data, &cfg); err != nil {
+			return nil, fmt.Errorf("parsing instance %q: %w", n, err)
+		}
+		addr, err := walletAddress(&cfg)
+		if err != nil {
+			return nil, fmt.Errorf("instance %q: %w", n, err)
+		}
+		out = append(out, ProviderUpstreams{Provider: strings.ToLower(addr), Service: &cfg.Service})
+	}
+	return out, nil
+}
