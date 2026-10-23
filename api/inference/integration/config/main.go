@@ -286,6 +286,10 @@ type Config struct {
 		Write1hMultiplierNumerator   int64 `yaml:"write1hMultiplierNumerator,omitempty"`
 		Write1hMultiplierDenominator int64 `yaml:"write1hMultiplierDenominator,omitempty"`
 	} `yaml:"cacheTokenBilling,omitempty"`
+	ModalityPricing *struct {
+		Input  map[string]string `yaml:"input,omitempty"`
+		Output map[string]string `yaml:"output,omitempty"`
+	} `yaml:"modalityPricing,omitempty"`
 	Whitelist struct {
 		Enabled       bool     `yaml:"enabled,omitempty"`
 		UserAddresses []string `yaml:"userAddresses,omitempty"`

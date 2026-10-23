@@ -20,6 +20,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/attest"
 	"github.com/0glabs/0g-serving-broker/common/config"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
+	"github.com/0glabs/0g-serving-broker/inference/internal/modalprice"
 	"gopkg.in/yaml.v2"
 )
 
@@ -991,6 +992,29 @@ func validateCacheTokenBilling(prefix string, c *CacheTokenBillingConfig) error 
 	return nil
 }
 
+// validateModalityPricing refuses a modality price shape the router would not
+// accept (modalprice.Parse), and one combined with tiered pricing or a cache
+// discount (divisor > 1): the shared fee rule (modalprice.Factors) is defined
+// only for a flat base price, so the router bills such an endpoint flat while
+// the broker would settle the blended fee. tiered and cache are what applies
+// to the same service or model.
+func validateModalityPricing(prefix string, m *modalprice.Published, tiered bool, cache CacheTokenBillingConfig) error {
+	p, err := m.Parse()
+	if err != nil {
+		return fmt.Errorf("invalid config: %s: %w", prefix, err)
+	}
+	if p.Empty() {
+		return nil
+	}
+	if tiered {
+		return fmt.Errorf("invalid config: %s cannot be combined with tiered pricing on the same service or model", prefix)
+	}
+	if cache.Enabled && cache.Divisor > 1 {
+		return fmt.Errorf("invalid config: %s cannot be combined with cacheTokenBilling (divisor %d) on the same service or model", prefix, cache.Divisor)
+	}
+	return nil
+}
+
 // validateWriteMultiplier enforces the >= 1x premium rule shared by both
 // cache-write tiers. field is the yaml key stem ("writeMultiplier" or
 // "write1hMultiplier") used in error messages. A fully-zero fraction is "unset"
@@ -1375,6 +1399,12 @@ type Config struct {
 	OverloadGuard       OverloadGuardConfig     `yaml:"overloadGuard"`
 	UserUsageStats      UserUsageStatsConfig    `yaml:"userUsageStats"`
 	Reconciliation      ReconciliationConfig    `yaml:"reconciliation"`
+	// ModalityPricing prices image / video / audio input tokens, audio output
+	// tokens and the output of a text-only request as multiples of the chat
+	// prompt / completion price (see internal/modalprice, the contract shared
+	// with the 0g-router). nil bills every token flat. A modelPricing entry's
+	// own modalityPricing overrides it.
+	ModalityPricing *modalprice.Published `yaml:"modalityPricing,omitempty"`
 	// AllowTokenBilledSpeechToText opens the billing path for token-billed
 	// speech-to-text models (gpt-4o-transcribe, gpt-4o-mini-transcribe).
 	// Defaults to false.
@@ -3429,6 +3459,10 @@ func applyAndValidate(cfg *Config, raw map[string]interface{}) error {
 
 	// Service-level cache-discount divisor (also covers the single-model path).
 	if err := validateCacheTokenBilling("cacheTokenBilling", &cfg.CacheTokenBilling); err != nil {
+		return err
+	}
+
+	if err := validateModalityPricing("modalityPricing", cfg.ModalityPricing, cfg.TieredPricing.Enabled, cfg.CacheTokenBilling); err != nil {
 		return err
 	}
 

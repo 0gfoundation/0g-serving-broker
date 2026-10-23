@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/0glabs/0g-serving-broker/inference/config"
+	"github.com/0glabs/0g-serving-broker/inference/internal/modalprice"
 	"github.com/0glabs/0g-serving-broker/inference/internal/pricefeed"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 )
@@ -23,6 +24,7 @@ type mockModelsCtrl struct {
 	serviceConfig           config.Service
 	tieredPricingConfig     config.TieredPricingConfig
 	cacheTokenBillingConfig config.CacheTokenBillingConfig
+	modalityPricingConfig   *modalprice.Published
 	concurrencyLimitConfig  config.ConcurrencyLimitConfig
 	priceFeedSnapshot       pricefeed.Snapshot
 	priceFeedThreshold      time.Duration
@@ -44,6 +46,10 @@ func (m *mockModelsCtrl) GetTieredPricingConfig() config.TieredPricingConfig {
 
 func (m *mockModelsCtrl) GetCacheTokenBillingConfig() config.CacheTokenBillingConfig {
 	return m.cacheTokenBillingConfig
+}
+
+func (m *mockModelsCtrl) GetModalityPricingConfig() *modalprice.Published {
+	return m.modalityPricingConfig
 }
 
 func (m *mockModelsCtrl) GetConcurrencyLimitConfig() config.ConcurrencyLimitConfig {

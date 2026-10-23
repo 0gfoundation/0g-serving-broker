@@ -13,6 +13,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/attest"
 	"github.com/0glabs/0g-serving-broker/common/videospec"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
+	"github.com/0glabs/0g-serving-broker/inference/internal/modalprice"
 )
 
 // UpstreamIdentityHeader is the request header the router sets to name the
@@ -139,6 +140,12 @@ type ModelPricingEntry struct {
 	// GET /v1/models. Same validation as the service-level block: divisor >= 1
 	// when enabled.
 	CacheTokenBilling *CacheTokenBillingConfig `yaml:"cacheTokenBilling"`
+
+	// ModalityPricing optionally overrides the service-level modalityPricing
+	// for THIS model (nil falls back to it). Published per-model in GET
+	// /v1/models as pricing.modality_pricing. Not combinable with tiers or a
+	// cache discount on this model.
+	ModalityPricing *modalprice.Published `yaml:"modalityPricing,omitempty"`
 
 	// InjectBodyFields is the per-model counterpart of service.injectBodyFields:
 	// top-level key/value pairs merged into the forwarded chat body for requests
@@ -1251,20 +1258,41 @@ func (e *ModelPricingEntry) maxTierMultipliers(serviceTiers []PricingTier) (inNu
 	return inNum, inDen, outNum, outDen
 }
 
+// maxModalityFactors is the largest multiple of this entry's input / output
+// price its effective modality shape (its own, else serviceModality) can bill
+// a token at (1/1 each when it has none). It is folded into the on-chain
+// ceiling for the same reason tiers are: the ceiling is advertised as the
+// worst-case per-token price of every served model, a consumer budgets a
+// request off it, and GetBillingPrices bills at it whenever the per-model
+// entry cannot be resolved — so a blended per-token price above it would be a
+// settled charge nobody was ever quoted. Validation already parsed the shape;
+// an unparsable one here is treated as flat.
+func (e *ModelPricingEntry) maxModalityFactors(serviceModality *modalprice.Published) (in, out *big.Rat) {
+	m := serviceModality
+	if e.ModalityPricing != nil {
+		m = e.ModalityPricing
+	}
+	p, _ := m.Parse()
+	return p.MaxFactors()
+}
+
 // MaxModelPricesNative returns the maximum tier-adjusted InputPrice and
 // OutputPrice (neuron) across all NATIVE model pricing entries. serviceTiers is
 // the service-level tier fallback for entries without their own tiers.
 // Precondition: every entry's prices have already been validated as parseable
 // integers (validate() enforces this before the only call site).
-func (s *Service) MaxModelPricesNative(serviceTiers []PricingTier) (maxInput, maxOutput string) {
+func (s *Service) MaxModelPricesNative(serviceTiers []PricingTier, serviceModality *modalprice.Published) (maxInput, maxOutput string) {
 	maxIn := big.NewInt(0)
 	maxOut := big.NewInt(0)
 	for i := range s.ModelPricing {
 		entry := &s.ModelPricing[i]
 		inNum, inDen, outNum, outDen := entry.maxTierMultipliers(serviceTiers)
+		modIn, modOut := entry.maxModalityFactors(serviceModality)
 		if v, ok := new(big.Int).SetString(entry.InputPrice, 10); ok {
 			v.Mul(v, big.NewInt(inNum))
 			v.Div(v, big.NewInt(inDen))
+			v.Mul(v, modIn.Num())
+			v.Div(v, modIn.Denom())
 			if v.Cmp(maxIn) > 0 {
 				maxIn = v
 			}
@@ -1272,6 +1300,8 @@ func (s *Service) MaxModelPricesNative(serviceTiers []PricingTier) (maxInput, ma
 		if v, ok := new(big.Int).SetString(entry.OutputPrice, 10); ok {
 			v.Mul(v, big.NewInt(outNum))
 			v.Div(v, big.NewInt(outDen))
+			v.Mul(v, modOut.Num())
+			v.Div(v, modOut.Denom())
 			if v.Cmp(maxOut) > 0 {
 				maxOut = v
 			}
@@ -1286,20 +1316,23 @@ func (s *Service) MaxModelPricesNative(serviceTiers []PricingTier) (maxInput, ma
 // on-chain ceiling covering every served model at its worst-case tier.
 // Precondition: every entry's USD prices have already been validated as
 // non-negative decimals (validate() enforces this before the only call site).
-func (s *Service) MaxModelUSDPrices(serviceTiers []PricingTier) (maxInput, maxOutput string) {
+func (s *Service) MaxModelUSDPrices(serviceTiers []PricingTier, serviceModality *modalprice.Published) (maxInput, maxOutput string) {
 	maxIn := new(big.Rat)
 	maxOut := new(big.Rat)
 	for i := range s.ModelPricing {
 		entry := &s.ModelPricing[i]
 		inNum, inDen, outNum, outDen := entry.maxTierMultipliers(serviceTiers)
+		modIn, modOut := entry.maxModalityFactors(serviceModality)
 		if r, ok := new(big.Rat).SetString(entry.InputPriceUSDPerMillionTokens); ok {
 			r.Mul(r, big.NewRat(inNum, inDen))
+			r.Mul(r, modIn)
 			if r.Cmp(maxIn) > 0 {
 				maxIn = r
 			}
 		}
 		if r, ok := new(big.Rat).SetString(entry.OutputPriceUSDPerMillionTokens); ok {
 			r.Mul(r, big.NewRat(outNum, outDen))
+			r.Mul(r, modOut)
 			if r.Cmp(maxOut) > 0 {
 				maxOut = r
 			}
@@ -1432,6 +1465,19 @@ func validateModelPricing(cfg *Config) error {
 	for i := range svc.ModelPricing {
 		entry := &svc.ModelPricing[i]
 		if err := validateModelPricingEntry(i, entry, svc.Type, isUSD, svc.IsCentralized()); err != nil {
+			return err
+		}
+		// The effective shape, tiers and cache discount of this model, resolved
+		// the way billing resolves them (entry first, else service level).
+		modality, cache := cfg.ModalityPricing, cfg.CacheTokenBilling
+		if entry.ModalityPricing != nil {
+			modality = entry.ModalityPricing
+		}
+		if entry.CacheTokenBilling != nil {
+			cache = *entry.CacheTokenBilling
+		}
+		if err := validateModalityPricing(fmt.Sprintf("service.modelPricing[%d].modalityPricing", i), modality,
+			len(entry.Tiers) > 0 || cfg.TieredPricing.Enabled, cache); err != nil {
 			return err
 		}
 		if entry.Model == ModelWildcard {
@@ -1585,15 +1631,15 @@ func validateModelPricing(cfg *Config) error {
 	if !hasWildcard && svc.GetModelPricing(svc.ModelType) == nil {
 		return fmt.Errorf("invalid config: service.model '%s' must be one of the service.modelPricing entries (or add a '%s' wildcard entry)", svc.ModelType, ModelWildcard)
 	}
-	// Auto-set the service-level on-chain ceiling to the tier-adjusted max over all
-	// models. The existing single-price machinery (native registration / USD price
+	// Auto-set the service-level on-chain ceiling to the tier- and
+	// modality-adjusted max over all models. The existing single-price machinery (native registration / USD price
 	// feed) then advertises a ceiling covering every served model at worst-case tier.
 	if isUSD {
 		svc.InputPriceUSDPerMillionTokens, svc.OutputPriceUSDPerMillionTokens =
-			svc.MaxModelUSDPrices(cfg.TieredPricing.Tiers)
+			svc.MaxModelUSDPrices(cfg.TieredPricing.Tiers, cfg.ModalityPricing)
 	} else {
 		svc.InputPrice, svc.OutputPrice =
-			svc.MaxModelPricesNative(cfg.TieredPricing.Tiers)
+			svc.MaxModelPricesNative(cfg.TieredPricing.Tiers, cfg.ModalityPricing)
 	}
 	return nil
 }
