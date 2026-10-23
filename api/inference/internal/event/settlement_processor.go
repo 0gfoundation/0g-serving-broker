@@ -19,19 +19,19 @@ type SettlementProcessor struct {
 	checkSettleInterval time.Duration
 	forceSettleInterval time.Duration
 
-	enableMonitor      bool
+	metrics            *monitor.EventMetrics // nil when monitoring is off
 	settleMu           sync.Mutex
 	teeSignerReady     bool
 	teeSignerReadyOnce sync.Once
 }
 
-func NewSettlementProcessor(ctrl *ctrl.Ctrl, checkSettleInterval, forceSettleInterval time.Duration, enableMonitor bool, logger log.Logger) *SettlementProcessor {
+func NewSettlementProcessor(ctrl *ctrl.Ctrl, checkSettleInterval, forceSettleInterval time.Duration, metrics *monitor.EventMetrics, logger log.Logger) *SettlementProcessor {
 	s := &SettlementProcessor{
 		ctrl:                ctrl,
 		logger:              logger,
 		checkSettleInterval: checkSettleInterval,
 		forceSettleInterval: forceSettleInterval,
-		enableMonitor:       enableMonitor,
+		metrics:             metrics,
 	}
 	return s
 }
@@ -88,9 +88,9 @@ func (s *SettlementProcessor) handleCheckSettle(ctx context.Context) {
 		return
 	}
 	if err := s.ctrl.ProcessSettlement(ctx); err != nil {
-		s.incrementMonitorCounter(monitor.EventSettleErrorCount, "Process settlement: %s", err)
+		s.incrementMonitorCounter(func(m *monitor.EventMetrics) prometheus.Counter { return m.EventSettleErrorCount }, "Process settlement: %s", err)
 	} else {
-		s.incrementMonitorCounter(monitor.EventSettleCount, "", nil)
+		s.incrementMonitorCounter(func(m *monitor.EventMetrics) prometheus.Counter { return m.EventSettleCount }, "", nil)
 	}
 }
 
@@ -103,15 +103,15 @@ func (s *SettlementProcessor) handleForceSettle(ctx context.Context) {
 	}
 	s.logger.Info("Force Settlement")
 	if err := s.ctrl.SettleFeesWithTEE(ctx); err != nil {
-		s.incrementMonitorCounter(monitor.EventForceSettleErrorCount, "Process settlement: %s", err)
+		s.incrementMonitorCounter(func(m *monitor.EventMetrics) prometheus.Counter { return m.EventForceSettleErrorCount }, "Process settlement: %s", err)
 	} else {
-		s.incrementMonitorCounter(monitor.EventForceSettleCount, "", nil)
+		s.incrementMonitorCounter(func(m *monitor.EventMetrics) prometheus.Counter { return m.EventForceSettleCount }, "", nil)
 	}
 }
 
-func (s *SettlementProcessor) incrementMonitorCounter(counter prometheus.Counter, logMsg string, err error) {
-	if s.enableMonitor {
-		counter.Inc()
+func (s *SettlementProcessor) incrementMonitorCounter(counter func(*monitor.EventMetrics) prometheus.Counter, logMsg string, err error) {
+	if s.metrics != nil {
+		counter(s.metrics).Inc()
 	}
 	if err != nil {
 		s.logger.Errorf(logMsg, err.Error())

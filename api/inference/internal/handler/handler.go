@@ -17,6 +17,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/internal/pricefeed"
 	"github.com/0glabs/0g-serving-broker/inference/internal/proxy"
 	"github.com/0glabs/0g-serving-broker/inference/model"
+	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
 
 // asyncCtrl is the interface for controller operations used by the async job handlers.
@@ -28,6 +29,7 @@ type asyncCtrl interface {
 	ValidateSession(ctx *gin.Context) (string, error)
 	IsWhitelistedUser(userAddress string) bool
 	WhitelistMetricLabels(ctx *gin.Context, reqBody []byte, contentType string) (model, upstream string)
+	Metrics() *monitor.Metrics
 	SubmitAsyncJob(ctx *gin.Context, userAddress, svcType string, reqHeaders, reqBody []byte, isWhitelisted bool, sealed *ctrl.SealedAsyncRequest) (string, error)
 	GetAsyncJob(jobID string) (model.AsyncJob, error)
 }

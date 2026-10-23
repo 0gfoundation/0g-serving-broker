@@ -57,8 +57,9 @@ func setupTestMetrics(t *testing.T) *prometheus.Registry {
 	// exercise the same series identity (and so a future label change is
 	// caught here, not only at runtime).
 	constLabels := prometheus.Labels{"server": serverName, "provider_address": "0x" + "0000000000000000000000000000000000000001"}
+	Default = &Metrics{}
 
-	InputTokensTotal = prometheus.NewCounterVec(
+	Default.InputTokensTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_input_tokens_total",
 			Help:        "Cumulative input token count.",
@@ -67,7 +68,7 @@ func setupTestMetrics(t *testing.T) *prometheus.Registry {
 		[]string{"service_type", "model", "provider_identity"},
 	)
 
-	OutputTokensTotal = prometheus.NewCounterVec(
+	Default.OutputTokensTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_output_tokens_total",
 			Help:        "Cumulative output token count.",
@@ -76,7 +77,7 @@ func setupTestMetrics(t *testing.T) *prometheus.Registry {
 		[]string{"service_type", "model", "provider_identity"},
 	)
 
-	TokensPerSecond = prometheus.NewHistogramVec(
+	Default.TokensPerSecond = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:        "broker_tokens_per_second",
 			Help:        "Per-request output token generation rate.",
@@ -86,7 +87,7 @@ func setupTestMetrics(t *testing.T) *prometheus.Registry {
 		[]string{"service_type", "model", "provider_identity"},
 	)
 
-	RequestCount = prometheus.NewCounterVec(
+	Default.RequestCount = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_requests_total",
 			Help:        "Total number of HTTP requests.",
@@ -95,7 +96,7 @@ func setupTestMetrics(t *testing.T) *prometheus.Registry {
 		[]string{"path", "status", "model", "provider_identity"},
 	)
 
-	ErrorCount = prometheus.NewCounterVec(
+	Default.ErrorCount = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_requests_errors_total",
 			Help:        "Total number of error requests.",
@@ -104,7 +105,7 @@ func setupTestMetrics(t *testing.T) *prometheus.Registry {
 		[]string{"path", "status"},
 	)
 
-	RequestDuration = prometheus.NewHistogramVec(
+	Default.RequestDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:        "broker_request_duration_seconds",
 			Help:        "Histogram of request latencies, labeled by path and model.",
@@ -114,7 +115,7 @@ func setupTestMetrics(t *testing.T) *prometheus.Registry {
 		[]string{"path", "model", "provider_identity"},
 	)
 
-	WhitelistRequestsTotal = prometheus.NewCounterVec(
+	Default.WhitelistRequestsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_whitelist_requests_total",
 			Help:        "Total whitelist requests.",
@@ -123,7 +124,7 @@ func setupTestMetrics(t *testing.T) *prometheus.Registry {
 		[]string{"service_type", "model", "provider_identity"},
 	)
 
-	WhitelistInputTokensTotal = prometheus.NewCounterVec(
+	Default.WhitelistInputTokensTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_whitelist_input_tokens_total",
 			Help:        "Whitelist input tokens.",
@@ -132,7 +133,7 @@ func setupTestMetrics(t *testing.T) *prometheus.Registry {
 		[]string{"service_type", "model", "provider_identity"},
 	)
 
-	WhitelistOutputTokensTotal = prometheus.NewCounterVec(
+	Default.WhitelistOutputTokensTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_whitelist_output_tokens_total",
 			Help:        "Whitelist output tokens.",
@@ -141,7 +142,7 @@ func setupTestMetrics(t *testing.T) *prometheus.Registry {
 		[]string{"service_type", "model", "provider_identity"},
 	)
 
-	AudioSecondsTotal = prometheus.NewCounterVec(
+	Default.AudioSecondsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_audio_seconds_total",
 			Help:        "Audio seconds.",
@@ -150,7 +151,7 @@ func setupTestMetrics(t *testing.T) *prometheus.Registry {
 		[]string{"service_type", "model", "provider_identity"},
 	)
 
-	WhitelistAudioSecondsTotal = prometheus.NewCounterVec(
+	Default.WhitelistAudioSecondsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_whitelist_audio_seconds_total",
 			Help:        "Whitelist audio seconds.",
@@ -159,7 +160,7 @@ func setupTestMetrics(t *testing.T) *prometheus.Registry {
 		[]string{"service_type", "model", "provider_identity"},
 	)
 
-	FailureCount = prometheus.NewCounterVec(
+	Default.FailureCount = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_request_failures_total",
 			Help:        "Total failed requests.",
@@ -170,7 +171,7 @@ func setupTestMetrics(t *testing.T) *prometheus.Registry {
 
 	// broker_requests_rejected_total had no assertion anywhere in the repo, so
 	// deleting the RecordRejection call left every test green.
-	RequestRejectedTotal = prometheus.NewCounterVec(
+	Default.RequestRejectedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_requests_rejected_total",
 			Help:        "Total requests rejected before reaching the upstream.",
@@ -179,11 +180,11 @@ func setupTestMetrics(t *testing.T) *prometheus.Registry {
 		[]string{"reason"},
 	)
 
-	registry.MustRegister(InputTokensTotal, OutputTokensTotal, TokensPerSecond,
-		RequestCount, ErrorCount, RequestDuration,
-		WhitelistRequestsTotal, WhitelistInputTokensTotal, WhitelistOutputTokensTotal,
-		AudioSecondsTotal, WhitelistAudioSecondsTotal, FailureCount,
-		RequestRejectedTotal)
+	registry.MustRegister(Default.InputTokensTotal, Default.OutputTokensTotal, Default.TokensPerSecond,
+		Default.RequestCount, Default.ErrorCount, Default.RequestDuration,
+		Default.WhitelistRequestsTotal, Default.WhitelistInputTokensTotal, Default.WhitelistOutputTokensTotal,
+		Default.AudioSecondsTotal, Default.WhitelistAudioSecondsTotal, Default.FailureCount,
+		Default.RequestRejectedTotal)
 
 	return registry
 }
@@ -302,13 +303,13 @@ func TestRecordTokens(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			beforeInput := getCounterValue(InputTokensTotal, tt.serviceType, "glm-5", "")
-			beforeOutput := getCounterValue(OutputTokensTotal, tt.serviceType, "glm-5", "")
+			beforeInput := getCounterValue(Default.InputTokensTotal, tt.serviceType, "glm-5", "")
+			beforeOutput := getCounterValue(Default.OutputTokensTotal, tt.serviceType, "glm-5", "")
 
-			RecordTokens(tt.serviceType, "glm-5", "", tt.inputTokens, tt.outputTokens)
+			Default.RecordTokens(tt.serviceType, "glm-5", "", tt.inputTokens, tt.outputTokens)
 
-			afterInput := getCounterValue(InputTokensTotal, tt.serviceType, "glm-5", "")
-			afterOutput := getCounterValue(OutputTokensTotal, tt.serviceType, "glm-5", "")
+			afterInput := getCounterValue(Default.InputTokensTotal, tt.serviceType, "glm-5", "")
+			afterOutput := getCounterValue(Default.OutputTokensTotal, tt.serviceType, "glm-5", "")
 
 			inputDelta := afterInput - beforeInput
 			outputDelta := afterOutput - beforeOutput
@@ -325,12 +326,11 @@ func TestRecordTokens(t *testing.T) {
 
 // TestRecordTokensNilMetrics verifies RecordTokens is a no-op when metrics are nil.
 func TestRecordTokensNilMetrics(t *testing.T) {
-	saved := InputTokensTotal
-	InputTokensTotal = nil
-	defer func() { InputTokensTotal = saved }()
-
-	// Should not panic
-	RecordTokens("chatbot", "glm-5", "", 100, 50)
+	// Monitoring off (nil *Metrics) and a field never initialised must both be
+	// no-ops.
+	var off *Metrics
+	off.RecordTokens("chatbot", "glm-5", "", 100, 50)
+	(&Metrics{}).RecordTokens("chatbot", "glm-5", "", 100, 50)
 }
 
 // TestRecordAudioSeconds verifies the duration counter increments for positive
@@ -353,9 +353,9 @@ func TestRecordAudioSeconds(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			before := getCounterValue(AudioSecondsTotal, tt.serviceType, "whisper-large-v3", "")
-			RecordAudioSeconds(tt.serviceType, "whisper-large-v3", "", tt.seconds)
-			delta := getCounterValue(AudioSecondsTotal, tt.serviceType, "whisper-large-v3", "") - before
+			before := getCounterValue(Default.AudioSecondsTotal, tt.serviceType, "whisper-large-v3", "")
+			Default.RecordAudioSeconds(tt.serviceType, "whisper-large-v3", "", tt.seconds)
+			delta := getCounterValue(Default.AudioSecondsTotal, tt.serviceType, "whisper-large-v3", "") - before
 			if delta != tt.want {
 				t.Errorf("audio seconds delta = %v, want %v", delta, tt.want)
 			}
@@ -366,12 +366,11 @@ func TestRecordAudioSeconds(t *testing.T) {
 // TestRecordAudioSecondsNilMetrics verifies the helper is a safe no-op when
 // the counter hasn't been initialised (e.g. tests that don't call PrometheusInit).
 func TestRecordAudioSecondsNilMetrics(t *testing.T) {
-	saved := AudioSecondsTotal
-	AudioSecondsTotal = nil
-	defer func() { AudioSecondsTotal = saved }()
-
-	// Should not panic
-	RecordAudioSeconds("speech_to_text", "whisper-large-v3", "", 100)
+	// Monitoring off (nil *Metrics) and a field never initialised must both be
+	// no-ops.
+	var off *Metrics
+	off.RecordAudioSeconds("speech_to_text", "whisper-large-v3", "", 100)
+	(&Metrics{}).RecordAudioSeconds("speech_to_text", "whisper-large-v3", "", 100)
 }
 
 // TestRecordWhitelistAudioSeconds mirrors TestRecordAudioSeconds for the
@@ -379,28 +378,27 @@ func TestRecordAudioSecondsNilMetrics(t *testing.T) {
 func TestRecordWhitelistAudioSeconds(t *testing.T) {
 	setupTestMetrics(t)
 
-	before := getCounterValue(WhitelistAudioSecondsTotal, "speech_to_text", "whisper-large-v3", "")
-	RecordWhitelistAudioSeconds("speech_to_text", "whisper-large-v3", "", 207)
-	if delta := getCounterValue(WhitelistAudioSecondsTotal, "speech_to_text", "whisper-large-v3", "") - before; delta != 207 {
+	before := getCounterValue(Default.WhitelistAudioSecondsTotal, "speech_to_text", "whisper-large-v3", "")
+	Default.RecordWhitelistAudioSeconds("speech_to_text", "whisper-large-v3", "", 207)
+	if delta := getCounterValue(Default.WhitelistAudioSecondsTotal, "speech_to_text", "whisper-large-v3", "") - before; delta != 207 {
 		t.Errorf("whitelist audio seconds delta = %v, want 207", delta)
 	}
 
 	// Zero/negative no-op
-	before = getCounterValue(WhitelistAudioSecondsTotal, "speech_to_text", "whisper-large-v3", "")
-	RecordWhitelistAudioSeconds("speech_to_text", "whisper-large-v3", "", 0)
-	RecordWhitelistAudioSeconds("speech_to_text", "whisper-large-v3", "", -10)
-	if delta := getCounterValue(WhitelistAudioSecondsTotal, "speech_to_text", "whisper-large-v3", "") - before; delta != 0 {
+	before = getCounterValue(Default.WhitelistAudioSecondsTotal, "speech_to_text", "whisper-large-v3", "")
+	Default.RecordWhitelistAudioSeconds("speech_to_text", "whisper-large-v3", "", 0)
+	Default.RecordWhitelistAudioSeconds("speech_to_text", "whisper-large-v3", "", -10)
+	if delta := getCounterValue(Default.WhitelistAudioSecondsTotal, "speech_to_text", "whisper-large-v3", "") - before; delta != 0 {
 		t.Errorf("whitelist audio seconds should not increment on non-positive, got delta=%v", delta)
 	}
 }
 
 func TestRecordWhitelistAudioSecondsNilMetrics(t *testing.T) {
-	saved := WhitelistAudioSecondsTotal
-	WhitelistAudioSecondsTotal = nil
-	defer func() { WhitelistAudioSecondsTotal = saved }()
-
-	// Should not panic
-	RecordWhitelistAudioSeconds("speech_to_text", "whisper-large-v3", "", 100)
+	// Monitoring off (nil *Metrics) and a field never initialised must both be
+	// no-ops.
+	var off *Metrics
+	off.RecordWhitelistAudioSeconds("speech_to_text", "whisper-large-v3", "", 100)
+	(&Metrics{}).RecordWhitelistAudioSeconds("speech_to_text", "whisper-large-v3", "", 100)
 }
 
 // TestRecordTPS verifies TPS histogram recording for various inputs.
@@ -435,11 +433,11 @@ func TestRecordTPS(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			beforeCount := getHistogramCount(TokensPerSecond, tt.serviceType, "glm-5", "")
+			beforeCount := getHistogramCount(Default.TokensPerSecond, tt.serviceType, "glm-5", "")
 
-			RecordTPS(tt.serviceType, "glm-5", "", tt.tps)
+			Default.RecordTPS(tt.serviceType, "glm-5", "", tt.tps)
 
-			afterCount := getHistogramCount(TokensPerSecond, tt.serviceType, "glm-5", "")
+			afterCount := getHistogramCount(Default.TokensPerSecond, tt.serviceType, "glm-5", "")
 			recorded := afterCount > beforeCount
 
 			if recorded != tt.wantRecord {
@@ -451,12 +449,11 @@ func TestRecordTPS(t *testing.T) {
 
 // TestRecordTPSNilMetrics verifies RecordTPS is a no-op when metrics are nil.
 func TestRecordTPSNilMetrics(t *testing.T) {
-	saved := TokensPerSecond
-	TokensPerSecond = nil
-	defer func() { TokensPerSecond = saved }()
-
-	// Should not panic
-	RecordTPS("chatbot", "glm-5", "", 42.5)
+	// Monitoring off (nil *Metrics) and a field never initialised must both be
+	// no-ops.
+	var off *Metrics
+	off.RecordTPS("chatbot", "glm-5", "", 42.5)
+	(&Metrics{}).RecordTPS("chatbot", "glm-5", "", 42.5)
 }
 
 // TestRecordTPSFromContext verifies TPS calculation from context start time.
@@ -532,12 +529,12 @@ func TestRecordTPSFromContext(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			beforeCount := getHistogramCount(TokensPerSecond, tt.serviceType, "glm-5", "")
+			beforeCount := getHistogramCount(Default.TokensPerSecond, tt.serviceType, "glm-5", "")
 
 			ctx := tt.setupCtx()
-			RecordTPSFromContext(ctx, tt.serviceType, "glm-5", "", tt.outputTokens)
+			Default.RecordTPSFromContext(ctx, tt.serviceType, "glm-5", "", tt.outputTokens)
 
-			afterCount := getHistogramCount(TokensPerSecond, tt.serviceType, "glm-5", "")
+			afterCount := getHistogramCount(Default.TokensPerSecond, tt.serviceType, "glm-5", "")
 			recorded := afterCount > beforeCount
 
 			if recorded != tt.wantRecord {
@@ -558,11 +555,11 @@ func TestRecordTPSFromContextCalculation(t *testing.T) {
 	// Set start time 2 seconds ago
 	c.Set(RequestStartTimeKey, time.Now().Add(-2*time.Second))
 
-	beforeSum := getHistogramSum(TokensPerSecond, "chatbot", "glm-5", "")
+	beforeSum := getHistogramSum(Default.TokensPerSecond, "chatbot", "glm-5", "")
 
-	RecordTPSFromContext(c, "chatbot", "glm-5", "", 100)
+	Default.RecordTPSFromContext(c, "chatbot", "glm-5", "", 100)
 
-	afterSum := getHistogramSum(TokensPerSecond, "chatbot", "glm-5", "")
+	afterSum := getHistogramSum(Default.TokensPerSecond, "chatbot", "glm-5", "")
 	observedTPS := afterSum - beforeSum
 
 	// With 100 tokens over ~2 seconds, TPS should be approximately 50
@@ -577,7 +574,7 @@ func TestStartDAUUpdater(t *testing.T) {
 	setupTestMetrics(t)
 
 	// Create a fresh gauge for testing
-	UniqueUsersTotal = prometheus.NewGauge(prometheus.GaugeOpts{
+	Default.UniqueUsersTotal = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name:        "broker_unique_users_total_test",
 		Help:        "Test gauge",
 		ConstLabels: prometheus.Labels{"server": t.Name()},
@@ -591,13 +588,13 @@ func TestStartDAUUpdater(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		StartDAUUpdater(ctx, queryFunc, 1*time.Hour, testLogger{})
+		Default.StartDAUUpdater(ctx, queryFunc, 1*time.Hour, testLogger{})
 
 		// Give the goroutine time to run the initial query
 		time.Sleep(50 * time.Millisecond)
 
 		m := &dto.Metric{}
-		if err := UniqueUsersTotal.Write(m); err != nil {
+		if err := Default.UniqueUsersTotal.Write(m); err != nil {
 			t.Fatalf("failed to read gauge: %v", err)
 		}
 		if got := m.GetGauge().GetValue(); got != 42 {
@@ -614,7 +611,7 @@ func TestTrackMetricsSetsStartTime(t *testing.T) {
 	w := httptest.NewRecorder()
 	c, engine := gin.CreateTestContext(w)
 
-	engine.Use(TrackMetrics())
+	engine.Use(Default.TrackMetrics())
 	engine.GET("/test", func(c *gin.Context) {
 		// Verify start time is set in context
 		val, exists := c.Get(RequestStartTimeKey)
@@ -663,7 +660,7 @@ func TestTrackMetricsCollapsesIDPaths(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	engine := gin.New()
-	engine.Use(TrackMetrics())
+	engine.Use(Default.TrackMetrics())
 	engine.Any("/v1/proxy/*any", func(c *gin.Context) { c.Status(http.StatusOK) })
 
 	for _, id := range []string{"1421e0c3-cc15-4468-9e26-220b1f17c8a1", "0e0cb3c0-396c-4b2a-a243-1ca1df2fb7bb"} {
@@ -671,14 +668,14 @@ func TestTrackMetricsCollapsesIDPaths(t *testing.T) {
 		engine.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/v1/proxy/signature/"+id, nil))
 	}
 
-	if got := getCounterValue(RequestCount, "/v1/proxy/signature/:id", "OK", "", ""); got != 2 {
+	if got := getCounterValue(Default.RequestCount, "/v1/proxy/signature/:id", "OK", "", ""); got != 2 {
 		t.Errorf("collapsed request count = %v, want 2", got)
 	}
 	// No raw-id series may exist: gathering the histogram must yield exactly
 	// one child for the signature path.
 	mfs, err := func() ([]*dto.MetricFamily, error) {
 		reg := prometheus.NewRegistry()
-		if err := reg.Register(RequestDuration); err != nil {
+		if err := reg.Register(Default.RequestDuration); err != nil {
 			return nil, err
 		}
 		return reg.Gather()
@@ -711,7 +708,7 @@ func TestTrackMetricsRecordsRequestMetrics(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	engine := gin.New()
-	engine.Use(TrackMetrics())
+	engine.Use(Default.TrackMetrics())
 	engine.GET("/api/test", func(c *gin.Context) {
 		c.Status(http.StatusOK)
 	})
@@ -720,26 +717,26 @@ func TestTrackMetricsRecordsRequestMetrics(t *testing.T) {
 	})
 
 	t.Run("successful request increments counter", func(t *testing.T) {
-		beforeCount := getCounterValue(RequestCount, "/api/test", "OK", "", "")
+		beforeCount := getCounterValue(Default.RequestCount, "/api/test", "OK", "", "")
 
 		w := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, "/api/test", nil)
 		engine.ServeHTTP(w, req)
 
-		afterCount := getCounterValue(RequestCount, "/api/test", "OK", "", "")
+		afterCount := getCounterValue(Default.RequestCount, "/api/test", "OK", "", "")
 		if afterCount-beforeCount != 1 {
 			t.Errorf("request count delta = %v, want 1", afterCount-beforeCount)
 		}
 	})
 
 	t.Run("error request increments error counter", func(t *testing.T) {
-		beforeCount := getCounterValue(ErrorCount, "/api/error", "Internal Server Error")
+		beforeCount := getCounterValue(Default.ErrorCount, "/api/error", "Internal Server Error")
 
 		w := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, "/api/error", nil)
 		engine.ServeHTTP(w, req)
 
-		afterCount := getCounterValue(ErrorCount, "/api/error", "Internal Server Error")
+		afterCount := getCounterValue(Default.ErrorCount, "/api/error", "Internal Server Error")
 		if afterCount-beforeCount != 1 {
 			t.Errorf("error count delta = %v, want 1", afterCount-beforeCount)
 		}
@@ -751,13 +748,13 @@ func TestTrackMetricsRecordsRequestMetrics(t *testing.T) {
 			c.Status(http.StatusOK)
 		})
 
-		before := getCounterValue(RequestCount, "/api/model", "OK", "glm-5", "")
+		before := getCounterValue(Default.RequestCount, "/api/model", "OK", "glm-5", "")
 
 		w := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, "/api/model", nil)
 		engine.ServeHTTP(w, req)
 
-		if delta := getCounterValue(RequestCount, "/api/model", "OK", "glm-5", "") - before; delta != 1 {
+		if delta := getCounterValue(Default.RequestCount, "/api/model", "OK", "glm-5", "") - before; delta != 1 {
 			t.Errorf("request count delta for bounded model = %v, want 1", delta)
 		}
 	})
@@ -775,29 +772,29 @@ func TestTrackMetricsRecordsRequestMetrics(t *testing.T) {
 			c.Status(http.StatusBadGateway)
 		})
 
-		beforeCount := getCounterValue(RequestCount, "/api/upstream", "Bad Gateway", "glm-5.2", "zhipu")
-		beforeDuration := getHistogramCount(RequestDuration, "/api/upstream", "glm-5.2", "zhipu")
-		beforeFailure := getCounterValue(FailureCount, FailureSourceBroker, "", "glm-5.2", "Bad Gateway", "zhipu")
+		beforeCount := getCounterValue(Default.RequestCount, "/api/upstream", "Bad Gateway", "glm-5.2", "zhipu")
+		beforeDuration := getHistogramCount(Default.RequestDuration, "/api/upstream", "glm-5.2", "zhipu")
+		beforeFailure := getCounterValue(Default.FailureCount, FailureSourceBroker, "", "glm-5.2", "Bad Gateway", "zhipu")
 
 		w := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, "/api/upstream", nil)
 		engine.ServeHTTP(w, req)
 
-		if delta := getCounterValue(RequestCount, "/api/upstream", "Bad Gateway", "glm-5.2", "zhipu") - beforeCount; delta != 1 {
+		if delta := getCounterValue(Default.RequestCount, "/api/upstream", "Bad Gateway", "glm-5.2", "zhipu") - beforeCount; delta != 1 {
 			t.Errorf("request count delta on the zhipu series = %v, want 1", delta)
 		}
-		if delta := getHistogramCount(RequestDuration, "/api/upstream", "glm-5.2", "zhipu") - beforeDuration; delta != 1 {
+		if delta := getHistogramCount(Default.RequestDuration, "/api/upstream", "glm-5.2", "zhipu") - beforeDuration; delta != 1 {
 			t.Errorf("duration histogram delta on the zhipu series = %v, want 1", delta)
 		}
-		if delta := getCounterValue(FailureCount, FailureSourceBroker, "", "glm-5.2", "Bad Gateway", "zhipu") - beforeFailure; delta != 1 {
+		if delta := getCounterValue(Default.FailureCount, FailureSourceBroker, "", "glm-5.2", "Bad Gateway", "zhipu") - beforeFailure; delta != 1 {
 			t.Errorf("failure count delta on the zhipu series = %v, want 1", delta)
 		}
 		// The whole point of the label: a sibling upstream serving the SAME model
 		// must not absorb this request.
-		if n := getCounterValue(RequestCount, "/api/upstream", "Bad Gateway", "glm-5.2", "aliyun"); n != 0 {
+		if n := getCounterValue(Default.RequestCount, "/api/upstream", "Bad Gateway", "glm-5.2", "aliyun"); n != 0 {
 			t.Errorf("request landed on the aliyun series too, count = %v, want 0", n)
 		}
-		if n := getCounterValue(RequestCount, "/api/upstream", "Bad Gateway", "glm-5.2", ""); n != 0 {
+		if n := getCounterValue(Default.RequestCount, "/api/upstream", "Bad Gateway", "glm-5.2", ""); n != 0 {
 			t.Errorf("request landed on the empty-identity series too, count = %v, want 0", n)
 		}
 	})
@@ -811,29 +808,29 @@ func TestTrackMetricsRecordsRequestMetrics(t *testing.T) {
 			c.Status(http.StatusOK)
 		})
 
-		beforeRaw := getCounterValue(RequestCount, "/api/raw", "OK", "attacker/minted-model-string", "")
-		beforeEmpty := getCounterValue(RequestCount, "/api/raw", "OK", "", "")
+		beforeRaw := getCounterValue(Default.RequestCount, "/api/raw", "OK", "attacker/minted-model-string", "")
+		beforeEmpty := getCounterValue(Default.RequestCount, "/api/raw", "OK", "", "")
 
 		w := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, "/api/raw", nil)
 		engine.ServeHTTP(w, req)
 
-		if delta := getCounterValue(RequestCount, "/api/raw", "OK", "attacker/minted-model-string", "") - beforeRaw; delta != 0 {
+		if delta := getCounterValue(Default.RequestCount, "/api/raw", "OK", "attacker/minted-model-string", "") - beforeRaw; delta != 0 {
 			t.Errorf("raw resolvedModel leaked into the request counter label (delta=%v)", delta)
 		}
-		if delta := getCounterValue(RequestCount, "/api/raw", "OK", "", "") - beforeEmpty; delta != 1 {
+		if delta := getCounterValue(Default.RequestCount, "/api/raw", "OK", "", "") - beforeEmpty; delta != 1 {
 			t.Errorf("expected the empty bounded label, delta = %v, want 1", delta)
 		}
 	})
 
 	t.Run("records request duration", func(t *testing.T) {
-		beforeCount := getHistogramCount(RequestDuration, "/api/test", "", "")
+		beforeCount := getHistogramCount(Default.RequestDuration, "/api/test", "", "")
 
 		w := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, "/api/test", nil)
 		engine.ServeHTTP(w, req)
 
-		afterCount := getHistogramCount(RequestDuration, "/api/test", "", "")
+		afterCount := getHistogramCount(Default.RequestDuration, "/api/test", "", "")
 		if afterCount <= beforeCount {
 			t.Error("request duration histogram not updated")
 		}
@@ -845,16 +842,16 @@ func TestTrackMetricsRecordsRequestMetrics(t *testing.T) {
 			c.Status(http.StatusOK)
 		})
 
-		before := getHistogramCount(RequestDuration, "/api/slow", "glm-5", "")
+		before := getHistogramCount(Default.RequestDuration, "/api/slow", "glm-5", "")
 
 		w := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, "/api/slow", nil)
 		engine.ServeHTTP(w, req)
 
-		if delta := getHistogramCount(RequestDuration, "/api/slow", "glm-5", "") - before; delta != 1 {
+		if delta := getHistogramCount(Default.RequestDuration, "/api/slow", "glm-5", "") - before; delta != 1 {
 			t.Errorf("duration histogram delta for bounded model = %v, want 1", delta)
 		}
-		if n := getHistogramCount(RequestDuration, "/api/slow", "", ""); n != 0 {
+		if n := getHistogramCount(Default.RequestDuration, "/api/slow", "", ""); n != 0 {
 			t.Errorf("duration landed on the empty model label too, count = %v, want 0", n)
 		}
 	})
@@ -867,19 +864,19 @@ func TestTrackMetricsIgnoreError(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	engine := gin.New()
-	engine.Use(TrackMetrics())
+	engine.Use(Default.TrackMetrics())
 	engine.GET("/api/ignored", func(c *gin.Context) {
 		c.Set("ignoreError", true)
 		c.Status(http.StatusBadRequest)
 	})
 
-	beforeCount := getCounterValue(ErrorCount, "/api/ignored", "Bad Request")
+	beforeCount := getCounterValue(Default.ErrorCount, "/api/ignored", "Bad Request")
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/ignored", nil)
 	engine.ServeHTTP(w, req)
 
-	afterCount := getCounterValue(ErrorCount, "/api/ignored", "Bad Request")
+	afterCount := getCounterValue(Default.ErrorCount, "/api/ignored", "Bad Request")
 	if afterCount != beforeCount {
 		t.Errorf("error count delta = %v, want 0 (ignoreError was set)", afterCount-beforeCount)
 	}
@@ -933,7 +930,7 @@ func TestTrackMetricsFailureSource(t *testing.T) {
 	}
 
 	engine := gin.New()
-	engine.Use(TrackMetrics())
+	engine.Use(Default.TrackMetrics())
 	for i, tc := range cases {
 		tc := tc
 		engine.GET(fmt.Sprintf("/fs/%d", i), func(c *gin.Context) {
@@ -952,13 +949,13 @@ func TestTrackMetricsFailureSource(t *testing.T) {
 
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			before := getCounterValue(FailureCount, tc.wantSource, tc.code, "", tc.wantStatus, "")
+			before := getCounterValue(Default.FailureCount, tc.wantSource, tc.code, "", tc.wantStatus, "")
 
 			w := httptest.NewRecorder()
 			req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/fs/%d", i), nil)
 			engine.ServeHTTP(w, req)
 
-			if delta := getCounterValue(FailureCount, tc.wantSource, tc.code, "", tc.wantStatus, "") - before; delta != 1 {
+			if delta := getCounterValue(Default.FailureCount, tc.wantSource, tc.code, "", tc.wantStatus, "") - before; delta != 1 {
 				t.Errorf("failure[source=%s code=%q status=%s] delta = %v, want 1",
 					tc.wantSource, tc.code, tc.wantStatus, delta)
 			}
@@ -974,7 +971,7 @@ func TestFailureSourceHeader(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	engine := gin.New()
-	engine.Use(TrackMetrics())
+	engine.Use(Default.TrackMetrics())
 	engine.GET("/broker5xx", func(c *gin.Context) { c.JSON(http.StatusInternalServerError, gin.H{"error": "x"}) })
 	engine.GET("/broker4xx", func(c *gin.Context) { c.JSON(http.StatusBadRequest, gin.H{"error": "x"}) }) // unflagged -> broker
 	engine.GET("/client4xx", func(c *gin.Context) {
@@ -1039,11 +1036,11 @@ func TestRecordWhitelistRequest(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			before := getCounterValue(WhitelistRequestsTotal, tt.serviceType, "glm-5", "")
+			before := getCounterValue(Default.WhitelistRequestsTotal, tt.serviceType, "glm-5", "")
 			for i := 0; i < tt.calls; i++ {
-				RecordWhitelistRequest(tt.serviceType, "glm-5", "")
+				Default.RecordWhitelistRequest(tt.serviceType, "glm-5", "")
 			}
-			after := getCounterValue(WhitelistRequestsTotal, tt.serviceType, "glm-5", "")
+			after := getCounterValue(Default.WhitelistRequestsTotal, tt.serviceType, "glm-5", "")
 			if delta := after - before; delta != tt.wantDelta {
 				t.Errorf("whitelist requests delta = %v, want %v", delta, tt.wantDelta)
 			}
@@ -1053,11 +1050,11 @@ func TestRecordWhitelistRequest(t *testing.T) {
 
 // TestRecordWhitelistRequestNilMetrics verifies no panic when metrics are nil.
 func TestRecordWhitelistRequestNilMetrics(t *testing.T) {
-	saved := WhitelistRequestsTotal
-	WhitelistRequestsTotal = nil
-	defer func() { WhitelistRequestsTotal = saved }()
-
-	RecordWhitelistRequest("chatbot", "glm-5", "") // should not panic
+	// Monitoring off (nil *Metrics) and a field never initialised must both be
+	// no-ops.
+	var off *Metrics
+	off.RecordWhitelistRequest("chatbot", "glm-5", "")          // should not panic
+	(&Metrics{}).RecordWhitelistRequest("chatbot", "glm-5", "") // should not panic
 }
 
 // TestRecordWhitelistTokens verifies the whitelist token counters.
@@ -1108,13 +1105,13 @@ func TestRecordWhitelistTokens(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			beforeInput := getCounterValue(WhitelistInputTokensTotal, tt.serviceType, "glm-5", "")
-			beforeOutput := getCounterValue(WhitelistOutputTokensTotal, tt.serviceType, "glm-5", "")
+			beforeInput := getCounterValue(Default.WhitelistInputTokensTotal, tt.serviceType, "glm-5", "")
+			beforeOutput := getCounterValue(Default.WhitelistOutputTokensTotal, tt.serviceType, "glm-5", "")
 
-			RecordWhitelistTokens(tt.serviceType, "glm-5", "", tt.inputTokens, tt.outputTokens)
+			Default.RecordWhitelistTokens(tt.serviceType, "glm-5", "", tt.inputTokens, tt.outputTokens)
 
-			afterInput := getCounterValue(WhitelistInputTokensTotal, tt.serviceType, "glm-5", "")
-			afterOutput := getCounterValue(WhitelistOutputTokensTotal, tt.serviceType, "glm-5", "")
+			afterInput := getCounterValue(Default.WhitelistInputTokensTotal, tt.serviceType, "glm-5", "")
+			afterOutput := getCounterValue(Default.WhitelistOutputTokensTotal, tt.serviceType, "glm-5", "")
 
 			if delta := afterInput - beforeInput; delta != tt.wantInputIncrement {
 				t.Errorf("whitelist input tokens delta = %v, want %v", delta, tt.wantInputIncrement)
@@ -1128,11 +1125,11 @@ func TestRecordWhitelistTokens(t *testing.T) {
 
 // TestRecordWhitelistTokensNilMetrics verifies no panic when metrics are nil.
 func TestRecordWhitelistTokensNilMetrics(t *testing.T) {
-	saved := WhitelistInputTokensTotal
-	WhitelistInputTokensTotal = nil
-	defer func() { WhitelistInputTokensTotal = saved }()
-
-	RecordWhitelistTokens("chatbot", "glm-5", "", 100, 50) // should not panic
+	// Monitoring off (nil *Metrics) and a field never initialised must both be
+	// no-ops.
+	var off *Metrics
+	off.RecordWhitelistTokens("chatbot", "glm-5", "", 100, 50)          // should not panic
+	(&Metrics{}).RecordWhitelistTokens("chatbot", "glm-5", "", 100, 50) // should not panic
 }
 
 // The Rejection* values are the contract with the PromQL in
@@ -1172,15 +1169,15 @@ func TestRejectionReasonLiteralsAreStable(t *testing.T) {
 func TestRecordRejectionIncrementsTheRejectionCounter(t *testing.T) {
 	setupTestMetrics(t)
 
-	before := getCounterValue(RequestRejectedTotal, RejectionGlobalConcurrency)
-	RecordRejection(RejectionGlobalConcurrency)
-	RecordRejection(RejectionGlobalConcurrency)
-	if got := getCounterValue(RequestRejectedTotal, RejectionGlobalConcurrency) - before; got != 2 {
+	before := getCounterValue(Default.RequestRejectedTotal, RejectionGlobalConcurrency)
+	Default.RecordRejection(RejectionGlobalConcurrency)
+	Default.RecordRejection(RejectionGlobalConcurrency)
+	if got := getCounterValue(Default.RequestRejectedTotal, RejectionGlobalConcurrency) - before; got != 2 {
 		t.Errorf("broker_requests_rejected_total{reason=%q} increased by %v, want 2",
 			RejectionGlobalConcurrency, got)
 	}
 	// A different reason must not land on the same series.
-	if got := getCounterValue(RequestRejectedTotal, RejectionConcurrency); got != 0 {
+	if got := getCounterValue(Default.RequestRejectedTotal, RejectionConcurrency); got != 0 {
 		t.Errorf("per-user concurrency series = %v, want 0 — the global shed leaked into it", got)
 	}
 }
@@ -1188,8 +1185,56 @@ func TestRecordRejectionIncrementsTheRejectionCounter(t *testing.T) {
 // Safe before PrometheusInit, per its own doc comment: monitoring disabled must
 // not panic on the shed path.
 func TestRecordRejectionIsSafeWhenUninitialised(t *testing.T) {
-	saved := RequestRejectedTotal
-	RequestRejectedTotal = nil
-	defer func() { RequestRejectedTotal = saved }()
-	RecordRejection(RejectionGlobalConcurrency)
+	// Monitoring off (nil *Metrics) and a field never initialised must both be
+	// no-ops.
+	var off *Metrics
+	off.RecordRejection(RejectionGlobalConcurrency)
+	(&Metrics{}).RecordRejection(RejectionGlobalConcurrency)
+}
+
+// Several provider instances served by one process register on one registry:
+// a collector is identified by its name plus its const label values, so two
+// instances differing in server and provider_address coexist, and each records
+// only into its own series.
+func TestNewMetricsTwoInstancesShareARegistry(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	a := NewMetrics("https://a.example", "0x00000000000000000000000000000000000000a1", reg)
+	b := NewMetrics("https://b.example", "0x00000000000000000000000000000000000000b2", reg)
+	a.EnableOverloadGuardMetrics()
+	b.EnableOverloadGuardMetrics()
+
+	a.RecordTokens("chatbot", "glm-5", "", 10, 0)
+	b.RecordTokens("text-to-image", "flux", "", 0, 3)
+	b.RecordRejection(RejectionRateLimit)
+
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	got := map[string]float64{}
+	for _, f := range families {
+		if f.GetName() != "broker_input_tokens_total" && f.GetName() != "broker_output_tokens_total" && f.GetName() != "broker_requests_rejected_total" {
+			continue
+		}
+		for _, m := range f.GetMetric() {
+			labels := map[string]string{}
+			for _, l := range m.GetLabel() {
+				labels[l.GetName()] = l.GetValue()
+			}
+			got[f.GetName()+" "+labels["server"]+" "+labels["provider_address"]] += m.GetCounter().GetValue()
+		}
+	}
+	want := map[string]float64{
+		"broker_input_tokens_total https://a.example 0x00000000000000000000000000000000000000a1":      10,
+		"broker_output_tokens_total https://b.example 0x00000000000000000000000000000000000000b2":     3,
+		"broker_requests_rejected_total https://b.example 0x00000000000000000000000000000000000000b2": 1,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("series = %v, want %v", got, want)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("%s = %v, want %v (all: %v)", k, got[k], v, got)
+		}
+	}
 }

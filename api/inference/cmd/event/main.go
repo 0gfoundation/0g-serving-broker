@@ -86,7 +86,7 @@ func Main() {
 	// the cache and the PriceUpdateProcessor.
 	ctrl := ctrl.New(db, contract, conf, nil, teeService, nil, logger)
 
-	settlementProcessor := event.NewSettlementProcessor(ctrl, conf.Interval.SettlementProcessor, conf.Interval.ForceSettlementProcessor, conf.Monitor.Enable, logger)
+	settlementProcessor := event.NewSettlementProcessor(ctrl, conf.Interval.SettlementProcessor, conf.Interval.ForceSettlementProcessor, monitor.DefaultEvent, logger)
 	if err := mgr.Add(settlementProcessor); err != nil {
 		panic(err)
 	}
@@ -107,6 +107,7 @@ func Main() {
 			conf.RevenueTransfer.TargetAddress,
 			conf.RevenueTransfer.ReserveAmount,
 			conf.RevenueTransfer.Interval,
+			monitor.DefaultEvent,
 			logger,
 		)
 		if err != nil {

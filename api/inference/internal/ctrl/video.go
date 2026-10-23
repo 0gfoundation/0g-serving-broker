@@ -357,7 +357,7 @@ func (c *Ctrl) videoOutputUnits(ctx context.Context, seconds int64, size string,
 					// shape until the operator adds the row — one error line per video
 					// create until then, with no aggregate signal, is the exact failure
 					// this codebase keeps replacing with a counter.
-					monitor.RecordVideoTableMiss(monitor.VideoTableMissNextBucket)
+					c.metrics.RecordVideoTableMiss(monitor.VideoTableMissNextBucket)
 					// Keyed on the COVERING BUCKET's units, never on (seconds, size):
 					// those are chosen by the caller (size is free text echoed from the
 					// request when the vendor omits it), so keying on them lets one
@@ -383,7 +383,7 @@ func (c *Ctrl) videoOutputUnits(ctx context.Context, seconds int64, size string,
 				// the key here: unlike the branch above there is no configured row to
 				// name, and the only candidates left are caller-chosen.
 				if mx := e.Billing.MaxTableUnits(); mx > 0 {
-					monitor.RecordVideoTableMiss(monitor.VideoTableMissUncovered)
+					c.metrics.RecordVideoTableMiss(monitor.VideoTableMissUncovered)
 					c.logProofSkip("per_unit_table_uncovered", "",
 						"video per_unit_table miss (seconds=%d, size=%q) with no bucket that covers it: billing table-max %d units; operator should extend the table to this resolution and duration", seconds, truncateForLog([]byte(size), 80), mx)
 					return mx
@@ -444,7 +444,7 @@ func (c *Ctrl) warnIfTokenBillingObservedNothing(ctx context.Context, tokens int
 		return
 	}
 	c.logger.Errorf("video per_video_token billing: no positive completion_tokens observed for a billable request; billing 0 units (served free) — the vendor response's usage.completion_tokens was missing, zero, or malformed")
-	monitor.RecordVideoBillingSkipped()
+	c.metrics.RecordVideoBillingSkipped()
 }
 
 // signVideoResponse signs a video response under chatKey with whichever proof this
@@ -606,7 +606,7 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 			// zero-usage row now (not deferred: there is no job to poll), so this hit still
 			// shows up in reconciliation rather than vanishing.
 			c.logger.Infof("whitelist video generation failed at create time for request %s; recording zero usage", reqModel.RequestHash)
-			monitor.RecordVideoGenerationFailed()
+			c.metrics.RecordVideoGenerationFailed()
 			c.recordWhitelistedUsage(reqModel, 0, 0, 0, 0, "")
 			return nil
 
@@ -643,8 +643,8 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 			outputCount := c.videoOutputUnits(ctx, sec, tier, respFields.completionTokens())
 			metricModel := c.metricModel(ctx)
 			metricUpstream := c.metricUpstream(ctx)
-			monitor.RecordTokens("video-generation", metricModel, metricUpstream, 0, outputCount)
-			monitor.RecordWhitelistTokens("video-generation", metricModel, metricUpstream, 0, outputCount)
+			c.metrics.RecordTokens("video-generation", metricModel, metricUpstream, 0, outputCount)
+			c.metrics.RecordWhitelistTokens("video-generation", metricModel, metricUpstream, 0, outputCount)
 		} else {
 			c.logger.Warnf("whitelist video: no usable seconds in response or request for %s; recording request count only", reqModel.RequestHash)
 		}
@@ -659,7 +659,7 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 		// Provider failed immediately at create time — nothing was generated, nothing to
 		// bill, and there is no job to poll.
 		c.logger.Infof("video generation failed at create time for request %s; not billing", reqModel.RequestHash)
-		monitor.RecordVideoGenerationFailed()
+		c.metrics.RecordVideoGenerationFailed()
 		return nil
 
 	case videoActionDeferToPoll:
@@ -694,7 +694,7 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 		// Returning here would serve the video FREE — make it loud + metered,
 		// not a silent skip (this was a Warnf that hid Wan2.7 mis-parsing).
 		c.logger.Errorf("video billing indeterminate: no positive seconds in response or request, NOT billing request %s (free output)", reqModel.RequestHash)
-		monitor.RecordVideoBillingSkipped()
+		c.metrics.RecordVideoBillingSkipped()
 		return nil
 	}
 	if source == videoSourceRequest {
@@ -740,7 +740,7 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 		return errors.Wrap(err, "update request video billing in database")
 	}
 
-	monitor.RecordTokens("video-generation", c.metricModel(ctx), c.metricUpstream(ctx), 0, outputCount)
+	c.metrics.RecordTokens("video-generation", c.metricModel(ctx), c.metricUpstream(ctx), 0, outputCount)
 	return nil
 }
 
@@ -764,7 +764,7 @@ func (c *Ctrl) deferVideoBillingToPoll(ctx *gin.Context, providerJobID, chatKey,
 		// codebase's precedent (the sibling "billing indeterminate" case just above) is to
 		// serve free + log loudly rather than bill blind.
 		c.logger.Errorf("video generation is non-terminal but the response has no id to poll; cannot track this job, NOT billing request %s (free output)", reqModel.RequestHash)
-		monitor.RecordVideoBillingSkipped()
+		c.metrics.RecordVideoBillingSkipped()
 		// Deliberately NO signature eviction: with no id the client cannot construct
 		// GET /videos/{id}, so there is no final body for it to obtain and nothing to
 		// mismatch against. The cached signature describes exactly the (malformed)
@@ -828,7 +828,7 @@ func (c *Ctrl) deferVideoBillingToPoll(ctx *gin.Context, providerJobID, chatKey,
 	if err := c.videoPollDB.CreateVideoPollJob(job); err != nil {
 		// Same "loud + metered, not silent" precedent as the empty-ID case above: a
 		// transient DB error here means this request is unbilled with no other capture.
-		monitor.RecordVideoBillingSkipped()
+		c.metrics.RecordVideoBillingSkipped()
 		c.dropUnpollableVideoSignature(chatKey, "the poll job could not be persisted", true)
 		if reqModel.IsWhitelisted {
 			c.recordWhitelistedUsage(reqModel, 0, 0, 0, 0, "")
@@ -915,7 +915,7 @@ func (c *Ctrl) dropUnpollableVideoSignature(chatKey, reason string, permanent bo
 	// same key — counting it would put a baseline under the alert for a state the
 	// operator can reverse, and its caller already logs it loudly.
 	if permanent && c.Service.IsCentralized() {
-		monitor.RecordRoutingProofSkipped(monitor.RoutingProofSkipNoPollJob)
+		c.metrics.RecordRoutingProofSkipped(monitor.RoutingProofSkipNoPollJob)
 	}
 	c.svcCache.Delete(c.chatCacheKey(chatKey))
 	// Throttled like every other skip reason: the causes here are static

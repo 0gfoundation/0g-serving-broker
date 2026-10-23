@@ -303,8 +303,8 @@ func (c *Ctrl) handleEmbeddingResponse(ctx *gin.Context, resp *http.Response, _ 
 	if reqModel.IsWhitelisted {
 		metricModel := c.metricModel(ctx)
 		metricUpstream := c.metricUpstream(ctx)
-		monitor.RecordTokens(embeddingMetricLabel, metricModel, metricUpstream, int64(usage.PromptTokens), 0)
-		monitor.RecordWhitelistTokens(embeddingMetricLabel, metricModel, metricUpstream, int64(usage.PromptTokens), 0)
+		c.metrics.RecordTokens(embeddingMetricLabel, metricModel, metricUpstream, int64(usage.PromptTokens), 0)
+		c.metrics.RecordWhitelistTokens(embeddingMetricLabel, metricModel, metricUpstream, int64(usage.PromptTokens), 0)
 		// Stamp the applied input-length tier so whitelisted embedding traffic (unbilled
 		// by the broker, but still billed by the vendor at the tiered rate) reconciles
 		// per-tier like billable traffic — mirrors decodeAndProcess's identical stamp for
@@ -343,7 +343,7 @@ func (c *Ctrl) updateEmbeddingWithUsage(ctx *gin.Context, usage *EmbeddingUsage,
 
 	metricModel := c.metricModel(ctx)
 	metricUpstream := c.metricUpstream(ctx)
-	monitor.RecordTokens(embeddingMetricLabel, metricModel, metricUpstream, int64(usage.PromptTokens), 0)
+	c.metrics.RecordTokens(embeddingMetricLabel, metricModel, metricUpstream, int64(usage.PromptTokens), 0)
 
 	c.consumeTPMLimiter(ctx, usage.PromptTokens)
 	return nil
