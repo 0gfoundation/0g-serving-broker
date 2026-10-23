@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
-	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
 
 // ResponseFormat represents the format of the LLM response
@@ -176,9 +175,9 @@ func (c *Ctrl) processLiteLLMSingleResponse(ctx context.Context, decodedBody []b
 		if isWhitelisted {
 			metricModel := c.metricModel(ctx)
 			metricUpstream := c.metricUpstream(ctx)
-			monitor.RecordTokens("chatbot", metricModel, metricUpstream, int64((*usage).PromptTokens), int64((*usage).CompletionTokens))
-			monitor.RecordWhitelistTokens("chatbot", metricModel, metricUpstream, int64((*usage).PromptTokens), int64((*usage).CompletionTokens))
-			monitor.RecordTPSFromContext(ctx, "chatbot", metricModel, metricUpstream, int64((*usage).CompletionTokens))
+			c.metrics.RecordTokens("chatbot", metricModel, metricUpstream, int64((*usage).PromptTokens), int64((*usage).CompletionTokens))
+			c.metrics.RecordWhitelistTokens("chatbot", metricModel, metricUpstream, int64((*usage).PromptTokens), int64((*usage).CompletionTokens))
+			c.metrics.RecordTPSFromContext(ctx, "chatbot", metricModel, metricUpstream, int64((*usage).CompletionTokens))
 			return nil
 		}
 

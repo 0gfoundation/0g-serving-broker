@@ -31,6 +31,8 @@ import (
 type Proxy struct {
 	ctrl   *ctrl.Ctrl
 	logger log.Logger
+	// metrics is this instance's broker metrics (ctrl's), nil when monitoring is off.
+	metrics *monitor.Metrics
 
 	allowOrigins              []string
 	serviceRoutesLock         sync.RWMutex
@@ -88,6 +90,7 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 		allowOrigins: allowOrigins,
 		ctrl:         ctrl,
 		logger:       logger,
+		metrics:      ctrl.Metrics(),
 		serviceGroup: engine.Group(constant.ServicePrefix),
 		// Configure rate limiter: 15 requests per second with burst of 20
 		rateLimiter: middleware.NewRateLimiter(rate.Limit(15), 20),
@@ -213,7 +216,7 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 	// wrapped regardless of order.) Registered AFTER cors so cross-origin
 	// preflight OPTIONS that cors short-circuits are not counted as traffic.
 	if enableMonitor {
-		p.serviceGroup.Use(monitor.TrackMetrics())
+		p.serviceGroup.Use(p.metrics.TrackMetrics())
 	}
 
 	// Apply rate limiting middleware
@@ -251,7 +254,7 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 // resolves one; record() treats "" as "count the total, attribute to no user".
 func (p *Proxy) globalConcurrencyMiddleware() gin.HandlerFunc {
 	return middleware.ConcurrencyLimitMiddleware(p.concurrencyLimiter, func(c *gin.Context) {
-		p.rejections.record(c, monitor.RejectionGlobalConcurrency, "")
+		p.reject(c, monitor.RejectionGlobalConcurrency, "")
 	})
 }
 
@@ -311,7 +314,7 @@ func (p *Proxy) overloadGuardMiddleware() gin.HandlerFunc {
 		// capacity alerts watch for.
 		c.Set("ignoreError", true)
 		c.Set(monitor.CtxKeyFailureSource, monitor.FailureSourceUpstream)
-		p.rejections.record(c, monitor.RejectionBackendOverloaded, "")
+		p.reject(c, monitor.RejectionBackendOverloaded, "")
 		retryAfter := p.overloadGuard.RetryAfterSeconds()
 		c.Header("Retry-After", strconv.Itoa(retryAfter))
 		c.AbortWithStatusJSON(http.StatusTooManyRequests, overloadErrorBody(c.Request.URL.Path, retryAfter))
@@ -729,19 +732,19 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		// log-amplification vector in #542). Rejections are now recorded to the
 		// Prometheus counter and summarized periodically by p.rejections.
 		if !middleware.CheckPerUserRateLimit(p.perUserRateLimiter, ctx, userAddress) {
-			p.rejections.record(ctx, monitor.RejectionRateLimit, userAddress)
+			p.reject(ctx, monitor.RejectionRateLimit, userAddress)
 			return
 		}
 		if !middleware.CheckPerUserTPMLimit(p.perUserTPMLimiter, ctx, userAddress, svcType) {
-			p.rejections.record(ctx, monitor.RejectionTPMLimit, userAddress)
+			p.reject(ctx, monitor.RejectionTPMLimit, userAddress)
 			return
 		}
 		if !middleware.CheckPerUserIPMLimit(p.perUserIPMLimiter, ctx, userAddress, svcType) {
-			p.rejections.record(ctx, monitor.RejectionIPMLimit, userAddress)
+			p.reject(ctx, monitor.RejectionIPMLimit, userAddress)
 			return
 		}
 		if !middleware.CheckPerUserConcurrency(p.perUserConcurrencyLimiter, ctx, userAddress) {
-			p.rejections.record(ctx, monitor.RejectionConcurrency, userAddress)
+			p.reject(ctx, monitor.RejectionConcurrency, userAddress)
 			return
 		}
 		defer p.perUserConcurrencyLimiter.Release(userAddress)
@@ -834,7 +837,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 			// expires — the same unbounded-log concern as the rate-limit gate.
 			ctx.Set("ignoreError", true)
 			remainingTime := blockedUntil.Sub(time.Now())
-			p.rejections.record(ctx, monitor.RejectionModelMismatch, userAddress)
+			p.reject(ctx, monitor.RejectionModelMismatch, userAddress)
 
 			ctx.JSON(http.StatusTooManyRequests, gin.H{
 				"error": fmt.Sprintf("Rate limit exceeded: too many invalid model requests for %q. Please try again in %v", blockModel, remainingTime.Round(time.Minute)),
@@ -872,7 +875,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	if exp, ok := p.ctrl.Service.ModelExpirationFor(modelForExpiry, ctrl.UpstreamIdentity(ctx)); ok && time.Now().After(exp) {
 		ctx.Set("ignoreError", true)
 		// record stamps CtxKeyRejectionReason for the unified failure metric.
-		p.rejections.record(ctx, monitor.RejectionModelExpired, userAddress)
+		p.reject(ctx, monitor.RejectionModelExpired, userAddress)
 		// 410 is cacheable by default; an operator can re-enable the model by
 		// extending expirationDate and restarting, so forbid caching to ensure
 		// the rejection never outlives the config that produced it.
@@ -897,7 +900,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		// identity header: these counters record before allowlist validation, and
 		// raw user strings as label values are an unbounded-cardinality vector.
 		wlModel, wlUpstream := p.ctrl.WhitelistMetricLabels(ctx, reqBody, ctx.Request.Header.Get("Content-Type"))
-		monitor.RecordWhitelistRequest(svcType, wlModel, wlUpstream)
+		p.metrics.RecordWhitelistRequest(svcType, wlModel, wlUpstream)
 		// Raw on purpose: the DB row records the user-requested id verbatim;
 		// only the metric label above goes through the bounded fold.
 		modelName := ctrl.ExtractModelName(reqBody, ctx.Request.Header.Get("Content-Type"))
@@ -1064,7 +1067,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		// exist), so handleBrokerError logs nothing. Record the classified reason
 		// it stashed in the context (defaulting to upstream_error for unclassified
 		// server-side failures) so these rejections are observable again.
-		p.rejections.record(ctx, rejectionReasonFromContext(ctx), userAddress)
+		p.reject(ctx, rejectionReasonFromContext(ctx), userAddress)
 		p.handleBrokerError(ctx, err, "validate request")
 		return
 	}

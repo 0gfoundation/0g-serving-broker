@@ -202,55 +202,49 @@ func addrForIndex(i int) string {
 	return sb.String()
 }
 
-// record() must emit broker_requests_rejected_total, not merely log. Deleting
+// reject() must emit broker_requests_rejected_total, not merely log. Deleting
 // the RecordRejection call left every test in the repo green, because the metric
 // the admission gates exist to feed was asserted nowhere — this pins the call
 // site, which the monitor-package test cannot: that one proves RecordRejection
 // works, not that anyone invokes it.
-func TestRejectionAggregatorEmitsTheRejectionMetric(t *testing.T) {
-	saved := monitor.RequestRejectedTotal
-	monitor.RequestRejectedTotal = prometheus.NewCounterVec(
-		prometheus.CounterOpts{Name: "test_requests_rejected_total"},
-		[]string{"reason"},
-	)
-	defer func() { monitor.RequestRejectedTotal = saved }()
+func TestRejectEmitsTheRejectionMetric(t *testing.T) {
+	m := testRejectionMetrics("test_requests_rejected_total")
+	p := &Proxy{metrics: m, rejections: newTestAggregator(&captureLogger{})}
+	p.reject(nil, monitor.RejectionGlobalConcurrency, "")
+	p.reject(nil, monitor.RejectionGlobalConcurrency, "")
+	p.reject(nil, monitor.RejectionRateLimit, "0x1111000000000000000000000000000000002222")
 
-	a := newTestAggregator(&captureLogger{})
-	a.record(nil, monitor.RejectionGlobalConcurrency, "")
-	a.record(nil, monitor.RejectionGlobalConcurrency, "")
-	a.record(nil, monitor.RejectionRateLimit, "0x1111000000000000000000000000000000002222")
-
-	if got := rejectionCount(t, monitor.RejectionGlobalConcurrency); got != 2 {
+	if got := rejectionCount(t, m, monitor.RejectionGlobalConcurrency); got != 2 {
 		t.Errorf("reason=%q counter = %v, want 2", monitor.RejectionGlobalConcurrency, got)
 	}
-	if got := rejectionCount(t, monitor.RejectionRateLimit); got != 1 {
+	if got := rejectionCount(t, m, monitor.RejectionRateLimit); got != 1 {
 		t.Errorf("reason=%q counter = %v, want 1", monitor.RejectionRateLimit, got)
 	}
 }
 
-// A nil receiver must still emit the metric: record() fires the counter and the
-// context stamp before its own nil guard, so monitoring survives a Proxy built
-// without an aggregator.
-func TestRejectionAggregatorNilReceiverStillEmitsTheMetric(t *testing.T) {
-	saved := monitor.RequestRejectedTotal
-	monitor.RequestRejectedTotal = prometheus.NewCounterVec(
-		prometheus.CounterOpts{Name: "test_requests_rejected_total_nilrecv"},
-		[]string{"reason"},
-	)
-	defer func() { monitor.RequestRejectedTotal = saved }()
+// A Proxy without an aggregator must still emit the metric, so monitoring
+// survives a Proxy built outside New().
+func TestRejectWithoutAggregatorStillEmitsTheMetric(t *testing.T) {
+	m := testRejectionMetrics("test_requests_rejected_total_nilrecv")
+	p := &Proxy{metrics: m}
+	p.reject(nil, monitor.RejectionGlobalConcurrency, "")
 
-	var a *rejectionAggregator
-	a.record(nil, monitor.RejectionGlobalConcurrency, "")
-
-	if got := rejectionCount(t, monitor.RejectionGlobalConcurrency); got != 1 {
+	if got := rejectionCount(t, m, monitor.RejectionGlobalConcurrency); got != 1 {
 		t.Errorf("counter = %v, want 1", got)
 	}
 }
 
-func rejectionCount(t *testing.T, reason string) float64 {
+func testRejectionMetrics(name string) *monitor.Metrics {
+	return &monitor.Metrics{RequestRejectedTotal: prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: name},
+		[]string{"reason"},
+	)}
+}
+
+func rejectionCount(t *testing.T, metrics *monitor.Metrics, reason string) float64 {
 	t.Helper()
 	m := &dto.Metric{}
-	c, err := monitor.RequestRejectedTotal.GetMetricWithLabelValues(reason)
+	c, err := metrics.RequestRejectedTotal.GetMetricWithLabelValues(reason)
 	if err != nil {
 		t.Fatalf("GetMetricWithLabelValues(%q): %v", reason, err)
 	}

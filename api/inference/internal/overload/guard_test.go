@@ -189,7 +189,7 @@ func saturatedServer(t *testing.T) *httptest.Server {
 // Start is main's whole wiring. A long poll interval means only Run's
 // immediate first scrape can arm it within the deadline.
 func TestStart(t *testing.T) {
-	if Start(context.Background(), config.OverloadGuardConfig{}, discardLogger{}) != nil {
+	if Start(context.Background(), config.OverloadGuardConfig{}, discardLogger{}, nil) != nil {
 		t.Fatal("disabled config must start nothing")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -197,7 +197,7 @@ func TestStart(t *testing.T) {
 	g := Start(ctx, config.OverloadGuardConfig{
 		Enabled: true, MetricsURL: saturatedServer(t).URL, MaxQueueRequests: 5,
 		PollInterval: time.Hour, RetryAfter: 30 * time.Second,
-	}, discardLogger{})
+	}, discardLogger{}, nil)
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		if shed, _ := g.Check(); shed {
@@ -324,6 +324,7 @@ func TestPoll_UpdatesGauges(t *testing.T) {
 	}))
 	defer srv.Close()
 	g := newTestGuard(config.OverloadGuardConfig{MetricsURL: srv.URL, MaxQueueRequests: 5})
+	g.metrics = monitor.Default
 
 	// Healthy first, so a gauge that merely mirrored "scrape succeeded" fails.
 	g.poll(context.Background())
@@ -348,6 +349,6 @@ func TestPoll_UpdatesGauges(t *testing.T) {
 // an earlier test is still writing them is a data race.
 func TestMain(m *testing.M) {
 	monitor.PrometheusInit("overload-guard-test", "0x00000000000000000000000000000000000000bb")
-	monitor.EnableOverloadGuardMetrics()
+	monitor.Default.EnableOverloadGuardMetrics()
 	os.Exit(m.Run())
 }

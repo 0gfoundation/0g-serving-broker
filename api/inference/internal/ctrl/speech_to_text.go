@@ -534,7 +534,7 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 	// Skip billing for whitelisted users, but record whitelist traffic metrics and
 	// count the usage into the reconciliation rollup (it hit the upstream).
 	if reqModel.IsWhitelisted {
-		recordWhitelistUsageMetrics(transcriptionResp.Usage, c.metricModel(ctx), c.metricUpstream(ctx))
+		c.recordWhitelistUsageMetrics(transcriptionResp.Usage, c.metricModel(ctx), c.metricUpstream(ctx))
 		c.recordWhitelistedSTT(reqModel, transcriptionResp.Usage)
 		return nil
 	}
@@ -711,7 +711,7 @@ func (c *Ctrl) handleStreamingSpeechToText(ctx *gin.Context, resp *http.Response
 	// Skip billing for whitelisted users, but record whitelist traffic metrics and
 	// count the usage into the reconciliation rollup (it hit the upstream).
 	if reqModel.IsWhitelisted {
-		recordWhitelistUsageMetrics(usage, c.metricModel(ctx), c.metricUpstream(ctx))
+		c.recordWhitelistUsageMetrics(usage, c.metricModel(ctx), c.metricUpstream(ctx))
 		c.recordWhitelistedSTT(reqModel, usage)
 		return nil
 	}
@@ -786,7 +786,7 @@ func (c *Ctrl) billSpeechToTextByDuration(ctx context.Context, usage *SpeechToTe
 		return errors.Wrap(err, "update request with duration usage")
 	}
 
-	monitor.RecordAudioSeconds(speechToTextMetricLabel, c.metricModel(ctx), c.metricUpstream(ctx), int64(seconds))
+	c.metrics.RecordAudioSeconds(speechToTextMetricLabel, c.metricModel(ctx), c.metricUpstream(ctx), int64(seconds))
 	// No RecordTPSFromContext for duration mode: whisper has no
 	// tokens-per-second concept (the whole transcript is delivered as one
 	// shot, not as a generation stream). A seconds/second metric would be
@@ -869,13 +869,13 @@ func (c *Ctrl) billSpeechToTextByTokensCore(ctx context.Context, usage *SpeechTo
 
 	metricModel := c.metricModel(ctx)
 	metricUpstream := c.metricUpstream(ctx)
-	monitor.RecordTokens(speechToTextMetricLabel, metricModel, metricUpstream, int64(usage.InputTokens), int64(usage.OutputTokens))
+	c.metrics.RecordTokens(speechToTextMetricLabel, metricModel, metricUpstream, int64(usage.InputTokens), int64(usage.OutputTokens))
 	// RecordTPSFromContext early-returns when outputTokens <= 0, so gpt-4o-transcribe
 	// (output_tokens always 0 upstream) emits no observation rather than recording a
-	// misleading 0 — verified in monitor.RecordTPSFromContext. Kept for forward
+	// misleading 0 — verified in monitor.Metrics.RecordTPSFromContext. Kept for forward
 	// compatibility with any future token-billed STT model that does emit
 	// non-zero output_tokens.
-	monitor.RecordTPSFromContext(ctx, speechToTextMetricLabel, metricModel, metricUpstream, int64(usage.OutputTokens))
+	c.metrics.RecordTPSFromContext(ctx, speechToTextMetricLabel, metricModel, metricUpstream, int64(usage.OutputTokens))
 	c.consumeSpeechToTextLimiter(ctx, usage.InputTokens+usage.OutputTokens)
 	return nil
 }
@@ -995,15 +995,15 @@ func (c *Ctrl) recordWhitelistedSTT(reqModel model.Request, usage *SpeechToTextU
 // stay accurate, plus broken out into the whitelist counter so the share is
 // inspectable). Routes via classifyUsageForMetrics so it stays in lockstep
 // with the billing dispatch.
-func recordWhitelistUsageMetrics(u *SpeechToTextUsage, model, upstream string) {
+func (c *Ctrl) recordWhitelistUsageMetrics(u *SpeechToTextUsage, model, upstream string) {
 	seconds, in, out := classifyUsageForMetrics(u)
 	if seconds > 0 {
-		monitor.RecordAudioSeconds(speechToTextMetricLabel, model, upstream, seconds)
-		monitor.RecordWhitelistAudioSeconds(speechToTextMetricLabel, model, upstream, seconds)
+		c.metrics.RecordAudioSeconds(speechToTextMetricLabel, model, upstream, seconds)
+		c.metrics.RecordWhitelistAudioSeconds(speechToTextMetricLabel, model, upstream, seconds)
 	}
 	if in > 0 || out > 0 {
-		monitor.RecordTokens(speechToTextMetricLabel, model, upstream, in, out)
-		monitor.RecordWhitelistTokens(speechToTextMetricLabel, model, upstream, in, out)
+		c.metrics.RecordTokens(speechToTextMetricLabel, model, upstream, in, out)
+		c.metrics.RecordWhitelistTokens(speechToTextMetricLabel, model, upstream, in, out)
 	}
 }
 
@@ -1055,8 +1055,8 @@ func (c *Ctrl) updateSpeechToTextFallback(ctx context.Context, reqModel model.Re
 	// Record token metrics (estimated output tokens only, no input token data in fallback path)
 	metricModel := c.metricModel(ctx)
 	metricUpstream := c.metricUpstream(ctx)
-	monitor.RecordTokens(speechToTextMetricLabel, metricModel, metricUpstream, 0, estimatedOutputTokens)
-	monitor.RecordTPSFromContext(ctx, speechToTextMetricLabel, metricModel, metricUpstream, estimatedOutputTokens)
+	c.metrics.RecordTokens(speechToTextMetricLabel, metricModel, metricUpstream, 0, estimatedOutputTokens)
+	c.metrics.RecordTPSFromContext(ctx, speechToTextMetricLabel, metricModel, metricUpstream, estimatedOutputTokens)
 
 	// Update TPM limiter with estimated token consumption (fallback path).
 	c.consumeSpeechToTextLimiter(ctx, int(estimatedOutputTokens))

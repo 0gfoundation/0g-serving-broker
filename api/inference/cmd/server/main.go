@@ -92,8 +92,8 @@ func Main() {
 	// of Main, and every metric-recording goroutine starts after this block.
 	if config.Monitor.Enable {
 		monitor.PrometheusInit(config.Service.ServingURL, contract.ProviderAddress)
-		monitor.StartDAUUpdater(monitorCtx, db.CountUniqueUsersLast24h, 1*time.Minute, logger)
-		monitor.StartAllTimeStatsUpdater(monitorCtx, func() (monitor.TotalStatsResult, error) {
+		monitor.Default.StartDAUUpdater(monitorCtx, db.CountUniqueUsersLast24h, 1*time.Minute, logger)
+		monitor.Default.StartAllTimeStatsUpdater(monitorCtx, func() (monitor.TotalStatsResult, error) {
 			s, err := db.GetCombinedTotalStats()
 			if err != nil {
 				return monitor.TotalStatsResult{}, err
@@ -147,6 +147,7 @@ func Main() {
 	}
 
 	ctrl := ctrl.New(db, contract, config, svcCache, teeService, priceCache, logger)
+	ctrl.SetMetrics(monitor.Default)
 
 	// Record the video-generation poll config and, if enabled, start the poll-to-completion
 	// scheduler before serving traffic. ctrl.New() above already fully initializes
@@ -349,7 +350,7 @@ func Main() {
 	}
 
 	proxy := proxy.New(ctrl, engine, config.AllowOrigins, config.Monitor.Enable, config.ConcurrencyLimit, logger)
-	if guard := overload.Start(ctx, config.OverloadGuard, logger); guard != nil {
+	if guard := overload.Start(ctx, config.OverloadGuard, logger, monitor.Default); guard != nil {
 		proxy.SetOverloadGuard(guard)
 		logger.Infof("overload guard enabled: %s, maxQueueRequests=%d maxTokenUsage=%v",
 			config.OverloadGuard.MetricsURL, config.OverloadGuard.MaxQueueRequests, config.OverloadGuard.MaxTokenUsage)

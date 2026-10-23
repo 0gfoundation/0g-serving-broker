@@ -677,12 +677,12 @@ func (c *Ctrl) upstreamCertFingerprint(header http.Header, state *tls.Connection
 				// literal or a plaintext URL, for which TLS sends no SNI at all.
 				// Telling this operator to compare *_BASE_URL against upstreamDomain
 				// would send them to edit config that was never wrong.
-				monitor.RecordRoutingProofSkipped(monitor.RoutingProofSkipNoSidecarHost)
+				c.metrics.RecordRoutingProofSkipped(monitor.RoutingProofSkipNoSidecarHost)
 				c.logProofSkip(monitor.RoutingProofSkipNoSidecarHost, "", "targetTLSProxy: sidecar at %s reported a certificate but no %s — its image predates that header, or its *_BASE_URL is an IP literal or plaintext URL (TLS sends no SNI for either); no routing proof for this response",
 					c.Service.TargetURL, teeutil.HeaderUpstreamCertHost)
 				return ""
 			case host != c.Service.UpstreamDomain:
-				monitor.RecordRoutingProofSkipped(monitor.RoutingProofSkipDomainMismatch)
+				c.metrics.RecordRoutingProofSkipped(monitor.RoutingProofSkipDomainMismatch)
 				// Logged once per distinct host: this is drift between two config files,
 				// so it does not self-heal and would otherwise emit at full request rate
 				// — the log-volume failure mode this counter exists to replace.
@@ -693,7 +693,7 @@ func (c *Ctrl) upstreamCertFingerprint(header http.Header, state *tls.Connection
 			}
 			return fp
 		}
-		monitor.RecordRoutingProofSkipped(monitor.RoutingProofSkipNoSidecarReport)
+		c.metrics.RecordRoutingProofSkipped(monitor.RoutingProofSkipNoSidecarReport)
 		// Absent and malformed have different fixes, so they get different messages:
 		// absent means the shim is not reporting at all (wrong image, middleware not
 		// installed, or it never reached the vendor over TLS); malformed means
@@ -714,7 +714,7 @@ func (c *Ctrl) upstreamCertFingerprint(header http.Header, state *tls.Connection
 	if info := teeutil.ExtractTLSInfo(state); info != nil {
 		return info.PeerCertFingerprint
 	}
-	monitor.RecordRoutingProofSkipped(monitor.RoutingProofSkipNoTLS)
+	c.metrics.RecordRoutingProofSkipped(monitor.RoutingProofSkipNoTLS)
 	c.logProofSkip(monitor.RoutingProofSkipNoTLS, "", "centralized provider response arrived without TLS state; no routing proof for this response")
 	return ""
 }
