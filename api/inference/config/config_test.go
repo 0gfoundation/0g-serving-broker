@@ -4452,3 +4452,36 @@ func TestModelInfo_Validate_URLInputModalities(t *testing.T) {
 		t.Fatalf("unset url_input_modalities must be omitted: %s", b)
 	}
 }
+
+func TestModelInfo_Validate_MaxInputBytes(t *testing.T) {
+	cases := []struct {
+		name    string
+		in      []string
+		max     map[string]int64
+		wantErr bool
+	}{
+		{"unset ok", []string{"text", "image"}, nil, false},
+		{"image and video ok", []string{"text", "image", "video"}, map[string]int64{"image": 3932160, "video": 10485760}, false},
+		{"not an input modality rejected", []string{"text", "image"}, map[string]int64{"video": 1}, true},
+		{"audio rejected", []string{"text", "audio"}, map[string]int64{"audio": 1}, true},
+		{"zero rejected", []string{"text", "image"}, map[string]int64{"image": 0}, true},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			m := validModelInfo()
+			m.Architecture.InputModalities = tt.in
+			m.Architecture.MaxInputBytes = tt.max
+			if err := m.Validate("chatbot"); (err != nil) != tt.wantErr {
+				t.Fatalf("wantErr=%v, got %v", tt.wantErr, err)
+			}
+		})
+	}
+	b, _ := json.Marshal(&ModelArchitecture{InputModalities: []string{"text", "image"}, MaxInputBytes: map[string]int64{"image": 3932160}})
+	if !strings.Contains(string(b), `"max_input_bytes":{"image":3932160}`) {
+		t.Fatalf("published architecture lacks max_input_bytes: %s", b)
+	}
+	b, _ = json.Marshal(&ModelArchitecture{InputModalities: []string{"text"}})
+	if strings.Contains(string(b), "max_input_bytes") {
+		t.Fatalf("unset max_input_bytes must be omitted: %s", b)
+	}
+}

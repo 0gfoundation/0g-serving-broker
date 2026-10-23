@@ -24,8 +24,10 @@ type ModelArchitecture struct {
 	OutputModalities []string `yaml:"outputModalities,omitempty"`
 	// URLInputModalities: media modalities the upstream also takes by link.
 	URLInputModalities []string `yaml:"urlInputModalities,omitempty"`
-	InstructType       string   `yaml:"instructType,omitempty"`
-	Tokenizer          string   `yaml:"tokenizer,omitempty"`
+	// MaxInputBytes: largest single media item per modality, decoded bytes.
+	MaxInputBytes map[string]int64 `yaml:"maxInputBytes,omitempty"`
+	InstructType  string           `yaml:"instructType,omitempty"`
+	Tokenizer     string           `yaml:"tokenizer,omitempty"`
 }
 
 // MarshalYAML renders short slice fields in flow style (e.g., ["text"]).
@@ -59,6 +61,20 @@ func (a ModelArchitecture) MarshalYAML() (interface{}, error) {
 	addFlowSeq("inputModalities", a.InputModalities)
 	addFlowSeq("outputModalities", a.OutputModalities)
 	addFlowSeq("urlInputModalities", a.URLInputModalities)
+	if len(a.MaxInputBytes) > 0 {
+		m := &yaml.Node{Kind: yaml.MappingNode, Style: yaml.FlowStyle}
+		keys := make([]string, 0, len(a.MaxInputBytes))
+		for k := range a.MaxInputBytes {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			m.Content = append(m.Content,
+				&yaml.Node{Kind: yaml.ScalarNode, Value: k},
+				&yaml.Node{Kind: yaml.ScalarNode, Value: strconv.FormatInt(a.MaxInputBytes[k], 10)})
+		}
+		node.Content = append(node.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "maxInputBytes"}, m)
+	}
 	addScalar("instructType", a.InstructType)
 	addScalar("tokenizer", a.Tokenizer)
 

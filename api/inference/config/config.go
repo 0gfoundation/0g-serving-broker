@@ -223,8 +223,14 @@ type ModelArchitecture struct {
 	// format this service serves. The router routes link requests only to
 	// services declaring it. Each entry must also be in InputModalities.
 	URLInputModalities []string `yaml:"urlInputModalities" json:"url_input_modalities,omitempty"`
-	InstructType       string   `yaml:"instructType" json:"instruct_type,omitempty"` // Optional. e.g., "none", "alpaca", "chatml"
-	Tokenizer          string   `yaml:"tokenizer" json:"tokenizer,omitempty"`        // Optional. Tokenizer identifier, e.g., "cl100k_base", "o200k_base", "llama3"
+	// MaxInputBytes is optional: per media input modality (image, video), the
+	// largest single item, in decoded bytes, the upstream takes. The router
+	// sends a request carrying a larger inline item elsewhere, or refuses it,
+	// instead of letting the upstream answer an opaque 400. Declare only a
+	// measured limit; each key must also be in InputModalities.
+	MaxInputBytes map[string]int64 `yaml:"maxInputBytes" json:"max_input_bytes,omitempty"`
+	InstructType  string           `yaml:"instructType" json:"instruct_type,omitempty"` // Optional. e.g., "none", "alpaca", "chatml"
+	Tokenizer     string           `yaml:"tokenizer" json:"tokenizer,omitempty"`        // Optional. Tokenizer identifier, e.g., "cl100k_base", "o200k_base", "llama3"
 }
 
 // urlInputModalities are the input modalities a link can carry.
@@ -240,6 +246,17 @@ func (a *ModelArchitecture) Validate() error {
 	}
 	if len(a.OutputModalities) == 0 {
 		return fmt.Errorf("service.modelInfo.architecture.outputModalities is required")
+	}
+	for m, n := range a.MaxInputBytes {
+		if !urlInputModalities[m] {
+			return fmt.Errorf("service.modelInfo.architecture.maxInputBytes: %q is not image or video", m)
+		}
+		if !slices.Contains(a.InputModalities, m) {
+			return fmt.Errorf("service.modelInfo.architecture.maxInputBytes: %q is not in inputModalities", m)
+		}
+		if n <= 0 {
+			return fmt.Errorf("service.modelInfo.architecture.maxInputBytes.%s: must be a positive byte count", m)
+		}
 	}
 	for _, m := range a.URLInputModalities {
 		if !urlInputModalities[m] {
