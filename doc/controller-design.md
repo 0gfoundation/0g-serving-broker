@@ -346,8 +346,12 @@ verifier's baseline cover every such machine.
   is refused before anything is recorded — and the primary broker and event restart,
   so every instance restarts with them. The API never creates or removes an instance;
   that is a redeploy. A primary config change is validated against the instances too.
-- Refused together with `ZG_CONTROLLER_INSTANCES`, and, like it, with
-  `controller.recordUpstreamSet` until that record covers every instance.
+- Refused together with `ZG_CONTROLLER_INSTANCES`. Unlike it, combines with
+  `controller.recordUpstreamSet`: the recorded set covers every instance, each member tagged
+  `provider=<address>` (rtmr3-records.md §4.3). Because the instances share one signer, a
+  change to any instance's upstreams rotates it for all of them — every provider address
+  needs its signer acknowledged again. Readers must understand `provider=` first: an older
+  reader refuses such a record and reads the set as unknown.
 - **No in-band upgrade work.** The instances run in the primary's containers, so an
   image update moves them with nothing more to plan.
 

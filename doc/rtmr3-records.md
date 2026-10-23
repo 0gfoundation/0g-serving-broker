@@ -126,6 +126,8 @@ Where the plaintext goes is **not** read from here but from §4.3.
 count=<n>
 <name> <base URL>
 <name> <base URL> <identity>
+<name> <base URL> provider=<address>
+<name> <base URL> <identity> provider=<address>
 …                               (exactly n member lines)
 ```
 
@@ -136,8 +138,16 @@ invalidated
 ```
 
 The **whole** set of destinations the primary broker may forward unsealed plaintext to:
-`service.targetUrl` plus every `modelPricing[].targetUrl`, deduplicated by name. A snapshot,
-not a delta: the last record is the set.
+`service.targetUrl` plus every `modelPricing[].targetUrl`, deduplicated by name — of every
+in-process instance's config too when there are any, each member tagged with its provider. A
+snapshot, not a delta: the last record is the set.
+
+The set's hash (which enters the signing and encryption key derivation) is SHA-256 over
+`zg-upstream-set-v1\n` followed by one line per member, `<name> <base URL> <identity>\n`
+(identity empty when absent), with ` provider=<address>` before the newline when the member
+has one, lines sorted. A set without providers hashes exactly as before the field existed.
+Because the instances share one signer, a change to **any** instance's upstreams rotates it,
+and every instance's provider address needs its signer acknowledged again on chain.
 
 - `count=<n>` is the first line; the number of member lines must equal `n` (a tally mismatch
   makes the record unreadable).
@@ -148,6 +158,12 @@ not a delta: the last record is the set.
   dot segments, no percent-encoding in the path. (The writer refuses to record anything else,
   so a reader may refuse too.)
 - `<identity>`: optional third field, the vendor identity the config names for that upstream.
+- `provider=<address>`: optional last field, present when the CVM serves several providers
+  from the same processes (in-process instances, controller-design.md §3.3a). `<address>` is
+  the provider's on-chain address as `0x` + 40 **lowercase** hex; the member is a destination
+  that provider's config permits. Tagged, so it cannot be read as an identity (which never
+  contains `=`). Either every member carries it or none does — a mixed record is unreadable.
+  Names are unique per provider: two providers using one upstream are two members.
 - Line cap 4096 bytes; member cap 1024.
 - `invalidated`: the writer could not state the set (config unreadable, grammar it cannot
   express). A reader treats the state as **unknown**, which for any privacy claim means
@@ -183,10 +199,11 @@ A config change to one of the extra broker instances the controller manages
 (`ZG_CONTROLLER_INSTANCES`), or to one of the in-process instances the primary broker
 serves from `CONFIG_DIR` (controller-design.md §3.3a) — the record is the same either way. `unknown` is what an aborted change writes; a reader refuses the
 whole CVM until a later record for that instance succeeds. Instances share the primary's
-signing and encryption keys (one trust domain). **The upstream set (§4.3) is derived from the
-primary config only**, which is why the controller refuses `recordUpstreamSet` together with
-instances today; a verifier must not accept a privacy claim for a CVM that declares
-instances until the record covers their upstreams too.
+signing and encryption keys (one trust domain). For **container** instances
+(`ZG_CONTROLLER_INSTANCES`) the upstream set (§4.3) is derived from the primary config only,
+which is why the controller refuses `recordUpstreamSet` together with them; a verifier must not
+accept a privacy claim for a CVM that declares them until the record covers their upstreams
+too. **In-process** instances are covered: their members carry `provider=`.
 
 ## 5. report_data (64 bytes at quote[568:632])
 

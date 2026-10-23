@@ -362,9 +362,10 @@ type RunningState struct {
 
 // Upstream is one permitted destination for unsealed plaintext.
 type Upstream struct {
-	// Name is what the config's model mapping refers to. Unique within a set: a name
-	// bound to two URLs at once would make that mapping unreadable, which is the whole
-	// point of recording the set, so a record naming one twice is refused outright.
+	// Name is what the config's model mapping refers to. Unique within a set (within a
+	// provider's share of it, when the set has providers): a name bound to two URLs at
+	// once would make that mapping unreadable, which is the whole point of recording
+	// the set, so a record naming one twice is refused outright.
 	Name string
 	// URL is the destination's base URL, exactly as recorded.
 	URL string
@@ -372,6 +373,11 @@ type Upstream struct {
 	// carried none. Only meaningful for upstreams outside this CVM, where it is
 	// what a routing proof attributes the request to.
 	Identity string
+	// Provider is the on-chain address of the provider whose config permits this
+	// destination, 0x + 40 lowercase hex, when one CVM serves several providers from
+	// the same processes. Empty in a set recorded for a single provider — and then
+	// empty for every member: a set carries it on all members or on none.
+	Provider string
 
 	// The two fields below are NOT from the record. They are what the deployment's own
 	// compose file says about the destination the record names, filled in by

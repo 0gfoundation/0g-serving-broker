@@ -7,7 +7,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/ethereum/go-ethereum/crypto"
 
 	"github.com/0glabs/0g-serving-broker/common/attest"
 	"github.com/0glabs/0g-serving-broker/controller/internal/attestproxy"
@@ -135,16 +138,75 @@ func TestCheckConfigDir(t *testing.T) {
 		name      string
 		dir       string
 		instances []Instance
-		record    bool
 		ok        bool
 	}{
-		{"unset", "", laya, true, true},
-		{"alone", "/etc/config/instances", nil, false, true},
-		{"with container instances", "/etc/config/instances", laya, false, false},
-		{"with the upstream-set record", "/etc/config/instances", nil, true, false},
+		{"unset", "", laya, true},
+		{"alone", "/etc/config/instances", nil, true},
+		{"with container instances", "/etc/config/instances", laya, false},
 	} {
-		if err := checkConfigDir(tc.dir, tc.instances, tc.record); (err == nil) != tc.ok {
+		if err := checkConfigDir(tc.dir, tc.instances); (err == nil) != tc.ok {
 			t.Errorf("%s: checkConfigDir() = %v, want ok=%v", tc.name, err, tc.ok)
 		}
+	}
+}
+
+func inProcAddress(t *testing.T, key string) string {
+	t.Helper()
+	k, err := crypto.HexToECDSA(strings.TrimPrefix(key, "0x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.ToLower(crypto.PubkeyToAddress(k.PublicKey).Hex())
+}
+
+// With in-process instances the recorded set is every provider's: the instances run
+// under the same signer, so where any of them may send plaintext is the answer a
+// reader needs. Each member says whose config permits it, so one engine both use
+// is two members.
+func TestInProcessUpstreamSetCoversEveryProvider(t *testing.T) {
+	l := &opLog{}
+	c, _, _ := newInProcessCtrl(t, l)
+	c.config.RecordUpstreamSet = true
+
+	if err := c.RecordUpstreamSet(context.Background()); err != nil {
+		t.Fatalf("RecordUpstreamSet() = %v", err)
+	}
+	a, b := inProcAddress(t, inProcKeyA), inProcAddress(t, inProcKeyB)
+	first, second := a, b
+	if b < a {
+		first, second = b, a
+	}
+	want := "count=2\n" +
+		"engine http://engine:8000/v1 provider=" + first + "\n" +
+		"engine http://engine:8000/v1 provider=" + second
+	if got := emitted(l); len(got) != 1 || got[0] != want {
+		t.Fatalf("recorded %q, want [%q]", got, want)
+	}
+}
+
+// A change to one instance moves the whole set, so it is recorded again — after the
+// instance's config record and before the file is written, like the primary's.
+func TestInProcessInstanceChangeRecordsTheNewSetBeforeTheWrite(t *testing.T) {
+	l := &opLog{}
+	c, _, img := newInProcessCtrl(t, l)
+	c.config.RecordUpstreamSet = true
+	watcher := &fileWatchingEmitter{log: l, path: img, at: map[string]string{}}
+	c.emitter = watcher
+	before, _ := os.ReadFile(img)
+
+	content := strings.Replace(inProcConfig("https://b.example", inProcKeyB, "after"), "http://engine:8000/v1", "http://img-engine:8000/v1", 1)
+	if err := c.ApplyInstanceConfig(context.Background(), "img", content); err != nil {
+		t.Fatalf("ApplyInstanceConfig() = %v", err)
+	}
+	got := emitted(l)
+	b := inProcAddress(t, inProcKeyB)
+	if len(got) != 1 || !strings.Contains(got[0], "img-engine http://img-engine:8000/v1 provider="+b) || !strings.Contains(got[0], "engine http://engine:8000/v1 provider="+inProcAddress(t, inProcKeyA)) {
+		t.Fatalf("recorded %q, want the primary's engine and the instance's new one", got)
+	}
+	if onDisk := watcher.at[attest.EventUpstreamSet]; onDisk != string(before) {
+		t.Errorf("the set was recorded with %q on disk; it must be recorded before the write", onDisk)
+	}
+	if i, j := l.indexOf("emit "+attest.EventInstanceConfigUpdate), l.indexOf("emit "+attest.EventUpstreamSet); i < 0 || j < i {
+		t.Errorf("ops = %v, want the instance's config record before the set", l.all())
 	}
 }

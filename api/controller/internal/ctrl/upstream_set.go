@@ -82,7 +82,17 @@ func (c *Ctrl) RecordUpstreamSet(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, recordUpstreamSetTimeout)
 	defer cancel()
 
-	return c.recordUpstreamSet(ctx, "RecordUpstreamSet", &c.fullConfig.Service)
+	if c.hasInProcessInstances() {
+		primary, err := os.ReadFile(c.config.ConfigFile)
+		if err != nil {
+			c.logger.Errorf("[RecordUpstreamSet] Could not read the primary config %s, recording the set as unreadable: %v", c.config.ConfigFile, err)
+			return c.invalidateUpstreamSet(ctx, "RecordUpstreamSet")
+		}
+		members, err := c.inProcessUpstreams(primary, "", nil)
+		return c.recordUpstreamSet(ctx, "RecordUpstreamSet", members, err)
+	}
+	members, err := upstreamsFromConfig(&c.fullConfig.Service)
+	return c.recordUpstreamSet(ctx, "RecordUpstreamSet", members, err)
 }
 
 // RecordUpstreamSetFromContent records the set a config that is about to be written
@@ -145,12 +155,61 @@ func (c *Ctrl) RecordUpstreamSetFromContent(ctx context.Context, content string)
 	ctx, cancel := context.WithTimeout(ctx, recordUpstreamSetTimeout)
 	defer cancel()
 
+	if c.hasInProcessInstances() {
+		members, err := c.inProcessUpstreams([]byte(content), "", nil)
+		return c.recordUpstreamSet(ctx, "ApplyCoreConfig", members, err)
+	}
 	svc, err := config.ServiceFromYAML([]byte(content))
 	if err != nil {
 		c.logger.Errorf("[ApplyCoreConfig] The new config cannot be read the way the broker reads it, so the set it permits is unknown: %v", err)
 		return c.invalidateUpstreamSet(ctx, "ApplyCoreConfig")
 	}
-	return c.recordUpstreamSet(ctx, "ApplyCoreConfig", svc)
+	members, err := upstreamsFromConfig(svc)
+	return c.recordUpstreamSet(ctx, "ApplyCoreConfig", members, err)
+}
+
+// recordInProcessInstanceUpstreamSet is RecordUpstreamSetFromContent for a change
+// to an in-process instance's config: the set the whole process permits once that
+// instance's file holds content. Same switch, same order (before the write), same
+// fail-closed rules.
+func (c *Ctrl) recordInProcessInstanceUpstreamSet(ctx context.Context, name, content string) error {
+	if !c.config.RecordUpstreamSet {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, recordUpstreamSetTimeout)
+	defer cancel()
+
+	tag := "ApplyInstanceConfig " + name
+	primary, err := os.ReadFile(c.config.ConfigFile)
+	if err != nil {
+		c.logger.Errorf("[%s] Could not read the primary config %s, recording the set as unreadable: %v", tag, c.config.ConfigFile, err)
+		return c.invalidateUpstreamSet(ctx, tag)
+	}
+	members, err := c.inProcessUpstreams(primary, name, []byte(content))
+	return c.recordUpstreamSet(ctx, tag, members, err)
+}
+
+// inProcessUpstreams is the set of a process serving in-process instances: every
+// provider's destinations, each member tagged with its provider, from primary as the
+// primary config and the instance files (content replacing name's). A destination
+// several providers use is one member per provider, since each may reach it.
+func (c *Ctrl) inProcessUpstreams(primary []byte, name string, content []byte) ([]attest.Upstream, error) {
+	sources, err := config.InProcessUpstreamSources(c.configDir, primary, name, content)
+	if err != nil {
+		return nil, err
+	}
+	var all []attest.Upstream
+	for _, s := range sources {
+		members, err := upstreamsFromConfig(s.Service)
+		if err != nil {
+			return nil, fmt.Errorf("provider %s: %w", s.Provider, err)
+		}
+		for i := range members {
+			members[i].Provider = s.Provider
+		}
+		all = append(all, members...)
+	}
+	return all, nil
 }
 
 // recordUpstreamSet is the body both entry points share: derive, render, emit, and fall
@@ -160,9 +219,9 @@ func (c *Ctrl) RecordUpstreamSetFromContent(ctx context.Context, content string)
 // switch has been checked, and the context is bounded.
 //
 // tag is the caller's log prefix, so an operator reading the journal can tell a boot
-// record from one a config change wrote.
-func (c *Ctrl) recordUpstreamSet(ctx context.Context, tag string, svc *config.Service) error {
-	members, err := upstreamsFromConfig(svc)
+// record from one a config change wrote. members and err are the caller's derivation
+// of the set; an err records the set as unreadable.
+func (c *Ctrl) recordUpstreamSet(ctx context.Context, tag string, members []attest.Upstream, err error) error {
 	if err != nil {
 		c.logger.Errorf("[%s] Cannot express this config's upstreams as a set, recording it as unreadable: %v", tag, err)
 		return c.invalidateUpstreamSet(ctx, tag)
