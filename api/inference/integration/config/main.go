@@ -22,8 +22,10 @@ type ModelArchitecture struct {
 	Modality         string   `yaml:"modality,omitempty"`
 	InputModalities  []string `yaml:"inputModalities,omitempty"`
 	OutputModalities []string `yaml:"outputModalities,omitempty"`
-	InstructType     string   `yaml:"instructType,omitempty"`
-	Tokenizer        string   `yaml:"tokenizer,omitempty"`
+	// URLInputModalities: media modalities the upstream also takes by link.
+	URLInputModalities []string `yaml:"urlInputModalities,omitempty"`
+	InstructType       string   `yaml:"instructType,omitempty"`
+	Tokenizer          string   `yaml:"tokenizer,omitempty"`
 }
 
 // MarshalYAML renders short slice fields in flow style (e.g., ["text"]).
@@ -56,6 +58,7 @@ func (a ModelArchitecture) MarshalYAML() (interface{}, error) {
 	addScalar("modality", a.Modality)
 	addFlowSeq("inputModalities", a.InputModalities)
 	addFlowSeq("outputModalities", a.OutputModalities)
+	addFlowSeq("urlInputModalities", a.URLInputModalities)
 	addScalar("instructType", a.InstructType)
 	addScalar("tokenizer", a.Tokenizer)
 
