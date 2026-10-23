@@ -5,8 +5,10 @@ import (
 	"os"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"k8s.io/client-go/rest"
 	controller "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	metricserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
@@ -29,31 +31,7 @@ func Main() {
 	}
 
 	if conf.Monitor.Enable {
-		monitor.InitPrometheus(conf.Service.ServingURL)
 		go monitor.StartMetricsServer(conf.Monitor.EventAddress)
-	}
-
-	db, err := database.NewDB(conf)
-	if err != nil {
-		panic(err)
-	}
-	contract, err := providercontract.NewProviderContract(conf, common.Address{}, logger)
-	if err != nil {
-		panic(err)
-	}
-	// contract.LockTime is a time.Duration; AutoSettleBufferTime is now also
-	// a Duration. The pre-#507 checks compared integer seconds.
-	if conf.Interval.AutoSettleBufferTime > contract.LockTime {
-		panic(errors.New("Interval.AutoSettleBufferTime greater than refund LockTime"))
-	}
-	if conf.Interval.AutoSettleBufferTime > conf.Interval.ForceSettlementProcessor {
-		panic(errors.New("Interval.AutoSettleBufferTime greater than forceSettlement Interval"))
-	}
-	if contract.LockTime-conf.Interval.AutoSettleBufferTime < time.Minute {
-		panic(errors.New("Interval.AutoSettleBufferTime is too large, which could lead to overly frequent settlements"))
-	}
-	if conf.Interval.ForceSettlementProcessor < time.Minute {
-		panic(errors.New("Interval.ForceSettlementProcessor is too small, which could lead to overly frequent settlements"))
 	}
 
 	cfg := &rest.Config{}
@@ -81,12 +59,51 @@ func Main() {
 		panic(err)
 	}
 
+	addInstance(mgr, conf, teeService, logger)
+
+	if err := mgr.Start(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// addInstance builds one provider instance's settlement, reconciliation and
+// revenue-transfer processors and adds them to mgr. The TEE service is the
+// process's and is shared by every instance.
+func addInstance(mgr manager.Manager, conf *config.Config, teeService *tee.TeeService, logger log.Logger) {
+	var metrics *monitor.EventMetrics
+	if conf.Monitor.Enable {
+		metrics = monitor.NewEventMetrics(conf.Service.ServingURL, prometheus.DefaultRegisterer)
+	}
+
+	db, err := database.NewDB(conf)
+	if err != nil {
+		panic(err)
+	}
+	contract, err := providercontract.NewProviderContract(conf, common.Address{}, logger)
+	if err != nil {
+		panic(err)
+	}
+	// contract.LockTime is a time.Duration; AutoSettleBufferTime is now also
+	// a Duration. The pre-#507 checks compared integer seconds.
+	if conf.Interval.AutoSettleBufferTime > contract.LockTime {
+		panic(errors.New("Interval.AutoSettleBufferTime greater than refund LockTime"))
+	}
+	if conf.Interval.AutoSettleBufferTime > conf.Interval.ForceSettlementProcessor {
+		panic(errors.New("Interval.AutoSettleBufferTime greater than forceSettlement Interval"))
+	}
+	if contract.LockTime-conf.Interval.AutoSettleBufferTime < time.Minute {
+		panic(errors.New("Interval.AutoSettleBufferTime is too large, which could lead to overly frequent settlements"))
+	}
+	if conf.Interval.ForceSettlementProcessor < time.Minute {
+		panic(errors.New("Interval.ForceSettlementProcessor is too small, which could lead to overly frequent settlements"))
+	}
+
 	// The event process does not compute request fees, so it doesn't need the
 	// USD price cache.  Billing happens in the server process, which owns
 	// the cache and the PriceUpdateProcessor.
 	ctrl := ctrl.New(db, contract, conf, nil, teeService, nil, logger)
 
-	settlementProcessor := event.NewSettlementProcessor(ctrl, conf.Interval.SettlementProcessor, conf.Interval.ForceSettlementProcessor, monitor.DefaultEvent, logger)
+	settlementProcessor := event.NewSettlementProcessor(ctrl, conf.Interval.SettlementProcessor, conf.Interval.ForceSettlementProcessor, metrics, logger)
 	if err := mgr.Add(settlementProcessor); err != nil {
 		panic(err)
 	}
@@ -107,7 +124,7 @@ func Main() {
 			conf.RevenueTransfer.TargetAddress,
 			conf.RevenueTransfer.ReserveAmount,
 			conf.RevenueTransfer.Interval,
-			monitor.DefaultEvent,
+			metrics,
 			logger,
 		)
 		if err != nil {
@@ -123,9 +140,5 @@ func Main() {
 				panic(err)
 			}
 		}
-	}
-
-	if err := mgr.Start(ctx); err != nil {
-		panic(err)
 	}
 }
