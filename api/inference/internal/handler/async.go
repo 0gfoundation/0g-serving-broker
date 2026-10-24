@@ -10,7 +10,6 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
 	"github.com/0glabs/0g-serving-broker/inference/model"
-	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
 
 // submitAsyncJob is the shared logic for all async submit endpoints.
@@ -81,7 +80,7 @@ func (h *Handler) submitAsyncJob(ctx *gin.Context, svcType string) {
 		// upstream that pair resolves to) — mirrors the sync proxy site; raw
 		// body values and identity headers must never become labels.
 		wlModel, wlUpstream := h.asyncCtrl.WhitelistMetricLabels(ctx, reqBody, ctx.GetHeader("Content-Type"))
-		monitor.RecordWhitelistRequest(svcType, wlModel, wlUpstream)
+		h.asyncCtrl.Metrics().RecordWhitelistRequest(svcType, wlModel, wlUpstream)
 	}
 
 	// Store only necessary request headers (Content-Type is critical for multipart boundary)

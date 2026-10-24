@@ -37,24 +37,24 @@ type UserMismatchInfo struct {
 	BlockedUntil time.Time // Time until which user is blocked
 }
 
-var (
-	globalMismatchLimiter *ModelMismatchLimiter
-	mismatchLimiterOnce   sync.Once
-)
-
-// GetRateLimiter returns the global model mismatch limiter instance
-func GetRateLimiter() *ModelMismatchLimiter {
-	mismatchLimiterOnce.Do(func() {
-		globalMismatchLimiter = &ModelMismatchLimiter{
+// MismatchLimiter returns this instance's model mismatch limiter, creating it
+// on first use.
+//
+// One per instance, not per process: a model one provider does not serve may be
+// exactly what another instance in the same process serves, and a block earned
+// by sending it to the wrong one must not refuse it at the right one.
+func (c *Ctrl) MismatchLimiter() *ModelMismatchLimiter {
+	c.mismatchLimiterOnce.Do(func() {
+		c.mismatchLimiter = &ModelMismatchLimiter{
 			users:  make(map[mismatchKey]*UserMismatchInfo),
 			limit:  5,               // Max 5 mismatches
 			window: 5 * time.Minute, // Within 5 minutes
 			block:  1 * time.Hour,   // Block for 1 hour
 		}
 		// Start cleanup goroutine (similar to common/middleware/RateLimiter)
-		go globalMismatchLimiter.cleanup()
+		go c.mismatchLimiter.cleanup()
 	})
-	return globalMismatchLimiter
+	return c.mismatchLimiter
 }
 
 // RecordModelMismatch records a model mismatch attempt for a (user, model) pair.

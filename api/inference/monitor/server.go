@@ -11,7 +11,14 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-var (
+// Metrics is one provider instance's broker metrics. Every series carries that
+// instance's server and provider_address as const labels, so several instances
+// served by one process register side by side in one registry (a collector is
+// identified by its name plus its const label values) and each exports exactly
+// the series a broker serving it alone would. A nil *Metrics means monitoring is
+// disabled: every method on it except TrackMetrics is a no-op (TrackMetrics is
+// only installed when monitoring is on).
+type Metrics struct {
 	RequestCount    *prometheus.CounterVec
 	ErrorCount      *prometheus.CounterVec
 	RequestDuration *prometheus.HistogramVec
@@ -164,7 +171,16 @@ var (
 	// BROKER; provider_identity identifies which upstream behind it served the
 	// request, so the two are complementary, not redundant.
 	FailureCount *prometheus.CounterVec
-)
+
+	overloadGuardUp, overloadGuardShedding prometheus.Gauge
+
+	constLabels prometheus.Labels
+	reg         prometheus.Registerer
+}
+
+// Default is the instance PrometheusInit builds: the only one in a process that
+// serves a single provider. Nil when monitoring is disabled.
+var Default *Metrics
 
 // Failure source label values for FailureCount. Bounded to three values so the
 // "whose fault" cut never grows cardinality.
@@ -245,9 +261,10 @@ const (
 // signatures. An unset key means "not a classified rejection".
 const CtxKeyRejectionReason = "rejectionReason"
 
-// PrometheusInit registers all broker metrics. serverName (the ServingURL)
-// and providerAddress (the provider's on-chain address, as registered in the
-// serving contract) are stamped on every series as const labels, so a series
+// NewMetrics builds one instance's broker metrics and registers them with reg.
+// serverName (the ServingURL) and providerAddress (the provider's on-chain
+// address, as registered in the serving contract) are stamped on every series
+// as const labels, so a series
 // is identified by (provider_address, server, ...) — the same
 // (address, endpoint) identity the router's providers catalog is keyed by,
 // immune to URL reuse.
@@ -256,7 +273,7 @@ const CtxKeyRejectionReason = "rejectionReason"
 // `provider` external label carrying the human-readable deployment nickname
 // (deploy/phala/*/your-prometheus.yml), and a series-level label with the
 // same name would override it and break provider-grouped ops dashboards.
-func PrometheusInit(serverName, providerAddress string) {
+func NewMetrics(serverName, providerAddress string, reg prometheus.Registerer) *Metrics {
 	if serverName == "" {
 		panic("server name must be provided")
 	}
@@ -268,9 +285,9 @@ func PrometheusInit(serverName, providerAddress string) {
 		panic("provider address must be a 0x-prefixed 40-hex-char address, got: " + providerAddress)
 	}
 	constLabels := prometheus.Labels{"server": serverName, "provider_address": providerAddress}
-	promConstLabels = constLabels
+	m := &Metrics{constLabels: constLabels, reg: reg}
 
-	RequestCount = prometheus.NewCounterVec(
+	m.RequestCount = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_requests_total",
 			Help:        "Total number of HTTP requests processed, labeled by path, status, model and provider identity.",
@@ -279,7 +296,7 @@ func PrometheusInit(serverName, providerAddress string) {
 		[]string{"path", "status", "model", "provider_identity"},
 	)
 
-	ErrorCount = prometheus.NewCounterVec(
+	m.ErrorCount = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_requests_errors_total",
 			Help:        "Total number of error requests processed by the broker server.",
@@ -288,7 +305,7 @@ func PrometheusInit(serverName, providerAddress string) {
 		[]string{"path", "status"},
 	)
 
-	RequestDuration = prometheus.NewHistogramVec(
+	m.RequestDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:        "broker_request_duration_seconds",
 			Help:        "Histogram of request latencies, labeled by path, model and provider identity.",
@@ -298,7 +315,7 @@ func PrometheusInit(serverName, providerAddress string) {
 		[]string{"path", "model", "provider_identity"},
 	)
 
-	UniqueUsersTotal = prometheus.NewGauge(
+	m.UniqueUsersTotal = prometheus.NewGauge(
 		prometheus.GaugeOpts{
 			Name:        "broker_unique_users_total",
 			Help:        "Number of unique users in the last 24 hours (queried from database).",
@@ -306,7 +323,7 @@ func PrometheusInit(serverName, providerAddress string) {
 		},
 	)
 
-	InputTokensTotal = prometheus.NewCounterVec(
+	m.InputTokensTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_input_tokens_total",
 			Help:        "Cumulative input token count, labeled by service_type, model and provider identity.",
@@ -315,7 +332,7 @@ func PrometheusInit(serverName, providerAddress string) {
 		[]string{"service_type", "model", "provider_identity"},
 	)
 
-	OutputTokensTotal = prometheus.NewCounterVec(
+	m.OutputTokensTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_output_tokens_total",
 			Help:        "Cumulative output token count, labeled by service_type, model and provider identity.",
@@ -324,7 +341,7 @@ func PrometheusInit(serverName, providerAddress string) {
 		[]string{"service_type", "model", "provider_identity"},
 	)
 
-	AudioSecondsTotal = prometheus.NewCounterVec(
+	m.AudioSecondsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_audio_seconds_total",
 			Help:        "Cumulative input audio duration in seconds for duration-billed services (e.g. whisper), labeled by service_type, model and provider identity.",
@@ -333,7 +350,7 @@ func PrometheusInit(serverName, providerAddress string) {
 		[]string{"service_type", "model", "provider_identity"},
 	)
 
-	TokensPerSecond = prometheus.NewHistogramVec(
+	m.TokensPerSecond = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:        "broker_tokens_per_second",
 			Help:        "Per-request output token generation rate (output_tokens / request_duration_seconds), labeled by service_type, model and provider identity.",
@@ -343,31 +360,31 @@ func PrometheusInit(serverName, providerAddress string) {
 		[]string{"service_type", "model", "provider_identity"},
 	)
 
-	AllTimeRequests = prometheus.NewGauge(prometheus.GaugeOpts{
+	m.AllTimeRequests = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name:        "broker_alltime_requests_total",
 		Help:        "All-time total number of requests (from database).",
 		ConstLabels: constLabels,
 	})
 
-	AllTimeInputTokens = prometheus.NewGauge(prometheus.GaugeOpts{
+	m.AllTimeInputTokens = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name:        "broker_alltime_input_tokens_total",
 		Help:        "All-time total input token count (from database).",
 		ConstLabels: constLabels,
 	})
 
-	AllTimeOutputTokens = prometheus.NewGauge(prometheus.GaugeOpts{
+	m.AllTimeOutputTokens = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name:        "broker_alltime_output_tokens_total",
 		Help:        "All-time total output token count (from database).",
 		ConstLabels: constLabels,
 	})
 
-	AllTimeUniqueUsers = prometheus.NewGauge(prometheus.GaugeOpts{
+	m.AllTimeUniqueUsers = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name:        "broker_alltime_unique_users_total",
 		Help:        "All-time total unique users (from database).",
 		ConstLabels: constLabels,
 	})
 
-	WhitelistRequestsTotal = prometheus.NewCounterVec(
+	m.WhitelistRequestsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_whitelist_requests_total",
 			Help:        "Total number of requests from whitelisted (internal) users, labeled by service_type, model and provider identity.",
@@ -376,7 +393,7 @@ func PrometheusInit(serverName, providerAddress string) {
 		[]string{"service_type", "model", "provider_identity"},
 	)
 
-	WhitelistInputTokensTotal = prometheus.NewCounterVec(
+	m.WhitelistInputTokensTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_whitelist_input_tokens_total",
 			Help:        "Cumulative input token count from whitelisted (internal) users, labeled by service_type, model and provider identity.",
@@ -385,7 +402,7 @@ func PrometheusInit(serverName, providerAddress string) {
 		[]string{"service_type", "model", "provider_identity"},
 	)
 
-	WhitelistOutputTokensTotal = prometheus.NewCounterVec(
+	m.WhitelistOutputTokensTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_whitelist_output_tokens_total",
 			Help:        "Cumulative output token count from whitelisted (internal) users, labeled by service_type, model and provider identity.",
@@ -394,7 +411,7 @@ func PrometheusInit(serverName, providerAddress string) {
 		[]string{"service_type", "model", "provider_identity"},
 	)
 
-	WhitelistAudioSecondsTotal = prometheus.NewCounterVec(
+	m.WhitelistAudioSecondsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_whitelist_audio_seconds_total",
 			Help:        "Cumulative input audio duration in seconds from whitelisted (internal) users, labeled by service_type, model and provider identity.",
@@ -403,19 +420,19 @@ func PrometheusInit(serverName, providerAddress string) {
 		[]string{"service_type", "model", "provider_identity"},
 	)
 
-	prometheus.MustRegister(RequestCount)
-	prometheus.MustRegister(ErrorCount)
-	prometheus.MustRegister(RequestDuration)
-	prometheus.MustRegister(UniqueUsersTotal)
-	prometheus.MustRegister(InputTokensTotal)
-	prometheus.MustRegister(OutputTokensTotal)
-	prometheus.MustRegister(AudioSecondsTotal)
-	prometheus.MustRegister(TokensPerSecond)
-	prometheus.MustRegister(AllTimeRequests)
-	prometheus.MustRegister(AllTimeInputTokens)
-	prometheus.MustRegister(AllTimeOutputTokens)
-	prometheus.MustRegister(AllTimeUniqueUsers)
-	VideoBillingSkippedTotal = prometheus.NewCounter(
+	reg.MustRegister(m.RequestCount)
+	reg.MustRegister(m.ErrorCount)
+	reg.MustRegister(m.RequestDuration)
+	reg.MustRegister(m.UniqueUsersTotal)
+	reg.MustRegister(m.InputTokensTotal)
+	reg.MustRegister(m.OutputTokensTotal)
+	reg.MustRegister(m.AudioSecondsTotal)
+	reg.MustRegister(m.TokensPerSecond)
+	reg.MustRegister(m.AllTimeRequests)
+	reg.MustRegister(m.AllTimeInputTokens)
+	reg.MustRegister(m.AllTimeOutputTokens)
+	reg.MustRegister(m.AllTimeUniqueUsers)
+	m.VideoBillingSkippedTotal = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Name:        "broker_video_billing_skipped_total",
 			Help:        "Video-generation requests served without billing (no positive duration resolvable from response or request).",
@@ -423,7 +440,7 @@ func PrometheusInit(serverName, providerAddress string) {
 		},
 	)
 
-	VideoPollTimedOutTotal = prometheus.NewCounter(
+	m.VideoPollTimedOutTotal = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Name:        "broker_video_poll_timed_out_total",
 			Help:        "Video-generation poll jobs that hit MaxPollDuration without the provider reaching a terminal state (potential reconciliation gap).",
@@ -431,7 +448,7 @@ func PrometheusInit(serverName, providerAddress string) {
 		},
 	)
 
-	VideoTableMissTotal = prometheus.NewCounterVec(
+	m.VideoTableMissTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_video_table_miss_total",
 			Help:        "Video-generation requests priced off-table — at a price the model's configured price table does not name — labeled by reason (next_bucket = no exact per_unit_table row but a longer bucket covered it; uncovered = nothing did, table maximum charged; token_tier_uncovered = no tokenPriceTiers row for the observed per_video_token tier, unscaled outputPrice charged). Non-zero means clients are charged a price GET /v1/models does not advertise for their request — add the missing rows.",
@@ -440,7 +457,7 @@ func PrometheusInit(serverName, providerAddress string) {
 		[]string{"reason"},
 	)
 
-	VideoReserveSkippedTotal = prometheus.NewCounterVec(
+	m.VideoReserveSkippedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_video_reserve_skipped_total",
 			Help:        "Video-generation creates forwarded without a pre-flight reserve, labeled by reason (unknown_vendor = no rules recorded for the configured vendor; undetermined_duration = the vendor decides the clip length itself; unpredictable_units = the model bills in vendor-computed tokens this broker does not predict). Non-zero means those requests are gated only by the minimum locked balance, so a wallet can owe far more than it holds.",
@@ -449,7 +466,7 @@ func PrometheusInit(serverName, providerAddress string) {
 		[]string{"reason"},
 	)
 
-	VideoGenerationFailedTotal = prometheus.NewCounter(
+	m.VideoGenerationFailedTotal = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Name:        "broker_video_generation_failed_total",
 			Help:        "Video-generation requests where the provider reported a terminal status=failed (create time or mid-poll).",
@@ -457,7 +474,7 @@ func PrometheusInit(serverName, providerAddress string) {
 		},
 	)
 
-	RoutingProofSkippedTotal = prometheus.NewCounterVec(
+	m.RoutingProofSkippedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_routing_proof_skipped_total",
 			Help:        "Responses from a centralized provider served WITHOUT a TEE routing proof, labeled by reason (no_tls, no_sidecar_report, no_sidecar_host, domain_mismatch, sign_error, no_poll_job). Non-zero means the service is advertising verifiability it is not delivering — alert on any sustained rate.",
@@ -466,7 +483,7 @@ func PrometheusInit(serverName, providerAddress string) {
 		[]string{"reason"},
 	)
 
-	RequestRejectedTotal = prometheus.NewCounterVec(
+	m.RequestRejectedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_requests_rejected_total",
 			Help:        "Total number of requests rejected before reaching the upstream, labeled by reason (rate_limit, tpm_limit, ipm_limit, concurrency, global_concurrency, backend_overloaded, model_mismatch, model_expired, insufficient_balance, not_acknowledged, account_not_exist, upstream_error). global_concurrency (the broker-wide capacity cap) and backend_overloaded (the engine reports itself saturated) are the reasons an UNAUTHENTICATED caller can drive: both abort ahead of session validation, so they carry no user attribution.",
@@ -475,7 +492,7 @@ func PrometheusInit(serverName, providerAddress string) {
 		[]string{"reason"},
 	)
 
-	FailureCount = prometheus.NewCounterVec(
+	m.FailureCount = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_request_failures_total",
 			Help:        "Total failed requests (HTTP status >= 400), labeled by source (broker|upstream|client), code (Rejection* reason or empty), model, status, and provider identity. Unified failure-attribution counter; see FailureCount doc.",
@@ -484,55 +501,56 @@ func PrometheusInit(serverName, providerAddress string) {
 		[]string{"source", "code", "model", "status", "provider_identity"},
 	)
 
-	prometheus.MustRegister(WhitelistRequestsTotal)
-	prometheus.MustRegister(WhitelistInputTokensTotal)
-	prometheus.MustRegister(WhitelistOutputTokensTotal)
-	prometheus.MustRegister(WhitelistAudioSecondsTotal)
-	prometheus.MustRegister(VideoBillingSkippedTotal)
-	prometheus.MustRegister(VideoPollTimedOutTotal)
-	prometheus.MustRegister(VideoGenerationFailedTotal)
-	prometheus.MustRegister(VideoTableMissTotal)
-	prometheus.MustRegister(VideoReserveSkippedTotal)
-	prometheus.MustRegister(RoutingProofSkippedTotal)
-	prometheus.MustRegister(RequestRejectedTotal)
-	prometheus.MustRegister(FailureCount)
+	reg.MustRegister(m.WhitelistRequestsTotal)
+	reg.MustRegister(m.WhitelistInputTokensTotal)
+	reg.MustRegister(m.WhitelistOutputTokensTotal)
+	reg.MustRegister(m.WhitelistAudioSecondsTotal)
+	reg.MustRegister(m.VideoBillingSkippedTotal)
+	reg.MustRegister(m.VideoPollTimedOutTotal)
+	reg.MustRegister(m.VideoGenerationFailedTotal)
+	reg.MustRegister(m.VideoTableMissTotal)
+	reg.MustRegister(m.VideoReserveSkippedTotal)
+	reg.MustRegister(m.RoutingProofSkippedTotal)
+	reg.MustRegister(m.RequestRejectedTotal)
+	reg.MustRegister(m.FailureCount)
+	return m
 }
 
-// promConstLabels are the const labels PrometheusInit stamped on every series,
-// kept for metrics registered later. Nil when monitoring is disabled.
-var promConstLabels prometheus.Labels
-
-var overloadGuardUp, overloadGuardShedding prometheus.Gauge
+// PrometheusInit builds the single-provider instance into Default, registered
+// with the process-wide default registry.
+func PrometheusInit(serverName, providerAddress string) {
+	Default = NewMetrics(serverName, providerAddress, prometheus.DefaultRegisterer)
+}
 
 // EnableOverloadGuardMetrics registers the overload guard's two gauges. Call it
-// once, after PrometheusInit, and only when the guard is enabled: a box without
-// the guard must not export an "up = 0" that reads as a guard that broke. No-op
-// when monitoring is disabled.
-func EnableOverloadGuardMetrics() {
-	if promConstLabels == nil || overloadGuardUp != nil {
+// once, and only when the guard is enabled: a box without the guard must not
+// export an "up = 0" that reads as a guard that broke. No-op when monitoring is
+// disabled.
+func (m *Metrics) EnableOverloadGuardMetrics() {
+	if m == nil || m.overloadGuardUp != nil {
 		return
 	}
-	overloadGuardUp = prometheus.NewGauge(prometheus.GaugeOpts{
+	m.overloadGuardUp = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name:        "broker_overload_guard_up",
 		Help:        "1 when the overload guard's last metrics scrape succeeded, 0 when it failed (the guard then admits everything). Alert on 0 sustained: the engine is unprotected.",
-		ConstLabels: promConstLabels,
+		ConstLabels: m.constLabels,
 	})
-	overloadGuardShedding = prometheus.NewGauge(prometheus.GaugeOpts{
+	m.overloadGuardShedding = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name:        "broker_overload_guard_shedding",
 		Help:        "1 while the overload guard is shedding new inference requests because the engine reports saturation, else 0.",
-		ConstLabels: promConstLabels,
+		ConstLabels: m.constLabels,
 	})
-	prometheus.MustRegister(overloadGuardUp, overloadGuardShedding)
+	m.reg.MustRegister(m.overloadGuardUp, m.overloadGuardShedding)
 }
 
 // SetOverloadGuardState records the guard's state after a scrape. Safe to call
 // when EnableOverloadGuardMetrics was not (no-op).
-func SetOverloadGuardState(up, shedding bool) {
-	if overloadGuardUp == nil {
+func (m *Metrics) SetOverloadGuardState(up, shedding bool) {
+	if m == nil || m.overloadGuardUp == nil {
 		return
 	}
-	overloadGuardUp.Set(boolToFloat(up))
-	overloadGuardShedding.Set(boolToFloat(shedding))
+	m.overloadGuardUp.Set(boolToFloat(up))
+	m.overloadGuardShedding.Set(boolToFloat(shedding))
 }
 
 func boolToFloat(b bool) float64 {
@@ -546,7 +564,10 @@ func boolToFloat(b bool) float64 {
 // to count unique users in the last 24 hours and updates the Prometheus gauge.
 // This ensures the DAU metric survives process restarts.
 // The goroutine exits when ctx is cancelled.
-func StartDAUUpdater(ctx context.Context, queryFunc func() (int64, error), interval time.Duration, logger log.Logger) {
+func (m *Metrics) StartDAUUpdater(ctx context.Context, queryFunc func() (int64, error), interval time.Duration, logger log.Logger) {
+	if m == nil {
+		return
+	}
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
@@ -555,7 +576,7 @@ func StartDAUUpdater(ctx context.Context, queryFunc func() (int64, error), inter
 		if count, err := queryFunc(); err != nil {
 			logger.Errorf("DAU updater: failed to query unique users: %v", err)
 		} else {
-			UniqueUsersTotal.Set(float64(count))
+			m.UniqueUsersTotal.Set(float64(count))
 		}
 
 		for {
@@ -566,7 +587,7 @@ func StartDAUUpdater(ctx context.Context, queryFunc func() (int64, error), inter
 				if count, err := queryFunc(); err != nil {
 					logger.Errorf("DAU updater: failed to query unique users: %v", err)
 				} else {
-					UniqueUsersTotal.Set(float64(count))
+					m.UniqueUsersTotal.Set(float64(count))
 				}
 			}
 		}
@@ -584,7 +605,10 @@ type TotalStatsResult struct {
 // StartAllTimeStatsUpdater starts a background goroutine that periodically queries
 // the database for all-time cumulative stats and updates the Prometheus gauges.
 // The goroutine exits when ctx is cancelled.
-func StartAllTimeStatsUpdater(ctx context.Context, queryFunc func() (TotalStatsResult, error), interval time.Duration, logger log.Logger) {
+func (m *Metrics) StartAllTimeStatsUpdater(ctx context.Context, queryFunc func() (TotalStatsResult, error), interval time.Duration, logger log.Logger) {
+	if m == nil {
+		return
+	}
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
@@ -595,10 +619,10 @@ func StartAllTimeStatsUpdater(ctx context.Context, queryFunc func() (TotalStatsR
 				logger.Errorf("All-time stats updater: failed to query: %v", err)
 				return
 			}
-			AllTimeRequests.Set(float64(stats.TotalRequests))
-			AllTimeInputTokens.Set(float64(stats.TotalInputTokens))
-			AllTimeOutputTokens.Set(float64(stats.TotalOutputTokens))
-			AllTimeUniqueUsers.Set(float64(stats.TotalUniqueUsers))
+			m.AllTimeRequests.Set(float64(stats.TotalRequests))
+			m.AllTimeInputTokens.Set(float64(stats.TotalInputTokens))
+			m.AllTimeOutputTokens.Set(float64(stats.TotalOutputTokens))
+			m.AllTimeUniqueUsers.Set(float64(stats.TotalUniqueUsers))
 		}
 
 		update()
@@ -803,7 +827,7 @@ func metricPath(urlPath string) string {
 }
 
 // TrackMetrics is a Gin middleware that tracks request metrics.
-func TrackMetrics() gin.HandlerFunc {
+func (m *Metrics) TrackMetrics() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		startTime := time.Now()
 		c.Set(RequestStartTimeKey, startTime)
@@ -829,14 +853,14 @@ func TrackMetrics() gin.HandlerFunc {
 
 		// Track request duration
 		duration := time.Since(startTime).Seconds()
-		RequestDuration.WithLabelValues(path, model, upstream).Observe(duration)
+		m.RequestDuration.WithLabelValues(path, model, upstream).Observe(duration)
 
 		// Track request count and errors.
 		status := c.Writer.Status()
 		statusText := http.StatusText(status)
-		RequestCount.WithLabelValues(path, statusText, model, upstream).Inc()
+		m.RequestCount.WithLabelValues(path, statusText, model, upstream).Inc()
 		if !ignoreError && status >= 400 {
-			ErrorCount.WithLabelValues(path, statusText).Inc()
+			m.ErrorCount.WithLabelValues(path, statusText).Inc()
 		}
 		// Unified failure attribution: count EVERY >=400 (including client-caused
 		// rejections that ErrorCount drops via ignoreError) exactly once, split by
@@ -846,7 +870,7 @@ func TrackMetrics() gin.HandlerFunc {
 		// and status.
 		if status >= 400 {
 			code := failureCodeFromGinContext(c)
-			RecordFailure(resolveFailureSource(c, status, code, ignoreError), code, model, statusText, upstream)
+			m.RecordFailure(resolveFailureSource(c, status, code, ignoreError), code, model, statusText, upstream)
 		}
 	}
 }
@@ -860,15 +884,15 @@ func TrackMetrics() gin.HandlerFunc {
 // do not query for provider_identity="" to mean "single upstream". Every
 // Record* below takes the same pair, so no two counters can attribute the same
 // request to different upstreams.
-func RecordTokens(serviceType, model, upstream string, inputTokens, outputTokens int64) {
-	if InputTokensTotal == nil || OutputTokensTotal == nil {
+func (m *Metrics) RecordTokens(serviceType, model, upstream string, inputTokens, outputTokens int64) {
+	if m == nil || m.InputTokensTotal == nil || m.OutputTokensTotal == nil {
 		return
 	}
 	if inputTokens > 0 {
-		InputTokensTotal.WithLabelValues(serviceType, model, upstream).Add(float64(inputTokens))
+		m.InputTokensTotal.WithLabelValues(serviceType, model, upstream).Add(float64(inputTokens))
 	}
 	if outputTokens > 0 {
-		OutputTokensTotal.WithLabelValues(serviceType, model, upstream).Add(float64(outputTokens))
+		m.OutputTokensTotal.WithLabelValues(serviceType, model, upstream).Add(float64(outputTokens))
 	}
 }
 
@@ -876,29 +900,29 @@ func RecordTokens(serviceType, model, upstream string, inputTokens, outputTokens
 // duration-billed services. This is intentionally separate from RecordTokens —
 // accumulating seconds into broker_input_tokens_total would skew the metric
 // by orders of magnitude versus token-billed services on the same dashboard.
-func RecordAudioSeconds(serviceType, model, upstream string, seconds int64) {
-	if AudioSecondsTotal == nil || seconds <= 0 {
+func (m *Metrics) RecordAudioSeconds(serviceType, model, upstream string, seconds int64) {
+	if m == nil || m.AudioSecondsTotal == nil || seconds <= 0 {
 		return
 	}
-	AudioSecondsTotal.WithLabelValues(serviceType, model, upstream).Add(float64(seconds))
+	m.AudioSecondsTotal.WithLabelValues(serviceType, model, upstream).Add(float64(seconds))
 }
 
 // RecordWhitelistAudioSeconds mirrors RecordAudioSeconds for whitelisted users.
-func RecordWhitelistAudioSeconds(serviceType, model, upstream string, seconds int64) {
-	if WhitelistAudioSecondsTotal == nil || seconds <= 0 {
+func (m *Metrics) RecordWhitelistAudioSeconds(serviceType, model, upstream string, seconds int64) {
+	if m == nil || m.WhitelistAudioSecondsTotal == nil || seconds <= 0 {
 		return
 	}
-	WhitelistAudioSecondsTotal.WithLabelValues(serviceType, model, upstream).Add(float64(seconds))
+	m.WhitelistAudioSecondsTotal.WithLabelValues(serviceType, model, upstream).Add(float64(seconds))
 }
 
 // RecordVideoBillingSkipped increments the counter of video requests served
 // without billing because no duration could be resolved (alertable signal that
 // an upstream response shape is unparsed).
-func RecordVideoBillingSkipped() {
-	if VideoBillingSkippedTotal == nil {
+func (m *Metrics) RecordVideoBillingSkipped() {
+	if m == nil || m.VideoBillingSkippedTotal == nil {
 		return
 	}
-	VideoBillingSkippedTotal.Inc()
+	m.VideoBillingSkippedTotal.Inc()
 }
 
 // Reasons for RecordRoutingProofSkipped.
@@ -936,11 +960,11 @@ const (
 // responses served without a TEE routing proof. Every call site is a place where
 // the service continues to advertise verifiability it did not deliver for that
 // response, so this must be alertable rather than log-only.
-func RecordRoutingProofSkipped(reason string) {
-	if RoutingProofSkippedTotal == nil {
+func (m *Metrics) RecordRoutingProofSkipped(reason string) {
+	if m == nil || m.RoutingProofSkippedTotal == nil {
 		return
 	}
-	RoutingProofSkippedTotal.WithLabelValues(reason).Inc()
+	m.RoutingProofSkippedTotal.WithLabelValues(reason).Inc()
 }
 
 // Reasons for RecordVideoTableMiss.
@@ -990,94 +1014,94 @@ const (
 )
 
 // RecordVideoReserveSkipped increments the un-reserved-create counter.
-func RecordVideoReserveSkipped(reason string) {
-	if VideoReserveSkippedTotal == nil {
+func (m *Metrics) RecordVideoReserveSkipped(reason string) {
+	if m == nil || m.VideoReserveSkippedTotal == nil {
 		return
 	}
-	VideoReserveSkippedTotal.WithLabelValues(reason).Inc()
+	m.VideoReserveSkippedTotal.WithLabelValues(reason).Inc()
 }
 
 // RecordVideoTableMiss increments the per_unit_table miss counter.
-func RecordVideoTableMiss(reason string) {
-	if VideoTableMissTotal == nil {
+func (m *Metrics) RecordVideoTableMiss(reason string) {
+	if m == nil || m.VideoTableMissTotal == nil {
 		return
 	}
-	VideoTableMissTotal.WithLabelValues(reason).Inc()
+	m.VideoTableMissTotal.WithLabelValues(reason).Inc()
 }
 
 // RecordVideoPollTimedOut increments the counter of video poll jobs that hit
 // MaxPollDuration without the provider ever reaching a terminal state.
-func RecordVideoPollTimedOut() {
-	if VideoPollTimedOutTotal == nil {
+func (m *Metrics) RecordVideoPollTimedOut() {
+	if m == nil || m.VideoPollTimedOutTotal == nil {
 		return
 	}
-	VideoPollTimedOutTotal.Inc()
+	m.VideoPollTimedOutTotal.Inc()
 }
 
 // RecordVideoGenerationFailed increments the counter of video-generation requests where the
 // provider reported a terminal status=failed, at create time or mid-poll.
-func RecordVideoGenerationFailed() {
-	if VideoGenerationFailedTotal == nil {
+func (m *Metrics) RecordVideoGenerationFailed() {
+	if m == nil || m.VideoGenerationFailedTotal == nil {
 		return
 	}
-	VideoGenerationFailedTotal.Inc()
+	m.VideoGenerationFailedTotal.Inc()
 }
 
 // RecordRejection increments the rejected-request counter for the given reason.
 // reason must be one of the Rejection* constants so the metric stays bounded.
 // Safe to call before PrometheusInit (no-op when monitoring is disabled).
-func RecordRejection(reason string) {
-	if RequestRejectedTotal == nil {
+func (m *Metrics) RecordRejection(reason string) {
+	if m == nil || m.RequestRejectedTotal == nil {
 		return
 	}
-	RequestRejectedTotal.WithLabelValues(reason).Inc()
+	m.RequestRejectedTotal.WithLabelValues(reason).Inc()
 }
 
 // RecordFailure increments the unified failure counter. source must be a
 // FailureSource* constant and code a Rejection* constant or "" so the metric
 // stays bounded. Safe to call before PrometheusInit (no-op when monitoring is
 // disabled). Normally called only from TrackMetrics' single emit site.
-func RecordFailure(source, code, model, status, upstream string) {
-	if FailureCount == nil {
+func (m *Metrics) RecordFailure(source, code, model, status, upstream string) {
+	if m == nil || m.FailureCount == nil {
 		return
 	}
-	FailureCount.WithLabelValues(source, code, model, status, upstream).Inc()
+	m.FailureCount.WithLabelValues(source, code, model, status, upstream).Inc()
 }
 
 // RecordWhitelistRequest increments the whitelist request counter for the given
 // service type and model.
-func RecordWhitelistRequest(serviceType, model, upstream string) {
-	if WhitelistRequestsTotal == nil {
+func (m *Metrics) RecordWhitelistRequest(serviceType, model, upstream string) {
+	if m == nil || m.WhitelistRequestsTotal == nil {
 		return
 	}
-	WhitelistRequestsTotal.WithLabelValues(serviceType, model, upstream).Inc()
+	m.WhitelistRequestsTotal.WithLabelValues(serviceType, model, upstream).Inc()
 }
 
 // RecordWhitelistTokens increments the whitelist input and output token counters.
-func RecordWhitelistTokens(serviceType, model, upstream string, inputTokens, outputTokens int64) {
-	if WhitelistInputTokensTotal == nil || WhitelistOutputTokensTotal == nil {
+func (m *Metrics) RecordWhitelistTokens(serviceType, model, upstream string, inputTokens, outputTokens int64) {
+	if m == nil || m.WhitelistInputTokensTotal == nil || m.WhitelistOutputTokensTotal == nil {
 		return
 	}
 	if inputTokens > 0 {
-		WhitelistInputTokensTotal.WithLabelValues(serviceType, model, upstream).Add(float64(inputTokens))
+		m.WhitelistInputTokensTotal.WithLabelValues(serviceType, model, upstream).Add(float64(inputTokens))
 	}
 	if outputTokens > 0 {
-		WhitelistOutputTokensTotal.WithLabelValues(serviceType, model, upstream).Add(float64(outputTokens))
+		m.WhitelistOutputTokensTotal.WithLabelValues(serviceType, model, upstream).Add(float64(outputTokens))
 	}
 }
 
 // RecordTPS records the per-request output tokens per second as a histogram observation.
-func RecordTPS(serviceType, model, upstream string, tps float64) {
-	if TokensPerSecond == nil || tps <= 0 {
+func (m *Metrics) RecordTPS(serviceType, model, upstream string, tps float64) {
+	if m == nil || m.TokensPerSecond == nil || tps <= 0 {
 		return
 	}
-	TokensPerSecond.WithLabelValues(serviceType, model, upstream).Observe(tps)
+	m.TokensPerSecond.WithLabelValues(serviceType, model, upstream).Observe(tps)
 }
 
 // RecordTPSFromContext calculates TPS from the request start time stored in context
 // and records it. This is a convenience wrapper combining start-time extraction,
 // duration calculation, and TPS recording.
-func RecordTPSFromContext(ctx context.Context, serviceType, model, upstream string, outputTokens int64) {
+func (m *Metrics) RecordTPSFromContext(ctx context.Context, serviceType, model, upstream string, outputTokens int64) {
 	if outputTokens <= 0 {
 		return
 	}
@@ -1087,6 +1111,6 @@ func RecordTPSFromContext(ctx context.Context, serviceType, model, upstream stri
 	}
 	duration := time.Since(startTime).Seconds()
 	if duration > 0 {
-		RecordTPS(serviceType, model, upstream, float64(outputTokens)/duration)
+		m.RecordTPS(serviceType, model, upstream, float64(outputTokens)/duration)
 	}
 }

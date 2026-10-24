@@ -353,12 +353,18 @@ func (c *Ctrl) engineStillRouted(name string) []string {
 		c.logger.Warnf("[RemoveEngine] Could not read %s, so this removal cannot say which models routed at %q: %v", c.config.ConfigFile, name, err)
 		return nil
 	}
-	svc, err := config.ServiceFromYAML(data)
-	if err != nil {
-		c.logger.Warnf("[RemoveEngine] Could not read the service config, so this removal cannot say which models routed at %q: %v", name, err)
-		return nil
+	var members []attest.Upstream
+	if c.hasInProcessInstances() {
+		// Every instance's routes, since any of them may point at the engine.
+		members, err = c.inProcessUpstreams(data, "", nil)
+	} else {
+		var svc *config.Service
+		if svc, err = config.ServiceFromYAML(data); err != nil {
+			c.logger.Warnf("[RemoveEngine] Could not read the service config, so this removal cannot say which models routed at %q: %v", name, err)
+			return nil
+		}
+		members, err = upstreamsFromConfig(svc)
 	}
-	members, err := upstreamsFromConfig(svc)
 	if err != nil {
 		c.logger.Warnf("[RemoveEngine] Could not collect the config's upstreams, so this removal cannot say which models routed at %q: %v", name, err)
 		return nil

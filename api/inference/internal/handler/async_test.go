@@ -16,6 +16,7 @@ import (
 
 	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
 	"github.com/0glabs/0g-serving-broker/inference/model"
+	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
 
 // --- Mock asyncCtrl ---
@@ -73,6 +74,8 @@ func (m *mockAsyncCtrl) ValidateSession(ctx *gin.Context) (string, error) {
 func (m *mockAsyncCtrl) WhitelistMetricLabels(ctx *gin.Context, reqBody []byte, contentType string) (string, string) {
 	return "mock-model", "mock-upstream"
 }
+
+func (m *mockAsyncCtrl) Metrics() *monitor.Metrics { return nil }
 
 func (m *mockAsyncCtrl) IsWhitelistedUser(userAddress string) bool {
 	return m.whitelistUser

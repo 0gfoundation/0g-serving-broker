@@ -48,7 +48,7 @@ type reasonBucket struct {
 
 // rejectionAggregator turns per-request rejections into bounded, periodic
 // summary logs while leaving the real-time signal to the Prometheus counter
-// (incremented separately via monitor.RecordRejection). It exists because the
+// (incremented separately via Proxy.reject). It exists because the
 // previous code logged one warning per rejected request — under a sustained
 // rejection flood that is an unbounded, disk-filling log-amplification vector,
 // and it also buried the (silent) billing-gate rejections that motivated this
@@ -79,11 +79,18 @@ func newRejectionAggregator(logger log.Logger, interval time.Duration) *rejectio
 	return a
 }
 
-// record increments both the Prometheus counter (real-time, per-reason) and the
-// in-memory aggregate used for periodic logging. The counter is incremented even
-// on a nil receiver so a Proxy built outside New() (e.g. the test helper, which
-// omits the aggregator) still records the metric without panicking — matching
-// the nil-tolerance the sibling limiter fields already rely on. Addresses are
+// reject records a rejection: the Prometheus counter (real-time, per-reason) and
+// the in-memory aggregate used for periodic logging. The counter is incremented
+// even when the aggregator is nil, so a Proxy built outside New() (e.g. the test
+// helper, which omits the aggregator) still records the metric without panicking
+// — matching the nil-tolerance the sibling limiter fields already rely on.
+func (p *Proxy) reject(ctx *gin.Context, reason, user string) {
+	p.metrics.RecordRejection(reason)
+	p.rejections.record(ctx, reason, user)
+}
+
+// record stamps the reason on ctx and adds it to the in-memory aggregate used
+// for periodic logging. Safe on a nil receiver (ctx is still stamped). Addresses are
 // stored in full but only ever emitted truncated (see topUsers), keeping full
 // addresses out of the logs per CLAUDE.md while avoiding the distinct-user
 // undercount that truncating-as-key would cause when two wallets share the
@@ -96,7 +103,6 @@ func newRejectionAggregator(logger log.Logger, interval time.Duration) *rejectio
 // limit, concurrency, …) — surfaces its code without each call site repeating
 // the Set.
 func (a *rejectionAggregator) record(ctx *gin.Context, reason, user string) {
-	monitor.RecordRejection(reason)
 	if ctx != nil {
 		ctx.Set(monitor.CtxKeyRejectionReason, reason)
 	}

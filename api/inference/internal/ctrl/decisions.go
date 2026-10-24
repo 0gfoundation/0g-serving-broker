@@ -12,7 +12,6 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/util"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/model"
-	"github.com/0glabs/0g-serving-broker/inference/monitor"
 	"github.com/gin-gonic/gin"
 )
 
@@ -126,8 +125,8 @@ func (c *Ctrl) handleDecisionsResponse(ctx *gin.Context, resp *http.Response, _ 
 	if reqModel.IsWhitelisted {
 		metricModel := c.metricModel(ctx)
 		metricUpstream := c.metricUpstream(ctx)
-		monitor.RecordTokens(decisionsMetricLabel, metricModel, metricUpstream, int64(usage.InputTokens), int64(usage.OutputTokens))
-		monitor.RecordWhitelistTokens(decisionsMetricLabel, metricModel, metricUpstream, int64(usage.InputTokens), int64(usage.OutputTokens))
+		c.metrics.RecordTokens(decisionsMetricLabel, metricModel, metricUpstream, int64(usage.InputTokens), int64(usage.OutputTokens))
+		c.metrics.RecordWhitelistTokens(decisionsMetricLabel, metricModel, metricUpstream, int64(usage.InputTokens), int64(usage.OutputTokens))
 		var rateClass string
 		if prices, err := c.GetBillingPrices(ctx); err == nil {
 			rateClass = matchedTierRateClass(c.effectiveTiers(prices.Tiers), usage.InputTokens)
@@ -184,7 +183,7 @@ func (c *Ctrl) updateDecisionsWithUsage(ctx *gin.Context, usage *DecisionsUsage,
 
 	metricModel := c.metricModel(ctx)
 	metricUpstream := c.metricUpstream(ctx)
-	monitor.RecordTokens(decisionsMetricLabel, metricModel, metricUpstream, int64(usage.InputTokens), int64(usage.OutputTokens))
+	c.metrics.RecordTokens(decisionsMetricLabel, metricModel, metricUpstream, int64(usage.InputTokens), int64(usage.OutputTokens))
 
 	c.consumeTPMLimiter(ctx, usage.InputTokens+usage.OutputTokens)
 	return nil

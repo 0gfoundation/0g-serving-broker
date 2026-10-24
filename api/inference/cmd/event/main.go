@@ -2,11 +2,15 @@ package event
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/sirupsen/logrus"
 	"k8s.io/client-go/rest"
 	controller "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	metricserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
@@ -28,32 +32,19 @@ func Main() {
 		panic(err)
 	}
 
-	if conf.Monitor.Enable {
-		monitor.InitPrometheus(conf.Service.ServingURL)
-		go monitor.StartMetricsServer(conf.Monitor.EventAddress)
+	extras, err := config.LoadInstances(conf)
+	if err != nil {
+		panic(err)
 	}
 
-	db, err := database.NewDB(conf)
-	if err != nil {
-		panic(err)
+	// One metrics server for the process, on the primary's address, whenever any
+	// instance exports metrics.
+	monitorOn := conf.Monitor.Enable
+	for _, extra := range extras {
+		monitorOn = monitorOn || extra.Config.Monitor.Enable
 	}
-	contract, err := providercontract.NewProviderContract(conf, common.Address{}, logger)
-	if err != nil {
-		panic(err)
-	}
-	// contract.LockTime is a time.Duration; AutoSettleBufferTime is now also
-	// a Duration. The pre-#507 checks compared integer seconds.
-	if conf.Interval.AutoSettleBufferTime > contract.LockTime {
-		panic(errors.New("Interval.AutoSettleBufferTime greater than refund LockTime"))
-	}
-	if conf.Interval.AutoSettleBufferTime > conf.Interval.ForceSettlementProcessor {
-		panic(errors.New("Interval.AutoSettleBufferTime greater than forceSettlement Interval"))
-	}
-	if contract.LockTime-conf.Interval.AutoSettleBufferTime < time.Minute {
-		panic(errors.New("Interval.AutoSettleBufferTime is too large, which could lead to overly frequent settlements"))
-	}
-	if conf.Interval.ForceSettlementProcessor < time.Minute {
-		panic(errors.New("Interval.ForceSettlementProcessor is too small, which could lead to overly frequent settlements"))
+	if monitorOn {
+		go monitor.StartMetricsServer(conf.Monitor.EventAddress)
 	}
 
 	cfg := &rest.Config{}
@@ -81,12 +72,59 @@ func Main() {
 		panic(err)
 	}
 
+	addInstance(mgr, "", conf, teeService, logger)
+	for _, extra := range extras {
+		addInstance(mgr, extra.Name, extra.Config, teeService, logger)
+	}
+
+	if err := mgr.Start(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// addInstance builds one provider instance's settlement, reconciliation and
+// revenue-transfer processors and adds them to mgr. name is "" for the primary
+// (CONFIG_FILE) instance and the extra instance's name otherwise. The TEE
+// service is the process's and is shared by every instance.
+func addInstance(mgr manager.Manager, name string, conf *config.Config, teeService *tee.TeeService, logger log.Logger) {
+	if name != "" {
+		logger = logger.WithFields(logrus.Fields{"instance": name})
+	}
+
+	var metrics *monitor.EventMetrics
+	if conf.Monitor.Enable {
+		metrics = monitor.NewEventMetrics(conf.Service.ServingURL, prometheus.DefaultRegisterer)
+	}
+
+	db, err := openDatabase(conf, name, logger)
+	if err != nil {
+		panic(err)
+	}
+	contract, err := providercontract.NewProviderContract(conf, common.Address{}, logger)
+	if err != nil {
+		panic(err)
+	}
+	// contract.LockTime is a time.Duration; AutoSettleBufferTime is now also
+	// a Duration. The pre-#507 checks compared integer seconds.
+	if conf.Interval.AutoSettleBufferTime > contract.LockTime {
+		panic(errors.New("Interval.AutoSettleBufferTime greater than refund LockTime"))
+	}
+	if conf.Interval.AutoSettleBufferTime > conf.Interval.ForceSettlementProcessor {
+		panic(errors.New("Interval.AutoSettleBufferTime greater than forceSettlement Interval"))
+	}
+	if contract.LockTime-conf.Interval.AutoSettleBufferTime < time.Minute {
+		panic(errors.New("Interval.AutoSettleBufferTime is too large, which could lead to overly frequent settlements"))
+	}
+	if conf.Interval.ForceSettlementProcessor < time.Minute {
+		panic(errors.New("Interval.ForceSettlementProcessor is too small, which could lead to overly frequent settlements"))
+	}
+
 	// The event process does not compute request fees, so it doesn't need the
 	// USD price cache.  Billing happens in the server process, which owns
 	// the cache and the PriceUpdateProcessor.
 	ctrl := ctrl.New(db, contract, conf, nil, teeService, nil, logger)
 
-	settlementProcessor := event.NewSettlementProcessor(ctrl, conf.Interval.SettlementProcessor, conf.Interval.ForceSettlementProcessor, conf.Monitor.Enable, logger)
+	settlementProcessor := event.NewSettlementProcessor(ctrl, conf.Interval.SettlementProcessor, conf.Interval.ForceSettlementProcessor, metrics, logger)
 	if err := mgr.Add(settlementProcessor); err != nil {
 		panic(err)
 	}
@@ -107,6 +145,7 @@ func Main() {
 			conf.RevenueTransfer.TargetAddress,
 			conf.RevenueTransfer.ReserveAmount,
 			conf.RevenueTransfer.Interval,
+			metrics,
 			logger,
 		)
 		if err != nil {
@@ -123,8 +162,31 @@ func Main() {
 			}
 		}
 	}
+}
 
-	if err := mgr.Start(ctx); err != nil {
-		panic(err)
+// extraDatabaseWait bounds how long the event process waits for the broker to
+// create an extra instance's database.
+const extraDatabaseWait = 5 * time.Minute
+
+// openDatabase opens the instance's database. The primary's is opened at once,
+// as always. An extra instance's database is created and migrated by the broker
+// — the one process that does either, so the two never race on a migration — and
+// on a first deployment the event process can start before the broker has made
+// it, so it waits for it to appear instead of failing or creating an empty one.
+func openDatabase(conf *config.Config, name string, logger log.Logger) (*database.DB, error) {
+	if name == "" {
+		return database.NewDB(conf)
+	}
+	deadline := time.Now().Add(extraDatabaseWait)
+	for {
+		db, err := database.NewDB(conf)
+		if err == nil {
+			return db, nil
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("instance %s: its database did not become reachable within %s (the broker creates it on start): %w", name, extraDatabaseWait, err)
+		}
+		logger.Infof("waiting for the broker to create this instance's database: %v", err)
+		time.Sleep(5 * time.Second)
 	}
 }

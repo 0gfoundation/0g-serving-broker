@@ -194,7 +194,7 @@ func (c *Ctrl) VideoCreateReserve(ctx *gin.Context, reqBody []byte) (string, err
 // throttle memo is shared across reasons, so a caller-chosen key would let one
 // client flush it and un-throttle everything.
 func (c *Ctrl) skipVideoReserve(reason, vendorName, format string, args ...interface{}) {
-	monitor.RecordVideoReserveSkipped(reason)
+	c.metrics.RecordVideoReserveSkipped(reason)
 	c.logProofSkip(reason, vendorName, format, args...)
 }
 
@@ -363,7 +363,7 @@ func (c *Ctrl) videoTokenUnitPrice(billing *config.BillingConfig, outputPrice, t
 	mult, ok := billing.TokenPriceMultiplier(tier)
 	if !ok {
 		if reportMiss {
-			monitor.RecordVideoTableMiss(monitor.VideoTableMissTokenTier)
+			c.metrics.RecordVideoTableMiss(monitor.VideoTableMissTokenTier)
 			// Keyed on the configured VENDOR, exactly as skipVideoReserve is, never
 			// on the tier: VideoBillingTier hands back the client's raw `size`
 			// unchanged whenever no videospec rules resolved it — which an unset

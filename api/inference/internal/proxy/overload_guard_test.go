@@ -207,7 +207,9 @@ func TestOverloadGuard_RegisteredByNewBehindTrackMetrics(t *testing.T) {
 	waitShedding(t, g, true)
 
 	engine := gin.New()
-	p := New(&ctrl.Ctrl{}, engine, nil, true, config.ConcurrencyLimitConfig{}, noopLogger{})
+	c := &ctrl.Ctrl{}
+	c.SetMetrics(monitor.Default)
+	p := New(c, engine, nil, config.ConcurrencyLimitConfig{}, noopLogger{})
 	p.SetOverloadGuard(g)
 	reached := false
 	p.serviceGroup.POST("/chat/completions", func(c *gin.Context) {
@@ -215,7 +217,7 @@ func TestOverloadGuard_RegisteredByNewBehindTrackMetrics(t *testing.T) {
 		c.Status(http.StatusOK)
 	})
 
-	shed := monitor.RequestRejectedTotal.WithLabelValues(monitor.RejectionBackendOverloaded)
+	shed := monitor.Default.RequestRejectedTotal.WithLabelValues(monitor.RejectionBackendOverloaded)
 	before := testutil.ToFloat64(shed)
 
 	w := httptest.NewRecorder()

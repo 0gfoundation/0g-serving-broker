@@ -18,6 +18,7 @@ type RevenueTransferProcessor struct {
 	targetAddress    common.Address
 	reserveAmount    *big.Int
 	transferInterval time.Duration
+	metrics          *monitor.EventMetrics // nil when monitoring is off
 }
 
 func NewRevenueTransferProcessor(
@@ -25,6 +26,7 @@ func NewRevenueTransferProcessor(
 	targetAddress string,
 	reserveAmount string,
 	transferInterval time.Duration,
+	metrics *monitor.EventMetrics,
 	logger log.Logger,
 ) (*RevenueTransferProcessor, error) {
 	if !common.IsHexAddress(targetAddress) {
@@ -43,6 +45,7 @@ func NewRevenueTransferProcessor(
 		targetAddress:    common.HexToAddress(targetAddress),
 		reserveAmount:    reserve,
 		transferInterval: transferInterval,
+		metrics:          metrics,
 	}, nil
 }
 
@@ -90,5 +93,5 @@ func (r *RevenueTransferProcessor) handleTransfer(ctx context.Context) {
 	r.logger.Infof("Revenue transfer successful, tx hash: %s", txHash.Hex())
 
 	// Record revenue transfer for monitoring
-	monitor.RecordRevenueTransfer(transferAmount)
+	r.metrics.RecordRevenueTransfer(transferAmount)
 }

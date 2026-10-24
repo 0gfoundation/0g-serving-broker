@@ -63,6 +63,9 @@ type Guard struct {
 	client *http.Client
 	logger Logger
 	now    func() time.Time
+	// metrics is the instance's broker metrics the guard reports into; nil when
+	// monitoring is off.
+	metrics *monitor.Metrics
 
 	latest atomic.Pointer[sample]
 
@@ -88,15 +91,16 @@ func New(cfg config.OverloadGuardConfig, logger Logger) *Guard {
 	}
 }
 
-// Start builds the guard, registers its gauges and starts polling. It returns
-// nil when the guard is disabled. This is the whole of the wiring main does, in
-// one place a test can reach.
-func Start(ctx context.Context, cfg config.OverloadGuardConfig, logger Logger) *Guard {
+// Start builds the guard, registers its gauges into metrics (nil when monitoring
+// is off) and starts polling. It returns nil when the guard is disabled. This is
+// the whole of the wiring main does, in one place a test can reach.
+func Start(ctx context.Context, cfg config.OverloadGuardConfig, logger Logger, metrics *monitor.Metrics) *Guard {
 	g := New(cfg, logger)
 	if g == nil {
 		return nil
 	}
-	monitor.EnableOverloadGuardMetrics()
+	g.metrics = metrics
+	metrics.EnableOverloadGuardMetrics()
 	go g.Run(ctx)
 	return g
 }
@@ -127,7 +131,7 @@ func (g *Guard) poll(ctx context.Context) {
 		// engine can no longer confirm is not evidence of saturation, so a broken
 		// endpoint admits from the next request on.
 		g.latest.Store(nil)
-		monitor.SetOverloadGuardState(false, false)
+		g.metrics.SetOverloadGuardState(false, false)
 		if ctx.Err() != nil {
 			return // shutting down: the scrape was cancelled, not broken
 		}
@@ -136,7 +140,7 @@ func (g *Guard) poll(ctx context.Context) {
 	}
 	g.latest.Store(s)
 	reason := g.verdict(s)
-	monitor.SetOverloadGuardState(true, reason != "")
+	g.metrics.SetOverloadGuardState(true, reason != "")
 	if reason != "" {
 		g.transition("shedding", "overload guard: engine saturated ("+reason+"), shedding new inference requests with 429")
 	} else {

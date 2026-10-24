@@ -384,7 +384,7 @@ func (c *Ctrl) buildCentralizedRoutingProof(reqBody, respData []byte, tlsFingerp
 func (c *Ctrl) buildSealedRoutingProof(e2eeSignedText, tlsFingerprint, providerIdentity string) (*RoutingProof, error) {
 	reqHash, respHash, ok := e2eeBindingHashes(e2eeSignedText)
 	if !ok {
-		monitor.RecordRoutingProofSkipped(monitor.RoutingProofSkipSignError)
+		c.metrics.RecordRoutingProofSkipped(monitor.RoutingProofSkipSignError)
 		return nil, fmt.Errorf("sealed §8 text %q is not <scheme>:<reqHhex>:<respHhex>, so there are no on-wire hashes to bind", truncateForLog([]byte(e2eeSignedText), 80))
 	}
 	return c.routingProofOverHashes(reqHash, respHash, tlsFingerprint, providerIdentity)
@@ -472,7 +472,7 @@ func (c *Ctrl) routingProofOverHashes(requestSha256, responseSha256, tlsFingerpr
 		// A non-empty but malformed value never came from the resolver, so it is a
 		// caller bug and does get counted.
 		if tlsFingerprint != "" {
-			monitor.RecordRoutingProofSkipped(monitor.RoutingProofSkipSignError)
+			c.metrics.RecordRoutingProofSkipped(monitor.RoutingProofSkipSignError)
 		}
 		return nil, fmt.Errorf("no usable upstream TLS certificate fingerprint for centralized provider routing proof (response and billing are unaffected)")
 	}
@@ -488,7 +488,7 @@ func (c *Ctrl) routingProofOverHashes(requestSha256, responseSha256, tlsFingerpr
 
 	sig, err := c.teeService.SignHash(accounts.TextHash([]byte(text)))
 	if err != nil {
-		monitor.RecordRoutingProofSkipped(monitor.RoutingProofSkipSignError)
+		c.metrics.RecordRoutingProofSkipped(monitor.RoutingProofSkipSignError)
 		return nil, fmt.Errorf("failed to sign routing proof: %w", err)
 	}
 

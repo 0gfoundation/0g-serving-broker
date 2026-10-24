@@ -323,6 +323,121 @@ Things to know before relying on it:
   as the instances take (each up to the 2-minute health wait). That order is what
   keeps a later primary failure from stranding an instance half-upgraded.
 
+#### 3.3a In-process instances (`CONFIG_DIR`)
+
+The alternative to extra containers: the primary broker and event processes serve the
+extra providers themselves. Set `CONFIG_DIR` (a compose literal) on the broker, the
+event service and the controller, each naming its own mount of one directory; every
+`<name>.yaml` in it is one provider instance beside the `CONFIG_FILE` one, with its own
+wallet, on-chain service and database. The compose then has the same services whatever
+number of providers the machine runs, which is what lets one recorded deployment in a
+verifier's baseline cover every such machine.
+
+- **Routing.** One ingress, one port. Each instance's `service.servingUrl` host must be
+  its own domain (no path); the ingress gets them all in `DOMAIN` + `DOMAINS` and keeps a
+  literal `TARGET_ENDPOINT`. The broker picks the instance by `Host`; anything matching
+  none goes to the primary.
+- **Attested overrides.** `DATABASE_DSN` decides every instance's database server, and
+  is **required** once there are extra instances — on the broker and the event service
+  alike, so the two can never open different databases for one instance. An instance's
+  database is the one its `database.dsn` names, else `<primary database>_<name>`; the
+  broker creates and migrates it on start, and the event service waits for it rather
+  than creating it. `TARGET_URL` is the primary's only.
+- **Metrics.** One `/metrics` on the primary (scrapes arrive by the compose service
+  name), mounted when any instance enables monitoring, serving every instance's series.
+- **Controller.** `GET|PUT /v1/config/core?instance=<name>` reads and replaces
+  `<name>.yaml`, recorded as `zg-instance-config-update`. The whole set is validated
+  first — a change that would collide with another instance's host, wallet or database
+  is refused before anything is recorded — and the primary broker and event restart,
+  so every instance restarts with them. The API never creates or removes an instance.
+  A primary config change is validated against the instances too. The validation runs
+  under the change lock, with the `DATABASE_DSN` the **broker container** runs with (read
+  over the docker socket, since the controller's own environment need not carry it), and
+  a controller with `CONFIG_DIR` refuses a change when the broker has none — otherwise
+  the recorded upstream set would leave the broker's instances out. A controller
+  without `CONFIG_DIR` does not inspect the broker, so the reverse mismatch (the broker
+  serving instances the controller does not know of) is the compose's to get right:
+  set `CONFIG_DIR` on all three services or none.
+- **One trust domain.** The instances share the signer and the E2EE key, so a sealed
+  request's `signer_addr` pins it to the CVM, not to a provider; what keeps a request at
+  the provider it is for is the session token, which names its provider. At most one
+  instance may enable LoRA (one adapter directory, one `LORA_ECIES_PRIVATE_KEY`).
+- **Startup.** Config problems across instances (hosts, wallets, databases, chain) stop
+  the process before anything is written on chain; a failure that needs the network — an
+  instance's RPC, price feed or account sync — panics while starting, after earlier
+  instances have synced, and takes every instance down with it.
+- Refused together with `ZG_CONTROLLER_INSTANCES`. Unlike it, combines with
+  `controller.recordUpstreamSet`: the recorded set covers every instance, each member tagged
+  `provider=<address>` (rtmr3-records.md §4.3). Because the instances share one signer, a
+  change to any instance's upstreams rotates it for all of them — every provider address
+  needs its signer acknowledged again. Readers must understand `provider=` first: an older
+  reader refuses such a record and reads the set as unknown.
+- **No in-band upgrade work.** The instances run in the primary's containers, so an
+  image update moves them with nothing more to plan.
+
+**Compose.** Against a single-instance compose, five services change, and none is added.
+The values that differ between machines arrive as environment variables whose *names*
+are fixed (add them to `allowed_envs`), so the service blocks — what a verifier's
+per-service baseline compares — are the same on every machine:
+
+```yaml
+broker-ingress:
+  environment:
+    - DOMAIN=${DOMAIN:?...}             # unchanged: the primary instance's domain
+    - DOMAINS=${EXTRA_DOMAINS:-}        # added: one per extra instance, comma-separated
+    - TARGET_ENDPOINT=http://0g-serving-provider-broker:3080   # unchanged, a literal
+
+broker-config-init:
+  environment:
+    - EXTRA_BROKER_CONFIGS=${EXTRA_BROKER_CONFIGS:-}   # one line per instance: <name>=<base64 config>
+    - EXTRA_PRIVATE_KEYS=${EXTRA_PRIVATE_KEYS:-}       # one line per instance: <name>=<private key>
+  command:
+    - sh
+    - -c
+    - |
+      set -e
+      # ...the existing primary block, unchanged...
+      mkdir -p /config/instances
+      printf '%s\n' "$$EXTRA_BROKER_CONFIGS" | while read -r line; do
+        [ -n "$$line" ] || continue
+        name="$${line%%=*}"
+        b64="$${line#*=}"
+        case "$$name" in
+          ''|*[!a-z0-9-]*|[!a-z]*) echo "EXTRA_BROKER_CONFIGS: bad instance name '$$name'" >&2; exit 1 ;;
+        esac
+        [ -f "/config/instances/$$name.yaml" ] && continue
+        key="$$(printf '%s\n' "$$EXTRA_PRIVATE_KEYS" | sed -n "s/^$$name=//p")"
+        if [ -z "$$key" ]; then echo "EXTRA_PRIVATE_KEYS has no key for instance '$$name'" >&2; exit 1; fi
+        printf '%s' "$$b64" | base64 -d \
+          | sed -e "s#\$${PRIVATE_KEY}#$$key#" \
+                -e "s#\$${COINGECKO_API_KEY}#$$COINGECKO_API_KEY#" \
+          > "/config/instances/$$name.yaml.tmp"
+        mv "/config/instances/$$name.yaml.tmp" "/config/instances/$$name.yaml"
+      done
+
+0g-serving-provider-broker:
+  environment:
+    - CONFIG_DIR=/etc/config/instances   # added
+
+0g-serving-provider-event:
+  environment:
+    - CONFIG_DIR=/etc/config/instances   # added
+    - DATABASE_DSN=root:...@tcp(mysql:3306)/provider?parseTime=true   # added: the broker's literal, verbatim
+
+0g-controller:
+  environment:
+    - CONFIG_DIR=/etc/config/instances   # added: its own mount of the same volume
+```
+
+The event service needs the broker's `DATABASE_DSN` literal: with extra instances it
+refuses to start without one, rather than risk settling an instance from a different
+database than the broker writes it to. Like the primary's config,
+an instance file is written once and then belongs to the controller
+(`PUT /v1/config/core?instance=`); a later boot does not overwrite it from the
+environment, and dropping an instance from `EXTRA_BROKER_CONFIGS` does not remove its
+file — delete it from the volume to stop serving it. A machine serving one provider sets the three variables empty, and the
+processes behave exactly as without `CONFIG_DIR`.
+
 ### 3.4 What the controller does with the docker socket
 
 The controller is the only service in a deployment that mounts

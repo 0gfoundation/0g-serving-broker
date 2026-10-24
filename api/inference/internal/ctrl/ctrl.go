@@ -22,6 +22,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/internal/modalprice"
 	"github.com/0glabs/0g-serving-broker/inference/internal/pricefeed"
 	"github.com/0glabs/0g-serving-broker/inference/model"
+	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
 
 // asyncDB is the interface for database operations used by the async job subsystem.
@@ -103,6 +104,12 @@ type Ctrl struct {
 	contract         *providercontract.ProviderContract
 	svcCache         *cache.Cache
 	logger           log.Logger
+	// metrics is this instance's broker metrics; nil when monitoring is off.
+	metrics *monitor.Metrics
+	// mismatchLimiter blocks callers repeatedly requesting a model this instance
+	// does not serve; see MismatchLimiter.
+	mismatchLimiter     *ModelMismatchLimiter
+	mismatchLimiterOnce sync.Once
 
 	autoSettleBufferTime time.Duration
 	minSettlementFee     *big.Int
@@ -461,6 +468,17 @@ func (c *Ctrl) GetServiceConfig() config.Service {
 // GetConcurrencyLimitConfig returns the concurrency/rate limit configuration.
 func (c *Ctrl) GetConcurrencyLimitConfig() config.ConcurrencyLimitConfig {
 	return c.concurrencyLimit
+}
+
+// SetMetrics sets this instance's broker metrics. Call it before serving; nil
+// (the default) leaves monitoring off.
+func (c *Ctrl) SetMetrics(m *monitor.Metrics) {
+	c.metrics = m
+}
+
+// Metrics returns this instance's broker metrics, nil when monitoring is off.
+func (c *Ctrl) Metrics() *monitor.Metrics {
+	return c.metrics
 }
 
 // GetTieredPricingConfig returns the tiered pricing configuration.

@@ -252,6 +252,12 @@ type Ctrl struct {
 	// primary one (InstancesEnvVar). Fixed at startup, like the admin list.
 	instances []Instance
 
+	// configDir is the directory of in-process instance configs
+	// (config.InstancesDirEnvVar), read from the controller's own environment; ""
+	// when the primary processes serve the primary instance alone. See
+	// inprocess.go.
+	configDir string
+
 	// enginesEnabled is EnginesEnvVar, read once at startup. See CreateEngine.
 	enginesEnabled bool
 }
@@ -330,6 +336,13 @@ func NewCtrl(fullConfig *config.Config, logger log.Logger) (*Ctrl, error) {
 		return nil, err
 	}
 	ctrl.instances = instances
+	ctrl.configDir = strings.TrimSpace(os.Getenv(config.InstancesDirEnvVar))
+	if err := checkConfigDir(ctrl.configDir, instances); err != nil {
+		return nil, err
+	}
+	if ctrl.configDir != "" {
+		logger.Infof("Serving in-process instances from %s", ctrl.configDir)
+	}
 	ctrl.enginesEnabled = os.Getenv(EnginesEnvVar) == "on"
 	for _, in := range instances {
 		logger.Infof("Managing extra instance %q: broker=%s event=%s ingress=%s config=%s", in.Name, in.Broker, in.Event, in.Ingress, in.ConfigFile)
@@ -626,7 +639,6 @@ func (c *Ctrl) ApplyCoreConfig(ctx context.Context, configContent string) error 
 	if err := config.ValidateConfigContent([]byte(configContent)); err != nil {
 		return &InvalidConfigError{Err: err}
 	}
-
 	if !c.changing.TryLock() {
 		return ErrChangeInProgress
 	}
@@ -635,6 +647,28 @@ func (c *Ctrl) ApplyCoreConfig(ctx context.Context, configContent string) error 
 	// Detached and bounded for the same reasons as UpdateImages.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), configChangeTimeout)
 	defer cancel()
+
+	// With in-process instances the primary config is one of a set the same
+	// process serves, and a change it accepts alone — a servingUrl host, wallet or
+	// database an instance already uses — still stops every instance. Under the
+	// lock, so the instance files cannot move between this check and the write.
+	if c.hasInProcessInstances() {
+		if err := c.validateInProcessSet(ctx, []byte(configContent), "", nil); err != nil {
+			return err
+		}
+	} else if c.configDir != "" {
+		// No instance files yet, but this controller expects them: the broker must
+		// read the same directory, or the set recorded once they appear would leave
+		// the broker's instances out. A controller without CONFIG_DIR does not look —
+		// a single-instance deployment's config change touches nothing new.
+		_, brokerConfigDir, err := c.brokerInstanceEnv(ctx)
+		if err != nil {
+			return &UnconfirmedConfigError{Err: fmt.Errorf("reading the broker container's environment: %w", err)}
+		}
+		if err := c.checkConfigDirAgrees(brokerConfigDir); err != nil {
+			return err
+		}
+	}
 
 	// Keys this controller's broker code does not know are ignored rather than refused
 	// (config.decodeConfig), and their values are not validated by this code at all. That
