@@ -107,42 +107,67 @@ func (r *ReconciliationProcessor) reconcile(ctx context.Context) {
 	// 4-5. Scan and process events in chunks bounded by MaxScanBlockRange so a
 	// single call cannot exceed the RPC's per-query log limit. Advance the cursor
 	// after every successful chunk so progress survives mid-loop failures.
-	fromBlock := cursor.LastBlockNumber + 1
-	for fromBlock <= safeBlock {
-		if ctx.Err() != nil {
-			return
-		}
-		toBlock := fromBlock + MaxScanBlockRange - 1
-		if toBlock > safeBlock {
-			toBlock = safeBlock
-		}
-
-		events, err := r.scanEvents(ctx, fromBlock, toBlock)
-		if err != nil {
-			r.logger.Errorf("Reconciliation: failed to scan events from block %d to %d: %v", fromBlock, toBlock, err)
-			return
-		}
-
-		if len(events) > 0 {
-			r.logger.Infof("Reconciliation: processing %d events from block %d to %d", len(events), fromBlock, toBlock)
-		}
-
-		for _, evt := range events {
-			r.processEvent(evt)
-		}
-
-		if err := r.db.UpdateReconciliationCursor(toBlock); err != nil {
-			r.logger.Errorf("Reconciliation: failed to update cursor to block %d: %v", toBlock, err)
-			return
-		}
-
-		fromBlock = toBlock + 1
+	err = walkBlockRange(ctx, cursor.LastBlockNumber+1, safeBlock, MaxScanBlockRange,
+		r.scanEvents,
+		func(events []settlementEvent, fromBlock, toBlock uint64) error {
+			if len(events) > 0 {
+				r.logger.Infof("Reconciliation: processing %d events from block %d to %d", len(events), fromBlock, toBlock)
+			}
+			for _, evt := range events {
+				r.processEvent(evt)
+			}
+			if err := r.db.UpdateReconciliationCursor(toBlock); err != nil {
+				return fmt.Errorf("update cursor to block %d: %w", toBlock, err)
+			}
+			return nil
+		})
+	if err != nil {
+		r.logger.Errorf("Reconciliation: %v", err)
+		return
 	}
 
 	// 6. Expire stale pending settlements once per tick, after all chunks scanned.
 	if safeBlock > r.expiryBlocks {
 		r.expireStaleSettlements(safeBlock - r.expiryBlocks)
 	}
+}
+
+// walkBlockRange scans [fromBlock, toBlock] in windows of at most maxSpan blocks
+// and hands each scanned window to commit, in order. A failed scan halves the
+// window and retries it: a fixed window that holds more logs than the RPC returns
+// per query ("result set exceeds the max limit of 10000 logs") would otherwise
+// fail every tick and pin the cursor forever. It gives up only when a single-block
+// window fails, or when commit fails. The shrunken window is kept for the rest of
+// the walk; the next tick starts again from maxSpan.
+func walkBlockRange(
+	ctx context.Context,
+	fromBlock, toBlock, maxSpan uint64,
+	scan func(ctx context.Context, fromBlock, toBlock uint64) ([]settlementEvent, error),
+	commit func(events []settlementEvent, fromBlock, toBlock uint64) error,
+) error {
+	span := maxSpan
+	for fromBlock <= toBlock {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		end := fromBlock + span - 1
+		if end > toBlock {
+			end = toBlock
+		}
+		events, err := scan(ctx, fromBlock, end)
+		if err != nil {
+			if end == fromBlock {
+				return fmt.Errorf("failed to scan events from block %d to %d: %w", fromBlock, end, err)
+			}
+			span = (end - fromBlock + 1) / 2
+			continue
+		}
+		if err := commit(events, fromBlock, end); err != nil {
+			return err
+		}
+		fromBlock = end + 1
+	}
+	return nil
 }
 
 func (r *ReconciliationProcessor) scanEvents(ctx context.Context, fromBlock, toBlock uint64) ([]settlementEvent, error) {
