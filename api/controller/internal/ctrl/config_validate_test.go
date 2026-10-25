@@ -113,7 +113,7 @@ func TestConfigChangeStillAppliesWhatItCannotDescribe(t *testing.T) {
 
 	// A dotted vendor FQDN with no providerIdentity: loads fine, and the host cannot be a
 	// record name. Measured on five deprecated deployments, so this is a real shape.
-	const content = "service:\n  model: m\n  targetUrl: https://api.red-pill.ai/v1\n"
+	const content = "service:\n  model: m\n  targetUrl: https://api.red-pill.ai/v1\n  targetSeparated: true\n  targetTeeAddress: \"0x1111111111111111111111111111111111111111\"\n"
 	if err := c.ApplyCoreConfig(context.Background(), content); err != nil {
 		t.Fatalf("ApplyCoreConfig() = %v, want the change to go through", err)
 	}

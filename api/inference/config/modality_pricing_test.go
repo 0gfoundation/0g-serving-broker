@@ -8,7 +8,7 @@ import (
 const modalitySingleModel = `
 service:
   servingUrl: "http://example.com"
-  targetUrl: "https://backend:8000"
+  targetUrl: "http://backend:8000"
   inputPrice: "1800000000"
   outputPrice: "12700000000"
   type: "chatbot"
