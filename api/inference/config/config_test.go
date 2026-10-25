@@ -3930,7 +3930,7 @@ func TestLoadConfig_DecisionsRejectsNonZeroOutputPrice(t *testing.T) {
 	base := `
 service:
   servingUrl: "http://example.com"
-  targetUrl: "https://openrouter.ai/api/alpha"
+  targetUrl: "http://laya:8000"
   type: "decisions"
   model: "typesafe/jev-1.13"
   verifiability: "TeeML"

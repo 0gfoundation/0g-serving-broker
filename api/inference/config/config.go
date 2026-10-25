@@ -3489,6 +3489,21 @@ func applyAndValidate(cfg *Config, raw map[string]interface{}) error {
 		return err
 	}
 
+	// The single-model half of the rule validateModelPricing applies per model
+	// (0g-router#728). A decentralized provider without targetSeparated signs every
+	// reply as its own TEE's output, so its engine has to be inside this CVM — and
+	// targetUrl can come from the config file, which compose_hash does not measure
+	// and PUT /v1/config/core rewrites whole. Left unchecked, the admin key alone
+	// could point the broker at an external API and keep every attestation artifact
+	// unchanged. spml is excluded on purpose: its engine is an external GPU node by
+	// design and its replies are vouched for by assay verdicts, not by this TEE.
+	if cfg.Service.ProviderType == constant.ProviderTypeDecentralized && !cfg.Service.TargetSeparated &&
+		len(cfg.Service.ModelPricing) == 0 && cfg.Service.TargetURL != "" {
+		if err := validateDecentralizedModelTarget(cfg.Service.TargetURL); err != nil {
+			return fmt.Errorf("invalid config: service.targetUrl on a decentralized provider without targetSeparated: %w — if the model runs outside this CVM, declare targetSeparated (a remote TEE signs) or providerType 'centralized'/'standard'", err)
+		}
+	}
+
 	// Per-wallet usage stats defaults. Only meaningful when the feature is
 	// enabled; leaving them unset gives a 90-day retention pruned daily.
 	if cfg.UserUsageStats.Enabled {

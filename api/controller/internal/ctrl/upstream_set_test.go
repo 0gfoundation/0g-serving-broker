@@ -494,7 +494,7 @@ func TestConfigChangeRecordsUnknownWhenTheNewContentCannotBeRead(t *testing.T) {
 		// A dotted vendor FQDN with no providerIdentity: upstreamsFromConfig refuses it
 		// because the host cannot be a record name. Measured on five deprecated
 		// deployments, so it is a real config shape and not an invented one.
-		{"a vendor host with no identity", "service:\n  model: m\n  targetUrl: https://api.red-pill.ai/v1\n"},
+		{"a vendor host with no identity", "service:\n  model: m\n  targetUrl: https://api.red-pill.ai/v1\n  targetSeparated: true\n  targetTeeAddress: \"0x1111111111111111111111111111111111111111\"\n"},
 		// Two distinct URLs deriving one name — the writer cannot say which is which.
 		{"two upstreams deriving one name", "service:\n  model: m\n  type: chatbot\n  providerType: standard\n  targetUrl: https://a.example/v1\n  providerIdentity: vendor\n  modelPricing:\n    - model: m\n      targetUrl: https://b.example/v1\n      providerIdentity: vendor\n      inputPrice: \"1\"\n      outputPrice: \"1\"\n"},
 	} {
