@@ -57,30 +57,7 @@ func Main() {
 		panic(err)
 	}
 
-	primary := startInstance(ctx, "", config, teeService, logger)
-	instances := []*instance{primary}
-	router := &hostRouter{byHost: map[string]http.Handler{}, primary: primary.engine}
-	for _, extra := range extras {
-		inst := startInstance(ctx, extra.Name, extra.Config, teeService, logger)
-		instances = append(instances, inst)
-		host, err := cfg.ServingHost(extra.Config.Service.ServingURL)
-		if err != nil {
-			panic(err)
-		}
-		router.byHost[host] = inst.engine
-		logger.Infof("instance %s: serving %s for host %s", extra.Name, extra.Config.Service.Type, host)
-	}
-	mountMetrics(primary.engine, instances)
-	// The primary is matched by its host too, though it also catches everything
-	// unmatched: with extra instances configured its servingUrl is checked to
-	// have a host of its own.
-	if len(extras) > 0 {
-		host, err := cfg.ServingHost(config.Service.ServingURL)
-		if err != nil {
-			panic(err)
-		}
-		router.byHost[host] = primary.engine
-	}
+	instances, router := startInstances(ctx, config, extras, teeService, logger)
 
 	// Listen and Serve with graceful shutdown
 	port := os.Getenv("PORT")
@@ -117,4 +94,35 @@ func Main() {
 	}
 
 	logger.Info("Server exited")
+}
+
+// startInstances starts the primary instance and every extra one, and returns
+// them, primary first, with the router that sends each request to its instance
+// by host. It panics on any startup failure, as startInstance does.
+func startInstances(ctx context.Context, config *cfg.Config, extras []cfg.Instance, teeService *tee.TeeService, logger log.Logger) ([]*instance, http.Handler) {
+	primary := startInstance(ctx, "", config, teeService, logger)
+	instances := []*instance{primary}
+	router := &hostRouter{byHost: map[string]http.Handler{}, primary: primary.engine}
+	for _, extra := range extras {
+		inst := startInstance(ctx, extra.Name, extra.Config, teeService, logger)
+		instances = append(instances, inst)
+		host, err := cfg.ServingHost(extra.Config.Service.ServingURL)
+		if err != nil {
+			panic(err)
+		}
+		router.byHost[host] = inst.engine
+		logger.Infof("instance %s: serving %s for host %s", extra.Name, extra.Config.Service.Type, host)
+	}
+	mountMetrics(primary.engine, instances)
+	// The primary is matched by its host too, though it also catches everything
+	// unmatched: with extra instances configured its servingUrl is checked to
+	// have a host of its own.
+	if len(extras) > 0 {
+		host, err := cfg.ServingHost(config.Service.ServingURL)
+		if err != nil {
+			panic(err)
+		}
+		router.byHost[host] = primary.engine
+	}
+	return instances, router
 }
