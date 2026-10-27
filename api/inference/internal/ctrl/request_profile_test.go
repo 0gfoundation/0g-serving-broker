@@ -65,6 +65,7 @@ func TestApplyRequestProfile_KeepsWhatTheEngineAccepts(t *testing.T) {
 		{"accepted reasoning_effort", config.APIFormatOpenAI, `{"reasoning_effort":"max"}`},
 		{"numeric-string reasoning_effort", config.APIFormatOpenAI, `{"reasoning_effort":"0.5"}`},
 		{"out-of-range numeric string is SGLang's to judge", config.APIFormatOpenAI, `{"reasoning_effort":"1.5"}`},
+		{"underscored numeric string pydantic accepts", config.APIFormatOpenAI, `{"reasoning_effort":"0._5"}`},
 		{"display on the openai surface", config.APIFormatOpenAI, `{"thinking":{"display":"updates"}}`},
 		{"unrecognized surface", "", `{"thinking":{"display":"updates"}}`},
 		{"not json", config.APIFormatAnthropic, `not json`},
@@ -149,5 +150,15 @@ func TestPrepareHTTPRequest_AppliesRequestProfile(t *testing.T) {
 
 	if forward(base)["display"] != "updates" {
 		t.Errorf("no profile configured, yet thinking.display changed")
+	}
+
+	perModel := base
+	perModel.RequestProfileEnforce = true
+	perModel.ModelPricing = []config.ModelPricingEntry{{Model: "glm-5.3", RequestProfile: config.RequestProfileSGLang}}
+	if err := perModel.BuildModelPricingMap(); err != nil {
+		t.Fatalf("BuildModelPricingMap: %v", err)
+	}
+	if _, present := forward(perModel)["display"]; present {
+		t.Errorf("per-model profile did not drop thinking.display")
 	}
 }

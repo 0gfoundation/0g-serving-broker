@@ -4522,6 +4522,27 @@ service:
 		t.Errorf("requestProfile not resolved: %+v", cfg.Service)
 	}
 
+	// Only one entry sets a profile: that model gets it, the other gets none.
+	cfg, err = load(`  type: "chatbot"
+  modelPricing:
+    - model: "glm-5.3"
+      inputPrice: "10"
+      outputPrice: "30"
+      requestProfile: "sglang"
+    - model: "other"
+      inputPrice: "10"
+      outputPrice: "30"
+`)
+	if err != nil {
+		t.Fatalf("per-model requestProfile should load, got: %v", err)
+	}
+	if got := cfg.Service.RequestProfileFor("glm-5.3", ""); got != RequestProfileSGLang {
+		t.Errorf("per-model profile for glm-5.3 = %q, want %q", got, RequestProfileSGLang)
+	}
+	if got := cfg.Service.RequestProfileFor("other", ""); got != "" {
+		t.Errorf("profile for other = %q, want none", got)
+	}
+
 	for name, body := range map[string]string{
 		"unknown profile": `  type: "chatbot"
   inputPrice: "10"
