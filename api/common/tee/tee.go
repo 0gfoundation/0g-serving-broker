@@ -243,9 +243,8 @@ func (s *TeeService) SyncQuote(ctx context.Context, nvQuote bool) error {
 		// covers them. The legacy reply stays byte-for-byte what it was for the
 		// clients that predate both; and with the §4.2 quote switched off the
 		// fallback advertises nothing, which is the safe answer.
-		if s.QuoteV2, err = withE2EEFeatures(s.QuoteV2, s.E2EEFeatures); err != nil {
-			return errors.Wrap(err, "tdx quote (§4.2)")
-		}
+		//
+		s.QuoteV2 = s.advertiseE2EEFeatures(s.QuoteV2)
 		if s.QuoteV2Sig, err = s.Sign(crypto.Keccak256([]byte(s.QuoteV2))); err != nil {
 			s.logger.Warnf("§4.2 quote will be served unsigned: %v", err)
 			s.QuoteV2Sig = nil
@@ -551,6 +550,20 @@ func verifyChainIsLocal(ctx context.Context, url string) error {
 			url, observed, hardhatChainID)
 	}
 	return nil
+}
+
+// advertiseE2EEFeatures returns quote with s.E2EEFeatures added, or quote
+// unchanged when they cannot be added. That failure is logged, not returned: a
+// gateway that does not see the features keeps sealing as it does today, so a
+// reply without them is a safe degradation, while failing SyncQuote over an
+// advertisement would take the whole inference server down at startup.
+func (s *TeeService) advertiseE2EEFeatures(quote string) string {
+	advertised, err := withE2EEFeatures(quote, s.E2EEFeatures)
+	if err != nil {
+		s.logger.Warnf("§4.2 quote will be served without e2ee_features %v: %v", s.E2EEFeatures, err)
+		return quote
+	}
+	return advertised
 }
 
 // withE2EEFeatures adds `"e2ee_features": features` to a quote reply, a JSON
