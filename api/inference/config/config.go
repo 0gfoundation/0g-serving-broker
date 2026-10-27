@@ -707,7 +707,7 @@ type Service struct {
 	// Only applied for the chatbot service type; rejected for others at load.
 	InjectBodyFields map[string]interface{} `yaml:"injectBodyFields"`
 
-	// StripBodyFields, when set, are top-level keys REMOVED from the JSON request
+	// StripBodyFields, when set, are keys REMOVED from the JSON request
 	// body before it is forwarded to a chatbot targetUrl. It is the surgical
 	// counterpart of injectBodyFields: a denylist of client-supplied params the
 	// upstream does not accept. The motivating case is OpenRouter returning 404 for
@@ -733,6 +733,10 @@ type Service struct {
 	// cost-affecting keys (max_tokens / max_completion_tokens, etc.): removing an
 	// output cap can uncap generation and inflate the output-token bill the user
 	// pays. List only params that actually cause upstream rejection.
+	//
+	// An entry may be a dotted path to a nested key ("thinking.display"): only
+	// that leaf is removed and its parent object stays. A top-level key spelled
+	// exactly like the entry takes precedence, so plain entries are unaffected.
 	//
 	// Matching is case-sensitive and exact: an entry must equal the JSON key the
 	// client sends byte-for-byte ("logprobs", not "Logprobs"). A typo loads fine
@@ -2207,7 +2211,11 @@ func normalizeStripBodyFields(fieldPath string, fields []string) ([]string, erro
 		if k == "" {
 			continue
 		}
-		if _, protected := protectedInjectBodyFields[k]; protected {
+		// A dotted entry reaches inside its first segment, so it is protected
+		// when that segment is ("stream_options.include_usage" would break usage
+		// billing just like "stream_options").
+		top, _, _ := strings.Cut(k, ".")
+		if _, protected := protectedInjectBodyFields[top]; protected {
 			return nil, fmt.Errorf("invalid config: %s must not strip broker-critical field %q (protected: model, messages, stream, stream_options, lora_adapter_name)", fieldPath, k)
 		}
 		if _, dup := seen[k]; dup {
@@ -2219,7 +2227,7 @@ func normalizeStripBodyFields(fieldPath string, fields []string) ([]string, erro
 	return normalized, nil
 }
 
-// EffectiveStripBodyFields returns the top-level body keys to strip for a request
+// EffectiveStripBodyFields returns the body keys to strip for a request
 // resolved to the given model: the UNION of the service-level stripBodyFields and
 // the resolved model's per-entry stripBodyFields. Unlike injectBodyFields (which
 // deep-merges so a per-model leaf overrides the service value), stripping is

@@ -1007,6 +1007,29 @@ service:
 	}
 }
 
+// A dotted entry reaches inside its first segment, so a protected first segment
+// is rejected the same as the bare key.
+func TestLoadConfig_StripBodyFields_RejectsProtectedNestedKey(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "chatbot"
+  model: "glm-5"
+  providerType: "centralized"
+  providerIdentity: "openrouter"
+  verifiability: "TeeML"
+  inputPrice: "10"
+  outputPrice: "30"
+  stripBodyFields:
+    - stream_options.include_usage
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "broker-critical field") {
+		t.Fatalf("expected protected-key rejection, got: %v", err)
+	}
+}
+
 func TestLoadConfig_ModelPricing_USD(t *testing.T) {
 	// USD-denominated multi-model pricing: each entry carries USD-per-1M prices,
 	// and the service-level USD price is set to the max over models so the price
