@@ -498,6 +498,73 @@ func TestStripBodyFields_RemovesConfiguredField(t *testing.T) {
 	}
 }
 
+// A dotted entry removes only the nested leaf: Claude Code's thinking.display
+// goes, thinking itself (and so thinking on) stays.
+func TestStripBodyFields_RemovesNestedField(t *testing.T) {
+	c := newTestCtrlForStripBodyFields(t, []string{"thinking.display"})
+	body := []byte(`{"model":"glm-5.3","messages":[],"thinking":{"type":"adaptive","display":"updates"}}`)
+
+	got, err := c.StripBodyFields(body, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(got, &out); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	thinking, ok := out["thinking"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("thinking dropped: %s", got)
+	}
+	if _, present := thinking["display"]; present {
+		t.Errorf("thinking.display not stripped: %s", got)
+	}
+	if thinking["type"] != "adaptive" {
+		t.Errorf("thinking.type = %v, want adaptive", thinking["type"])
+	}
+}
+
+// A dotted entry whose path is absent, or whose parent is not an object, leaves
+// the body byte-for-byte unchanged.
+func TestStripBodyFields_NestedNoopWhenPathAbsent(t *testing.T) {
+	c := newTestCtrlForStripBodyFields(t, []string{"thinking.display"})
+	for _, body := range [][]byte{
+		[]byte(`{"model":"glm-5.3","messages":[]}`),
+		[]byte(`{"model":"glm-5.3","messages":[],"thinking":{"type":"enabled","budget_tokens":2048}}`),
+		[]byte(`{"model":"glm-5.3","messages":[],"thinking":"on"}`),
+	} {
+		got, err := c.StripBodyFields(body, "")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !bytes.Equal(got, body) {
+			t.Errorf("body mutated: got %s, want %s", got, body)
+		}
+	}
+}
+
+// A top-level key spelled exactly like a dotted entry keeps winning, so entries
+// written before dotted paths existed mean what they meant.
+func TestStripBodyFields_LiteralDottedKeyWins(t *testing.T) {
+	c := newTestCtrlForStripBodyFields(t, []string{"a.b"})
+	body := []byte(`{"model":"m","messages":[],"a.b":1,"a":{"b":2}}`)
+
+	got, err := c.StripBodyFields(body, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(got, &out); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	if _, present := out["a.b"]; present {
+		t.Errorf("literal a.b not stripped: %s", got)
+	}
+	if a, _ := out["a"].(map[string]interface{}); a["b"] == nil {
+		t.Errorf("nested a.b stripped too: %s", got)
+	}
+}
+
 // Nothing configured → body forwarded byte-for-byte unchanged.
 func TestStripBodyFields_NoopWhenUnset(t *testing.T) {
 	c := newTestCtrlForStripBodyFields(t, nil)

@@ -1213,6 +1213,36 @@ func developerAsSystem(body []byte) []byte {
 	return out
 }
 
+// stripBodyField removes one stripBodyFields entry from bodyMap and reports
+// whether anything was removed. A top-level key spelled exactly like the entry
+// wins, so existing entries keep their meaning; otherwise a dotted entry
+// ("thinking.display") walks nested objects and removes the leaf only, leaving
+// its parent in place. The motivating case: SGLang's Anthropic surface accepts
+// thinking.display only as "summarized"/"omitted" and 400s on the newer values
+// Claude Code sends, while the field changes nothing SGLang generates — dropping
+// the whole "thinking" object instead would turn thinking off.
+func stripBodyField(bodyMap map[string]interface{}, key string) bool {
+	if _, present := bodyMap[key]; present {
+		delete(bodyMap, key)
+		return true
+	}
+	parts := strings.Split(key, ".")
+	m := bodyMap
+	for _, p := range parts[:len(parts)-1] {
+		next, ok := m[p].(map[string]interface{})
+		if !ok {
+			return false
+		}
+		m = next
+	}
+	leaf := parts[len(parts)-1]
+	if _, present := m[leaf]; !present || len(parts) == 1 {
+		return false
+	}
+	delete(m, leaf)
+	return true
+}
+
 func (c *Ctrl) StripBodyFieldsFor(body []byte, resolvedModel, identity string) ([]byte, error) {
 	fields := c.Service.EffectiveStripBodyFieldsFor(resolvedModel, identity)
 	if len(fields) == 0 || len(body) == 0 {
@@ -1240,8 +1270,7 @@ func (c *Ctrl) StripBodyFieldsFor(body []byte, resolvedModel, identity string) (
 	// so no client content leaks; the single line stays greppable per guardrail.
 	var strippedKeys []string
 	for _, k := range fields {
-		if _, present := bodyMap[k]; present {
-			delete(bodyMap, k)
+		if stripBodyField(bodyMap, k) {
 			strippedKeys = append(strippedKeys, k)
 		}
 	}
