@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
@@ -24,11 +25,17 @@ import (
 )
 
 // profileRule is one optional enum field: the dotted path in the request body and
-// the string values the engine accepts there.
+// the string values the engine accepts there. numeric marks a field that also takes
+// a number, which the engine's lax parsing accepts as a numeric string too.
 type profileRule struct {
 	path     string
 	accepted []string
+	numeric  bool
 }
+
+// maxLoggedValueLen caps a dropped value in the log line: the value is chosen by
+// the client and otherwise bounded only by the request size.
+const maxLoggedValueLen = 64
 
 // requestProfiles maps profile -> API surface -> rules. The SGLang sets are copied
 // from python/sglang/srt/entrypoints/{anthropic,openai}/protocol.py at v0.5.18
@@ -43,9 +50,10 @@ var requestProfiles = map[string]map[string][]profileRule{
 			{path: "output_config.effort", accepted: []string{"minimal", "low", "medium", "high", "xhigh", "max"}},
 		},
 		config.APIFormatOpenAI: {
-			// ReasoningEffortTier. SGLang also accepts a float in [0, 0.99]; only
-			// strings are ever dropped, so a number passes through to be judged there.
-			{path: "reasoning_effort", accepted: []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}},
+			// ReasoningEffortTier, or a float in [0, 0.99] that pydantic's lax union
+			// also takes as a string ("0.5"). Any number, string or not, passes
+			// through to be judged by SGLang, out-of-range ones included.
+			{path: "reasoning_effort", accepted: []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}, numeric: true},
 		},
 	},
 }
@@ -77,6 +85,14 @@ func (c *Ctrl) ApplyRequestProfile(body []byte, profile, surface, model string, 
 		v, ok := parent[leaf].(string)
 		if !ok || containsString(r.accepted, v) {
 			continue
+		}
+		if r.numeric {
+			if _, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil {
+				continue
+			}
+		}
+		if len(v) > maxLoggedValueLen {
+			v = v[:maxLoggedValueLen] + "..."
 		}
 		dropped = append(dropped, fmt.Sprintf("%s=%q", r.path, v))
 		if enforce {

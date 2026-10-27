@@ -63,6 +63,8 @@ func TestApplyRequestProfile_KeepsWhatTheEngineAccepts(t *testing.T) {
 		{"accepted effort", config.APIFormatAnthropic, `{"output_config":{"effort":"xhigh"}}`},
 		{"numeric reasoning_effort", config.APIFormatOpenAI, `{"reasoning_effort":0.5}`},
 		{"accepted reasoning_effort", config.APIFormatOpenAI, `{"reasoning_effort":"max"}`},
+		{"numeric-string reasoning_effort", config.APIFormatOpenAI, `{"reasoning_effort":"0.5"}`},
+		{"out-of-range numeric string is SGLang's to judge", config.APIFormatOpenAI, `{"reasoning_effort":"1.5"}`},
 		{"display on the openai surface", config.APIFormatOpenAI, `{"thinking":{"display":"updates"}}`},
 		{"unrecognized surface", "", `{"thinking":{"display":"updates"}}`},
 		{"not json", config.APIFormatAnthropic, `not json`},
