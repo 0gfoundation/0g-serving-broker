@@ -82,7 +82,13 @@ the engine's own 400 stands — Claude Code already strips and retries on the
 
 `service.requestProfileEnforce: false` (the default) only logs
 `request profile "<p>" would drop [...]`, so a profile can be watched on live traffic
-before it changes a request. When the deployed SGLang version moves, re-check the sets
+before it changes a request. **Rollout precondition:** a broker built before b3263dcc (lenient config,
+2026-09-26) decodes config strictly and panics on these keys — and so does the
+controller, which loads the same file with the same code. On a CVM whose compose pins
+such an image, an image hot-swap plus a config push works only until the next reboot,
+when broker, event and controller all fail to start and the controller API with them.
+Redeploy the compose with a post-b3263dcc image first, and remove the keys before ever
+rolling the image back past that commit. When the deployed SGLang version moves, re-check the sets
 against its `entrypoints/{anthropic,openai}/protocol.py`.
 
 ## Shared rules
