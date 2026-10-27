@@ -137,6 +137,19 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 		}
 		reqBody = modifiedBody
 
+		// Request profile: drop an optional field whose value the upstream engine's
+		// schema does not list (e.g. Claude Code's thinking.display "updates" on
+		// SGLang), so a newer client does not 400 the whole request. Runs after the
+		// reasoning translation so it sees what is actually forwarded. No-op unless
+		// requestProfile is configured; log-only unless requestProfileEnforce.
+		if profile := c.Service.RequestProfileFor(resolvedModelStr, resolvedIdentity(ctx)); profile != "" {
+			modifiedBody, err = c.ApplyRequestProfile(reqBody, profile, apiFormatForPath(ctx.Request.URL.Path), resolvedModelStr, c.Service.RequestProfileEnforce)
+			if err != nil {
+				return nil, errors.Wrap(err, "apply request profile")
+			}
+			reqBody = modifiedBody
+		}
+
 		// Strip operator-denylisted client params (e.g. logprobs/top_logprobs the
 		// routed upstream rejects) BEFORE injecting server fields, so a stripped
 		// key can be re-set by injection. No-op unless service- or per-model

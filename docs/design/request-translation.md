@@ -54,6 +54,37 @@ compute, unlike the type-only `thinking` above — see
 
 Full design: [reasoning-translation.md](reasoning-translation.md).
 
+### 3. Values the engine does not list yet — `ApplyRequestProfile`
+
+Clients move faster than self-hosted engines. Claude Code started sending
+`thinking.display: "updates"` / `"highlights"`; SGLang v0.5.18's Anthropic schema
+lists only `summarized` / `omitted` and 400s the whole request, although it only
+logs on `display`. Unknown field *names* are not the problem — SGLang's request models
+ignore extra keys — closed enums are.
+
+`service.requestProfile` (or a model entry's `requestProfile`, which overrides it) names
+the engine, and `inference/internal/ctrl/request_profile.go` holds that engine's
+accepted values per API surface. A field with a rule is dropped when its value is a
+string outside the accepted set, so the upstream's default applies — the per-engine
+half of OpenRouter's "providers ignore unknown parameters". Only fields whose absence
+is a valid reading of the request get a rule:
+
+| Profile | Surface | Field | Accepted |
+|---|---|---|---|
+| `sglang` | anthropic | `thinking.display` | `summarized`, `omitted` |
+| `sglang` | anthropic | `output_config.effort` | `minimal` … `max` |
+| `sglang` | openai | `reasoning_effort` (strings only) | `none` … `max` |
+
+Structural fields (roles, content-block types such as Claude Code's `tool_addition`,
+`thinking.type`, `tool_choice`) get no rule: dropping them would change the answer, so
+the engine's own 400 stands — Claude Code already strips and retries on the
+`tool_addition` one.
+
+`service.requestProfileEnforce: false` (the default) only logs
+`request profile "<p>" would drop [...]`, so a profile can be watched on live traffic
+before it changes a request. When the deployed SGLang version moves, re-check the sets
+against its `entrypoints/{anthropic,openai}/protocol.py`.
+
 ## Shared rules
 
 All translations above follow the same contract:
@@ -90,14 +121,14 @@ config and no augmentation is needed.
 
 ## Where it runs
 
-Both translations run inside `PrepareHTTPRequest`
+The translations run inside `PrepareHTTPRequest`
 (`inference/internal/ctrl/proxy.go`), after model validation has stamped the resolved
 model id, and before the operator strip/inject steps. Full chatbot rewrite order:
 
 ```
 EnsureStreamOptions → RewriteLoRARequest → ValidateModelAllowlist / EnforceConfiguredModel
   → enforceRequestFormat → TranslateMaxTokens → TranslateReasoning
-  → StripBodyFields → InjectBodyFields → forward upstream
+  → ApplyRequestProfile → StripBodyFields → InjectBodyFields → forward upstream
 ```
 
 ## Adding a new translation
