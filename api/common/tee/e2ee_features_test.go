@@ -2,8 +2,11 @@ package tee
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/0glabs/0g-serving-broker/common/log"
 )
 
 // The features ride in the quote reply as a top-level member, and nothing the
@@ -41,5 +44,36 @@ func TestWithE2EEFeaturesEdges(t *testing.T) {
 		if _, err := withE2EEFeatures(bad, []string{"resp-bind"}); err == nil {
 			t.Errorf("%s: accepted", bad)
 		}
+	}
+}
+
+// warnRecorder is a logger that records Warnf calls.
+type warnRecorder struct {
+	log.Logger
+	warns []string
+}
+
+func (w *warnRecorder) Warnf(format string, args ...interface{}) {
+	w.warns = append(w.warns, fmt.Sprintf(format, args...))
+}
+
+// A reply the features cannot be added to is served unchanged, with a warning:
+// an advertisement must never be why SyncQuote fails and the server does not
+// start.
+func TestAdvertiseE2EEFeaturesDegradesInsteadOfFailing(t *testing.T) {
+	rec := &warnRecorder{Logger: testLogger(t)}
+	s := &TeeService{logger: rec, E2EEFeatures: []string{"resp-bind"}}
+
+	for _, quote := range []string{`not json`, `{"e2ee_features":["other"]}`} {
+		if got := s.advertiseE2EEFeatures(quote); got != quote {
+			t.Errorf("%s: served %q, want the reply unchanged", quote, got)
+		}
+	}
+	if len(rec.warns) != 2 {
+		t.Fatalf("warnings = %v, want one per failed reply", rec.warns)
+	}
+
+	if got := s.advertiseE2EEFeatures(`{"quote":"00"}`); !strings.Contains(got, `"e2ee_features":["resp-bind"]`) {
+		t.Fatalf("a well-formed reply was not advertised on: %s", got)
 	}
 }
