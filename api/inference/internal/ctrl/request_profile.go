@@ -87,7 +87,8 @@ func (c *Ctrl) ApplyRequestProfile(body []byte, profile, surface, model string, 
 			continue
 		}
 		if r.numeric {
-			if _, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil {
+			// Pydantic also takes underscores Go's parser does not ("0._5").
+			if _, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil || strings.ContainsRune(v, '_') {
 				continue
 			}
 		}
