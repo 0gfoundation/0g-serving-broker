@@ -1,6 +1,7 @@
 package ctrl
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -127,5 +128,61 @@ func TestStreamFrameSealer_Bound(t *testing.T) {
 	}
 	if _, err := base.OpenFrame(frames[0]); err == nil {
 		t.Fatal("a bound stream opened in base mode")
+	}
+}
+
+// Speech is materialized back into multipart for the upstream (SPEC §5.3), so the
+// binding must come out before that happens, or it would ride to the upstream as
+// a form field. The bound request then gets a bound response.
+func TestSealedSpeech_ResponseBinding(t *testing.T) {
+	f := speechFixture(t)
+	req, err := wire.AttachResponseBind(wire.ProfileSpeech, wire.Request{
+		"model":           mustRaw(t, "whisper-large-v3"),
+		"response_format": mustRaw(t, "json"),
+		"file_base64":     mustRaw(t, base64.StdEncoding.EncodeToString([]byte(speechAudio))),
+	}, f.clientEphSk)
+	if err != nil {
+		t.Fatalf("AttachResponseBind: %v", err)
+	}
+	sealed, err := wire.SealRequestFor(wire.ProfileSpeech, f.encPub, req, nil, f.signerAddr, f.clientEphPub)
+	if err != nil {
+		t.Fatalf("SealRequestFor: %v", err)
+	}
+	body, err := json.Marshal(sealed)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := speechCtx()
+	out, err := unsealOn(f.c, ctx, body)
+	if err != nil {
+		t.Fatalf("MaybeUnsealRequest: %v", err)
+	}
+	audio, _, fields := readForm(t, ctx.Request.Header.Get("Content-Type"), out)
+	if string(audio) != speechAudio {
+		t.Errorf("audio = %q", audio)
+	}
+	if v, ok := fields["_bind"]; ok {
+		t.Fatalf("_bind reached the upstream as a form field: %v", v)
+	}
+	if e2eeRespBind(ctx) == nil {
+		t.Fatal("the binding was not kept for the response")
+	}
+
+	resp := []byte(`{"model":"whisper-large-v3","usage":{"type":"duration","seconds":1.5},"text":"the transcript"}`)
+	sealedResp, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, resp)
+	if err != nil || !isSealed {
+		t.Fatalf("maybeSealNonStreamResponse: sealed=%v err=%v", isSealed, err)
+	}
+	var frame wire.Response
+	if err := json.Unmarshal(sealedResp, &frame); err != nil {
+		t.Fatal(err)
+	}
+	opened, err := wire.OpenBoundResponseFor(wire.ProfileSpeech, f.clientEphSk, frame)
+	if err != nil {
+		t.Fatalf("OpenBoundResponseFor: %v", err)
+	}
+	if string(opened["text"]) != `"the transcript"` {
+		t.Errorf("text = %s", opened["text"])
 	}
 }

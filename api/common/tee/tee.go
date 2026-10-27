@@ -136,7 +136,8 @@ type TeeService struct {
 	KeyID         []byte // SHA-256(enc_pub)[0:8] (§4.3)
 
 	// E2EEFeatures are the 0g-pc protocol features this process implements,
-	// published as `e2ee_features` in every quote reply SyncQuote builds. A gateway
+	// published as `e2ee_features` in the §4.2 quote reply (GET /quote?legacy=false)
+	// SyncQuote builds. A gateway
 	// reads them from the quote at the provider's on-chain URL to decide what it
 	// may ask of this enclave — e.g. "resp-bind" (0g-pc SPEC §7.6), without which
 	// it must not attach `_bind`. Set before SyncQuote; empty publishes nothing.
@@ -213,10 +214,6 @@ func (s *TeeService) SyncQuote(ctx context.Context, nvQuote bool) error {
 	if err != nil {
 		return errors.Wrap(err, "tdx quote (legacy)")
 	}
-	// Before signing, so the signature covers the advertised features too.
-	if s.Quote, err = withE2EEFeatures(s.Quote, s.E2EEFeatures); err != nil {
-		return errors.Wrap(err, "tdx quote (legacy)")
-	}
 	// Signed here, once, because this string is what every later fetch returns. A
 	// failure leaves the signature nil and the quote still served: every field that
 	// carries its own proof keeps verifying, and refusing to attest at all over an
@@ -241,6 +238,11 @@ func (s *TeeService) SyncQuote(ctx context.Context, nvQuote bool) error {
 		if err != nil {
 			return errors.Wrap(err, "tdx quote (§4.2)")
 		}
+		// Only on the §4.2 quote, the one a gateway that can use the features reads
+		// (they need the enc key it binds), and before signing so the signature
+		// covers them. The legacy reply stays byte-for-byte what it was for the
+		// clients that predate both; and with the §4.2 quote switched off the
+		// fallback advertises nothing, which is the safe answer.
 		if s.QuoteV2, err = withE2EEFeatures(s.QuoteV2, s.E2EEFeatures); err != nil {
 			return errors.Wrap(err, "tdx quote (§4.2)")
 		}
