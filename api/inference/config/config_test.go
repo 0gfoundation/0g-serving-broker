@@ -4485,3 +4485,64 @@ func TestModelInfo_Validate_MaxInputBytes(t *testing.T) {
 		t.Fatalf("unset max_input_bytes must be omitted: %s", b)
 	}
 }
+
+func TestLoadConfig_RequestProfile(t *testing.T) {
+	const head = `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  model: "glm-5.3"
+  providerType: "centralized"
+  providerIdentity: "self"
+  verifiability: "TeeML"
+`
+	load := func(body string) (*Config, error) {
+		t.Helper()
+		t.Setenv("CONFIG_FILE", writeTestConfig(t, head+body))
+		cfg := &Config{}
+		return cfg, loadConfig(cfg)
+	}
+
+	cfg, err := load(`  type: "chatbot"
+  requestProfile: "sglang"
+  requestProfileEnforce: true
+  modelPricing:
+    - model: "glm-5.3"
+      inputPrice: "10"
+      outputPrice: "30"
+    - model: "other"
+      inputPrice: "10"
+      outputPrice: "30"
+      requestProfile: "sglang"
+`)
+	if err != nil {
+		t.Fatalf("valid requestProfile should load, got: %v", err)
+	}
+	if !cfg.Service.RequestProfileEnforce || cfg.Service.RequestProfileFor("glm-5.3", "") != RequestProfileSGLang || cfg.Service.RequestProfileFor("other", "") != RequestProfileSGLang {
+		t.Errorf("requestProfile not resolved: %+v", cfg.Service)
+	}
+
+	for name, body := range map[string]string{
+		"unknown profile": `  type: "chatbot"
+  inputPrice: "10"
+  outputPrice: "30"
+  requestProfile: "vllm"
+`,
+		"unknown per-model profile": `  type: "chatbot"
+  modelPricing:
+    - model: "glm-5.3"
+      inputPrice: "10"
+      outputPrice: "30"
+      requestProfile: "SGLang"
+`,
+		"non-chatbot": `  type: "text-to-image"
+  inputPrice: "10"
+  outputPrice: "30"
+  requestProfile: "sglang"
+`,
+	} {
+		if _, err := load(body); err == nil || !strings.Contains(err.Error(), "requestProfile") {
+			t.Errorf("%s: want a requestProfile load error, got %v", name, err)
+		}
+	}
+}

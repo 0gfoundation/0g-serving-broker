@@ -750,6 +750,24 @@ type Service struct {
 	// others at load.
 	StripBodyFields []string `yaml:"stripBodyFields"`
 
+	// RequestProfile names the upstream engine whose request schema chat requests
+	// are normalized against before forwarding (only "sglang" today; see
+	// ctrl/request_profile.go for the rules). A newer client — Claude Code sending
+	// thinking.display "updates", say — can carry a value the engine's schema
+	// does not list yet, and the engine then 400s the whole request. The profile
+	// drops such a field when the upstream's default is a valid reading of the
+	// request without it, the way OpenRouter providers "ignore unknown
+	// parameters"; structural fields are never touched. Unlike stripBodyFields it
+	// acts on values, not names, so a field is removed only when its value is one
+	// the engine rejects. A per-model requestProfile overrides this one. Empty
+	// means off. Only supported for the chatbot service type.
+	RequestProfile string `yaml:"requestProfile"`
+
+	// RequestProfileEnforce makes requestProfile drop what it finds. While false
+	// the broker only logs what it would drop ("request profile ... would drop"),
+	// so a profile can be watched on live traffic before it changes any request.
+	RequestProfileEnforce bool `yaml:"requestProfileEnforce"`
+
 	// EnforceMaxCompletionTokens makes the advertised modelInfo.maxCompletionTokens
 	// binding instead of decorative.
 	//
@@ -2191,6 +2209,31 @@ func normalizeInjectBodyFields(fieldPath string, fields map[string]interface{}) 
 	return normalized, nil
 }
 
+// RequestProfileSGLang selects the SGLang request profile (see Service.RequestProfile).
+const RequestProfileSGLang = "sglang"
+
+func validateRequestProfile(fieldPath, profile, serviceType string) error {
+	if serviceType != constant.ServiceTypeChatbot {
+		return fmt.Errorf("invalid config: %s is only supported for service type '%s', got '%s'", fieldPath, constant.ServiceTypeChatbot, serviceType)
+	}
+	if profile != RequestProfileSGLang {
+		return fmt.Errorf("invalid config: %s %q is not a known request profile (known: %s)", fieldPath, profile, RequestProfileSGLang)
+	}
+	return nil
+}
+
+// RequestProfileFor returns the request profile for a request resolved to model
+// via identity: the model entry's own requestProfile when set, else the
+// service-level one. "" means no profile.
+func (s *Service) RequestProfileFor(model, identity string) string {
+	if model != "" {
+		if e := s.GetModelPricingFor(model, identity); e != nil && e.RequestProfile != "" {
+			return e.RequestProfile
+		}
+	}
+	return s.RequestProfile
+}
+
 // normalizeStripBodyFields trims and de-duplicates a stripBodyFields list and
 // rejects broker-critical keys, reusing the same protected denylist as
 // injectBodyFields — stripping model/messages/stream/stream_options/
@@ -3283,6 +3326,12 @@ func applyAndValidateWith(cfg *Config, raw map[string]interface{}, overrides fun
 			return err
 		}
 		cfg.Service.StripBodyFields = normalized
+	}
+
+	if cfg.Service.RequestProfile != "" {
+		if err := validateRequestProfile("service.requestProfile", cfg.Service.RequestProfile, cfg.Service.Type); err != nil {
+			return err
+		}
 	}
 
 	// The output-token clamp runs on the chatbot forward path only (see

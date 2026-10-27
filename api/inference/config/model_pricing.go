@@ -172,6 +172,11 @@ type ModelPricingEntry struct {
 	// service-level list applies unchanged.
 	StripBodyFields []string `yaml:"stripBodyFields"`
 
+	// RequestProfile is the per-model counterpart of service.requestProfile and
+	// overrides it for requests resolved to THIS model, so a multi-upstream
+	// service can normalize only the entry its self-hosted engine serves.
+	RequestProfile string `yaml:"requestProfile"`
+
 	// AdditionalSecret is the per-model counterpart of service.additionalSecret:
 	// outbound header name/value pairs (typically the upstream API key, e.g.
 	// Authorization: "Bearer sk-...") attached to requests resolved to THIS model.
@@ -1775,6 +1780,11 @@ func validateModelPricingEntry(i int, entry *ModelPricingEntry, serviceType stri
 			return err
 		}
 		entry.StripBodyFields = normalized
+	}
+	if entry.RequestProfile != "" {
+		if err := validateRequestProfile(fmt.Sprintf("service.modelPricing[%d].requestProfile", i), entry.RequestProfile, serviceType); err != nil {
+			return err
+		}
 	}
 	// The wildcard catch-all has no concrete id to rewrite to — ValidateModelAllowlist
 	// forwards a wildcard-served model verbatim — so an upstreamModel on the "*"
