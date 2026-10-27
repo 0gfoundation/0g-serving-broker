@@ -109,6 +109,11 @@ const (
 	// the non-streaming call site was simply wrong for it, and being wrong here is
 	// silent (identical wire format, plausible frames, content in the clear).
 	CtxKeyE2EEProfile = "e2eeProfile"
+	// CtxKeyE2EERespBind holds the response-binding value ([]byte, 0g-pc SPEC
+	// §7.6) the sealed request carried as `_bind`, taken out of it at unseal time.
+	// Present only when the client asked for a bound response; the response path
+	// then MUST seal in mode_psk keyed by it, since the client opens nothing else.
+	CtxKeyE2EERespBind = "e2eeRespBind"
 )
 
 // e2eeResponseUnboundFields are declared in every sealed response's
@@ -445,6 +450,13 @@ func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, targetPath string, reqBody [
 	if err != nil {
 		return nil, err
 	}
+	// The response binding (SPEC §7.6): `_bind` is protocol metadata, not a model
+	// parameter, so it comes out before the request is re-encoded or materialized
+	// for the upstream, and the response is sealed with it.
+	respBind, reconstructed, err := wire.TakeResponseBind(profile, reconstructed)
+	if err != nil {
+		return nil, fmt.Errorf("take the response binding: %w", err)
+	}
 
 	plaintext, err := json.Marshal(reconstructed)
 	if err != nil {
@@ -477,7 +489,10 @@ func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, targetPath string, reqBody [
 	ctx.Set(CtxKeyE2EEProfile, profile)
 	ctx.Set(CtxKeyE2EEClientEphPub, clientEphPub)
 	ctx.Set(CtxKeyE2EEReqBindHash, reqBindHash)
-	c.logger.Debugf("E2EE: unsealed request (sealed_fields=%v, key_id=%s)", e2ee.SealedFields, e2ee.KeyID)
+	if respBind != nil {
+		ctx.Set(CtxKeyE2EERespBind, respBind)
+	}
+	c.logger.Debugf("E2EE: unsealed request (sealed_fields=%v, key_id=%s, bound=%t)", e2ee.SealedFields, e2ee.KeyID, respBind != nil)
 	return forward, nil
 }
 
@@ -668,6 +683,29 @@ func e2eeReqBindHash(ctx *gin.Context) ([32]byte, bool) {
 	return h, ok
 }
 
+// e2eeRespBind returns the response-binding value the sealed request carried
+// (SPEC §7.6), or nil when it carried none.
+func e2eeRespBind(ctx *gin.Context) []byte {
+	v, ok := ctx.Get(CtxKeyE2EERespBind)
+	if !ok {
+		return nil
+	}
+	b, _ := v.([]byte)
+	return b
+}
+
+// newE2EEResponseSealer sets up the response context for a sealed request: in
+// mode_psk keyed by the request's binding when it carried one (SPEC §7.6), in
+// base mode otherwise. Every response sealer goes through here, so no path can
+// answer a bound request in base mode — which the client would refuse anyway,
+// but only after the upstream call was paid for.
+func newE2EEResponseSealer(ctx *gin.Context, profile wire.Profile, ephPub pccrypto.PublicKey) (*wire.ResponseSealer, error) {
+	if bind := e2eeRespBind(ctx); bind != nil {
+		return wire.NewBoundResponseSealerFor(profile, ephPub, bind, e2eeResponseUnboundFields...)
+	}
+	return wire.NewResponseSealerFor(profile, ephPub, e2eeResponseUnboundFields...)
+}
+
 // e2eeProfile returns the wire profile the request was opened under, stashed at
 // unseal time. Its absence on a sealed request means the response path ran
 // without a prior unseal, which the seal paths treat as fail-closed rather than
@@ -726,7 +764,11 @@ func (c *Ctrl) maybeSealNonStreamResponse(ctx *gin.Context, body []byte) (out []
 	}
 	// Declare model + x_0g_trace unbound so the router may rewrite/inject them
 	// downstream (SPEC §5.2).
-	frame, err := wire.SealResponseFor(profile, ephPub, resp, sealedFields, e2eeResponseUnboundFields...)
+	rs, err := newE2EEResponseSealer(ctx, profile, ephPub)
+	if err != nil {
+		return nil, true, respBindHash, fmt.Errorf("seal response: %w", err)
+	}
+	frame, err := rs.SealFrame(resp, sealedFields, true)
 	if err != nil {
 		return nil, true, respBindHash, fmt.Errorf("seal response: %w", err)
 	}
@@ -795,7 +837,7 @@ func (c *Ctrl) newResponseFrameSealer(ctx *gin.Context) (*responseFrameSealer, e
 	// Declare model + x_0g_trace unbound on every frame so the router may
 	// rewrite/inject them into the sealed stream downstream (SPEC §5.2). The whole
 	// stream shares one context, so the unbound set is fixed once here.
-	s, err := wire.NewResponseSealerFor(profile, ephPub, e2eeResponseUnboundFields...)
+	s, err := newE2EEResponseSealer(ctx, profile, ephPub)
 	if err != nil {
 		return nil, fmt.Errorf("set up response sealer: %w", err)
 	}

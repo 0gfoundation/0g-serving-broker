@@ -33,7 +33,8 @@ type SealedAsyncRequest struct {
 	Forward []byte
 	// ClientEphPub is the key the result is sealed to.
 	ClientEphPub pccrypto.PublicKey
-	// Bind is the request's `_bind`, echoed sealed in the result (SPEC §7.5.1).
+	// Bind is the request's `_bind`, the PSK the result is sealed with (SPEC
+	// §7.5.1, §7.6).
 	Bind []byte
 	// ReqBindHash is the §8 request binding of the sealed envelope.
 	ReqBindHash [32]byte
@@ -121,7 +122,8 @@ type sealedAsyncResult struct {
 }
 
 // sealAsyncImageResult builds the completed poll response for a sealed job and
-// seals it (SPEC §7.5.2): `data` (the provider's image JSON) and `_bind` sealed;
+// seals it (SPEC §7.5.2): `data` (the provider's image JSON) sealed, in mode_psk
+// keyed by the request's `_bind`;
 // jobId, status, createdAt, updatedAt and usage.output_images bound cleartext.
 // Built once; every poll returns it.
 func sealAsyncImageResult(req *SealedAsyncRequest, jobID string, createdAt, completedAt time.Time, providerResp []byte, outputImages int) (*sealedAsyncResult, error) {
@@ -216,8 +218,8 @@ func AssembleSealedAsyncFrame(stored, ciphertext []byte) ([]byte, error) {
 // centralized provider it carries the routing proof too (see signChatResponse).
 //
 // Returns "" when signing fails: like the plaintext async path, a missing
-// signature is not fatal. The receiver authenticates a sealed result by its
-// `_bind` (SPEC §7.5.1), not by §8.
+// signature is not fatal. The receiver authenticates a sealed result by the
+// binding its context is keyed with (SPEC §7.5.1), not by §8.
 func (c *Ctrl) signSealedAsyncResult(jobID string, req *SealedAsyncRequest, res *sealedAsyncResult, fingerprint, providerIdentity string) string {
 	text := proof.SignedTextE2EEFromHashes(req.ReqBindHash, res.respBindHash)
 	var buildRouting func() *RoutingProof

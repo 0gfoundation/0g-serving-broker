@@ -10,6 +10,10 @@ github.com/0gfoundation/0g-pc-e2ee/protocol v0.0.0-20260917035702-126cacea9df7 h
 github.com/0gfoundation/0g-pc-e2ee/protocol v0.0.0-20260917035702-126cacea9df7/go.mod h1:5pJJr/FHG05oVbwDF0F9RsIOT2REcrzz0cyyV2QmMjw=
 github.com/0gfoundation/0g-pc-e2ee/protocol v0.0.0-20261014061422-e320272f41c7 h1:cdl9BG60oRxOak9LiWq0bdSEPKpRz1Hgw/pNUCuXotY=
 github.com/0gfoundation/0g-pc-e2ee/protocol v0.0.0-20261014061422-e320272f41c7/go.mod h1:5pJJr/FHG05oVbwDF0F9RsIOT2REcrzz0cyyV2QmMjw=
+github.com/0gfoundation/0g-pc-e2ee/protocol v0.0.0-20261027051714-cfe92823ed3c h1:0T2J5077nN/rfDT3ZeBBh9PRLnxgitWYu89K1IKGypI=
+github.com/0gfoundation/0g-pc-e2ee/protocol v0.0.0-20261027051714-cfe92823ed3c/go.mod h1:8Osmdjl9fJDhLr4Tf8yVmVgC02SXly7VzZBzeVuaHgs=
+github.com/0gfoundation/0g-pc-e2ee/protocol v0.0.0-20261027052053-44033a2166e7 h1:GB77/sWkqQeKryZ6Ao/awXbhH86PWUuvqfuHi/GoMKY=
+github.com/0gfoundation/0g-pc-e2ee/protocol v0.0.0-20261027052053-44033a2166e7/go.mod h1:8Osmdjl9fJDhLr4Tf8yVmVgC02SXly7VzZBzeVuaHgs=
 github.com/0gfoundation/0g-storage-client v1.2.2 h1:sBcilMSEDw5bc40j/tFKaX6TQCrF17bhZtdZ50rkADg=
 github.com/0gfoundation/0g-storage-client v1.2.2/go.mod h1:1tDzgn0q/bTEmAfkIHpWjvjj9T6P+xz/Ezej6XrD/MY=
 github.com/AdaLogics/go-fuzz-headers v0.0.0-20240806141605-e8a1dd7889d6 h1:He8afgbRMd7mFxO99hRNu+6tazq8nFF9lIwo9JFroBk=
