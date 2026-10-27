@@ -8,6 +8,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/0gfoundation/0g-pc-e2ee/protocol/wire"
+
 	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/common/tee"
 
@@ -51,6 +53,10 @@ func Main() {
 	if err != nil {
 		panic(err)
 	}
+
+	// Advertised in the quote reply, which is where a gateway learns it may bind
+	// responses to their requests (0g-pc SPEC §7.6, see ctrl.MaybeUnsealRequest).
+	teeService.E2EEFeatures = []string{wire.FeatureResponseBind}
 
 	ctx := context.Background()
 	if err := teeService.SyncQuote(ctx, config.NvGPU); err != nil {

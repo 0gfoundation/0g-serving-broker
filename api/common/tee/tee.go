@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -133,6 +134,13 @@ type TeeService struct {
 	EncPrivateKey pccrypto.PrivateKey
 	EncPublicKey  pccrypto.PublicKey
 	KeyID         []byte // SHA-256(enc_pub)[0:8] (§4.3)
+
+	// E2EEFeatures are the 0g-pc protocol features this process implements,
+	// published as `e2ee_features` in every quote reply SyncQuote builds. A gateway
+	// reads them from the quote at the provider's on-chain URL to decide what it
+	// may ask of this enclave — e.g. "resp-bind" (0g-pc SPEC §7.6), without which
+	// it must not attach `_bind`. Set before SyncQuote; empty publishes nothing.
+	E2EEFeatures []string
 }
 
 func NewTeeService(clientType ClientType, logger log.Logger) (*TeeService, error) {
@@ -205,6 +213,10 @@ func (s *TeeService) SyncQuote(ctx context.Context, nvQuote bool) error {
 	if err != nil {
 		return errors.Wrap(err, "tdx quote (legacy)")
 	}
+	// Before signing, so the signature covers the advertised features too.
+	if s.Quote, err = withE2EEFeatures(s.Quote, s.E2EEFeatures); err != nil {
+		return errors.Wrap(err, "tdx quote (legacy)")
+	}
 	// Signed here, once, because this string is what every later fetch returns. A
 	// failure leaves the signature nil and the quote still served: every field that
 	// carries its own proof keeps verifying, and refusing to attest at all over an
@@ -227,6 +239,9 @@ func (s *TeeService) SyncQuote(ctx context.Context, nvQuote bool) error {
 		}
 		s.QuoteV2, err = client.TdxQuote(ctx, reportData, nvQuote)
 		if err != nil {
+			return errors.Wrap(err, "tdx quote (§4.2)")
+		}
+		if s.QuoteV2, err = withE2EEFeatures(s.QuoteV2, s.E2EEFeatures); err != nil {
 			return errors.Wrap(err, "tdx quote (§4.2)")
 		}
 		if s.QuoteV2Sig, err = s.Sign(crypto.Keccak256([]byte(s.QuoteV2))); err != nil {
@@ -534,4 +549,33 @@ func verifyChainIsLocal(ctx context.Context, url string) error {
 			url, observed, hardhatChainID)
 	}
 	return nil
+}
+
+// withE2EEFeatures adds `"e2ee_features": features` to a quote reply, a JSON
+// object every TappdClient produces. It splices the member in before the closing
+// brace rather than re-marshaling, so every byte the backend produced — the
+// quote, the event log, the app compose a client hashes — is served exactly as
+// before. No features leaves the reply untouched.
+func withE2EEFeatures(quote string, features []string) (string, error) {
+	if len(features) == 0 {
+		return quote, nil
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(quote), &obj); err != nil || obj == nil {
+		return "", fmt.Errorf("quote reply is not a JSON object, cannot add e2ee_features")
+	}
+	if _, ok := obj["e2ee_features"]; ok {
+		return "", fmt.Errorf("quote reply already carries e2ee_features")
+	}
+	member, err := json.Marshal(features)
+	if err != nil {
+		return "", err
+	}
+	body := strings.TrimRight(quote, " \t\r\n")
+	body = strings.TrimSuffix(body, "}")
+	sep := ","
+	if len(obj) == 0 {
+		sep = ""
+	}
+	return body + sep + `"e2ee_features":` + string(member) + "}", nil
 }

@@ -310,7 +310,7 @@ func TestUnsealAsyncRequest(t *testing.T) {
 		if err != nil {
 			t.Fatalf("err: %v", err)
 		}
-		want, _ := wire.DeriveAsyncBind(f.clientEphSk)
+		want, _ := wire.DeriveResponseBind(f.clientEphSk)
 		if !bytes.Equal(got.Bind, want) {
 			t.Error("bind is not the request's")
 		}
