@@ -5,6 +5,7 @@ package ctrl
 import (
 	"context"
 	"fmt"
+	"os"
 	"testing"
 	"time"
 
@@ -26,7 +27,11 @@ func setupReconcileCtrl(t *testing.T) *Ctrl {
 	t.Helper()
 	ctx := context.Background()
 
-	container, err := tcmysql.Run(ctx, "mysql:8.0",
+	image := os.Getenv("TEST_MYSQL_IMAGE") // see db.setupTestDB
+	if image == "" {
+		image = "mysql:8.0"
+	}
+	container, err := tcmysql.Run(ctx, image,
 		tcmysql.WithDatabase("testdb"),
 		tcmysql.WithUsername("test"),
 		tcmysql.WithPassword("test"),

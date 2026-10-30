@@ -9,23 +9,26 @@ import (
 	"math/big"
 	"net/http"
 	"strings"
-	"time"
 
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
+	"github.com/0glabs/0g-serving-broker/inference/internal/db"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 )
 
 // SPML payout (docs/spml-design §4 steps 9-10): the broker owns the money —
-// after each successful on-chain settlement it folds every settled request's
-// fee into its serving node's cumulative and sends the amounts to the assay
-// (POST /v1/payout/invoice). The assay validates each covered request against
-// ITS OWN ledger and answers with signed PayoutVouchers, which it also pushes
-// to the GPUs; the broker only needs the ok/fail per node.
+// each successful on-chain settlement folds every settled request's fee into
+// its serving node's cumulative, and the broker then sends the amounts to the
+// assay (POST /v1/payout/invoice). The assay validates each covered request
+// against ITS OWN ledger and answers with signed PayoutVouchers, which it also
+// pushes to the GPUs; the broker only needs the ok/fail per node.
 //
-// Fault model: cumulatives and pending covered hashes are persisted BEFORE the
-// invoice attempt, because settled request rows are deleted right after
-// settlement — a failed invoice must not lose fees. Retried on the next
-// settlement cycle; the assay's invoice endpoint is idempotent per epoch.
+// Fault model: the accrual happens in the same DB transaction that deletes
+// the settled request rows (db.deleteSettledTx), on both delete paths — the
+// broker's own round and the event process's on-chain reconciliation. So a
+// crash between the receipt and the accrual, or a failed write, can never lose
+// a fee: the rows survive until they are accrued. The invoice is sent after;
+// a failed invoice is retried on the next settlement cycle (the assay's
+// invoice endpoint is idempotent per epoch).
 
 type invoiceItem struct {
 	NodeID     string   `json:"node_id"`
@@ -57,127 +60,19 @@ type invoiceResponse struct {
 	Cut     *invoiceResult  `json:"cut"`
 }
 
-// payableFee decides whether a settled request's fee goes onto its node's
-// cumulative. nil fee = not invoiced, with the reason. Three cases:
-//   - unparseable fee: nothing sensible to add;
-//   - no node attribution (header lost + settlement check didn't fill it):
-//     nobody can be invoiced for it;
-//   - verdict REJECT: settled (REJECT is advisory until the LDD thresholds
-//     are calibrated) but NOT payable — the assay's ledger refuses a REJECT
-//     hash, and refuses the whole invoice with it. Folding the fee in would
-//     wedge the node's payouts for good: every later invoice carries the
-//     hash and is refused (seen live 2026-09-10).
-//
-// In all three the money reaches the pool and stays there — the design's
-// loss ceiling. Pure, so the rule is testable without a database.
-func payableFee(req *model.Request) (*big.Int, string) {
-	fee, ok := new(big.Int).SetString(req.Fee, 10)
-	if !ok {
-		return nil, fmt.Sprintf("unparseable fee %q", req.Fee)
-	}
-	if req.Node == "" {
-		return nil, fmt.Sprintf("no node attribution; fee %s stays unattributed in the pool", req.Fee)
-	}
-	if req.Verdict == constant.AssayVerdictReject {
-		return nil, fmt.Sprintf("REJECT'd by the assay on node %s; fee %s stays in the pool", req.Node, req.Fee)
-	}
-	return fee, ""
-}
-
-// splitFee divides one settled fee between the serving node and the assay's
-// cut. Per request, in integer basis points, so the assay can recompute the
-// node's share exactly from its own token counts and the on-chain price. The
-// two parts always sum to the fee: the pool holds exactly the fee, so a cut
-// added on top of a full node share could never be funded (seen live
-// 2026-09-11: 110% invoiced, refused by the assay's deposited check).
-func splitFee(fee *big.Int, cutBps int64) (node, cut *big.Int) {
-	cut = new(big.Int).Mul(fee, big.NewInt(cutBps))
-	cut.Div(cut, big.NewInt(10000))
-	node = new(big.Int).Sub(fee, cut)
-	return node, cut
-}
-
-// settleAssayPayout runs after settlement outcomes are known and before the
-// settled request rows are deleted. Never fails the settlement — payout
-// problems are logged and retried next cycle.
-func (c *Ctrl) settleAssayPayout(ctx context.Context, outcomes []*SettlementOutcome) {
+// settleAssayPayout runs after a round's settled rows were deleted (and their
+// fees accrued): it invoices the assay for whatever is not yet acknowledged.
+// Never fails the settlement — invoice problems are logged and retried next
+// cycle.
+func (c *Ctrl) settleAssayPayout(ctx context.Context) {
 	if !c.assayPayoutEnabled {
 		return
 	}
-
-	// 1. Per-node sums of the newly settled fees, net of the assay's cut.
-	sums := map[string]*big.Int{}
-	covered := map[string][]string{}
-	cutTotal := big.NewInt(0)
-	for _, outcome := range outcomes {
-		if outcome.Status != SettlementSuccess && outcome.Status != SettlementPartial {
-			continue
-		}
-		for _, req := range outcome.SettledRequests {
-			fee, why := payableFee(req)
-			if fee == nil {
-				c.logger.Warnf("Payout: settled request %s not invoiced: %s", req.RequestHash, why)
-				continue
-			}
-			share, cut := splitFee(fee, c.assayVerifierCutBps)
-			if sums[req.Node] == nil {
-				sums[req.Node] = big.NewInt(0)
-			}
-			sums[req.Node].Add(sums[req.Node], share)
-			covered[req.Node] = append(covered[req.Node], req.RequestHash)
-			cutTotal.Add(cutTotal, cut)
-		}
-	}
-
-	// 2. Fold into persisted cumulatives (before invoicing — see fault model).
-	epoch := time.Now().Unix()
 	states, err := c.loadPayoutStates()
 	if err != nil {
-		c.logger.Errorf("Payout: cannot load payout state, skipping this cycle: %v", err)
+		c.logger.Errorf("Payout: cannot load payout state, skipping this cycle's invoice: %v", err)
 		return
 	}
-	for node, sum := range sums {
-		st := states[node]
-		cum, _ := new(big.Int).SetString(st.Cumulative, 10)
-		if cum == nil {
-			cum = big.NewInt(0)
-		}
-		cum.Add(cum, sum)
-		pending := decodeCovered(st.PendingCovered)
-		pending = append(pending, covered[node]...)
-		st.Node = node
-		st.Cumulative = cum.String()
-		st.Epoch = epoch
-		st.PendingCovered = encodeCovered(pending)
-		st.Invoiced = false
-		states[node] = st
-		if err := c.db.UpsertAssayPayout(st); err != nil {
-			c.logger.Errorf("Payout: failed to persist cumulative for node %s: %v", node, err)
-			return
-		}
-	}
-
-	// The verifier's cut: what splitFee took out of the node shares above.
-	// Computed here because pricing is the broker's authority; the contract's
-	// cut cap bounds it independently.
-	if cutTotal.Sign() > 0 {
-		st := states[model.VerifierCutNode]
-		cum, _ := new(big.Int).SetString(st.Cumulative, 10)
-		if cum == nil {
-			cum = big.NewInt(0)
-		}
-		cum.Add(cum, cutTotal)
-		st.Node = model.VerifierCutNode
-		st.Cumulative = cum.String()
-		st.Epoch = epoch
-		st.PendingCovered = encodeCovered(nil)
-		st.Invoiced = false
-		states[model.VerifierCutNode] = st
-		if err := c.db.UpsertAssayPayout(st); err != nil {
-			c.logger.Errorf("Payout: failed to persist verifier cut: %v", err)
-		}
-	}
-
 	c.invoiceAssay(ctx, states)
 }
 
@@ -216,7 +111,7 @@ func (c *Ctrl) invoiceAssay(ctx context.Context, states map[string]model.AssayPa
 		req.Invoices = append(req.Invoices, invoiceItem{
 			NodeID:     node,
 			Cumulative: st.Cumulative,
-			Covered:    decodeCovered(st.PendingCovered),
+			Covered:    coveredHashes(db.DecodeCovered(st.PendingCovered)),
 		})
 		if st.Epoch > req.Epoch {
 			req.Epoch = st.Epoch
@@ -238,45 +133,25 @@ func (c *Ctrl) invoiceAssay(ctx context.Context, states map[string]model.AssayPa
 			continue
 		}
 		if r.OK {
-			st.PendingCovered = encodeCovered(nil)
+			st.PendingCovered = db.EncodeCovered(nil)
 			st.Invoiced = true
 			if err := c.db.UpsertAssayPayout(st); err != nil {
 				c.logger.Errorf("Payout: failed to mark node %s invoiced: %v", r.NodeID, err)
 				continue
 			}
 			c.logger.Infof("Payout: voucher issued for node %s cumulative=%s epoch=%d", r.NodeID, st.Cumulative, req.Epoch)
-		} else if landed := alreadyCoveredHashes(r.Failures); len(landed) > 0 {
-			// The assay says some of these hashes are already covered by a
-			// voucher it issued: our previous invoice DID land, we just never
-			// saw the response. Re-sending them forever would deadlock this
-			// node's payouts — every later cycle appends new hashes to the
-			// same pending set and is refused for the old ones.
-			//
-			// Drop exactly what it says it already has and keep the rest. The
-			// cumulative is untouched, so the next invoice asks for
-			// (our cumulative) covering only the genuinely new hashes, and the
-			// assay's amount check reconciles: its delta against our
-			// cumulative is precisely those new hashes' fees.
-			remaining := removeHashes(decodeCovered(st.PendingCovered), landed)
-			st.PendingCovered = encodeCovered(remaining)
-			if len(remaining) == 0 {
-				// Every hash we were invoicing is already covered, and fees
-				// only ever arrive together with new hashes — so our
-				// cumulative is exactly what landed. Nothing left to ask for.
-				st.Invoiced = true
-				c.logger.Warnf("Payout: node %s was already fully invoiced at cumulative=%s (lost response); reconciled",
-					r.NodeID, st.Cumulative)
-			} else {
-				c.logger.Warnf("Payout: node %s had %d hash(es) already covered by an earlier voucher (lost response); dropping them, %d still to invoice",
-					r.NodeID, len(landed), len(remaining))
-			}
-			if err := c.db.UpsertAssayPayout(st); err != nil {
-				c.logger.Errorf("Payout: failed to reconcile node %s: %v", r.NodeID, err)
-			}
-		} else {
+			continue
+		}
+		next, note := reconcileRefusal(st, r.Failures)
+		if note == "" {
 			// A disagreement we cannot explain: leave everything pending so
 			// nothing is lost, and let an operator look.
 			c.logger.Errorf("Payout: assay REFUSED invoice for node %s: %v", r.NodeID, r.Failures)
+			continue
+		}
+		c.logger.Warnf("Payout: node %s: %s", r.NodeID, note)
+		if err := c.db.UpsertAssayPayout(next); err != nil {
+			c.logger.Errorf("Payout: failed to reconcile node %s: %v", r.NodeID, err)
 		}
 	}
 	if resp.Cut != nil && resp.Cut.OK && cutState.Node != "" {
@@ -287,35 +162,102 @@ func (c *Ctrl) invoiceAssay(ctx context.Context, states map[string]model.AssayPa
 	}
 }
 
-// alreadyCoveredHashes picks out the request hashes the assay says it has
-// already issued a voucher for. Its failures are formatted
-// "<hash>: already covered by an earlier voucher" (payout.py validate), so the
-// refusal itself carries the reconciliation data — no second round trip.
-func alreadyCoveredHashes(failures []string) []string {
+// reconcileRefusal acts on the two refusals the assay's per-hash failures
+// explain by themselves; anything else returns an empty note and the state
+// untouched. Pure, so the money rules are testable without a database.
+//
+//   - "already covered by an earlier voucher": our previous invoice DID land,
+//     we just never saw the response. Drop exactly those hashes and keep the
+//     cumulative — it is what landed. Re-sending them forever would deadlock
+//     the node: every later cycle appends new hashes to the same pending set
+//     and is refused for the old ones.
+//   - "not in my ledger": the assay has no record of the request (its bounded
+//     verdict store evicted it, or it was UNKNOWN at settlement and recorded
+//     before UNVERIFIED_LOST existed). It can never validate that hash, so the
+//     node would be wedged forever. Un-accrue it: drop the hash AND subtract
+//     its node share from the cumulative; the fee stays in the pool, the
+//     design's loss ceiling. An entry stored without its fee (pre-fee rows)
+//     cannot be un-accrued exactly and is left for an operator.
+//
+// With nothing left pending the cumulative is fully acknowledged, so the
+// node is marked invoiced and asks for nothing until new work accrues.
+func reconcileRefusal(st model.AssayPayout, failures []string) (model.AssayPayout, string) {
+	landed := failedHashes(failures, "already covered")
+	lost := failedHashes(failures, "not in my ledger")
+	if len(landed) == 0 && len(lost) == 0 {
+		return st, ""
+	}
+	cum, ok := new(big.Int).SetString(st.Cumulative, 10)
+	if !ok {
+		return st, ""
+	}
+	drop := make(map[string]bool, len(landed)+len(lost))
+	for _, h := range landed {
+		drop[h] = true
+	}
+	var unaccrued, unknownFee int
+	for _, h := range lost {
+		drop[h] = true
+	}
+	var remaining []db.CoveredEntry
+	for _, e := range db.DecodeCovered(st.PendingCovered) {
+		if !drop[e.Hash] {
+			remaining = append(remaining, e)
+			continue
+		}
+		if !contains(lost, e.Hash) {
+			continue // landed: money already counted on the assay's side
+		}
+		fee, ok := new(big.Int).SetString(e.Fee, 10)
+		if !ok || e.Fee == "" {
+			unknownFee++
+			remaining = append(remaining, e) // cannot un-accrue exactly; keep for an operator
+			continue
+		}
+		cum.Sub(cum, fee)
+		unaccrued++
+	}
+	st.Cumulative = cum.String()
+	st.PendingCovered = db.EncodeCovered(remaining)
+	if len(remaining) == 0 {
+		st.Invoiced = true
+	}
+	note := fmt.Sprintf("%d hash(es) already covered by an earlier voucher (lost response), %d un-accrued as lost by the assay, %d left pending",
+		len(landed), unaccrued, len(remaining))
+	if unknownFee > 0 {
+		note += fmt.Sprintf(" (%d lost hash(es) stored without a fee cannot be un-accrued — operator action needed)", unknownFee)
+	}
+	return st, note
+}
+
+// failedHashes picks out the request hashes whose failure text starts with
+// prefix. The assay's failures are formatted "<hash>: <reason>" (payout.py
+// validate), so the refusal itself carries the reconciliation data — no second
+// round trip.
+func failedHashes(failures []string, prefix string) []string {
 	var out []string
 	for _, f := range failures {
 		hash, rest, found := strings.Cut(f, ": ")
-		if found && strings.HasPrefix(rest, "already covered") && hash != "" {
+		if found && strings.HasPrefix(rest, prefix) && hash != "" {
 			out = append(out, hash)
 		}
 	}
 	return out
 }
 
-// removeHashes returns `all` without any element of `drop`, preserving order.
-func removeHashes(all, drop []string) []string {
-	if len(drop) == 0 {
-		return all
-	}
-	gone := make(map[string]struct{}, len(drop))
-	for _, h := range drop {
-		gone[h] = struct{}{}
-	}
-	out := make([]string, 0, len(all))
-	for _, h := range all {
-		if _, ok := gone[h]; !ok {
-			out = append(out, h)
+func contains(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
 		}
+	}
+	return false
+}
+
+func coveredHashes(entries []db.CoveredEntry) []string {
+	out := make([]string, len(entries))
+	for i, e := range entries {
+		out[i] = e.Hash
 	}
 	return out
 }
@@ -384,23 +326,4 @@ func (c *Ctrl) postInvoice(ctx context.Context, req invoiceRequest) (*invoiceRes
 		return nil, fmt.Errorf("bad invoice response: %w (%s)", err, raw)
 	}
 	return &resp, nil
-}
-
-func decodeCovered(s string) []string {
-	if s == "" {
-		return nil
-	}
-	var hashes []string
-	if err := json.Unmarshal([]byte(s), &hashes); err != nil {
-		return nil
-	}
-	return hashes
-}
-
-func encodeCovered(hashes []string) string {
-	if len(hashes) == 0 {
-		return "[]"
-	}
-	b, _ := json.Marshal(hashes)
-	return string(b)
 }

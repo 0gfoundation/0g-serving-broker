@@ -162,6 +162,10 @@ func (c *Ctrl) SettleFeesWithTEE(ctx context.Context) error {
 		c.logger.Errorf("Settlement skipped this round: %s", why)
 		return nil
 	}
+	// Once per round, on every exit path below (empty round, error, success): for spml
+	// this is the invoice retry, and it must not depend on the round having settled
+	// anything or on the round having succeeded.
+	defer c.providerHooks().afterSettlement(ctx)
 
 	// Clear expired skipUntil flags for both requests and users
 	if err := c.db.ClearExpiredSkipUntil(); err != nil {
@@ -227,9 +231,8 @@ func (c *Ctrl) SettleFeesWithTEE(ctx context.Context) error {
 			// Don't return immediately — always process outcomes for completed batches
 		}
 
-		c.providerHooks().afterSettlement(ctx, batch.Outcomes)
-
-		// Process outcomes (delete/skip requests) — runs even if execution had partial errors
+		// Process outcomes (delete/skip requests) — runs even if execution had partial errors.
+		// For SPML the delete also accrues the payout, in one transaction (db.deleteSettledTx).
 		c.processOutcomes(batch.Outcomes)
 
 		// Sync user balances from contract AFTER settlement execution.
@@ -663,7 +666,7 @@ func (c *Ctrl) processOutcomes(outcomes []*SettlementOutcome) {
 		switch outcome.Status {
 		case SettlementSuccess, SettlementPartial:
 			if len(outcome.SettledRequests) > 0 {
-				if err := c.deleteRequests(outcome.SettledRequests); err != nil {
+				if err := c.deleteRequests(outcome.SettledRequests, true); err != nil {
 					c.logger.Errorf("User %s: failed to delete %d settled requests: %v",
 						outcome.User.Hex(), len(outcome.SettledRequests), err)
 					continue
@@ -678,7 +681,7 @@ func (c *Ctrl) processOutcomes(outcomes []*SettlementOutcome) {
 			if err != nil {
 				c.logger.Infof("Error getting requests for permanent failure user %s: %v", outcome.User.Hex(), err)
 			} else if userReqs != nil {
-				if err := c.deleteRequests(userReqs.Requests); err != nil {
+				if err := c.deleteRequests(userReqs.Requests, false); err != nil {
 					c.logger.Errorf("User %s: failed to delete requests for permanent failure: %v",
 						outcome.User.Hex(), err)
 				} else {
@@ -797,9 +800,17 @@ func (c *Ctrl) getRequestHashes(requests []*model.Request) []string {
 	return hashes
 }
 
-func (c *Ctrl) deleteRequests(requests []*model.Request) error {
+// deleteRequests removes request rows. settled says the rows were paid for
+// on-chain: for an SPML provider their fees then accrue to the serving nodes'
+// payout cumulatives in the same transaction. A permanent-failure purge is not
+// settled and must not accrue.
+func (c *Ctrl) deleteRequests(requests []*model.Request, settled bool) error {
 	if len(requests) == 0 {
 		return nil
+	}
+	var payout *db.AssayPayoutOptions
+	if settled {
+		payout = c.assayPayoutOptions()
 	}
 
 	// Atomically accumulate stats and delete requests in a single transaction
@@ -817,6 +828,7 @@ func (c *Ctrl) deleteRequests(requests []*model.Request) error {
 		ServiceType:     c.Service.Type,
 		RecordPerWallet: c.userUsageStats.Enabled,
 		FallbackModel:   c.Service.ModelType,
+		AssayPayout:     payout,
 	}); err != nil {
 		c.logger.Errorf("CRITICAL: failed to accumulate stats and delete settled requests: %v", err)
 		return err
