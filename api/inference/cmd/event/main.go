@@ -93,7 +93,11 @@ func Main() {
 
 	// Add reconciliation processor for event-based settlement verification
 	if conf.Interval.ReconciliationProcessor > 0 {
-		reconciliationProcessor := event.NewReconciliationProcessor(db, contract, conf.Interval.ReconciliationProcessor, logger)
+		var assayPayout *database.AssayPayoutOptions
+		if conf.Service.IsSPML() && conf.Assay.Payout.Enabled {
+			assayPayout = &database.AssayPayoutOptions{CutBps: conf.Assay.Payout.VerifierCutBps, Logf: logger.Warnf}
+		}
+		reconciliationProcessor := event.NewReconciliationProcessor(db, contract, conf.Interval.ReconciliationProcessor, assayPayout, logger)
 		if err := mgr.Add(reconciliationProcessor); err != nil {
 			panic(err)
 		}

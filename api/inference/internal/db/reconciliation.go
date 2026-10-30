@@ -92,14 +92,6 @@ func (d *DB) MarkRequestsSettling(requestHashes []string, settling bool) error {
 		Update("settling", settling).Error
 }
 
-// DeleteRequestsByHashesIfExist deletes requests by hashes, ignoring already-deleted ones (idempotent)
-func (d *DB) DeleteRequestsByHashesIfExist(requestHashes []string) error {
-	if len(requestHashes) == 0 {
-		return nil
-	}
-	return d.db.Where("request_hash IN ?", requestHashes).Delete(&model.Request{}).Error
-}
-
 // GetReconciliationCursor returns the current reconciliation cursor
 func (d *DB) GetReconciliationCursor() (*model.ReconciliationCursor, error) {
 	var cursor model.ReconciliationCursor

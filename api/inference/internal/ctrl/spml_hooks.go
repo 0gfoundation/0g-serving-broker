@@ -18,6 +18,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/tee"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
+	"github.com/0glabs/0g-serving-broker/inference/internal/db"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 )
 
@@ -72,10 +73,22 @@ func (h *spmlHooks) filterSettlement(ctx context.Context, reqs []model.Request) 
 	return h.c.gateSettlementWithAssay(ctx, reqs)
 }
 
-// afterSettlement accrues each settled request's fee onto its node's cumulative and
-// invoices the assay for signed PayoutVouchers. Never fails settlement.
-func (h *spmlHooks) afterSettlement(ctx context.Context, outcomes []*SettlementOutcome) {
-	h.c.settleAssayPayout(ctx, outcomes)
+// afterSettlement invoices the assay for signed PayoutVouchers over every cumulative it
+// has not acknowledged yet — the ones this round's deletes just accrued
+// (db.AccumulateAndDeleteRequests) and any left pending by an earlier failed invoice.
+// Running on every round, not only on rounds that settled something, is what makes a
+// failed invoice retry without waiting for new traffic. Never fails settlement.
+func (h *spmlHooks) afterSettlement(ctx context.Context) {
+	h.c.settleAssayPayout(ctx)
+}
+
+// assayPayoutOptions is what a settled-row delete needs to accrue payout, or nil when
+// SPML payout is off.
+func (c *Ctrl) assayPayoutOptions() *db.AssayPayoutOptions {
+	if !c.assayPayoutEnabled {
+		return nil
+	}
+	return &db.AssayPayoutOptions{CutBps: c.assayVerifierCutBps, Logf: c.logger.Warnf}
 }
 
 // spmlSetup is what New parses out of cfg.Assay for a spml provider, before the Ctrl

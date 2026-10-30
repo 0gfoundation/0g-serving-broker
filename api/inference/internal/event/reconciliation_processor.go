@@ -42,14 +42,21 @@ type ReconciliationProcessor struct {
 	interval           time.Duration
 	confirmationBlocks uint64 // blocks to wait for finality
 	expiryBlocks       uint64 // blocks after which a pending settlement is expired
+	// assayPayout, for an SPML provider, accrues a confirmed settlement's
+	// fees onto the serving nodes' payout cumulatives in the same transaction
+	// that deletes the rows. This path runs when the broker died between the
+	// receipt and its own accrual, so without it those fees were lost.
+	assayPayout *db.AssayPayoutOptions
 }
 
 // NewReconciliationProcessor creates a processor that periodically scans on-chain settlement
-// events and reconciles them against local pending_settlement records.
+// events and reconciles them against local pending_settlement records. assayPayout is nil
+// for providers without SPML payout.
 func NewReconciliationProcessor(
 	db *db.DB,
 	contract *providercontract.ProviderContract,
 	interval time.Duration,
+	assayPayout *db.AssayPayoutOptions,
 	logger log.Logger,
 ) *ReconciliationProcessor {
 	if interval <= 0 {
@@ -59,6 +66,7 @@ func NewReconciliationProcessor(
 		db:                 db,
 		contract:           contract,
 		logger:             logger,
+		assayPayout:        assayPayout,
 		interval:           interval,
 		confirmationBlocks: DefaultConfirmationBlocks,
 		expiryBlocks:       DefaultExpiryBlocks,
@@ -199,8 +207,8 @@ func (r *ReconciliationProcessor) processEvent(evt settlementEvent) {
 
 	switch evt.Status {
 	case 0: // SUCCESS
-		// Delete requests (idempotent -- Layer 1 may have already done this)
-		if err := r.db.DeleteRequestsByHashesIfExist(requestHashes); err != nil {
+		// Delete requests, accruing payout first (idempotent -- Layer 1 may have already done both)
+		if err := r.db.DeleteSettledRequestsByHashes(requestHashes, r.assayPayout); err != nil {
 			r.logger.Errorf("Reconciliation: failed to delete requests for tx %s: %v", txHash, err)
 			return
 		}
@@ -269,7 +277,7 @@ func (r *ReconciliationProcessor) handlePartialEvent(
 
 	// Delete settled requests, clear settling flag for unsettled ones
 	if len(settledHashes) > 0 {
-		if err := r.db.DeleteRequestsByHashesIfExist(settledHashes); err != nil {
+		if err := r.db.DeleteSettledRequestsByHashes(settledHashes, r.assayPayout); err != nil {
 			r.logger.Errorf("Reconciliation: failed to delete settled requests for pending %d: %v", pending.ID, err)
 		}
 	}

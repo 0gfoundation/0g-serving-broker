@@ -142,6 +142,11 @@ func newScanSource(cfg config.AssayAttestation, verifierURL string, sign func([]
 	if err != nil || u.Host == "" {
 		return nil, fmt.Errorf("assay.verifierUrl %q: cannot take a host for the live TLS probe", verifierURL)
 	}
+	// The pin only guards a TLS handshake: a plain http:// URL would fetch the record
+	// unpinned and every check below would run on whatever answered.
+	if su, err := url.Parse(cfg.Tappscan.URL); err != nil || su.Scheme != "https" || su.Host == "" {
+		return nil, fmt.Errorf("assay.attestation.tappscan.url %q must be an https URL", cfg.Tappscan.URL)
+	}
 	host := u.Host
 	if u.Port() == "" {
 		host += ":443"
@@ -150,6 +155,11 @@ func newScanSource(cfg config.AssayAttestation, verifierURL string, sign func([]
 	s.client = &http.Client{
 		Timeout:   20 * time.Second,
 		Transport: &http.Transport{TLSClientConfig: pinnedTLSConfig(func() []byte { return s.scanPin })},
+		// A redirect could leave the pinned host (or the https scheme); the record
+		// lives at one URL, so there is nothing legitimate to follow.
+		CheckRedirect: func(req *http.Request, _ []*http.Request) error {
+			return fmt.Errorf("tappscan redirected to %s; refusing to follow", req.URL)
+		},
 	}
 	return s, nil
 }
