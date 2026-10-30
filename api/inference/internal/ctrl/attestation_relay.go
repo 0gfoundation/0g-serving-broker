@@ -36,6 +36,11 @@ type assayAttestationCache struct {
 	body      json.RawMessage
 	fetchedAt time.Time
 	ttl       time.Duration
+	// refresh single-flights the fetch: when the entry expires, every caller
+	// that sees it stale would otherwise hit the assay at once. One fetches,
+	// the rest wait and reuse its result (a failed fetch lets the next waiter
+	// try, so the retry is serial, not parallel).
+	refresh sync.Mutex
 	// forcedAt rate-limits the ?fresh=1 bypass. Without a floor the bypass
 	// would undo the reason the cache exists, since anyone may ask for it.
 	forcedAt time.Time
@@ -63,10 +68,7 @@ func (c *Ctrl) AssayAttestation(ctx context.Context, force bool) (json.RawMessag
 	if c.assayVerifierURL == "" {
 		return nil, time.Time{}, fmt.Errorf("assay is not configured on this broker")
 	}
-	if c.assayAttCache == nil {
-		c.assayAttCache = &assayAttestationCache{ttl: constant.AssayAttestationRelayTTL}
-	}
-	cache := c.assayAttCache
+	cache := c.assayAttCache // allocated once in New; never lazily (two first callers would race)
 
 	// The ordinary path stays a read lock: this endpoint is public, and making
 	// every caller queue behind a writer would hand out a contention point.
@@ -90,6 +92,16 @@ func (c *Ctrl) AssayAttestation(ctx context.Context, force bool) (json.RawMessag
 		if !allowed {
 			return body, at, nil // asked too soon: the cached copy, honestly dated
 		}
+	}
+
+	cache.refresh.Lock()
+	defer cache.refresh.Unlock()
+	cache.mu.RLock()
+	refreshed := cache.body != nil && cache.fetchedAt.After(at)
+	body, at = cache.body, cache.fetchedAt
+	cache.mu.RUnlock()
+	if refreshed {
+		return body, at, nil // the fetcher we waited on already answered
 	}
 
 	url := c.assayVerifierURL + constant.AssayAttestationPath

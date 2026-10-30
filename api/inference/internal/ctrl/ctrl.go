@@ -384,6 +384,7 @@ func New(
 		svcCache:             svcCache,
 		teeService:           teeService,
 		hooks:                hooks,
+		assayAttCache:        &assayAttestationCache{ttl: constant.AssayAttestationRelayTTL},
 		chatCacheExpiration:  cfg.ChatCacheExpiration,
 		logger:               logger,
 		// Initialize session cache with 5 minute expiration and cleanup every 10 minutes
