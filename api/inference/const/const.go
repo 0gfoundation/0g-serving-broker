@@ -209,6 +209,12 @@ const (
 	// store is in-memory). Treated as no-information: fail-open outside strict
 	// mode, kept pending in strict mode.
 	AssayVerdictUnknown = "UNKNOWN"
+	// AssayVerdictUnverifiedLost is recorded locally (never sent by the
+	// verifier) when a PENDING audit comes back UNKNOWN outside strict mode:
+	// the request settles like an unsampled one, but its fee is NOT paid out
+	// to the node — the assay has no ledger entry for the hash and would
+	// refuse the node's whole invoice for it, wedging the node's payouts.
+	AssayVerdictUnverifiedLost = "UNVERIFIED_LOST"
 	// AssayVerdictInvalidSig is recorded locally (never sent by the verifier)
 	// when assay.strictVerdict is on and a response's verdict is missing or
 	// fails signature verification — such requests are excluded from
@@ -277,7 +283,9 @@ var (
 
 	// MinimumLockedBalance is the fixed minimum locked balance required for all service types (1 0G in neuron).
 	// This replaces the dynamic per-service-type calculation in balance adequacy validation.
-	MinimumLockedBalance = "1000000000000000000"
+	// zgTestnetAssay payout run: lowered from 1 0G to 0.005 0G to match the
+	// faucet-funded test ledger floors (:payout-lowmin image); never merge.
+	MinimumLockedBalance = "5000000000000000"
 
 	// TEE settlement batch size to avoid gas limit issues
 	TEESettlementBatchSize = 50

@@ -481,6 +481,15 @@ func (d *DB) Migrate() error {
 				return tx.AutoMigrate(&AsyncJob{})
 			},
 		},
+		{
+			// pending_covered grows one entry per settled request while the
+			// assay is unreachable; TEXT (64 KB, ~950 hashes) overflowed in a
+			// busy hour and the failed upsert then lost that round's accrual.
+			ID: "assay-payout-pending-covered-longtext",
+			Migrate: func(tx *gorm.DB) error {
+				return tx.Exec("ALTER TABLE assay_payout MODIFY pending_covered LONGTEXT NOT NULL").Error
+			},
+		},
 	})
 
 	return errors.Wrap(m.Migrate(), "migrate database")

@@ -1219,6 +1219,11 @@ type AssayAttestation struct {
 	// RequireTcb is the allowed tcb_status set (e.g. ["UpToDate"]). Widen it
 	// deliberately, listing each accepted advisory state.
 	RequireTcb []string `yaml:"requireTcb"`
+	// AllowAdvisories lists the Intel advisory IDs (e.g. INTEL-SA-01439) an
+	// attested record may carry and still pass the clean gate. Empty means
+	// none: any advisory blocks. Pair with a widened RequireTcb — OutOfDate
+	// always comes with advisories.
+	AllowAdvisories []string `yaml:"allowAdvisories"`
 	// MaxAgeSeconds: how long the last successful verification stays valid
 	// (default 3600). Interval: re-check period (default 10m).
 	MaxAgeSeconds int           `yaml:"maxAgeSeconds"`
@@ -1370,7 +1375,7 @@ type Config struct {
 		// threshold judgement, so it withholds settlement regardless.
 		RejectGatesSettlement bool `yaml:"rejectGatesSettlement"`
 		// VerifierKeyPin authenticates the TLS connection to the verifier
-		// (docs/spml-broker-assay-tls.md Phase 1): 0x-hex sha256 of the
+		// (docs/spml-design.md §5 (TLS layer)): 0x-hex sha256 of the
 		// verifier endpoint's SubjectPublicKeyInfo, whose authoritative
 		// source is `tapp-cli verify-app`. When set, every TLS connection
 		// the shared provider client makes checks the presented leaf
@@ -1389,7 +1394,7 @@ type Config struct {
 			// settled amount (also enforced on-chain via the cut cap).
 			VerifierCutBps int64 `yaml:"verifierCutBps"`
 		} `yaml:"payout"`
-		// Attestation (docs/spml-broker-assay-tls.md Phase 2): periodically
+		// Attestation (docs/spml-design.md §7 (attestation gate)): periodically
 		// re-attest the verifier by exec'ing `tapp-cli verify-app` and
 		// PARSING ITS OUTPUT (its exit code lies). While the latest verified
 		// snapshot is fresh, its attested "tls key" replaces VerifierKeyPin
