@@ -114,7 +114,7 @@ func (c *Ctrl) AssayAttestation(ctx context.Context, force bool) (json.RawMessag
 	// validation can never succeed. No request signature here: unlike the
 	// voucher ledger this document is public by design (it is the thing we
 	// want auditors to read), and the assay's nginx allowlists it accordingly.
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.assayDo(req)
 	if err != nil {
 		// A forced re-fetch that fails must not take the cached document with
 		// it: the caller asked for fresher, not for nothing. They can still see

@@ -161,7 +161,7 @@ func (c *Ctrl) fetchAssayVerdicts(ctx context.Context, hashes []string) (map[str
 		return nil, fmt.Errorf("refusing to send an unsigned settlement check: %w", err)
 	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.assayDo(req)
 	if err != nil {
 		return nil, err
 	}

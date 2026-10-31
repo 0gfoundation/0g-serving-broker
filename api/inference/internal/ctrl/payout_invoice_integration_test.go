@@ -154,3 +154,115 @@ func TestInvoiceFailureKeepsStateAndRetryResendsSameInvoice(t *testing.T) {
 		t.Fatalf("invoice sent with nothing pending (%d attempts)", requests())
 	}
 }
+
+// The invoice path loads the payout rows, talks to the assay, then records the
+// answer. The event process's reconciliation can accrue into the same row in
+// between (it is the recovery path for a broker that died after the receipt).
+// The answer must not overwrite that accrual: the row keeps the higher
+// cumulative and the new pending hash, stays un-invoiced, and the next
+// invoice carries the new hash while the assay reports the old ones as
+// already covered.
+func TestInvoiceAnswerDoesNotOverwriteConcurrentAccrual(t *testing.T) {
+	c := setupReconcileCtrl(t)
+	if err := c.db.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	priv, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.logger = testLogger()
+	c.teeService = &tee.TeeService{ProviderSigner: priv}
+	c.contract = &providercontract.ProviderContract{ProviderAddress: "0xprovider"}
+	c.assayPayoutEnabled = true
+	c.assayVerifierCutBps = 1000
+
+	var (
+		mu     sync.Mutex
+		bodies []invoiceRequest
+		race   = true
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		var req invoiceRequest
+		if err := json.Unmarshal(raw, &req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		bodies = append(bodies, req)
+		doRace := race
+		mu.Unlock()
+		if doRace {
+			// Layer 2 lands while the POST is in flight: +900 for h9.
+			if err := c.db.UpsertAssayPayout(model.AssayPayout{Node: "node_0", Cumulative: "2250", Epoch: 8,
+				PendingCovered: db.EncodeCovered([]db.CoveredEntry{{Hash: "h1", Fee: "900"}, {Hash: "h2", Fee: "450"}, {Hash: "h9", Fee: "900"}})}); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+		resp := invoiceResponse{OK: true, Epoch: req.Epoch}
+		for _, it := range req.Invoices {
+			res := invoiceResult{NodeID: it.NodeID, OK: true}
+			if !doRace {
+				// second round: h1/h2 were vouched by the first answer
+				for _, h := range it.Covered {
+					if h != "h9" {
+						res.OK = false
+						res.Failures = append(res.Failures, h+": already covered by an earlier voucher")
+					}
+				}
+			}
+			resp.Results = append(resp.Results, res)
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+	c.httpClient = srv.Client()
+	c.assayVerifierURL = srv.URL
+
+	if err := c.db.UpsertAssayPayout(model.AssayPayout{Node: "node_0", Cumulative: "1350", Epoch: 7,
+		PendingCovered: db.EncodeCovered([]db.CoveredEntry{{Hash: "h1", Fee: "900"}, {Hash: "h2", Fee: "450"}})}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	// 1. OK answer for 1350/{h1,h2} arrives after the row moved to 2250/{h1,h2,h9}.
+	c.settleAssayPayout(ctx)
+	states, err := c.loadPayoutStates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st := states["node_0"]; st.Invoiced || st.Cumulative != "2250" || st.Epoch != 8 || len(db.DecodeCovered(st.PendingCovered)) != 3 {
+		t.Fatalf("concurrent accrual overwritten by the invoice answer: %+v", st)
+	}
+
+	// 2. Next round re-invoices 2250/{h1,h2,h9}; the assay says h1,h2 already covered -> they are dropped, cumulative kept.
+	mu.Lock()
+	race = false
+	mu.Unlock()
+	c.settleAssayPayout(ctx)
+	mu.Lock()
+	second := bodies[1]
+	mu.Unlock()
+	if len(second.Invoices) != 1 || second.Invoices[0].Cumulative != "2250" || len(second.Invoices[0].Covered) != 3 {
+		t.Fatalf("second invoice: %+v", second)
+	}
+	states, _ = c.loadPayoutStates()
+	if st := states["node_0"]; st.Invoiced || st.Cumulative != "2250" || !reflect.DeepEqual(coveredHashes(db.DecodeCovered(st.PendingCovered)), []string{"h9"}) {
+		t.Fatalf("after reconciliation: %+v (want cumulative 2250, only h9 pending)", st)
+	}
+
+	// 3. Third round: only h9 is sent and accepted.
+	c.settleAssayPayout(ctx)
+	states, _ = c.loadPayoutStates()
+	if st := states["node_0"]; !st.Invoiced || st.Cumulative != "2250" || len(db.DecodeCovered(st.PendingCovered)) != 0 {
+		t.Fatalf("after third round: %+v", st)
+	}
+	mu.Lock()
+	n := len(bodies)
+	mu.Unlock()
+	if n != 3 {
+		t.Fatalf("expected 3 invoices, got %d", n)
+	}
+}

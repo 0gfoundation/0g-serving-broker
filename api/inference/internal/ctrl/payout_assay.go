@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -133,10 +134,10 @@ func (c *Ctrl) invoiceAssay(ctx context.Context, states map[string]model.AssayPa
 			continue
 		}
 		if r.OK {
-			st.PendingCovered = db.EncodeCovered(nil)
-			st.Invoiced = true
-			if err := c.db.UpsertAssayPayout(st); err != nil {
-				c.logger.Errorf("Payout: failed to mark node %s invoiced: %v", r.NodeID, err)
+			next := st
+			next.PendingCovered = db.EncodeCovered(nil)
+			next.Invoiced = true
+			if !c.markPayout(r.NodeID, st, next) {
 				continue
 			}
 			c.logger.Infof("Payout: voucher issued for node %s cumulative=%s epoch=%d", r.NodeID, st.Cumulative, req.Epoch)
@@ -150,16 +151,29 @@ func (c *Ctrl) invoiceAssay(ctx context.Context, states map[string]model.AssayPa
 			continue
 		}
 		c.logger.Warnf("Payout: node %s: %s", r.NodeID, note)
-		if err := c.db.UpsertAssayPayout(next); err != nil {
-			c.logger.Errorf("Payout: failed to reconcile node %s: %v", r.NodeID, err)
-		}
+		c.markPayout(r.NodeID, st, next)
 	}
 	if resp.Cut != nil && resp.Cut.OK && cutState.Node != "" {
-		cutState.Invoiced = true
-		if err := c.db.UpsertAssayPayout(cutState); err != nil {
-			c.logger.Errorf("Payout: failed to mark verifier cut invoiced: %v", err)
-		}
+		next := cutState
+		next.Invoiced = true
+		c.markPayout(cutState.Node, cutState, next)
 	}
+}
+
+// markPayout writes the assay's answer back only if the row still reads as
+// the snapshot the invoice was built from. A row that moved meanwhile (the
+// event process accrued into it during the POST) is left alone and
+// re-invoiced next round; overwriting it would drop that accrual.
+func (c *Ctrl) markPayout(node string, prev, next model.AssayPayout) bool {
+	ok, err := c.db.UpdateAssayPayoutIfUnchanged(prev, next)
+	if err != nil {
+		c.logger.Errorf("Payout: failed to record assay answer for node %s: %v", node, err)
+		return false
+	}
+	if !ok {
+		c.logger.Warnf("Payout: node %s accrued during the invoice; answer not recorded, re-invoicing next round", node)
+	}
+	return ok
 }
 
 // reconcileRefusal acts on the two refusals the assay's per-hash failures
@@ -178,12 +192,21 @@ func (c *Ctrl) invoiceAssay(ctx context.Context, states map[string]model.AssayPa
 //     its node share from the cumulative; the fee stays in the pool, the
 //     design's loss ceiling. An entry stored without its fee (pre-fee rows)
 //     cannot be un-accrued exactly and is left for an operator.
+//   - "verdict REJECT is not payable" / "attributed to X, not Y": the assay's
+//     record disagrees with what the broker settled (a dropped verdict header
+//     plus a settlement check that fell back to recorded verdicts). Same
+//     answer as above — the assay will never vouch for that hash for this
+//     node, so un-accrue it rather than wedge the node; the fee stays in the
+//     pool.
 //
 // With nothing left pending the cumulative is fully acknowledged, so the
 // node is marked invoiced and asks for nothing until new work accrues.
 func reconcileRefusal(st model.AssayPayout, failures []string) (model.AssayPayout, string) {
 	landed := failedHashes(failures, "already covered")
-	lost := failedHashes(failures, "not in my ledger")
+	var lost []string
+	for _, prefix := range []string{"not in my ledger", "verdict ", "attributed to "} {
+		lost = append(lost, failedHashes(failures, prefix)...)
+	}
 	if len(landed) == 0 && len(lost) == 0 {
 		return st, ""
 	}
@@ -228,6 +251,18 @@ func reconcileRefusal(st model.AssayPayout, failures []string) (model.AssayPayou
 		note += fmt.Sprintf(" (%d lost hash(es) stored without a fee cannot be un-accrued — operator action needed)", unknownFee)
 	}
 	return st, note
+}
+
+// assayDo sends a request to the assay with the shared client but never
+// follows a redirect: the verifier's answers decide which hashes get paid or
+// un-accrued, and a 30x could hand that conversation to an unpinned host
+// (same guard as the tappscan client).
+func (c *Ctrl) assayDo(req *http.Request) (*http.Response, error) {
+	cl := *c.httpClient
+	cl.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return errors.New("assay redirected; redirects are not followed")
+	}
+	return cl.Do(req)
 }
 
 // failedHashes picks out the request hashes whose failure text starts with
@@ -309,7 +344,7 @@ func (c *Ctrl) postInvoice(ctx context.Context, req invoiceRequest) (*invoiceRes
 	// The shared client, NOT http.DefaultClient: it carries the verifier's
 	// TLS key pin — through the default client the invoice would bypass the
 	// pin check entirely (settlement would work but invoicing would not).
-	httpResp, err := c.httpClient.Do(httpReq)
+	httpResp, err := c.assayDo(httpReq)
 	if err != nil {
 		return nil, err
 	}

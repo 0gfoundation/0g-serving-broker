@@ -146,6 +146,23 @@ func upsertAssayPayoutTx(tx *gorm.DB, row model.AssayPayout) error {
 	}).Create(&row).Error
 }
 
+// UpdateAssayPayoutIfUnchanged writes next over the row only if it still
+// reads as prev (cumulative, epoch, pending set). The invoice path loads the
+// state, talks to the assay, then writes the answer back; the event process's
+// reconciliation can accrue into the same row in between, and a plain upsert
+// of the stale snapshot would silently drop that accrual (cumulative back
+// down, new pending hashes gone, request rows already deleted). Returns false
+// when the row moved: the caller leaves it and re-invoices next round — the
+// assay answers "already covered" for what it has vouched and the broker
+// reconciles.
+func (d *DB) UpdateAssayPayoutIfUnchanged(prev, next model.AssayPayout) (bool, error) {
+	now := time.Now()
+	res := d.db.Model(&model.AssayPayout{}).
+		Where("node = ? AND cumulative = ? AND epoch = ? AND pending_covered = ?", prev.Node, prev.Cumulative, prev.Epoch, prev.PendingCovered).
+		Updates(map[string]interface{}{"cumulative": next.Cumulative, "epoch": next.Epoch, "pending_covered": next.PendingCovered, "invoiced": next.Invoiced, "updated_at": &now})
+	return res.RowsAffected == 1, res.Error
+}
+
 // DeleteSettledRequestsByHashes deletes settled request rows by hash, accruing
 // their fees first when opt is set. Idempotent: rows already deleted (by the
 // other delete site) are neither found nor accrued again.
