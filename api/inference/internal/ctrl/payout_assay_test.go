@@ -104,9 +104,22 @@ func TestReconcileRefusal(t *testing.T) {
 	st := model.AssayPayout{Node: "node_0", Cumulative: "1000", PendingCovered: pending}
 
 	t.Run("unexplained refusal leaves everything pending", func(t *testing.T) {
-		got, note := reconcileRefusal(st, []string{"h1: verdict REJECT is not payable"})
+		got, note := reconcileRefusal(st, []string{"h1: duplicated in covered[]", "cumulative 5 not above already-issued 9"})
 		if note != "" || got != st {
 			t.Fatalf("got %+v note %q, want untouched", got, note)
+		}
+	})
+
+	t.Run("REJECT or misattributed on the assay's side: un-accrue like lost", func(t *testing.T) {
+		got, note := reconcileRefusal(st, []string{
+			"h1: verdict REJECT is not payable",
+			"h2: attributed to node_1, not node_0",
+		})
+		if note == "" || got.Cumulative != "700" || got.Invoiced {
+			t.Fatalf("got %+v note %q, want cumulative 700", got, note)
+		}
+		if rem := coveredHashes(db.DecodeCovered(got.PendingCovered)); len(rem) != 2 || rem[0] != "h3" {
+			t.Fatalf("remaining = %v", rem)
 		}
 	})
 
