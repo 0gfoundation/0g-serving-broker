@@ -398,7 +398,8 @@ func New(
 		// Optimized for single backend container with many concurrent users
 		// Timeouts are configurable via providerHttp config for different GPU/model requirements
 		httpClient: &http.Client{
-			Timeout: cfg.ProviderHttp.TotalTimeout, // Overall request timeout
+			Timeout:       cfg.ProviderHttp.TotalTimeout, // Overall request timeout
+			CheckRedirect: sameOriginRedirectsOnly,
 			Transport: &http.Transport{
 				// Connection pool settings for high concurrency scenarios
 				MaxIdleConns:          200,                                    // Increased total idle connections to handle more concurrent users
