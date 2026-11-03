@@ -126,14 +126,36 @@ func TestTheBrokersTargetURLIsTrimmed(t *testing.T) {
 	}
 }
 
-func emptyDaemon(t *testing.T) *docker.Client {
+func emptyDaemon(t *testing.T) *docker.Client { return daemonWith(t, "[]") }
+
+// A neighbour whose name contains the broker's is not the broker.
+func TestANeighbourIsNotTheBroker(t *testing.T) {
+	t.Setenv(config.TargetURLEnvVar, "")
+	c, l := targetURLCtrl(t, nil, "http://vllm:8000/v1")
+	c.dockerClient = daemonWith(t, `[{"Id":"dbcontainerid","Names":["/`+containerBroker+`-db"],"State":"running"}]`)
+
+	if err := c.RecordUpstreamSet(context.Background()); err != nil {
+		t.Fatalf("RecordUpstreamSet() = %v", err)
+	}
+	if got := emitted(l); len(got) != 1 || !strings.Contains(got[0], "http://vllm:8000/v1") {
+		t.Fatalf("recorded %q", got)
+	}
+}
+
+func daemonWith(t *testing.T, list string) *docker.Client {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/_ping"):
 			w.Header().Set("Api-Version", "1.47")
 		case strings.HasSuffix(r.URL.Path, "/containers/json"):
-			_, _ = w.Write([]byte("[]"))
+			_, _ = w.Write([]byte(list))
+		case strings.Contains(r.URL.Path, "/containers/"):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"Id": "dbcontainerid", "Name": "/" + containerBroker + "-db",
+				"State":  map[string]any{"Status": "running"},
+				"Config": map[string]any{"Env": []string{"TARGET_URL=http://elsewhere:1/v1"}},
+			})
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
