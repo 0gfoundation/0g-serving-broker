@@ -256,9 +256,11 @@ version 2 commits the same state in the quote instead. Design and rationale:
 
 `GET <Service.url>/v1/quote?report_data_version=2` returns the reply of §1 with one more member,
 `state_document` (a JSON string), and is signed like the other layouts (`ZG-Quote-Signature`
-over the body, by the key `report_data` names). It answers **404** when the deployment serves
-no v2 quote (no attestation proxy, or a controller that predates it) — never another layout.
-Any other `report_data_version` is 400.
+over the body, by the signer the document's `image` line names). It answers **404** when the
+deployment serves no v2 quote — no attestation proxy, a controller that predates it, or a
+controller that could not build the document when the broker started (the v2 quote is taken
+once, at broker start, and is best effort) — never another layout. Any other
+`report_data_version` is 400.
 
 ### 8.2 Layout
 
@@ -296,7 +298,7 @@ taken from the last record written:
 |---|---|
 | `image` | `<repo>@sha256:<digest> <signer> <enc_pub>`: the digest of the image the broker container runs, and both keys derived for it and for the bound upstream set (§4.1). `<repo>` is the controller's configured repository and is not attested — judge the digest. |
 | `config` | the hex SHA-256 of the primary config file on disk. |
-| `upstreams` | the set the keys are **bound** to (§4.3). `unrecorded`: the deployment records no set (only possible with a ledger and `recordUpstreamSet` off). The payload `invalidated`: a set is recorded but not bound. Either is "nothing bounds where plaintext goes". |
+| `upstreams` | the set the keys are **bound** to (§4.3). `unrecorded`: the deployment records no set (only possible with a ledger and `recordUpstreamSet` off). The payload `invalidated`: the set is recorded but no set is bound — it could not be stated, or its binding failed. Either is "nothing bounds where plaintext goes". |
 | `engines` | the containers the controller created (§4.4); `count=0` when none. |
 | `instance` | per extra instance, its name and its config file's hash (§4.5). |
 | `ledger` | `rtmr3`: this CVM has an RTMR3 the controller appends to on every change (dstack 0.5) — the records of §4 exist for changes since boot, but a deployment that changed nothing has none, so their absence is not a mismatch. `unavailable`: no ledger (dstack 0.6, `ZG_CONTROLLER_LEDGER=none`). |
@@ -322,17 +324,22 @@ source.
 - **Who chooses the bytes.** The controller's attestation proxy quotes a v2 `report_data` only
   for the document it builds itself at that moment and the `enc_pub` it derives for that
   document's key identity; legacy and v1 only for the current keys; the ingress's socket only
-  values whose second half is zero, which no layout has. No container holding either socket
-  can obtain a quote over a document or key of its choosing.
+  values whose second half is zero. No container holding either socket can obtain a quote in
+  any layout a reader accepts over a document or key of its choosing (a zero second half is
+  none of them).
 - **The set is a bound on destinations by origin.** It is `service.targetUrl` (after the
-  broker's `TARGET_URL`, which overrides it) plus every `modelPricing[].targetUrl`; the
+  broker's `TARGET_URL`, which overrides it) plus every `modelPricing[].targetUrl` — of every
+  in-process instance's config too, when there are any (§4.3); the
   broker's forwarding client follows redirects only to the same origin and answers any other
   as 502. Every outbound request carrying request content targets a member.
-- **Freshness.** A quote is as fresh as the state it commits to. The broker takes it at start,
-  and every change of image or upstream set restarts the broker and rotates the keys (a new
-  signer to acknowledge on chain). A config-only change restarts it too. Engine changes do not
-  restart the broker, so its document's `engines` line can be older than the running engines
-  — with no ledger, engine changes are refused for this reason; with one, the `zg-engine-set`
-  records carry the change.
+- **Freshness.** A quote is as fresh as the state it commits to: the broker takes all its
+  quotes once, at start, and serves them until it restarts. An image change and a primary
+  config change restart it; a change of a **bound** set also rotates the keys (a new signer to
+  acknowledge on chain) — an unrecorded set rotates nothing. Two changes do not restart the
+  primary broker, so their lines can lag the running deployment: engines, and the config of a
+  container instance (`ZG_CONTROLLER_INSTANCES`). Both exist only with a ledger (without one,
+  engine changes and container instances are refused), and there the `zg-engine-set` /
+  `zg-instance-config-update` records are appended to RTMR3 — visible in a quote the broker
+  takes after its next restart, not in the one it serves now.
 - **Snapshot, not history.** On 0.6 nothing records the states between two quotes; changes
   that rotate the keys leave an on-chain acknowledgement, config-only changes leave nothing.
