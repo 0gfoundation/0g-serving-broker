@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/inference/contract"
@@ -18,6 +19,20 @@ type TEESettlementData struct {
 	RequestsHash [32]byte
 	Nonce        *big.Int
 	Signature    []byte
+}
+
+// ErrTxReverted marks a settlement tx that was mined but reverted (out of
+// gas, any revert): nothing moved on chain, so the caller must treat every
+// user in the batch as unsettled. A reverted receipt carries no logs, and
+// "no failure event" must never be read as success.
+var ErrTxReverted = errors.New("settlement transaction reverted")
+
+// receiptError is nil for a successful receipt and wraps ErrTxReverted otherwise.
+func receiptError(receipt *types.Receipt) error {
+	if receipt.Status == types.ReceiptStatusSuccessful {
+		return nil
+	}
+	return errors.Wrapf(ErrTxReverted, "tx %s status %d in block %d", receipt.TxHash.Hex(), receipt.Status, receipt.BlockNumber)
 }
 
 // SettlementResult represents the on-chain result for a single user settlement
@@ -55,7 +70,11 @@ func (c *ProviderContract) SettleFeesWithTEE(ctx context.Context, settlements []
 		c.logger.Warnf("Transaction %s was mined despite WaitForReceipt timeout (block %d)",
 			tx.Hash().Hex(), receipt.BlockNumber.Uint64())
 	}
-	
+	if err := receiptError(receipt); err != nil {
+		c.logger.Errorf("[SettleFeesWithTEE] %v", err)
+		return tx.Hash(), nil, err
+	}
+
 	// Parse TEESettlementResult events from logs to determine per-user results
 	var results []SettlementResult
 	for _, vLog := range receipt.Logs {
@@ -79,4 +98,3 @@ func (c *ProviderContract) SettleFeesWithTEE(ctx context.Context, settlements []
 
 	return tx.Hash(), results, nil
 }
-

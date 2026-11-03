@@ -35,6 +35,10 @@ type invoiceItem struct {
 	NodeID     string   `json:"node_id"`
 	Cumulative string   `json:"cumulative"`
 	Covered    []string `json:"covered"`
+	// Fees: the node's share of each covered hash, parallel to Covered, so
+	// the assay can check the amount per hash (and refuse per hash) instead
+	// of refusing the whole invoice on one price drift.
+	Fees []string `json:"fees"`
 }
 
 type invoiceRequest struct {
@@ -109,10 +113,12 @@ func (c *Ctrl) invoiceAssay(ctx context.Context, states map[string]model.AssayPa
 			}
 			continue
 		}
+		covered := db.DecodeCovered(st.PendingCovered)
 		req.Invoices = append(req.Invoices, invoiceItem{
 			NodeID:     node,
 			Cumulative: st.Cumulative,
-			Covered:    coveredHashes(db.DecodeCovered(st.PendingCovered)),
+			Covered:    coveredHashes(covered),
+			Fees:       coveredFees(covered),
 		})
 		if st.Epoch > req.Epoch {
 			req.Epoch = st.Epoch
@@ -198,13 +204,18 @@ func (c *Ctrl) markPayout(node string, prev, next model.AssayPayout) bool {
 //     answer as above — the assay will never vouch for that hash for this
 //     node, so un-accrue it rather than wedge the node; the fee stays in the
 //     pool.
+//   - "amount mismatch (got X, expected Y)": the assay recomputed this hash's
+//     share from its own token counts and the price in effect and disagrees
+//     with ours. It will never agree on that hash, so un-accrue it the same
+//     way (the fee stays in the pool) instead of wedging every other hash
+//     and node behind it.
 //
 // With nothing left pending the cumulative is fully acknowledged, so the
 // node is marked invoiced and asks for nothing until new work accrues.
 func reconcileRefusal(st model.AssayPayout, failures []string) (model.AssayPayout, string) {
 	landed := failedHashes(failures, "already covered")
 	var lost []string
-	for _, prefix := range []string{"not in my ledger", "verdict ", "attributed to "} {
+	for _, prefix := range []string{"not in my ledger", "verdict ", "attributed to ", "amount mismatch"} {
 		lost = append(lost, failedHashes(failures, prefix)...)
 	}
 	if len(landed) == 0 && len(lost) == 0 {
@@ -268,7 +279,9 @@ func (c *Ctrl) assayDo(req *http.Request) (*http.Response, error) {
 // failedHashes picks out the request hashes whose failure text starts with
 // prefix. The assay's failures are formatted "<hash>: <reason>" (payout.py
 // validate), so the refusal itself carries the reconciliation data — no second
-// round trip.
+// round trip. Splitting on the FIRST ": " is safe because the hash is never
+// client-chosen: it is the broker's own uuid4 nonce (proxy.go, async.go), so
+// it cannot contain ": " while a reason may.
 func failedHashes(failures []string, prefix string) []string {
 	var out []string
 	for _, f := range failures {
@@ -287,6 +300,20 @@ func contains(list []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// coveredFees is the node share per covered hash, or nil when any entry
+// predates fee tracking: the assay then falls back to its whole-node check
+// rather than choking on an empty amount.
+func coveredFees(entries []db.CoveredEntry) []string {
+	out := make([]string, len(entries))
+	for i, e := range entries {
+		if e.Fee == "" {
+			return nil
+		}
+		out[i] = e.Fee
+	}
+	return out
 }
 
 func coveredHashes(entries []db.CoveredEntry) []string {
