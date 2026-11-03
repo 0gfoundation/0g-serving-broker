@@ -71,7 +71,7 @@ ledger rtmr3|unavailable
 - `upstreams`: the whole permitted set, `invalidated`, or `unrecorded` (§4.5). A reader
   treats anything but a readable set as "not private".
 - `engines`: `count=0` on every deployment without `ZG_CONTROLLER_ENGINES=on`.
-- `ledger`: `rtmr3` when every record in this document was also appended to RTMR3 (0.5),
+- `ledger`: `rtmr3` when this CVM has an RTMR3 the controller appends to on every change (0.5 — an unchanged boot has no records, which is not a mismatch),
   `unavailable` when the deployment declares `ZG_CONTROLLER_LEDGER=none` (0.6, §4.4). It tells a reader whether the RTMR3 copy
   exists to cross-check; it changes no rule.
 
@@ -128,7 +128,7 @@ bound upstream-set hash (`CurrentKeyIdentity`), the installed config's sha256, t
 set and the instance configs — the same values it writes to RTMR3 today. Two new local
 methods on `zg-tee`, answered by the proxy like `/Sign` is:
 
-- `GET /State` → the current document (text/plain). The broker serves it to clients.
+- `POST /State` → the current document (text/plain; POST like the proxy's other local methods). The broker serves it to clients.
 - `POST /GetQuote` with v2 report_data → validated against `SHA-256(current document)`
   and the current enc_pub, then forwarded. (The broker computes report_data from the
   document it fetched; a race with a concurrent state change simply fails validation and
