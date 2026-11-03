@@ -170,7 +170,11 @@ func (c *Ctrl) applyInProcessInstanceConfig(ctx context.Context, name, path, con
 	// instance, so this change can move it, and the record must not still name the old
 	// set once the processes restart onto the new file.
 	if err := c.recordInProcessInstanceUpstreamSet(ctx, name, content); err != nil {
-		return c.abortInstanceConfigChange(ctx, in, err)
+		// The set may already be recorded (the binding failed after it), so it is restored
+		// too, as on the write failure below.
+		err = c.abortInstanceConfigChange(ctx, in, err)
+		c.restoreInProcessUpstreamSet(ctx, "ApplyInstanceConfig "+name)
+		return err
 	}
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		err = c.abortInstanceConfigChange(ctx, in, err)

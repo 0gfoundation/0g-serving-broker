@@ -447,3 +447,38 @@ func upstreamsFromConfig(svc *config.Service) ([]attest.Upstream, error) {
 func upstreamName(rawURL, identity string) (string, error) {
 	return attest.UpstreamName(rawURL, identity)
 }
+
+// restoreUpstreamSet records — and binds — the set of the config on disk again, after a
+// change that recorded or bound a new set did not complete.
+//
+// RecordUpstreamSetFromContent runs before the write, so by the time a change aborts it may
+// have (a) appended a set record naming the new destinations and (b) bound the keys to them.
+// Restoring only the config record, as the abort used to, leaves both: the ledger says
+// plaintext goes to the new set while the broker still forwards to the old one, and — since
+// the proxy derives the signing key per request — the broker's responses are signed for a set
+// it does not run. Recording the file on disk again supersedes the record and rebinds.
+//
+// Best effort, like the config record's restore: a failure is logged and the cause stands.
+// What is left is then the honest half — with a ledger, a binding that failed leaves the
+// previous one in place; without one, an unreadable file serves no key.
+func (c *Ctrl) restoreUpstreamSet(ctx context.Context, tag string) {
+	if !c.recordsUpstreamSet() {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), restoreTimeout)
+	defer cancel()
+
+	content, err := os.ReadFile(c.config.ConfigFile)
+	if err != nil {
+		c.logger.Errorf("[%s] Could not re-read the config file to restore the upstream set, recording it as unreadable: %v", tag, err)
+		if err := c.invalidateUpstreamSet(ctx, tag); err != nil {
+			c.logger.Errorf("[%s] Recording the upstream set as unreadable failed: %v", tag, err)
+		}
+		return
+	}
+	if err := c.RecordUpstreamSetFromContent(ctx, string(content)); err != nil {
+		c.logger.Errorf("[%s] The upstream set of a config that was not applied could not be superseded: %v", tag, err)
+		return
+	}
+	c.logger.Infof("[%s] Upstream set restored to the config on disk", tag)
+}
