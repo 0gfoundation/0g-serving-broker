@@ -150,8 +150,7 @@ func TestBrokerSocketQuotesOnlyTheCurrentKeys(t *testing.T) {
 		t.Fatalf("dstack saw %v, want both honest layouts quoted", rec.got)
 	}
 
-	attacker := append([]byte(nil), v1...)
-	attacker[0] ^= 0xff // someone else's enc_pub, the real signer, version 1
+	attacker := attackerOf(v1) // someone else's enc_pub, the real signer, version 1
 	otherLegacy, otherV1 := reportDataFor(t, KeyIdentity{Digest: otherDigest})
 	refused := map[string][]byte{
 		"attacker enc_pub beside the real signer": attacker,
@@ -287,4 +286,20 @@ func TestQuoteRequestIsCanonicalOrRefused(t *testing.T) {
 	if len(rec.got) != 1 {
 		t.Errorf("dstack saw %v after the malformed requests, want none of them through", rec.got[1:])
 	}
+
+	// A GET carries its report_data in the query; a body riding along is dropped rather
+	// than forwarded beside the validated query.
+	q := "/GetQuote?report_data=" + hex.EncodeToString(legacy)
+	if code, _ := send(t, c, http.MethodGet, q, quoteBody(attackerOf(v1))); code != http.StatusOK {
+		t.Fatalf("GET with a body = %d, want 200", code)
+	}
+	if got, want := rec.got[len(rec.got)-1], "GET "+q+" "; got != want {
+		t.Errorf("dstack saw %q, want %q (no body)", got, want)
+	}
+}
+
+func attackerOf(v1 []byte) []byte {
+	a := append([]byte(nil), v1...)
+	a[0] ^= 0xff
+	return a
 }
