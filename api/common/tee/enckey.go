@@ -159,3 +159,20 @@ func EncPublicKeyFromMaterial(material string) (pccrypto.PublicKey, error) {
 	}
 	return pub, nil
 }
+
+// LegacyReportData and ReportDataV1 are the two report_data values this package asks a
+// quote over (legacyReportData and buildReportData), exported for the controller's
+// attestation proxy.
+//
+// The proxy refuses to forward a GetQuote whose report_data is not one of these for the
+// keys it currently derives: otherwise anything holding its socket could obtain a genuine
+// quote over an enc_pub of its own beside the real signer, and a client that seals to the
+// enc_pub in a verified quote would seal to it. The proxy must compute the bytes exactly as
+// the broker does — legacy is the EIP-55 spelling, not a lowercase one — so it calls these
+// rather than repeating the layout.
+func LegacyReportData(addr common.Address) []byte { return legacyReportData(addr) }
+
+// ReportDataV1 is buildReportData. See LegacyReportData.
+func ReportDataV1(encPub pccrypto.PublicKey, signer common.Address) ([]byte, error) {
+	return buildReportData(encPub, signer)
+}

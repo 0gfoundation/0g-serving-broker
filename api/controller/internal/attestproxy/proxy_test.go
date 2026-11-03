@@ -2,6 +2,7 @@ package attestproxy
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"io"
 	"net"
@@ -37,6 +38,14 @@ func fakeDstack(t *testing.T, dir string, reached *[]string) string {
 		t.Fatalf("listening on the fake dstack socket: %v", err)
 	}
 	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The proxy's own derivations, made to work out which report_data it may quote
+		// (reportdata.go). Answered and not recorded: reached lists what was FORWARDED,
+		// and a client can never get /GetKey forwarded (TestGetKeyIsNotForwarded checks
+		// that against a fake that records it).
+		if r.URL.Path == "/GetKey" {
+			serveFakeKey(w, r)
+			return
+		}
 		// RequestURI, not Path: the ingress passes report_data as a query string, and a
 		// proxy that dropped it would hand back a quote over the wrong bytes.
 		*reached = append(*reached, r.URL.RequestURI())
@@ -103,7 +112,12 @@ func startWith(t *testing.T, reached *[]string, readOnly bool) *http.Client {
 
 func post(t *testing.T, c *http.Client, method, path string) (int, string) {
 	t.Helper()
-	req, err := http.NewRequest(method, "http://dstack"+path, strings.NewReader(`{}`))
+	return send(t, c, method, path, `{}`)
+}
+
+func send(t *testing.T, c *http.Client, method, path, reqBody string) (int, string) {
+	t.Helper()
+	req, err := http.NewRequest(method, "http://dstack"+path, strings.NewReader(reqBody))
 	if err != nil {
 		t.Fatalf("building the request: %v", err)
 	}
@@ -131,10 +145,12 @@ func TestOnlyReadOnlyMethodsReachDstack(t *testing.T) {
 	var reached []string
 	c := start(t, &reached)
 
-	for _, path := range []string{"/GetQuote", "/Info"} {
-		if code, body := post(t, c, http.MethodPost, path); code != http.StatusOK {
-			t.Errorf("POST %s = %d %q, want 200", path, code, body)
-		}
+	_, v1 := brokerReportData(t)
+	if code, body := send(t, c, http.MethodPost, "/GetQuote", quoteBody(v1)); code != http.StatusOK {
+		t.Errorf("POST /GetQuote = %d %q, want 200", code, body)
+	}
+	if code, body := post(t, c, http.MethodPost, "/Info"); code != http.StatusOK {
+		t.Errorf("POST /Info = %d %q, want 200", code, body)
 	}
 	if len(reached) != 2 {
 		t.Errorf("dstack saw %v, want both forwarded", reached)
@@ -169,7 +185,8 @@ func TestIngressStyleGetIsForwarded(t *testing.T) {
 	var reached []string
 	c := start(t, &reached)
 
-	for _, path := range []string{"/Info", "/GetQuote?report_data=" + strings.Repeat("ab", 64)} {
+	legacy, _ := brokerReportData(t)
+	for _, path := range []string{"/Info", "/GetQuote?report_data=" + hex.EncodeToString(legacy)} {
 		if code, body := post(t, c, http.MethodGet, path); code != http.StatusOK || body != `{"served":"`+path+`"}` {
 			t.Errorf("GET %s = %d %q, want 200 with the request forwarded verbatim", path, code, body)
 		}
@@ -198,12 +215,13 @@ func TestReadOnlySocketForwardsButNeverSigns(t *testing.T) {
 	var reached []string
 	c := startWith(t, &reached, true)
 
-	for _, path := range []string{"/Info", "/GetQuote?report_data=" + strings.Repeat("ab", 64)} {
+	evidence := hex.EncodeToString(ingressReportData())
+	for _, path := range []string{"/Info", "/GetQuote?report_data=" + evidence} {
 		if code, _ := post(t, c, http.MethodGet, path); code != http.StatusOK {
 			t.Errorf("read-only GET %s = %d, want 200", path, code)
 		}
 	}
-	if code, _ := post(t, c, http.MethodPost, "/GetQuote"); code != http.StatusOK {
+	if code, _ := send(t, c, http.MethodPost, "/GetQuote", quoteBody(ingressReportData())); code != http.StatusOK {
 		t.Errorf("read-only POST /GetQuote = %d, want 200", code)
 	}
 	if len(reached) != 3 {
@@ -244,7 +262,8 @@ func TestResponseIsPassedThrough(t *testing.T) {
 	var reached []string
 	c := start(t, &reached)
 
-	code, body := post(t, c, http.MethodPost, "/GetQuote")
+	_, v1 := brokerReportData(t)
+	code, body := send(t, c, http.MethodPost, "/GetQuote", quoteBody(v1))
 	if code != http.StatusOK || body != `{"served":"/GetQuote"}` {
 		t.Errorf("POST /GetQuote = %d %q, want dstack's own body", code, body)
 	}
