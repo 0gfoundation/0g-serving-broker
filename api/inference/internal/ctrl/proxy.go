@@ -952,6 +952,18 @@ func (c *Ctrl) handleServiceError(ctx *gin.Context, resp *http.Response) {
 		}
 	}
 
+	// A redirect reaches here only when it pointed at another origin, which the forwarding
+	// client does not follow (sameOriginRedirectsOnly). Its body is a page saying where it
+	// moved — the upstream's host, which a forwarder exists to hide — and a 3xx with no
+	// Location is nothing a client can act on; callers that count anything under 400 as
+	// success would even take it as one. It is the upstream misbehaving: 502, fixed body.
+	if statusCode >= 300 && statusCode < 400 {
+		statusCode = http.StatusBadGateway
+		outBody = []byte(`{"error":{"message":"the upstream redirected the request to another origin, which is not followed","type":"upstream_redirect"}}`)
+		ctx.Writer.Header().Del("Content-Encoding")
+		ctx.Writer.Header().Set("Content-Type", "application/json")
+	}
+
 	ctx.Writer.WriteHeader(statusCode)
 
 	if _, err := ctx.Writer.Write(outBody); err != nil {
