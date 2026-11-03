@@ -73,6 +73,7 @@ type SettlementOutcome struct {
 	AdjustedRequest *contract.TEESettlementData // nil if failed completely
 	SettledRequests []*model.Request            // requests that were actually settled
 	UnsettledAmount *big.Int                    // amount that couldn't be settled (for partial)
+	PendingID       uint64                      // pending_settlement row for this user's tx (0 = none)
 }
 
 // SettlementBatch represents a complete settlement operation
@@ -524,6 +525,12 @@ func (c *Ctrl) executeAndProcessResults(ctx context.Context, batch *SettlementBa
 			settledAmount := new(big.Int).Sub(outcome.AdjustedRequest.TotalFee, result.UnsettledAmount)
 			if settledAmount.Cmp(big.NewInt(0)) > 0 && len(outcome.SettledRequests) > 0 {
 				settledReqs, _ := c.getRequestsWithinBudget(outcome.SettledRequests, settledAmount)
+				// The remainder was not paid for: release it for the next
+				// round here, so Layer 2 never has to re-fit it into the
+				// same settledAmount (which accrued it twice).
+				if err := c.db.MarkRequestsSettling(c.getRequestHashes(diffRequests(outcome.SettledRequests, settledReqs)), false); err != nil {
+					c.logger.Warnf("Failed to release unsettled remainder for user %s: %v", outcome.User.Hex(), err)
+				}
 				outcome.SettledRequests = settledReqs
 				outcome.Status = SettlementPartial
 				outcome.UnsettledAmount = result.UnsettledAmount
@@ -636,6 +643,7 @@ func (c *Ctrl) recordPendingSettlements(ctx context.Context, batch *SettlementBa
 
 		batchIdx := executableUserBatch[outcome.User]
 		records = append(records, pendingSettlementRecord{ID: ps.ID, BatchIndex: batchIdx})
+		outcome.PendingID = ps.ID
 
 		// Mark requests as settling so they won't be picked up by the next settlement cycle
 		if err := c.db.MarkRequestsSettling(requestHashes, true); err != nil {
@@ -674,6 +682,15 @@ func (c *Ctrl) processOutcomes(outcomes []*SettlementOutcome) {
 				c.logger.Infof("User %s: deleted %d settled requests",
 					outcome.User.Hex(), len(outcome.SettledRequests))
 			}
+			// Done with this tx: a still-"pending" row would make the event
+			// process reconcile (and for a PARTIAL, accrue) it a second time.
+			// Dying before this line leaves the row pending for Layer 2 —
+			// that is the recovery path, by design.
+			if outcome.PendingID != 0 {
+				if err := c.db.UpdatePendingSettlementStatus(outcome.PendingID, "confirmed"); err != nil {
+					c.logger.Warnf("User %s: failed to confirm pending settlement %d: %v", outcome.User.Hex(), outcome.PendingID, err)
+				}
+			}
 
 		case SettlementNoSigner:
 			// Permanent failure - delete all requests for this user
@@ -695,6 +712,21 @@ func (c *Ctrl) processOutcomes(outcomes []*SettlementOutcome) {
 			c.logger.Infof("User %s: temporary failure %s", outcome.User.Hex(), outcome.Status.String())
 		}
 	}
+}
+
+// diffRequests returns the requests in all that are not in sub (by hash).
+func diffRequests(all, sub []*model.Request) []*model.Request {
+	in := make(map[string]bool, len(sub))
+	for _, r := range sub {
+		in[r.RequestHash] = true
+	}
+	var out []*model.Request
+	for _, r := range all {
+		if !in[r.RequestHash] {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // Helper functions (simplified and consolidated)

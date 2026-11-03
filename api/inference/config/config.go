@@ -1944,6 +1944,9 @@ func validateSPMLService(cfg *Config) error {
 			return fmt.Errorf("invalid config: assay.attestation.source=tappscan needs expected.image (the reference-values path the assay's boot chain must match, e.g. gcp/uki/v0.7.0/dev.json)")
 		}
 	}
+	if bps := cfg.Assay.Payout.VerifierCutBps; bps < 0 || bps > 10000 {
+		return fmt.Errorf("invalid config: assay.payout.verifierCutBps=%d must be within 0..10000 — above that the node share goes negative and the assay refuses every invoice", bps)
+	}
 	// SPML serves one model against one FP32 reference; per-model pricing
 	// describes a multi-model upstream, which this is not.
 	if len(cfg.Service.ModelPricing) > 0 {

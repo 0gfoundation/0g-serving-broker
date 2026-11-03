@@ -110,6 +110,13 @@ func TestReconcileRefusal(t *testing.T) {
 		}
 	})
 
+	t.Run("audit still pending: transient, nothing dropped or un-accrued", func(t *testing.T) {
+		got, note := reconcileRefusal(st, []string{"h1: audit still pending"})
+		if note != "" || got != st {
+			t.Fatalf("got %+v note %q, want untouched", got, note)
+		}
+	})
+
 	t.Run("REJECT or misattributed on the assay's side: un-accrue like lost", func(t *testing.T) {
 		got, note := reconcileRefusal(st, []string{
 			"h1: verdict REJECT is not payable",

@@ -256,6 +256,20 @@ func (r *ReconciliationProcessor) handlePartialEvent(
 	if err != nil || len(requests) == 0 {
 		return // Already handled
 	}
+	if len(requests) != len(requestHashes) {
+		// Some rows are gone: Layer 1 already deleted (and accrued) the
+		// settled part of this tx and died before confirming. What is left
+		// is the unpaid remainder — fitting it into settledAmount again
+		// would accrue the same money twice. Just release it.
+		var left []string
+		for _, req := range requests {
+			left = append(left, req.RequestHash)
+		}
+		if err := r.db.MarkRequestsSettling(left, false); err != nil {
+			r.logger.Errorf("Reconciliation: failed to clear settling for remainder of pending %d: %v", pending.ID, err)
+		}
+		return
+	}
 
 	// Determine which requests fit within the settled amount
 	accumulated := big.NewInt(0)

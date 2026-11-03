@@ -4296,6 +4296,22 @@ func TestSPML_ReportsStaleEnabledKey(t *testing.T) {
 	t.Errorf("the removed assay.enabled key must be reported as ignored, got: %v", ignored)
 }
 
+func TestSPML_VerifierCutBpsRange(t *testing.T) {
+	for _, bps := range []string{"10001", "-1"} {
+		err := loadSPML(t, `
+assay:
+  verifierUrl: "http://verifier:8200"
+  verifierAddress: "0x1111111111111111111111111111111111111111"
+  payout:
+    enabled: true
+    verifierCutBps: `+bps+`
+`)
+		if err == nil || !strings.Contains(err.Error(), "verifierCutBps") {
+			t.Errorf("verifierCutBps=%s must be refused, got: %v", bps, err)
+		}
+	}
+}
+
 func TestSPML_RequiresVerifierURL(t *testing.T) {
 	err := loadSPML(t, `
 assay:
