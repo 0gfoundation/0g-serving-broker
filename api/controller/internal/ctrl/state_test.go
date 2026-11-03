@@ -163,3 +163,19 @@ func TestStateDocumentListsInstancesSorted(t *testing.T) {
 		t.Errorf("instance line payload %q", got)
 	}
 }
+
+// An instance name goes into the document as raw text, so a file whose name could break a
+// line is refused rather than written in.
+func TestStateDocumentRefusesAnInstanceNameThatIsNotOne(t *testing.T) {
+	c, _ := stateCtrl(t, beforeConfig)
+	if err := c.RecordUpstreamSet(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	c.configDir = t.TempDir()
+	if err := os.WriteFile(filepath.Join(c.configDir, "a b.yaml"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := c.StateDocument(context.Background()); err == nil {
+		t.Error("StateDocument() wrote an instance named \"a b\"")
+	}
+}

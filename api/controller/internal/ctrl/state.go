@@ -131,7 +131,13 @@ func (c *Ctrl) instanceConfigFiles() (map[string]string, error) {
 			return nil, err
 		}
 		for _, p := range paths {
-			out[strings.TrimSuffix(filepath.Base(p), ".yaml")] = p
+			name := strings.TrimSuffix(filepath.Base(p), ".yaml")
+			// Held to the pattern the instance routes are: a name goes into the document
+			// as raw text, so one carrying a space or LF must not get there.
+			if !instanceNamePattern.MatchString(name) {
+				return nil, fmt.Errorf("instance config %q has a name the instance routes would refuse", p)
+			}
+			out[name] = p
 		}
 	}
 	return out, nil
