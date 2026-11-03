@@ -25,8 +25,10 @@ func recordCtrl(t *testing.T, on bool, svc config.Service, emitErr error) (*Ctrl
 	return &Ctrl{
 		config:     config.ControllerConfig{RecordUpstreamSet: on},
 		fullConfig: &config.Config{Service: svc},
-		emitter:    &fakeEmitter{log: l, err: emitErr},
-		logger:     testLogger(t),
+		// Recording reads the broker's TARGET_URL first (adoptBrokerTargetURL).
+		dockerClient: fakeChangeDaemon(t, l, okPull),
+		emitter:      &fakeEmitter{log: l, err: emitErr},
+		logger:       testLogger(t),
 	}, l
 }
 

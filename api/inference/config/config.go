@@ -2751,6 +2751,10 @@ func migrateDeprecated(cfg *Config, raw map[string]interface{}) error {
 // place a user can read it from an attested source. See loadConfig for why it wins.
 const targetURLEnvVar = "TARGET_URL"
 
+// TargetURLEnvVar is targetURLEnvVar, for the controller: it computes the permitted upstream
+// set and has to apply the same override the broker does, from the broker's own value.
+const TargetURLEnvVar = targetURLEnvVar
+
 // applyTargetURLEnv is the TARGET_URL precedence, extracted so loadConfig and
 // ServiceFromYAML apply the same one.
 //
