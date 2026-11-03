@@ -280,7 +280,11 @@ func (s *TeeService) SyncQuote(ctx context.Context, nvQuote bool) error {
 // calls is refused there — the next sync, which every state change triggers by restarting
 // this process, gets a consistent pair.
 func (s *TeeService) syncStateQuote(ctx context.Context, client TappdClient, nvQuote bool) {
-	doc, err := s.remote.StateDocument(ctx)
+	// Bounded: this quote is best effort, and a controller that cannot answer must not hold
+	// up a boot the other two quotes have already completed.
+	stateCtx, cancel := context.WithTimeout(ctx, remoteSignerTimeout)
+	doc, err := s.remote.StateDocument(stateCtx)
+	cancel()
 	if err != nil {
 		s.logger.Warnf("report_data v2 quote unavailable: %v", err)
 		return
