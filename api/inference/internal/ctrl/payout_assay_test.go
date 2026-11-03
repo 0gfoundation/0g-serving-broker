@@ -43,7 +43,8 @@ func TestInvoiceRequestShape(t *testing.T) {
 		Invoices: []invoiceItem{{
 			NodeID:     "node_0",
 			Cumulative: "1000",
-			Covered:    coveredHashes([]db.CoveredEntry{{Hash: "0xh1", Fee: "500"}, {Hash: "0xh2", Fee: "500"}}),
+			Covered:    coveredHashes([]db.CoveredEntry{{Hash: "0xh1", Fee: "500"}, {Hash: "0xh2", Fee: "600"}}),
+			Fees:       coveredFees([]db.CoveredEntry{{Hash: "0xh1", Fee: "500"}, {Hash: "0xh2", Fee: "600"}}),
 		}},
 		Cut:    &cut,
 		CutBps: 1000,
@@ -62,14 +63,23 @@ func TestInvoiceRequestShape(t *testing.T) {
 		}
 	}
 	inv := decoded["invoices"].([]interface{})[0].(map[string]interface{})
-	for _, key := range []string{"node_id", "cumulative", "covered"} {
+	for _, key := range []string{"node_id", "cumulative", "covered", "fees"} {
 		if _, ok := inv[key]; !ok {
 			t.Fatalf("invoice item missing %q: %s", key, raw)
 		}
 	}
-	// covered stays a plain hash array on the wire: the fee is ours, not the assay's.
+	// covered stays a plain hash array on the wire; the node share of each
+	// hash travels in the parallel fees list (decimal strings) so the assay
+	// can check the amount per hash.
 	if c := inv["covered"].([]interface{}); len(c) != 2 || c[0] != "0xh1" {
 		t.Fatalf("covered = %v, want bare hashes", c)
+	}
+	if f := inv["fees"].([]interface{}); len(f) != 2 || f[0] != "500" || f[1] != "600" {
+		t.Fatalf("fees = %v, want [500 600]", f)
+	}
+	// a pre-fee row in the set: no fees at all (whole-node check on the assay)
+	if f := coveredFees([]db.CoveredEntry{{Hash: "0xh1", Fee: "500"}, {Hash: "0xh2"}}); f != nil {
+		t.Fatalf("fees with a fee-less entry = %v, want nil", f)
 	}
 }
 
@@ -84,13 +94,18 @@ func TestFailedHashes(t *testing.T) {
 		"0xbbb: not in my ledger (never verified here)",
 		"0xccc: already covered by an earlier voucher",
 		"0xddd: verdict REJECT is not payable",
-		"cumulative 100 not above already-issued 100", // not a per-hash failure
+		"0xfff: amount mismatch (got 10, expected 12: price 1/2)", // a reason may itself contain ": "
+		"cumulative 100 not above already-issued 100",             // not a per-hash failure
+		"amount mismatch: node=n0 delta=1 expected=2",             // whole-node form: not a hash
 	}
 	if got := failedHashes(failures, "already covered"); len(got) != 2 || got[0] != "0xaaa" || got[1] != "0xccc" {
 		t.Fatalf("already covered = %v", got)
 	}
 	if got := failedHashes(failures, "not in my ledger"); len(got) != 1 || got[0] != "0xbbb" {
 		t.Fatalf("not in my ledger = %v", got)
+	}
+	if got := failedHashes(failures, "amount mismatch"); len(got) != 1 || got[0] != "0xfff" {
+		t.Fatalf("amount mismatch = %v", got)
 	}
 	if got := failedHashes(nil, "already covered"); len(got) != 0 {
 		t.Errorf("got %v, want none", got)
@@ -127,6 +142,16 @@ func TestReconcileRefusal(t *testing.T) {
 		}
 		if rem := coveredHashes(db.DecodeCovered(got.PendingCovered)); len(rem) != 2 || rem[0] != "h3" {
 			t.Fatalf("remaining = %v", rem)
+		}
+	})
+
+	t.Run("per-hash amount mismatch: un-accrue that hash only", func(t *testing.T) {
+		got, note := reconcileRefusal(st, []string{"h2: amount mismatch (got 200, expected 180)"})
+		if note == "" || got.Cumulative != "800" || got.Invoiced {
+			t.Fatalf("got %+v note %q, want cumulative 800", got, note)
+		}
+		if rem := coveredHashes(db.DecodeCovered(got.PendingCovered)); len(rem) != 3 || rem[0] != "h1" || rem[1] != "h3" {
+			t.Fatalf("remaining = %v, want [h1 h3 h4]", rem)
 		}
 	})
 
