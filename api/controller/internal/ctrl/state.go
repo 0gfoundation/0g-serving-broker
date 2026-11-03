@@ -22,7 +22,7 @@ import (
 //
 //	zg-state-v2
 //	image <b64url(zg-image-update payload)>
-//	config <b64url(zg-config-update payload)> | config none
+//	config <b64url(zg-config-update payload)>
 //	upstreams <b64url(zg-upstream-set payload)> | upstreams unrecorded
 //	engines <b64url(zg-engine-set payload)>
 //	instance <name> <b64url(zg-instance-config-update payload)>   (0..n, sorted by name)
