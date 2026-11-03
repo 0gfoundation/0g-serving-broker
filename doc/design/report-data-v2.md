@@ -1,6 +1,7 @@
 # report_data v2: the running state committed in the quote (dstack 0.6 and after)
 
-Status: proposal, 2026-10-26. Owners: broker/controller (Jiahao), gateway/pcverify (Hongji).
+Status: proposal, 2026-10-26; revised 2026-11-03 (§4.4–4.6: binding keys without a
+ledger, the set is mandatory, what the set must cover; §6 split into three PRs). Owners: broker/controller (Jiahao), gateway/pcverify (Hongji).
 
 ## 1. Why
 
@@ -67,11 +68,11 @@ ledger rtmr3|unavailable
 - `config`: sha256 of the installed primary config file. Written as `none` (literal, not
   encoded) only on a CVM whose controller has never installed a config — in practice
   never, since the boot path installs one.
-- `upstreams`: the whole permitted set, or `invalidated`, exactly as §4.3. A reader treats
-  anything but a readable set as "not private".
+- `upstreams`: the whole permitted set, `invalidated`, or `unrecorded` (§4.5). A reader
+  treats anything but a readable set as "not private".
 - `engines`: `count=0` on every deployment without `ZG_CONTROLLER_ENGINES=on`.
 - `ledger`: `rtmr3` when every record in this document was also appended to RTMR3 (0.5),
-  `unavailable` when `EmitEvent` refused (0.6). It tells a reader whether the RTMR3 copy
+  `unavailable` when the deployment declares `ZG_CONTROLLER_LEDGER=none` (0.6, §4.4). It tells a reader whether the RTMR3 copy
   exists to cross-check; it changes no rule.
 
 The document is the controller's; the broker never composes it (§4.2).
@@ -143,7 +144,8 @@ hash, which by construction cannot look like any of our layouts.
   commitment over the same keys, so no re-acknowledgement is caused by adopting it.
   (dstack 0.6's *v1* `GetKey` uses a different KDF; we stay on the frozen v0 `GetKey`,
   which 0.6 serves unchanged. Moving to the v1 KDF would rotate every signer and is a
-  separate decision.)
+  separate decision.) This holds on 0.5 only: on 0.6 the binding to the set does not
+  happen today at all, and §4.4 is what makes it happen.
 - **Freshness.** A quote is as fresh as the state it commits to, no more — exactly as a
   RTMR3 log is. What bounds staleness today keeps bounding it: a change to the image or
   the upstream set rotates the keys, so a request sealed to an old enc_pub does not open
@@ -156,6 +158,93 @@ hash, which by construction cannot look like any of our layouts.
   A per-request nonce would need per-request quote generation and is left out; if a
   verifier wants it later, the document gains a `nonce` line the proxy accepts verbatim
   (≤ 32 bytes) and nothing else here changes.
+
+### 4.4 Binding the keys without a ledger (dstack 0.6)
+
+§4.3 says the keys stay `(digest, upstream-set hash)`. On 0.6 that is not what runs today.
+`recordUpstreamSet` emits the set first and binds the keys only after the emit succeeds
+(`controller/internal/ctrl/upstream_set.go`, the `EmitEvent` call before
+`bindKeysToUpstreamSet`). On 0.6 the emit always fails, so the function returns before
+binding, `main.go` logs the error and carries on, and the proxy derives at the digest-only
+path `/<digest>/sign`. The signer is then independent of where plaintext may go: changing
+the set rotates nothing and needs no new on-chain acknowledgement. That is the
+accountability property of `per-image-signing.md` gone, silently, on exactly the OS this
+document is for. Committing the set in report_data does not restore it by itself — a
+verifier would read the new set from a quote whose signer the owner never had to re-ack.
+
+The rule in v2 is that binding no longer depends on the ledger:
+
+1. Compute the set and its hash (unchanged).
+2. Bind the keys to `(digest, set hash)` and derive signer and enc_pub.
+3. Build the state document from the bound identity.
+4. Only then append to RTMR3 — on 0.5. On 0.6 there is nothing to append to.
+
+Whether RTMR3 is writable is **declared by the deployment**, as a literal in the
+controller's compose environment, `ZG_CONTROLLER_LEDGER=rtmr3|none` — not guessed from the
+error text of a failed `EmitEvent`, and not inferred at runtime (dstack's `Info` carries
+`os_image_hash` but no version a controller could branch on). Being a compose literal it
+is covered by compose_hash, so a verifier sees which mode was chosen, and the baseline
+pins it. With `rtmr3`, any emit failure is a failure; with `none`, nothing is attempted and
+the document says `ledger unavailable`. Unset means `rtmr3`, so every existing 0.5
+deployment keeps today's behaviour, now fail-closed. A 0.6 deployment that forgets the
+literal does not start, which is the safe direction.
+
+Everything that used to log and continue now fails closed, at boot and at runtime alike:
+an emit failure where the ledger exists, no running digest, a derivation error. At boot
+the controller does not start the proxy (the broker gets no key and serves nothing); on a
+runtime change the change is refused and the previous state stays. While unbound, the
+proxy refuses `/Sign`, `/GetEncKey` and every v1/v2 quote. A deployment that cannot say
+where its plaintext goes must not be able to sign as though it could.
+
+`ATTEST_PROXY_SOCKET` unset (the broker derives its own keys at fixed paths) stays as it
+is: no binding is possible, so no state document is served, and a reader falls back and
+reports the deployment as not private.
+
+Cost: none beyond the release itself. A new broker release is a new digest, and the
+digest is in the derivation path, so every provider re-acknowledges at the v0.6.0
+redeploy regardless; folding the set hash in at the same time rotates nothing extra.
+
+### 4.5 The set is mandatory
+
+Whether the set is recorded at all is `recordUpstreamSet`, which comes from the config
+file — the input compose_hash does not measure (`BROKER_CONFIG` is an encrypted env
+variable; the measured text is the placeholder `${BROKER_CONFIG:-}`), and which `PUT
+/v1/config/core` rewrites whole. Off means no record, and no record means nothing bounds
+where plaintext goes. A flag the operator can turn off from unmeasured input cannot be the
+switch for the one property the gateway exists to check.
+
+So in v2:
+
+- The state document always has an `upstreams` line. With recording off it says
+  `upstreams unrecorded`, and a reader treats that as not private — the same verdict as
+  `invalidated`, kept distinct so a report can say which.
+- Whenever the attestation proxy is in use, the controller records and binds the set
+  regardless of `recordUpstreamSet`; the field stays only for the no-proxy shape. The
+  re-ack this forces is the one §4.4 already pays.
+- The config-time "target must be inside this CVM" check
+  (`validateDecentralizedModelTarget`) applies only to `providerType: decentralized`
+  without `targetSeparated`, and both come from the same unmeasured config — switching
+  the type skips it. It stays as a guard against mistakes, but it is not what the privacy
+  claim rests on. The claim rests on the reader judging the recorded set (§7).
+
+### 4.6 What the set must cover
+
+The set is `service.targetUrl` plus every `service.modelPricing[].targetUrl`
+(`config.UpstreamCandidates`). "Plaintext goes only to the set" is true only if nothing
+else carries request content out of the CVM. Known and to check before v0.6.0:
+
+- **Redirects.** The forwarding `http.Client` sets no `CheckRedirect`
+  (`inference/internal/ctrl/ctrl.go`), so a 307/308 from an upstream makes Go replay the
+  POST body to a host outside the set. Fix in this release: return
+  `http.ErrUseLastResponse`, so a redirect is relayed as a response, never followed.
+- **Other broker-initiated requests** that may carry request content — fetching image or
+  video URLs found in a request, web search, tool execution, telemetry. Each one is either
+  shown to carry no request content, added to the set, or removed. The list goes into
+  `rtmr3-records.md` §8 so a reader knows what the set is a bound on.
+
+Out of scope here, tracked separately: an encrypted request whose upstream answers non-200
+gets the error body back in the clear and logged (`proxy.go`). That leaks to the router,
+not out of the CVM, and the fix is a sealed fixed error, as the async path already does.
 
 ## 5. What is lost, stated plainly
 
@@ -174,25 +263,37 @@ until it asks for v2.
 
 | component | change | default behaviour |
 |---|---|---|
-| controller (`attestproxy`) | validate report_data per §4.2; serve `/State`; on `EmitEvent` failure write `ledger unavailable` and continue; on **any other** RTMR3 write failure on 0.5 fail closed (today: log and continue) | unchanged for legacy and v1 callers |
-| broker | `GET /v1/quote?report_data_version=2` → v2 quote + `state` document in the reply; `?legacy=` unchanged | unchanged |
+| controller (`attestproxy`) | validate report_data per §4.2; serve `/State`; bind keys before and independent of the ledger, fail closed on any binding or (where the ledger exists) emit failure (§4.4); record the set whenever the proxy is in use (§4.5) | unchanged for legacy and v1 callers; signer rotates once at the v0.6.0 redeploy, as any release does |
+| broker | `GET /v1/quote?report_data_version=2` → v2 quote + `state` document in the reply; `?legacy=` unchanged; forwarding client does not follow redirects (§4.6) | unchanged |
 | event, instance brokers | nothing (same image, same proxy) | — |
 | `rtmr3-records.md` | add §8 "report_data v2" (= this §3); add a 0.6 golden vector under `testdata/vectors/` once a 0.6 CVM exists; the v1/RTMR3 vector stays | — |
 | gateway / pcverify | request v2; verify per §3.2; **fall back** to v1 + RTMR3 replay when the broker returns no state document (pre-v2 broker, or v2 not requested); OS allowlist may then admit a 0.6 image | enforce semantics unchanged: the same three judgements, read from the document instead of the log |
-| compose (19, 20, rehearsal, template) | none — the sockets and volumes are already in the #763 shape | — |
+| compose (19, 20, rehearsal, template) | 0.5: none — the sockets and volumes are already in the #763 shape. 0.6: add the literal `ZG_CONTROLLER_LEDGER=none` to the controller (§4.4) | unset = `rtmr3` |
 
 Order:
 
-1. Broker PR: proxy validation (§4.2, including the ingress rule — this part is worth
-   shipping even if nothing else is), `/State`, v2 quote, fail-closed, spec §8, tests
-   (vector: the rehearsal CVM on 0.5.9 with `ledger rtmr3`; a 0.6 vector when available).
-   Release as **v0.6.0** of the broker.
+1. Broker, three PRs, released together as **v0.6.0** with #776 (response binding):
+   - PR1 — proxy validation (§4.2) for the legacy and v1 layouts plus the ingress rule.
+     Stands alone on 0.5 and closes §4.1 today; no reader changes.
+   - PR2 — state document, `/State`, v2 quote and its proxy rule, binding without a
+     ledger and fail-closed (§4.4), the mandatory set (§4.5), no redirects (§4.6).
+   - PR3 — `rtmr3-records.md` §8 and vectors (the rehearsal CVM on 0.5.9 with
+     `ledger rtmr3`; a 0.6 vector from the first 0.6 CVM).
 2. Deploy 19/20 on it — the redeploy that was planned anyway for the controller
    release; one restart carries both.
 3. Gateway: v2 reader with v1 fallback, behind the existing enforce switch.
 4. Only then: trial a 0.6 guest image on the rehearsal CVM, add it to the OS allowlist.
 
 ## 7. Open points for the gateway side
+
+- **The gateway has to judge the set, or none of this bounds anything.** Today
+  `-provider-enforce` judges the compose baseline and the running release only
+  (`client/route/enforce.go`); the upstream set is parsed but not judged. v2 needs a rule
+  in the same gate: refuse a provider whose `upstreams` has a member outside the CVM, or
+  reads `invalidated` / `unrecorded`. Without it §4.5 records a set nobody checks.
+- On 0.6, `runtime_release` must not pass as `not_checked` beside a baseline pass when a
+  state document is present: the document always names the running image, so a missing
+  or unreadable one is a failure, not an absence.
 
 - Whether to keep requiring the RTMR3 replay on 0.5 as a cross-check (cheap, and it keeps
   the history argument in §5 for 0.5) or to read only the document everywhere.
