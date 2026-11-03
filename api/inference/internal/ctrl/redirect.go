@@ -16,8 +16,8 @@ import (
 // plaintext may go by host, so a redirect to another host takes both outside it, unrecorded.
 // A same-origin redirect (a trailing slash, a versioned path) stays where it was going.
 //
-// The 3xx then reaches the client with its Location header stripped (isUpstreamIdentityHeader),
-// so the upstream host is not revealed either.
+// The 3xx is then answered as a 502 with a fixed body (handleServiceError), so neither its
+// Location (also stripped by isUpstreamLeakHeader) nor a "moved to" page reveals the host.
 func sameOriginRedirectsOnly(req *http.Request, via []*http.Request) error {
 	if len(via) >= 10 {
 		return errors.New("stopped after 10 redirects")

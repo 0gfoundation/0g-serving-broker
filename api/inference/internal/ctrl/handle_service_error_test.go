@@ -105,3 +105,25 @@ func TestHandleServiceError_DecentralizedForwardsErrorBodyUnchanged(t *testing.T
 		t.Errorf("decentralized error body should be forwarded unchanged, got: %s", out)
 	}
 }
+
+// A cross-origin redirect the forwarder did not follow must not reach the client as a 3xx
+// carrying a page that names where it moved: it is a 502 with a fixed body.
+func TestHandleServiceError_UnfollowedRedirectIsABadGateway(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c := newChatbotTestCtrl(t, config.Service{ProviderType: "standard", TargetSeparated: true, TargetURL: "https://secret-upstream:8000"})
+	w := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(w)
+	ctx.Request = httptest.NewRequest("POST", "/v1/proxy/chat/completions", nil)
+	resp := &http.Response{
+		StatusCode: http.StatusTemporaryRedirect,
+		Header:     http.Header{"Content-Type": {"text/html"}},
+		Body:       io.NopCloser(strings.NewReader(`<a href="https://secret-upstream.example/v2">moved</a>`)),
+	}
+	c.handleServiceError(ctx, resp)
+	if w.Code != http.StatusBadGateway {
+		t.Errorf("status %d, want 502", w.Code)
+	}
+	if strings.Contains(w.Body.String(), "secret-upstream") {
+		t.Errorf("the redirect page reached the client: %s", w.Body.String())
+	}
+}
