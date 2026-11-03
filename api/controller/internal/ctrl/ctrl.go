@@ -308,10 +308,12 @@ func (c *Ctrl) markUpstreamSetUnreadable() {
 	c.setUnreadable = true
 }
 
-func (c *Ctrl) upstreamSetUnreadable() bool {
+// boundUpstreamSetState reads the bound hash and the unreadable mark together, so no reader
+// sees the moment between unbinding and marking.
+func (c *Ctrl) boundUpstreamSetState() (hash string, unreadable bool) {
 	c.setHashMu.RLock()
 	defer c.setHashMu.RUnlock()
-	return c.setUnreadable
+	return c.boundSetHashVal, c.setUnreadable
 }
 
 // NewCtrl creates a new controller
@@ -1541,14 +1543,17 @@ func (c *Ctrl) GetPrometheusConfig(ctx context.Context) (string, error) {
 // a later change to this value cannot reach a running broker either — the restart in
 // ApplyCoreConfig is what publishes it.
 func (c *Ctrl) CurrentKeyIdentity(ctx context.Context) (attestproxy.KeyIdentity, error) {
-	if c.upstreamSetUnreadable() {
-		return attestproxy.KeyIdentity{}, fmt.Errorf("the permitted upstream set cannot be stated and this CVM has no ledger to say so; serving no key until a readable set is recorded")
-	}
 	digest, err := c.RunningBrokerDigest(ctx)
 	if err != nil {
 		return attestproxy.KeyIdentity{}, err
 	}
-	return attestproxy.KeyIdentity{Digest: digest, UpstreamSetHash: c.boundUpstreamSetHash()}, nil
+	// After the digest, and both halves under one lock: the docker call above can take a
+	// while, and a set invalidated during it must not be served as the unbound key.
+	hash, unreadable := c.boundUpstreamSetState()
+	if unreadable {
+		return attestproxy.KeyIdentity{}, fmt.Errorf("the permitted upstream set cannot be stated and this CVM has no ledger to say so; serving no key until a readable set is recorded")
+	}
+	return attestproxy.KeyIdentity{Digest: digest, UpstreamSetHash: hash}, nil
 }
 
 // target is a container that restarts onto a config file and decodes it: role names it

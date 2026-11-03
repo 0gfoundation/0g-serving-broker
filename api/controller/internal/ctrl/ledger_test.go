@@ -2,12 +2,18 @@ package ctrl
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/0glabs/0g-serving-broker/common/attest"
+	"github.com/0glabs/0g-serving-broker/controller/internal/docker"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 )
 
@@ -205,5 +211,47 @@ func TestWithALedgerAFailedBindingSupersedesTheNewSetRecord(t *testing.T) {
 	}
 	if got := c.boundUpstreamSetHash(); got != bootHash {
 		t.Errorf("bound %q, want the boot binding %q left in place", got, bootHash)
+	}
+}
+
+// CurrentKeyIdentity spends a docker call resolving the digest. A set invalidated during that
+// call must not come back as the unbound key: the unreadable mark is read after the digest,
+// together with the hash.
+func TestWithoutALedgerASetInvalidatedDuringTheDigestLookupServesNoKey(t *testing.T) {
+	pinned := "ghcr.io/0gfoundation/0g-serving-broker@sha256:" + strings.Repeat("d", 64)
+	var c *Ctrl
+	var once sync.Once
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/_ping"):
+			w.Header().Set("Api-Version", "1.47")
+		case strings.HasSuffix(r.URL.Path, "/containers/json"):
+			// The lookup is under way: a concurrent config change invalidates the set now.
+			once.Do(func() { c.markUpstreamSetUnreadable() })
+			_ = json.NewEncoder(w).Encode([]map[string]any{{
+				"Id": "brokercontainerid", "Names": []string{"/" + containerBroker}, "Image": pinned, "State": "running",
+			}})
+		case strings.Contains(r.URL.Path, "/containers/"):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"Id": "brokercontainerid", "Image": "sha256:" + strings.Repeat("e", 64), "Name": "/" + containerBroker,
+				"State":  map[string]any{"Status": "running", "StartedAt": "now"},
+				"Config": map[string]any{"Image": pinned, "Env": []string{}},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	dc, err := docker.NewClient(config.ControllerConfig{Docker: config.DockerConfig{Host: srv.URL, APIVersion: "1.47"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dc.Close() })
+
+	c = &Ctrl{dockerClient: dc, ledger: ledgerNone, emitter: noLedger{}, logger: testLogger(t)}
+	c.bindUpstreamSetHash(strings.Repeat("a", 64))
+
+	if id, err := c.CurrentKeyIdentity(context.Background()); err == nil {
+		t.Fatalf("CurrentKeyIdentity() = %+v, want a refusal: the set was invalidated during the lookup", id)
 	}
 }

@@ -372,16 +372,17 @@ func (c *Ctrl) invalidateUpstreamSet(ctx context.Context, tag string) error {
 	// Before the emit, because the emit can fail: the ledger would then still name the old
 	// set while this process has stopped standing behind it, and unbound is the honest half
 	// of that. A running broker is unaffected either way, since it cached its keys at start.
-	c.bindUpstreamSetHash("")
-
+	//
 	// Without a ledger there is no record to supersede with, so nothing would tell a reader
 	// the set is unknown — and the unbound key would serve as if it were fine. Refuse keys
-	// instead, until a readable set is recorded.
+	// instead, until a readable set is recorded. One step (markUpstreamSetUnreadable clears
+	// the hash too), so no reader sees an unbound hash that is not yet marked.
 	if c.ledger == ledgerNone {
 		c.markUpstreamSetUnreadable()
 		c.logger.Errorf("[%s] The permitted upstream set cannot be stated; serving no key until a readable set is recorded", tag)
 		return nil
 	}
+	c.bindUpstreamSetHash("")
 
 	if err := c.emitter.EmitEvent(ctx, attest.EventUpstreamSet, []byte(upstreamSetInvalidated)); err != nil {
 		return fmt.Errorf("recording the upstream set as unreadable: %w", err)
@@ -459,8 +460,9 @@ func upstreamName(rawURL, identity string) (string, error) {
 // it does not run. Recording the file on disk again supersedes the record and rebinds.
 //
 // Best effort, like the config record's restore: a failure is logged and the cause stands.
-// What is left is then the honest half — with a ledger, a binding that failed leaves the
-// previous one in place; without one, an unreadable file serves no key.
+// With a ledger, a restore whose image record fails leaves the keys unbound (see
+// bindKeysToUpstreamSet), which a verifier refuses against the set record — closed, not
+// open. Without one, an unreadable file serves no key.
 func (c *Ctrl) restoreUpstreamSet(ctx context.Context, tag string) {
 	if !c.recordsUpstreamSet() {
 		return
