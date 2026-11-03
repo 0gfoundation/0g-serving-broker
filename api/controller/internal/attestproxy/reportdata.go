@@ -95,6 +95,12 @@ func (p *Proxy) guardQuote(w http.ResponseWriter, r *http.Request) bool {
 	canonical := hex.EncodeToString(rd)
 	if r.Method == http.MethodGet {
 		r.URL.RawQuery = url.Values{"report_data": {canonical}}.Encode()
+		// Nothing else travels: dstack's GET handler reads only the query today, and this
+		// should not depend on that staying true.
+		r.Body = http.NoBody
+		r.ContentLength = 0
+		r.Header.Del("Content-Type")
+		r.Header.Del("Transfer-Encoding")
 		return true
 	}
 	body, _ := json.Marshal(map[string]string{"report_data": canonical})
