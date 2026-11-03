@@ -28,7 +28,7 @@ func TestParseLedger(t *testing.T) {
 }
 
 // noLedgerCtrl is bindCtrl wired the way NewCtrl wires a CVM without a ledger, with the
-// recordUpstreamSet switch OFF — the default every deployment has.
+// recordUpstreamSet switch OFF, its default.
 func noLedgerCtrl(t *testing.T, svc config.Service) (*Ctrl, *fakeDeriver) {
 	t.Helper()
 	c, _, d := bindCtrl(t, svc, true, nil)
