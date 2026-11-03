@@ -506,7 +506,16 @@ func (c *Ctrl) restoreUpstreamSet(ctx context.Context, tag string) {
 // broker's value. The broker's environment does not change without recreating its container,
 // and the controller's own recreations keep it (mergeEnv).
 func (c *Ctrl) adoptBrokerTargetURL(ctx context.Context) error {
-	env, err := c.dockerClient.GetContainerEnv(ctx, containerBroker, []string{config.TargetURLEnvVar})
+	// The broker by its exact name: container lookup falls back to a substring match, which
+	// with no broker would read a neighbour's environment (a "…-broker-db") as the broker's.
+	var env map[string]string
+	status, err := c.dockerClient.GetContainerStatus(ctx, containerBroker)
+	if err == nil && (status == nil || status.Name != containerBroker) {
+		err = &docker.ContainerNotFoundError{Name: containerBroker}
+	}
+	if err == nil {
+		env, err = c.dockerClient.GetContainerEnv(ctx, containerBroker, []string{config.TargetURLEnvVar})
+	}
 	var missing *docker.ContainerNotFoundError
 	switch {
 	case errors.As(err, &missing):
