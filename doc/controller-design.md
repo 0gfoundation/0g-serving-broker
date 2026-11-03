@@ -836,6 +836,18 @@ Therefore, restart order should be:
 
 ### 5.1a RTMR3 accounting
 
+> **dstack 0.6 has no ledger for applications.** `EmitEvent` always fails there ("runtime
+> RTMR3 events are system-owned"). A deployment on 0.6 sets the compose literal
+> `ZG_CONTROLLER_LEDGER=none` on the controller: records are then accepted and written
+> nowhere, so every change path below runs unchanged; the upstream set is always recorded
+> and the keys bound to it, whatever `recordUpstreamSet` says (it comes from the unmeasured
+> config file); and a set that cannot be stated serves no key at all. What a verifier reads
+> on 0.6 is the state committed in the quote's report_data, not this ledger
+> (`doc/design/report-data-v2.md`). Unset or `rtmr3` is the behaviour described here; any
+> other value refuses to start. On 0.6 without the literal, every recorded change is
+> refused at its emit and — with `recordUpstreamSet` on — the controller does not start;
+> with it off the set is simply unrecorded, which a reader reports as not private.
+
 The controller records the broker's image and the shared config file in **RTMR3
 before changing either**. RTMR3 is append-only hardware state: an event folded into it cannot be
 edited or removed, and it is covered by the signature over any quote taken
