@@ -98,3 +98,51 @@ func TestTheControllersOwnTargetURLDoesNotDecideTheSet(t *testing.T) {
 		t.Fatalf("recorded %q, want the file's targetUrl", got)
 	}
 }
+
+// With no broker container nothing forwards, and refusing to start would leave no controller
+// to recreate it: the set is computed from the controller's own view.
+func TestNoBrokerContainerDoesNotStopTheController(t *testing.T) {
+	t.Setenv(config.TargetURLEnvVar, "")
+	c, l := targetURLCtrl(t, nil, "http://vllm:8000/v1")
+	c.dockerClient = emptyDaemon(t)
+
+	if err := c.RecordUpstreamSet(context.Background()); err != nil {
+		t.Fatalf("RecordUpstreamSet() = %v, want the set recorded from the controller's own view", err)
+	}
+	if got := emitted(l); len(got) != 1 || !strings.Contains(got[0], "http://vllm:8000/v1") {
+		t.Fatalf("recorded %q", got)
+	}
+}
+
+// Whitespace around the broker's value is not part of the destination, as on the broker.
+func TestTheBrokersTargetURLIsTrimmed(t *testing.T) {
+	t.Setenv(config.TargetURLEnvVar, "")
+	c, l := targetURLCtrl(t, []string{"TARGET_URL= http://sglang:30000/v1 "}, "http://vllm:8000/v1")
+	if err := c.RecordUpstreamSet(context.Background()); err != nil {
+		t.Fatalf("RecordUpstreamSet() = %v", err)
+	}
+	if got := emitted(l); len(got) != 1 || !strings.Contains(got[0], " http://sglang:30000/v1") || strings.Contains(got[0], "/v1 ") {
+		t.Fatalf("recorded %q, want the trimmed URL", got)
+	}
+}
+
+func emptyDaemon(t *testing.T) *docker.Client {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/_ping"):
+			w.Header().Set("Api-Version", "1.47")
+		case strings.HasSuffix(r.URL.Path, "/containers/json"):
+			_, _ = w.Write([]byte("[]"))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	dc, err := docker.NewClient(config.ControllerConfig{Docker: config.DockerConfig{Host: srv.URL, APIVersion: "1.47"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dc.Close() })
+	return dc
+}
