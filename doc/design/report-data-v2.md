@@ -185,9 +185,10 @@ error text of a failed `EmitEvent`, and not inferred at runtime (dstack's `Info`
 `os_image_hash` but no version a controller could branch on). Being a compose literal it
 is covered by compose_hash, so a verifier sees which mode was chosen, and the baseline
 pins it. With `rtmr3`, any emit failure is a failure; with `none`, nothing is attempted and
-the document says `ledger unavailable`. Unset means `rtmr3`, so every existing 0.5
-deployment keeps today's behaviour, now fail-closed. A 0.6 deployment that forgets the
-literal does not start, which is the safe direction.
+the document says `ledger unavailable`. Unset means `rtmr3`, so every existing 0.5 deployment keeps today's behaviour. A 0.6
+deployment that forgets the literal has every recorded change refused at its emit and, with
+`recordUpstreamSet` on, does not start; with it off its set is unrecorded, which a reader
+reports as not private. Either way it cannot pass as bound.
 
 Everything that used to log and continue now fails closed, at boot and at runtime alike:
 an emit failure where the ledger exists, no running digest, a derivation error. At boot
