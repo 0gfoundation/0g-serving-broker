@@ -72,8 +72,8 @@ const ReadOnlySocketEnvVar = "ATTEST_PROXY_READONLY_SOCKET"
 // Deliberately a fixed set rather than a prefix or a denylist: a denylist is wrong by
 // default the moment dstack adds a method.
 var forwarded = map[string]bool{
-	"/GetQuote": true, // the attestation itself
-	"/Info":     true, // tcb_info, which TdxQuote assembles into its response
+	pathGetQuote: true, // the attestation itself, over report_data this proxy chose (reportdata.go)
+	"/Info":      true, // tcb_info, which TdxQuote assembles into its response
 
 	// GetKey is deliberately absent. It is a key-derivation primitive, so forwarding it
 	// would let the broker derive any path — including the path belonging to a previous
@@ -173,6 +173,10 @@ func (p *Proxy) guard(next http.Handler) http.Handler {
 			// the ledger through the one path built to keep it from doing that.
 			p.logger.Warnf("[attestproxy] refused %s %s", r.Method, r.URL.Path)
 			http.NotFound(w, r)
+			return
+		}
+		// The one forwarded method whose arguments matter: see reportdata.go.
+		if r.URL.Path == pathGetQuote && !p.guardQuote(w, r) {
 			return
 		}
 		next.ServeHTTP(w, r)
