@@ -21,9 +21,29 @@ const quoteSignatureHeader = "ZG-Quote-Signature"
 //	@ID			getQuote
 //	@Tags		quote
 //	@Param		legacy	query	bool	false	"Return the legacy ASCII signer-address report_data quote (default true). Pass legacy=false for the §4.2 enc_pub-binding quote."
+//	@Param		report_data_version	query	int	false	"2: the quote whose report_data is enc_pub ‖ SHA-256(state document), with the document in its state_document member. Takes precedence over legacy; 404 when this deployment serves none."
 //	@Router		/quote [get]
 //	@Success	200	{string}	string
 func (h *Handler) GetQuote(ctx *gin.Context) {
+	// report_data v2 is answered by itself or not at all: a client asking for the state
+	// commitment must not be handed a quote that commits to something else.
+	if v := ctx.Query("report_data_version"); v != "" {
+		if v != "2" {
+			ctx.JSON(http.StatusBadRequest, gin.H{"error": "report_data_version must be 2"})
+			return
+		}
+		quote, sig := h.ctrl.StateQuote()
+		if quote == "" {
+			ctx.JSON(http.StatusNotFound, gin.H{"error": "this deployment serves no report_data v2 quote"})
+			return
+		}
+		if sig != nil {
+			ctx.Header(quoteSignatureHeader, hexutil.Encode(sig))
+		}
+		ctx.String(http.StatusOK, quote)
+		return
+	}
+
 	legacy := true
 	if v := ctx.Query("legacy"); v != "" {
 		if parsed, err := strconv.ParseBool(v); err == nil {
