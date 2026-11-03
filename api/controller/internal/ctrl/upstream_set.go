@@ -82,6 +82,10 @@ func (c *Ctrl) RecordUpstreamSet(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, recordUpstreamSetTimeout)
 	defer cancel()
 
+	if err := c.adoptBrokerTargetURL(ctx); err != nil {
+		return err
+	}
+
 	if c.hasInProcessInstances() {
 		primary, err := os.ReadFile(c.config.ConfigFile)
 		if err != nil {
@@ -483,4 +487,55 @@ func (c *Ctrl) restoreUpstreamSet(ctx context.Context, tag string) {
 		return
 	}
 	c.logger.Infof("[%s] Upstream set restored to the config on disk", tag)
+}
+
+// adoptBrokerTargetURL makes this process compute the permitted set with the TARGET_URL the
+// broker runs with.
+//
+// TARGET_URL overrides service.targetUrl wherever a config is loaded (config.applyTargetURLEnv),
+// and the override is read from the loading process's own environment. The broker's compose
+// entry sets it; the controller's does not, as a rule. So the controller computed the set from
+// the file's targetUrl while the broker forwarded to TARGET_URL — and the recorded, bound set
+// could leave out the one destination the broker actually uses by default.
+//
+// Done once, at boot, before the first set is computed: every later computation (config
+// changes, restores, in-process instances) loads through the same override and now sees the
+// broker's value. The broker's environment does not change without recreating its container,
+// and the controller's own recreations keep it (mergeEnv).
+func (c *Ctrl) adoptBrokerTargetURL(ctx context.Context) error {
+	env, err := c.dockerClient.GetContainerEnv(ctx, containerBroker, []string{config.TargetURLEnvVar})
+	if err != nil {
+		return fmt.Errorf("reading the broker's %s, which decides one of the destinations the set must name: %w", config.TargetURLEnvVar, err)
+	}
+	brokerValue := env[config.TargetURLEnvVar]
+	ownValue := os.Getenv(config.TargetURLEnvVar)
+	switch {
+	case brokerValue != "":
+		if err := os.Setenv(config.TargetURLEnvVar, brokerValue); err != nil {
+			return err
+		}
+		if c.fullConfig != nil {
+			c.fullConfig.Service.TargetURL = brokerValue
+		}
+	case ownValue != "":
+		// The broker runs on the file's targetUrl, but this process's startup config was
+		// overridden by its own TARGET_URL: drop it and take the file's value back. (The
+		// in-process path reads the file itself, through the override.)
+		if err := os.Unsetenv(config.TargetURLEnvVar); err != nil {
+			return err
+		}
+		if c.fullConfig == nil {
+			return nil
+		}
+		content, err := os.ReadFile(c.config.ConfigFile)
+		if err != nil {
+			return fmt.Errorf("re-reading %s: %w", c.config.ConfigFile, err)
+		}
+		svc, err := config.ServiceFromYAML(content)
+		if err != nil {
+			return fmt.Errorf("re-reading %s: %w", c.config.ConfigFile, err)
+		}
+		c.fullConfig.Service.TargetURL = svc.TargetURL
+	}
+	return nil
 }
