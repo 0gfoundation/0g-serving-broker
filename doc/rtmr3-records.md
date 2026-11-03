@@ -258,8 +258,10 @@ version 2 commits the same state in the quote instead. Design and rationale:
 `state_document` (a JSON string), and is signed like the other layouts (`ZG-Quote-Signature`
 over the body, by the signer the document's `image` line names). It answers **404** when the
 deployment serves no v2 quote — no attestation proxy, a controller that predates it, or a
-controller that could not build the document when the broker started (the v2 quote is taken
-once, at broker start, and is best effort) — never another layout. Any other
+controller that could not build the document when the broker started, or a state change landing
+between the broker's `/State` fetch and its quote request (the proxy then refuses the quote).
+The v2 quote is taken once, at broker start, and is best effort, so a 404 lasts until the broker
+next restarts — never another layout. Any other
 `report_data_version` is 400.
 
 ### 8.2 Layout
@@ -301,7 +303,7 @@ taken from the last record written:
 | `upstreams` | the set the keys are **bound** to (§4.3). `unrecorded`: the deployment records no set (only possible with a ledger and `recordUpstreamSet` off). The payload `invalidated`: the set is recorded but no set is bound — it could not be stated, or its binding failed. Either is "nothing bounds where plaintext goes". |
 | `engines` | the containers the controller created (§4.4); `count=0` when none. |
 | `instance` | per extra instance, its name and its config file's hash (§4.5). |
-| `ledger` | `rtmr3`: this CVM has an RTMR3 the controller appends to on every change (dstack 0.5) — the records of §4 exist for changes since boot, but a deployment that changed nothing has none, so their absence is not a mismatch. `unavailable`: no ledger (dstack 0.6, `ZG_CONTROLLER_LEDGER=none`). |
+| `ledger` | `rtmr3`: this CVM has an RTMR3 the controller appends to (dstack 0.5) — at boot when the set is recorded (`zg-upstream-set`, and the `zg-image-update` its binding writes), and on every change; a kind that was neither recorded at boot nor changed since has no record, and its absence is not a mismatch. `unavailable`: no ledger (dstack 0.6, `ZG_CONTROLLER_LEDGER=none`). |
 
 ### 8.4 Steps
 
@@ -316,8 +318,9 @@ Replace §2 steps 2 and 4–6 with:
    the compose baseline is unchanged.
 
 On `ledger rtmr3` a reader may additionally replay RTMR3 (§3) and require the last record of
-each kind, where one exists, to equal the document's line — a consistency check, not a second
-source.
+each kind — for `zg-instance-config-update`, the last record **per instance name** — where one
+exists, to equal the document's line. A consistency check, not a second source; and the records
+are those of the quote the broker took at start (§8.5, freshness).
 
 ### 8.5 What it does and does not bound
 
