@@ -138,7 +138,7 @@ func TestStateDocumentListsInstancesSorted(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.configDir = t.TempDir()
-	for _, name := range []string{"zeta", "alpha"} {
+	for _, name := range []string{"zeta", "alpha", "mike", "bravo", "yankee", "delta"} {
 		if err := os.WriteFile(filepath.Join(c.configDir, name+".yaml"), []byte(name), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -147,11 +147,16 @@ func TestStateDocumentListsInstancesSorted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a := strings.Index(string(doc), "\ninstance alpha ")
-	z := strings.Index(string(doc), "\ninstance zeta ")
-	if a < 0 || z < 0 || a > z {
-		t.Fatalf("document %q, want alpha then zeta", doc)
+	var order []string
+	for _, line := range strings.Split(string(doc), "\n") {
+		if strings.HasPrefix(line, "instance ") {
+			order = append(order, strings.Fields(line)[1])
+		}
 	}
+	if got := strings.Join(order, ","); got != "alpha,bravo,delta,mike,yankee,zeta" {
+		t.Fatalf("instances in order %s, want sorted by name", got)
+	}
+	a := strings.Index(string(doc), "\ninstance alpha ")
 	sum := sha256.Sum256([]byte("alpha"))
 	line := strings.SplitN(string(doc)[a+1:], "\n", 2)[0]
 	if got := unb64(t, strings.TrimPrefix(line, "instance alpha ")); got != "alpha "+hex.EncodeToString(sum[:]) {
