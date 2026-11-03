@@ -248,6 +248,16 @@ type Ctrl struct {
 	setHashMu       sync.RWMutex
 	boundSetHashVal string
 
+	// setUnreadable is set when, on a CVM without a ledger, the permitted set could not be
+	// stated. With a ledger the invalidation record says so and the unbound key is the
+	// honest answer; without one nothing would say so, and the unbound key would serve a
+	// deployment whose destinations nobody can name. So no key is served at all — see
+	// CurrentKeyIdentity. Guarded by setHashMu; cleared by any successful bind.
+	setUnreadable bool
+
+	// ledger is LedgerEnvVar, read once at startup.
+	ledger ledgerMode
+
 	// instances are the extra broker/event pairs this controller manages beside the
 	// primary one (InstancesEnvVar). Fixed at startup, like the admin list.
 	instances []Instance
@@ -287,6 +297,21 @@ func (c *Ctrl) bindUpstreamSetHash(hash string) {
 	c.setHashMu.Lock()
 	defer c.setHashMu.Unlock()
 	c.boundSetHashVal = hash
+	c.setUnreadable = false
+}
+
+// markUpstreamSetUnreadable makes CurrentKeyIdentity refuse until a set is bound again.
+func (c *Ctrl) markUpstreamSetUnreadable() {
+	c.setHashMu.Lock()
+	defer c.setHashMu.Unlock()
+	c.boundSetHashVal = ""
+	c.setUnreadable = true
+}
+
+func (c *Ctrl) upstreamSetUnreadable() bool {
+	c.setHashMu.RLock()
+	defer c.setHashMu.RUnlock()
+	return c.setUnreadable
 }
 
 // NewCtrl creates a new controller
@@ -311,9 +336,18 @@ func NewCtrl(fullConfig *config.Config, logger log.Logger) (*Ctrl, error) {
 		allowedIPs[ip] = true
 	}
 
+	ledger, err := parseLedger(os.Getenv(LedgerEnvVar))
+	if err != nil {
+		return nil, err
+	}
+
 	// One client for both jobs it does over that socket: appending to RTMR3, and deriving the
 	// per-image key whose address goes into the record.
 	dstackClient := dstack.NewDstackClient()
+	var emitter EventEmitter = dstackClient
+	if ledger == ledgerNone {
+		emitter = noLedger{}
+	}
 
 	ctrl := &Ctrl{
 		config:       cfg,
@@ -324,14 +358,15 @@ func NewCtrl(fullConfig *config.Config, logger log.Logger) (*Ctrl, error) {
 		// refused to start without it would take the read-only endpoints down too.
 		// An upgrade attempted without the socket fails at the emit, before
 		// anything is touched, which is the outcome that matters.
-		emitter:        dstackClient,
+		emitter:        emitter,
 		deriver:        dstackSignerDeriver{client: dstackClient},
+		ledger:         ledger,
 		adminAddresses: adminAddresses,
 		allowedIPs:     allowedIPs,
 		logger:         logger,
 	}
 
-	instances, err := parseInstances(os.Getenv(InstancesEnvVar), cfg.ConfigFile, cfg.RecordUpstreamSet)
+	instances, err := parseInstances(os.Getenv(InstancesEnvVar), cfg.ConfigFile, cfg.RecordUpstreamSet || ledger == ledgerNone)
 	if err != nil {
 		return nil, err
 	}
@@ -1500,6 +1535,9 @@ func (c *Ctrl) GetPrometheusConfig(ctx context.Context) (string, error) {
 // a later change to this value cannot reach a running broker either — the restart in
 // ApplyCoreConfig is what publishes it.
 func (c *Ctrl) CurrentKeyIdentity(ctx context.Context) (attestproxy.KeyIdentity, error) {
+	if c.upstreamSetUnreadable() {
+		return attestproxy.KeyIdentity{}, fmt.Errorf("the permitted upstream set cannot be stated and this CVM has no ledger to say so; serving no key until a readable set is recorded")
+	}
 	digest, err := c.RunningBrokerDigest(ctx)
 	if err != nil {
 		return attestproxy.KeyIdentity{}, err

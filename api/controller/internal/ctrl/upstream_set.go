@@ -73,7 +73,7 @@ const recordUpstreamSetTimeout = 30 * time.Second
 // was recorded, so the caller decides whether a deployment that cannot describe its own
 // upstreams should start.
 func (c *Ctrl) RecordUpstreamSet(ctx context.Context) error {
-	if !c.config.RecordUpstreamSet {
+	if !c.recordsUpstreamSet() {
 		// Not an error and not a warning. Off is the default and the correct state until
 		// every reader of this deployment's quote can read the record — see the field.
 		return nil
@@ -148,7 +148,7 @@ func (c *Ctrl) RecordUpstreamSetFromContent(ctx context.Context, content string)
 	// never recorded a set has nothing to correct, and writing anything here would be the
 	// FIRST zg-upstream-set event it ever emitted — which is exactly the hard-fail the
 	// switch exists to keep off.
-	if !c.config.RecordUpstreamSet {
+	if !c.recordsUpstreamSet() {
 		return nil
 	}
 
@@ -173,7 +173,7 @@ func (c *Ctrl) RecordUpstreamSetFromContent(ctx context.Context, content string)
 // instance's file holds content. Same switch, same order (before the write), same
 // fail-closed rules.
 func (c *Ctrl) recordInProcessInstanceUpstreamSet(ctx context.Context, name, content string) error {
-	if !c.config.RecordUpstreamSet {
+	if !c.recordsUpstreamSet() {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, recordUpstreamSetTimeout)
@@ -308,20 +308,32 @@ func (c *Ctrl) bindKeysToUpstreamSet(ctx context.Context, tag, hash string) erro
 		return nil
 	}
 
+	// Without a ledger there is no image record to write, so the digest and the derived keys
+	// that record would carry are not needed: binding is storing the hash. That is also why
+	// this cannot wait on the broker container — at boot it may not be running yet.
+	if c.ledger == ledgerNone {
+		c.bindUpstreamSetHash(hash)
+		c.logger.Infof("[%s] Keys bound to the permitted upstream set (no ledger)", tag)
+		return nil
+	}
+
+	// Each failure below is returned, not logged and passed over. Passing over left the set
+	// recorded and the keys unbound, which looks like a bound deployment to anyone reading
+	// the set record while the signer does not depend on it — the fail-open state this
+	// binding exists to close (report-data-v2.md §4.4). At boot the caller stops; on a
+	// config change the change is refused.
 	digest, err := c.RunningBrokerDigest(ctx)
 	if err != nil {
 		// Unbound rather than half-bound. Binding needs the digest as much as the hash, and
 		// storing the hash without being able to write the record would make the broker
 		// derive a key nothing describes.
-		c.logger.Errorf("[%s] Recorded the upstream set but could not resolve the broker's digest, so no key is bound to it: %v", tag, err)
-		return nil
+		return fmt.Errorf("recorded the upstream set but could not resolve the broker's digest, so no key is bound to it: %w", err)
 	}
 
 	id := attestproxy.KeyIdentity{Digest: digest, UpstreamSetHash: hash}
 	signer, encPub, err := c.deriver.ImageKeys(ctx, id)
 	if err != nil {
-		c.logger.Errorf("[%s] Recorded the upstream set but could not derive the keys bound to it, so none is bound: %v", tag, err)
-		return nil
+		return fmt.Errorf("recorded the upstream set but could not derive the keys bound to it, so none is bound: %w", err)
 	}
 
 	// Bound BEFORE the record is written, and the record written before this returns —
@@ -361,6 +373,15 @@ func (c *Ctrl) invalidateUpstreamSet(ctx context.Context, tag string) error {
 	// set while this process has stopped standing behind it, and unbound is the honest half
 	// of that. A running broker is unaffected either way, since it cached its keys at start.
 	c.bindUpstreamSetHash("")
+
+	// Without a ledger there is no record to supersede with, so nothing would tell a reader
+	// the set is unknown — and the unbound key would serve as if it were fine. Refuse keys
+	// instead, until a readable set is recorded.
+	if c.ledger == ledgerNone {
+		c.markUpstreamSetUnreadable()
+		c.logger.Errorf("[%s] The permitted upstream set cannot be stated; serving no key until a readable set is recorded", tag)
+		return nil
+	}
 
 	if err := c.emitter.EmitEvent(ctx, attest.EventUpstreamSet, []byte(upstreamSetInvalidated)); err != nil {
 		return fmt.Errorf("recording the upstream set as unreadable: %w", err)

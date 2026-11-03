@@ -193,11 +193,13 @@ func TestAnInvalidationUnbinds(t *testing.T) {
 
 // A derivation this cannot complete leaves the set recorded and nothing bound, rather than
 // binding a hash whose key nothing describes.
-func TestADerivationFailureLeavesNothingBound(t *testing.T) {
+func TestADerivationFailureBindsNothingAndIsReported(t *testing.T) {
 	c, l, _ := bindCtrl(t, config.Service{TargetURL: "http://vllm:8000/v1"}, true, errors.New("dstack is down"))
 
-	if err := c.RecordUpstreamSet(context.Background()); err != nil {
-		t.Fatalf("RecordUpstreamSet() = %v, want the set recorded unbound", err)
+	// Returned, not passed over: the set is recorded but the signer would not depend on
+	// it, which reads as bound while it is not (report-data-v2.md §4.4). The caller stops.
+	if err := c.RecordUpstreamSet(context.Background()); err == nil {
+		t.Fatal("RecordUpstreamSet() = nil after a failed derivation, want the failure reported")
 	}
 	if got := emitted(l); len(got) != 1 || !strings.HasPrefix(got[0], "count=") {
 		t.Fatalf("recorded %q, want the set", got)
@@ -219,7 +221,7 @@ func TestADerivationFailureLeavesNothingBound(t *testing.T) {
 // the hash bound with NO image record written — so the broker derives the bound key while
 // the ledger names the previous signer, or none. That mismatch is unrecoverable for the
 // boot, because RTMR3 only appends.
-func TestAnUnresolvableDigestLeavesNothingBound(t *testing.T) {
+func TestAnUnresolvableDigestBindsNothingAndIsReported(t *testing.T) {
 	t.Setenv(attestproxy.SocketEnvVar, "/var/run/zg-tee/tee.sock")
 
 	// The same fixture running_digest_test.go uses for "built locally and never pushed":
@@ -233,8 +235,8 @@ func TestAnUnresolvableDigestLeavesNothingBound(t *testing.T) {
 	c.deriver = d
 	c.logger = testLogger(t)
 
-	if err := c.RecordUpstreamSet(context.Background()); err != nil {
-		t.Fatalf("RecordUpstreamSet() = %v, want the set recorded unbound", err)
+	if err := c.RecordUpstreamSet(context.Background()); err == nil {
+		t.Fatal("RecordUpstreamSet() = nil with no digest, want the failure reported")
 	}
 	if got := emitted(l); len(got) != 1 || !strings.HasPrefix(got[0], "count=") {
 		t.Fatalf("recorded %q, want the set", got)

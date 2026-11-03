@@ -116,7 +116,7 @@ func (c *Ctrl) validateInProcessSet(ctx context.Context, primaryContent []byte, 
 // ledger would go on naming the set of a config the process does not run, and
 // the next start would bind keys to it.
 func (c *Ctrl) restoreInProcessUpstreamSet(ctx context.Context, tag string) {
-	if !c.config.RecordUpstreamSet {
+	if !c.recordsUpstreamSet() {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), restoreTimeout)
