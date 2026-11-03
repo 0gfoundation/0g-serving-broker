@@ -209,6 +209,8 @@ func (p *Proxy) handleLocal(w http.ResponseWriter, r *http.Request) bool {
 		p.serveSignerAddress(w, r)
 	case pathGetEncKey:
 		p.serveEncKey(w, r)
+	case pathState:
+		p.serveState(w, r)
 	default:
 		return false
 	}

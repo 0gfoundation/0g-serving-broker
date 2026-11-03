@@ -426,10 +426,20 @@ func (c *Ctrl) ListEngines(ctx context.Context) ([]EngineStatus, error) {
 // may go. It is still preferred to failing, because the caller is mid-change and the
 // alternative is a ledger left describing the state before it.
 func (c *Ctrl) engineSetFromDocker(ctx context.Context) []attest.Engine {
-	containers, err := c.dockerClient.ListContainers(ctx)
+	out, err := c.engineSet(ctx)
 	if err != nil {
 		c.logger.Errorf("[engineSet] Could not list containers, so the recorded set may understate what runs: %v", err)
 		return nil
+	}
+	return out
+}
+
+// engineSet is engineSetFromDocker that reports a failed listing rather than an empty set —
+// for the state document, which must not state "no engines" when it could not look.
+func (c *Ctrl) engineSet(ctx context.Context) ([]attest.Engine, error) {
+	containers, err := c.dockerClient.ListContainers(ctx)
+	if err != nil {
+		return nil, err
 	}
 	var out []attest.Engine
 	for _, cont := range containers {
@@ -450,7 +460,7 @@ func (c *Ctrl) engineSetFromDocker(ctx context.Context) []attest.Engine {
 			Args: strings.Join(cont.Command(), " "),
 		})
 	}
-	return out
+	return out, nil
 }
 
 // engineExists refuses a name that is not, exactly, an engine this controller created.

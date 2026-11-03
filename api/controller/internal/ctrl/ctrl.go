@@ -247,6 +247,9 @@ type Ctrl struct {
 	// reaches the broker. See boundUpstreamSetHash.
 	setHashMu       sync.RWMutex
 	boundSetHashVal string
+	// boundSetPayload is the rendered set boundSetHashVal is the hash of — what the state
+	// document (state.go) states as the bound set. "" whenever the hash is.
+	boundSetPayload string
 
 	// setUnreadable is set when, on a CVM without a ledger, the permitted set could not be
 	// stated. With a ledger the invalidation record says so and the unbound key is the
@@ -293,10 +296,15 @@ func (c *Ctrl) boundUpstreamSetHash() string {
 }
 
 // bindUpstreamSetHash records what keys are derived for from now on. "" unbinds.
-func (c *Ctrl) bindUpstreamSetHash(hash string) {
+func (c *Ctrl) bindUpstreamSetHash(hash string) { c.bindUpstreamSet(hash, "") }
+
+// bindUpstreamSet binds the keys to a set: its hash, and the rendered payload it is the hash
+// of, which the state document carries.
+func (c *Ctrl) bindUpstreamSet(hash, payload string) {
 	c.setHashMu.Lock()
 	defer c.setHashMu.Unlock()
 	c.boundSetHashVal = hash
+	c.boundSetPayload = payload
 	c.setUnreadable = false
 }
 
@@ -305,15 +313,22 @@ func (c *Ctrl) markUpstreamSetUnreadable() {
 	c.setHashMu.Lock()
 	defer c.setHashMu.Unlock()
 	c.boundSetHashVal = ""
+	c.boundSetPayload = ""
 	c.setUnreadable = true
 }
 
 // boundUpstreamSetState reads the bound hash and the unreadable mark together, so no reader
 // sees the moment between unbinding and marking.
 func (c *Ctrl) boundUpstreamSetState() (hash string, unreadable bool) {
+	hash, _, unreadable = c.boundUpstreamSetSnapshot()
+	return hash, unreadable
+}
+
+// boundUpstreamSetSnapshot is boundUpstreamSetState with the payload, all under one lock.
+func (c *Ctrl) boundUpstreamSetSnapshot() (hash, payload string, unreadable bool) {
 	c.setHashMu.RLock()
 	defer c.setHashMu.RUnlock()
-	return c.boundSetHashVal, c.setUnreadable
+	return c.boundSetHashVal, c.boundSetPayload, c.setUnreadable
 }
 
 // NewCtrl creates a new controller

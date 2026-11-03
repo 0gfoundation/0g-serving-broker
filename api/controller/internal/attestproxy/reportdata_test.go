@@ -70,7 +70,7 @@ func quoteBody(rd []byte) string {
 // arrived — method, query and body — so a test can see what was quoted.
 type quoteRecorder struct{ got []string }
 
-func startRecording(t *testing.T, readOnly bool, identity CurrentKeyIdentityFunc) (*http.Client, *quoteRecorder) {
+func startRecording(t *testing.T, readOnly bool, identity CurrentKeyIdentityFunc, opts ...func(*Proxy)) (*http.Client, *quoteRecorder) {
 	t.Helper()
 	dir := t.TempDir()
 	rec := &quoteRecorder{}
@@ -98,6 +98,9 @@ func startRecording(t *testing.T, readOnly bool, identity CurrentKeyIdentityFunc
 		p = NewReadOnly(listenPath, dstackPath, testLogger(t))
 	} else {
 		p = New(listenPath, dstackPath, identity, testLogger(t))
+	}
+	for _, o := range opts {
+		o(p)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)

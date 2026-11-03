@@ -262,7 +262,7 @@ func (c *Ctrl) recordUpstreamSet(ctx context.Context, tag string, members []atte
 	}
 	c.logger.Infof("[%s] Recorded %d permitted upstream(s)", tag, len(members))
 
-	return c.bindKeysToUpstreamSet(ctx, tag, hash)
+	return c.bindKeysToUpstreamSet(ctx, tag, hash, payload)
 }
 
 // bindKeysToUpstreamSet makes the signing and encryption keys a function of the set just
@@ -302,7 +302,7 @@ func (c *Ctrl) recordUpstreamSet(ctx context.Context, tag string, members []atte
 // refuses outright for exactly this reason. Here the set is still worth recording, so it
 // is: the record is written and left UNBOUND, loudly, because a set nobody can read is
 // strictly less than a set that is merely unenforced.
-func (c *Ctrl) bindKeysToUpstreamSet(ctx context.Context, tag, hash string) error {
+func (c *Ctrl) bindKeysToUpstreamSet(ctx context.Context, tag, hash, setPayload string) error {
 	if os.Getenv(attestproxy.SocketEnvVar) == "" {
 		c.logger.Warnf("[%s] Recorded the upstream set but bound no key to it: %s is unset, so the broker derives its own keys and a record naming one derived here could never match its quote. The set is recorded and readable; changing it will NOT rotate the signer or reset the on-chain acknowledgement.", tag, attestproxy.SocketEnvVar)
 		return nil
@@ -312,7 +312,7 @@ func (c *Ctrl) bindKeysToUpstreamSet(ctx context.Context, tag, hash string) erro
 	// that record would carry are not needed: binding is storing the hash. That is also why
 	// this cannot wait on the broker container — at boot it may not be running yet.
 	if c.ledger == ledgerNone {
-		c.bindUpstreamSetHash(hash)
+		c.bindUpstreamSet(hash, setPayload)
 		c.logger.Infof("[%s] Keys bound to the permitted upstream set (no ledger)", tag)
 		return nil
 	}
@@ -340,7 +340,7 @@ func (c *Ctrl) bindKeysToUpstreamSet(ctx context.Context, tag, hash string) erro
 	// which is before main.go starts the proxy and before ApplyCoreConfig restarts the
 	// broker. So there is no moment at which the broker can obtain a key from this value
 	// while the ledger still describes the previous one.
-	c.bindUpstreamSetHash(hash)
+	c.bindUpstreamSet(hash, setPayload)
 
 	payload := c.config.ImageRepo + "@" + digest + " " + signer + " " + encPub
 	if err := c.emitter.EmitEvent(ctx, attest.EventImageUpdate, []byte(payload)); err != nil {
