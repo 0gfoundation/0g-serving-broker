@@ -192,7 +192,7 @@ func (c *Ctrl) CreateEngine(ctx context.Context, spec EngineSpec) error {
 	if !c.enginesEnabled {
 		return refusef("cannot create an engine: %s is not \"on\" in the controller's environment, so this deployment's compose does not permit containers beyond the ones it lists", EnginesEnvVar)
 	}
-	if !c.config.RecordUpstreamSet {
+	if !c.recordsUpstreamSet() {
 		return refusef("cannot create an engine: controller.recordUpstreamSet is off, so there is nowhere to record the set and the container would serve unrecorded")
 	}
 
@@ -284,7 +284,7 @@ func (c *Ctrl) RemoveEngine(ctx context.Context, name string) ([]string, error) 
 	// controller did not create is refused one layer down anyway. An operator who turned
 	// the switch off with engines running is told that rather than being allowed a removal
 	// the ledger would never reflect.
-	if !c.config.RecordUpstreamSet {
+	if !c.recordsUpstreamSet() {
 		return nil, refusef("cannot remove an engine: controller.recordUpstreamSet is off, so the correction could not be recorded and the ledger would go on naming it")
 	}
 	if !c.changing.TryLock() {

@@ -66,14 +66,17 @@ func Main() {
 	// without this the set is UpstreamsUnrecorded, which reads as "nothing bounds where
 	// plaintext goes". And RTMR3 is cleared at every boot, so it has to be every start.
 	//
-	// Logged rather than fatal. A failed emit leaves the set unrecorded, which is where
-	// every deployment already is, so refusing to start would trade today's fail-open
-	// state for a new way to be down — and the enforcement that actually closes it is
-	// binding the set hash into the signing key's derivation path, where no set means no
-	// key and the deployment cannot serve at all. That is mechanical; a Fatal here would
-	// only be a second, weaker copy of it.
+	// Fatal: a deployment that cannot record and bind where its plaintext may go must not
+	// serve as though it had. This used to log and carry on, on the argument that the binding
+	// itself would stop a deployment with no set — but the binding ran only after a
+	// successful emit, so a failed emit left the keys unbound and the deployment serving
+	// (doc/design/report-data-v2.md §4.4). Without a ledger (ZG_CONTROLLER_LEDGER=none) no
+	// emit is attempted and this only fails on a binding error.
+	//
+	// Only reached when the set is recorded: recordUpstreamSet on, or no ledger. Every
+	// deployment with a ledger and the switch off is unaffected.
 	if err := controller.RecordUpstreamSet(context.Background()); err != nil {
-		logger.Errorf("Could not record the permitted upstream set; this deployment starts with nothing in RTMR3 bounding where plaintext may go: %v", err)
+		logger.Fatalf("Could not record and bind the permitted upstream set: %v", err)
 	}
 
 	// Serve quotes and derived keys to the broker, when a deployment has asked for it.
