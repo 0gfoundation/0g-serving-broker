@@ -2,12 +2,15 @@ package ctrl
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/0glabs/0g-serving-broker/common/attest"
 	"github.com/0glabs/0g-serving-broker/controller/internal/attestproxy"
+	"github.com/0glabs/0g-serving-broker/controller/internal/docker"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 )
 
@@ -504,10 +507,20 @@ func (c *Ctrl) restoreUpstreamSet(ctx context.Context, tag string) {
 // and the controller's own recreations keep it (mergeEnv).
 func (c *Ctrl) adoptBrokerTargetURL(ctx context.Context) error {
 	env, err := c.dockerClient.GetContainerEnv(ctx, containerBroker, []string{config.TargetURLEnvVar})
-	if err != nil {
+	var missing *docker.ContainerNotFoundError
+	switch {
+	case errors.As(err, &missing):
+		// No broker container: nothing forwards anything, so there is no destination to
+		// miss — and refusing to start here would leave the deployment with no controller to
+		// recreate it (an image swap interrupted between remove and create). Keep this
+		// process's own view; the next boot with a broker adopts its value.
+		c.logger.Warnf("[RecordUpstreamSet] No broker container to read %s from; computing the set from the controller's own environment", config.TargetURLEnvVar)
+		return nil
+	case err != nil:
 		return fmt.Errorf("reading the broker's %s, which decides one of the destinations the set must name: %w", config.TargetURLEnvVar, err)
 	}
-	brokerValue := env[config.TargetURLEnvVar]
+	// Trimmed as the broker trims it (applyTargetURLEnv), so both sides name one string.
+	brokerValue := strings.TrimSpace(env[config.TargetURLEnvVar])
 	ownValue := os.Getenv(config.TargetURLEnvVar)
 	switch {
 	case brokerValue != "":
