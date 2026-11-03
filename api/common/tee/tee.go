@@ -127,6 +127,14 @@ type TeeService struct {
 	QuoteSig   []byte
 	QuoteV2Sig []byte
 
+	// QuoteState is the report_data v2 quote — report_data = enc_pub ‖ SHA-256(state
+	// document) — with the document itself in its "state_document" member, and
+	// QuoteStateSig the signature over it, computed once like the two above. Empty when
+	// the controller serves no state document (no attestation proxy, or one that predates
+	// it). doc/design/report-data-v2.md.
+	QuoteState    string
+	QuoteStateSig []byte
+
 	// E2EE (0g-pc SPEC §4) enclave encryption key. Derived inside the TEE from a
 	// path distinct from the signer, optionally bound into the quote's report_data
 	// (§4.2, see reportData), and used as the HPKE recipient to unseal sealed
@@ -251,7 +259,60 @@ func (s *TeeService) SyncQuote(ctx context.Context, nvQuote bool) error {
 		}
 	}
 
+	s.QuoteState, s.QuoteStateSig = "", nil
+	if s.remote != nil {
+		s.syncStateQuote(ctx, client, nvQuote)
+	}
+
 	return nil
+}
+
+// syncStateQuote builds the report_data v2 quote: the state document from the controller,
+// a quote over enc_pub ‖ SHA-256(document), and the document carried in the reply.
+//
+// Best effort. The legacy and §4.2 quotes are what every client reads today; a controller
+// that predates /State, or cannot build the document right now, leaves this one empty and
+// GET /v1/quote?report_data_version=2 answers that it is unavailable rather than serving a
+// different layout under that name.
+//
+// The proxy quotes a v2 report_data only for the document it would build itself and the
+// enc_pub it derives for that document's identity, so a document that moved between the two
+// calls is refused there — the next sync, which every state change triggers by restarting
+// this process, gets a consistent pair.
+func (s *TeeService) syncStateQuote(ctx context.Context, client TappdClient, nvQuote bool) {
+	doc, err := s.remote.StateDocument(ctx)
+	if err != nil {
+		s.logger.Warnf("report_data v2 quote unavailable: %v", err)
+		return
+	}
+	if len(s.EncPublicKey) != reportDataSize/2 {
+		s.logger.Warnf("report_data v2 quote unavailable: enc_pub is %d bytes", len(s.EncPublicKey))
+		return
+	}
+	sum := sha256.Sum256(doc)
+	reportData := append(append([]byte{}, s.EncPublicKey...), sum[:]...)
+
+	quote, err := client.TdxQuote(ctx, reportData, nvQuote)
+	if err != nil {
+		s.logger.Warnf("report_data v2 quote unavailable: %v", err)
+		return
+	}
+	if quote, err = withQuoteMember(quote, "state_document", string(doc)); err != nil {
+		s.logger.Warnf("report_data v2 quote unavailable: %v", err)
+		return
+	}
+	quote = s.advertiseE2EEFeatures(quote)
+	sig, err := s.Sign(crypto.Keccak256([]byte(quote)))
+	if err != nil {
+		s.logger.Warnf("report_data v2 quote will be served unsigned: %v", err)
+		sig = nil
+	}
+	s.QuoteState, s.QuoteStateSig = quote, sig
+}
+
+// GetStateQuote returns the report_data v2 quote and its signature, or "" when there is none.
+func (s *TeeService) GetStateQuote() (string, []byte) {
+	return s.QuoteState, s.QuoteStateSig
 }
 
 // GetQuote returns the cached quote for the requested report_data layout. When
@@ -575,14 +636,20 @@ func withE2EEFeatures(quote string, features []string) (string, error) {
 	if len(features) == 0 {
 		return quote, nil
 	}
+	return withQuoteMember(quote, "e2ee_features", features)
+}
+
+// withQuoteMember splices `"name": value` into a quote reply before its closing brace, for
+// the reason withE2EEFeatures gives: every byte the backend produced stays as it was.
+func withQuoteMember(quote, name string, value interface{}) (string, error) {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(quote), &obj); err != nil || obj == nil {
-		return "", fmt.Errorf("quote reply is not a JSON object, cannot add e2ee_features")
+		return "", fmt.Errorf("quote reply is not a JSON object, cannot add %s", name)
 	}
-	if _, ok := obj["e2ee_features"]; ok {
-		return "", fmt.Errorf("quote reply already carries e2ee_features")
+	if _, ok := obj[name]; ok {
+		return "", fmt.Errorf("quote reply already carries %s", name)
 	}
-	member, err := json.Marshal(features)
+	member, err := json.Marshal(value)
 	if err != nil {
 		return "", err
 	}
@@ -592,5 +659,5 @@ func withE2EEFeatures(quote string, features []string) (string, error) {
 	if len(obj) == 0 {
 		sep = ""
 	}
-	return body + sep + `"e2ee_features":` + string(member) + "}", nil
+	return body + sep + `"` + name + `":` + string(member) + "}", nil
 }

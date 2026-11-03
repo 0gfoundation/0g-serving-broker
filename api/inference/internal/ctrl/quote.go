@@ -46,6 +46,12 @@ func (c *Ctrl) QuoteSignature(legacy bool) []byte {
 	return c.teeService.GetQuoteSignature(legacy)
 }
 
+// StateQuote returns the report_data v2 quote (with its state document) and its signature,
+// or "" when this deployment has none.
+func (c *Ctrl) StateQuote() (string, []byte) {
+	return c.teeService.GetStateQuote()
+}
+
 func (c *Ctrl) GetProviderSignerAddress(ctx context.Context) common.Address {
 	return c.teeService.Address
 }

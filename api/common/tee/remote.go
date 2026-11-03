@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -33,6 +35,7 @@ const (
 	remoteSignerPathSign    = "/Sign"
 	remoteSignerPathAddress = "/SignerAddress"
 	remoteSignerPathEncKey  = "/GetEncKey"
+	remoteSignerPathState   = "/State"
 
 	// remoteSignerTimeout bounds one call. The peer is a local unix socket doing one key
 	// derivation, so this is generous; it exists so a wedged controller surfaces as a failed
@@ -128,6 +131,40 @@ func (r *remoteSigner) EncKeyMaterial(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("the controller returned no enc key material")
 	}
 	return out.Key, nil
+}
+
+// errNoStateSource is the controller answering 404 for /State: it predates report_data v2.
+var errNoStateSource = errors.New("the controller serves no state document")
+
+// stateDocumentMax bounds the document read: a few lines of hashes and keys, and at most a
+// few dozen upstreams and instances.
+const stateDocumentMax = 1 << 20
+
+// StateDocument fetches the controller's current state document (report_data v2), verbatim.
+func (r *remoteSigner) StateDocument(ctx context.Context) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://controller"+remoteSignerPathState, strings.NewReader("{}"))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := r.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("calling the controller's %s: %w", remoteSignerPathState, err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, stateDocumentMax+1))
+	if err != nil {
+		return nil, err
+	}
+	switch {
+	case resp.StatusCode == http.StatusNotFound:
+		return nil, errNoStateSource
+	case resp.StatusCode != http.StatusOK:
+		return nil, fmt.Errorf("the controller answered %d for %s: %s", resp.StatusCode, remoteSignerPathState, strings.TrimSpace(string(body)))
+	case len(body) > stateDocumentMax:
+		return nil, fmt.Errorf("the state document is over %d bytes", stateDocumentMax)
+	}
+	return body, nil
 }
 
 func (r *remoteSigner) post(ctx context.Context, path string, in, out interface{}) error {
