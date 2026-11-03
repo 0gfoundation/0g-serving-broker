@@ -96,7 +96,10 @@ func (p *Proxy) guardQuote(w http.ResponseWriter, r *http.Request) bool {
 	if r.Method == http.MethodGet {
 		r.URL.RawQuery = url.Values{"report_data": {canonical}}.Encode()
 		// Nothing else travels: dstack's GET handler reads only the query today, and this
-		// should not depend on that staying true.
+		// should not depend on that staying true. The caller's body is drained first, so
+		// the connection it arrived on can be reused.
+		_, _ = io.Copy(io.Discard, io.LimitReader(r.Body, quoteRequestMax))
+		_ = r.Body.Close()
 		r.Body = http.NoBody
 		r.ContentLength = 0
 		r.Header.Del("Content-Type")
