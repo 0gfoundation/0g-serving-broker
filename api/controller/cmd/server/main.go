@@ -76,7 +76,7 @@ func Main() {
 	// Only reached when the set is recorded: recordUpstreamSet on, or no ledger. Every
 	// deployment with a ledger and the switch off is unaffected.
 	if err := controller.RecordUpstreamSet(context.Background()); err != nil {
-		logger.Fatalf("Could not record and bind the permitted upstream set: %v", err)
+		logger.Fatalf("Could not record and bind the permitted upstream set: %v (on dstack 0.6, which has no RTMR3 ledger for applications, set %s=none on the controller)", err, ctrl.LedgerEnvVar)
 	}
 
 	// Serve quotes and derived keys to the broker, when a deployment has asked for it.

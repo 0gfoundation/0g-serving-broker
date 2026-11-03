@@ -841,7 +841,8 @@ Therefore, restart order should be:
 > `ZG_CONTROLLER_LEDGER=none` on the controller: records are then accepted and written
 > nowhere, so every change path below runs unchanged; the upstream set is always recorded
 > and the keys bound to it, whatever `recordUpstreamSet` says (it comes from the unmeasured
-> config file); and a set that cannot be stated serves no key at all. What a verifier reads
+> config file); a set that cannot be stated serves no key at all; and engine changes
+> (`/v1/engines`) are refused, since nothing would record the engine set. What a verifier reads
 > on 0.6 is the state committed in the quote's report_data, not this ledger
 > (`doc/design/report-data-v2.md`). Unset or `rtmr3` is the behaviour described here; any
 > other value refuses to start. On 0.6 without the literal, every recorded change is
