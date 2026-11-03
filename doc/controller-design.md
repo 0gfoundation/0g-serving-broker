@@ -180,13 +180,21 @@ The controller can serve those instead, on a second socket, forwarding two read-
 methods and answering three more itself:
 
 ```
-GET|POST /GetQuote   forwarded — the attestation itself
+GET|POST /GetQuote   forwarded — the attestation itself, over report_data the proxy allows (below)
 GET|POST /Info       forwarded — tcb_info, which TdxQuote assembles into its response
 POST /Sign           answered here — {hash} → 65 raw signature bytes under the running image's key
 POST /SignerAddress  answered here — the address of that key
 POST /GetEncKey      answered here — the running image's enclave encryption key
 POST /GetKey         NOT forwarded
 ```
+
+`/GetQuote` is not a pass-through for its argument. Whoever picks report_data picks what the
+quote attests, so a caller choosing it could get a genuine quote over its own enc_pub beside
+the real signer. The broker's socket quotes only the legacy and v1 layouts for the keys of the
+current identity; the ingress's socket only report_data whose second half is zero (its
+evidence hash, padded). Anything else is refused with 403, and the request dstack receives is
+rebuilt from the validated bytes (`attestproxy/reportdata.go`). A future broker that asks for
+a new layout therefore needs the controller that allows it deployed first.
 
 `/EmitEvent` is never forwarded, and the set is a fixed allowlist rather than a denylist — a
 denylist is wrong by default the moment dstack adds a method.
