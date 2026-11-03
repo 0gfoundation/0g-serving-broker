@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -332,5 +333,22 @@ func TestRelayAssayVoucherRefusesUnsigned(t *testing.T) {
 	}
 	if reached {
 		t.Fatal("an unsignable fetch must not leave the broker")
+	}
+}
+
+// R1-3: the voucher relay carries a 5-minute-valid signed fetch; a 30x from
+// the assay must not forward it (and the pinned conversation) to another host.
+func TestRelayAssayVoucherRefusesRedirects(t *testing.T) {
+	leak := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		t.Errorf("redirect target was contacted with sig=%q", r.Header.Get("ZG-Body-Sig"))
+	}))
+	defer leak.Close()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, leak.URL+"/v1/payout/vouchers", http.StatusTemporaryRedirect)
+	}))
+	defer srv.Close()
+	c := relayTestCtrl(srv.URL)
+	if _, err := c.RelayAssayVoucher(context.Background(), addr(testProvider)); err == nil || !strings.Contains(err.Error(), "redirects are not followed") {
+		t.Fatalf("redirect must be refused, got %v", err)
 	}
 }
