@@ -277,8 +277,10 @@ func (s *TeeService) SyncQuote(ctx context.Context, nvQuote bool) error {
 //
 // The proxy quotes a v2 report_data only for the document it would build itself and the
 // enc_pub it derives for that document's identity, so a document that moved between the two
-// calls is refused there — the next sync, which every state change triggers by restarting
-// this process, gets a consistent pair.
+// calls is refused there, and this sync serves no v2 quote. Image and primary-config changes
+// restart this process, so their next sync gets a consistent pair; a change that does not
+// restart it (an engine, a container instance's config — ledger deployments only) leaves the
+// v2 quote absent until the next restart (doc/rtmr3-records.md §8.1).
 func (s *TeeService) syncStateQuote(ctx context.Context, client TappdClient, nvQuote bool) {
 	// Bounded: this quote is best effort, and a controller that cannot answer must not hold
 	// up a boot the other two quotes have already completed.
