@@ -18,6 +18,17 @@ import (
 //
 // The 3xx is then answered as a 502 with a fixed body (handleServiceError), so neither its
 // Location (also stripped by isUpstreamLeakHeader) nor a "moved to" page reveals the host.
+// isRedirectStatus is the set of statuses Go's client follows (and so the ones
+// sameOriginRedirectsOnly can hand back unfollowed).
+func isRedirectStatus(code int) bool {
+	switch code {
+	case http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther,
+		http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
+		return true
+	}
+	return false
+}
+
 func sameOriginRedirectsOnly(req *http.Request, via []*http.Request) error {
 	if len(via) >= 10 {
 		return errors.New("stopped after 10 redirects")

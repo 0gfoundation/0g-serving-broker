@@ -127,3 +127,16 @@ func TestHandleServiceError_UnfollowedRedirectIsABadGateway(t *testing.T) {
 		t.Errorf("the redirect page reached the client: %s", w.Body.String())
 	}
 }
+
+// A 304 answers a conditional request; it is not a redirect and passes through unchanged.
+func TestHandleServiceError_NotModifiedPassesThrough(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c := newChatbotTestCtrl(t, config.Service{ProviderType: "standard", TargetSeparated: true})
+	w := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(w)
+	ctx.Request = httptest.NewRequest("GET", "/v1/proxy/videos/x/content", nil)
+	c.handleServiceError(ctx, &http.Response{StatusCode: http.StatusNotModified, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(""))})
+	if w.Code != http.StatusNotModified {
+		t.Errorf("status %d, want 304 unchanged", w.Code)
+	}
+}

@@ -957,7 +957,10 @@ func (c *Ctrl) handleServiceError(ctx *gin.Context, resp *http.Response) {
 	// moved — the upstream's host, which a forwarder exists to hide — and a 3xx with no
 	// Location is nothing a client can act on; callers that count anything under 400 as
 	// success would even take it as one. It is the upstream misbehaving: 502, fixed body.
-	if statusCode >= 300 && statusCode < 400 {
+	//
+	// Redirect statuses only: a 304 answering a conditional request a client passed through
+	// is not a redirect and goes on as it came.
+	if isRedirectStatus(statusCode) {
 		statusCode = http.StatusBadGateway
 		outBody = []byte(`{"error":{"message":"the upstream redirected the request to another origin, which is not followed","type":"upstream_redirect"}}`)
 		ctx.Writer.Header().Del("Content-Encoding")
