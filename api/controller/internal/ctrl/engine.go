@@ -195,6 +195,11 @@ func (c *Ctrl) CreateEngine(ctx context.Context, spec EngineSpec) error {
 	if !c.recordsUpstreamSet() {
 		return refusef("cannot create an engine: controller.recordUpstreamSet is off, so there is nowhere to record the set and the container would serve unrecorded")
 	}
+	// Without a ledger the engine record is written nowhere, and until the state committed in
+	// the quote carries the engine set (report_data v2) nothing would show the container.
+	if c.ledger == ledgerNone {
+		return refusef("cannot create an engine: %s=none, and nothing records the engine set on this CVM yet", LedgerEnvVar)
+	}
 
 	img, err := c.engineImageFor(spec.Image)
 	if err != nil {
@@ -286,6 +291,9 @@ func (c *Ctrl) RemoveEngine(ctx context.Context, name string) ([]string, error) 
 	// the ledger would never reflect.
 	if !c.recordsUpstreamSet() {
 		return nil, refusef("cannot remove an engine: controller.recordUpstreamSet is off, so the correction could not be recorded and the ledger would go on naming it")
+	}
+	if c.ledger == ledgerNone {
+		return nil, refusef("cannot remove an engine: %s=none, and nothing records the engine set on this CVM yet", LedgerEnvVar)
 	}
 	if !c.changing.TryLock() {
 		return nil, ErrChangeInProgress

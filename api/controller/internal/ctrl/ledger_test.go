@@ -255,3 +255,16 @@ func TestWithoutALedgerASetInvalidatedDuringTheDigestLookupServesNoKey(t *testin
 		t.Fatalf("CurrentKeyIdentity() = %+v, want a refusal: the set was invalidated during the lookup", id)
 	}
 }
+
+// Without a ledger the engine record goes nowhere, so engine changes are refused until the
+// state committed in the quote carries the engine set.
+func TestWithoutALedgerEngineChangesAreRefused(t *testing.T) {
+	c, _ := noLedgerCtrl(t, config.Service{TargetURL: "http://vllm:8000/v1"})
+	c.enginesEnabled = true
+	if err := c.CreateEngine(context.Background(), EngineSpec{Name: "e"}); err == nil || !strings.Contains(err.Error(), LedgerEnvVar) {
+		t.Errorf("CreateEngine() = %v, want a refusal naming %s", err, LedgerEnvVar)
+	}
+	if _, err := c.RemoveEngine(context.Background(), "e"); err == nil || !strings.Contains(err.Error(), LedgerEnvVar) {
+		t.Errorf("RemoveEngine() = %v, want a refusal naming %s", err, LedgerEnvVar)
+	}
+}
