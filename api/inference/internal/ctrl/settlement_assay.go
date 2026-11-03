@@ -171,7 +171,7 @@ func (c *Ctrl) fetchAssayVerdicts(ctx context.Context, hashes []string) (map[str
 		return nil, fmt.Errorf("settlement check returned %d: %s", resp.StatusCode, snippet)
 	}
 	var parsed assayCheckResponse
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&parsed); err != nil {
 		return nil, err
 	}
 	return parsed.Results, nil

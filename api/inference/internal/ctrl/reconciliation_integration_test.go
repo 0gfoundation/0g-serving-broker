@@ -60,8 +60,13 @@ func setupReconcileCtrl(t *testing.T) *Ctrl {
 	if err := gdb.AutoMigrate(&model.HourlyUsageStat{}); err != nil {
 		t.Fatalf("auto-migrate: %v", err)
 	}
+	testGorm = gdb
 	return &Ctrl{db: db.NewTestDB(gdb)}
 }
+
+// testGorm is the raw handle behind the last setupReconcileCtrl, for tests
+// that read rows the db package exposes no getter for.
+var testGorm *gorm.DB
 
 // TestReconcile_Integration seeds the hourly rollup and runs the full Reconcile() against a
 // real DB: window resolution → filtered/grouped SQL query with real Scan → report
