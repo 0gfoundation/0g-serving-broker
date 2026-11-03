@@ -62,8 +62,8 @@ func (noLedger) EmitEvent(context.Context, string, []byte) error { return nil }
 // recordsUpstreamSet is whether this deployment records — and so binds its keys to — the
 // set of destinations plaintext may reach.
 //
-// On a CVM with a ledger that stays the opt-in controller.recordUpstreamSet, which every
-// deployment today has off and turning on rotates the signer. Without a ledger it is not
+// On a CVM with a ledger that stays the opt-in controller.recordUpstreamSet (on for the
+// in-CVM engine deployments, off for the rest; turning it on rotates the signer). Without a ledger it is not
 // optional: recordUpstreamSet comes from the config file, which compose_hash does not
 // measure, and with nothing appended there is no other place a change of destinations
 // would show. A new deployment on 0.6 has a new signer anyway, so this rotates nothing
