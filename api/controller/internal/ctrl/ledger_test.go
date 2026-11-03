@@ -2,6 +2,9 @@ package ctrl
 
 import (
 	"context"
+	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/0glabs/0g-serving-broker/common/attest"
@@ -128,5 +131,79 @@ func TestWithALedgerTheSwitchStillDecides(t *testing.T) {
 	}
 	if h := c.boundUpstreamSetHash(); h != "" || len(d.seenIdentities) != 0 {
 		t.Errorf("bound %q / derived %d times with the switch off", h, len(d.seenIdentities))
+	}
+}
+
+// changeCtrlWithFile is newChangeCtrl over a real config file holding `before`, with the set
+// recorded and bound for it as at boot.
+func changeCtrlWithFile(t *testing.T, l *opLog, before string, ledger ledgerMode) (*Ctrl, string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(before), 0o644); err != nil {
+		t.Fatalf("seeding the config file: %v", err)
+	}
+	t.Setenv("ATTEST_PROXY_SOCKET", "/var/run/zg-tee/tee.sock")
+	c := newChangeCtrl(t, l, nil, path, okPull)
+	c.fullConfig = &config.Config{Service: config.Service{TargetURL: "http://vllm:8000/v1"}}
+	c.ledger = ledger
+	if ledger == ledgerNone {
+		c.emitter = noLedger{}
+	} else {
+		c.config.RecordUpstreamSet = true
+	}
+	if err := c.RecordUpstreamSet(context.Background()); err != nil {
+		t.Fatalf("boot RecordUpstreamSet() = %v", err)
+	}
+	return c, path
+}
+
+const (
+	beforeConfig = "service:\n  targetUrl: http://vllm:8000/v1\n"
+	afterConfig  = "service:\n  targetUrl: http://0gm-sglang:8000/v1\n"
+)
+
+// A config change binds the new set before writing the file. If the write then fails, the
+// broker keeps running the old config — and since the proxy derives the signing key per
+// request, it would sign every response for a set it does not run. The abort rebinds the set
+// of the file on disk.
+func TestWithoutALedgerAFailedWriteRestoresTheBinding(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the read-only file this uses to make the write fail")
+	}
+	c, path := changeCtrlWithFile(t, &opLog{}, beforeConfig, ledgerNone)
+	bootHash := c.boundUpstreamSetHash()
+	if err := os.Chmod(path, 0o400); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := c.ApplyCoreConfig(context.Background(), afterConfig); err == nil {
+		t.Fatal("ApplyCoreConfig() = nil with an unwritable config file")
+	}
+	if got := c.boundUpstreamSetHash(); got != bootHash {
+		t.Errorf("bound %q after the failed change, want the set on disk %q", got, bootHash)
+	}
+}
+
+// With a ledger, a change whose binding fails after its set record is in RTMR3 must not leave
+// that record standing: the ledger would say plaintext goes to the new set while the broker
+// still forwards to the old one. The abort records the set on disk again.
+func TestWithALedgerAFailedBindingSupersedesTheNewSetRecord(t *testing.T) {
+	l := &opLog{}
+	c, _ := changeCtrlWithFile(t, l, beforeConfig, ledgerRTMR3)
+	bootHash := c.boundUpstreamSetHash()
+	c.deriver = &fakeDeriver{log: l, err: errors.New("dstack is down")}
+
+	if err := c.ApplyCoreConfig(context.Background(), afterConfig); err == nil {
+		t.Fatal("ApplyCoreConfig() = nil with a failing derivation")
+	}
+	sets := emitted(l)
+	if len(sets) < 3 {
+		t.Fatalf("set records %q, want boot, new, and a restore", sets)
+	}
+	if last, boot := sets[len(sets)-1], sets[0]; last != boot {
+		t.Errorf("last set record %q, want the set on disk %q", last, boot)
+	}
+	if got := c.boundUpstreamSetHash(); got != bootHash {
+		t.Errorf("bound %q, want the boot binding %q left in place", got, bootHash)
 	}
 }

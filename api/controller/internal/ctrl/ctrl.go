@@ -734,12 +734,18 @@ func (c *Ctrl) ApplyCoreConfig(ctx context.Context, configContent string) error 
 	// over the file this call is about to replace — see RecordUpstreamSetFromContent. An
 	// earlier version superseded the record with one a reader refuses instead, which left
 	// every config change reading as unknown until the next boot.
+	// Either failure below may come after the new set was recorded or bound, so the abort
+	// restores the set of the file on disk as well as the config record (restoreUpstreamSet).
 	if err := c.RecordUpstreamSetFromContent(ctx, configContent); err != nil {
-		return c.abortConfigChange(ctx, err)
+		err = c.abortConfigChange(ctx, err)
+		c.restoreUpstreamSet(ctx, "ApplyCoreConfig")
+		return err
 	}
 
 	if err := os.WriteFile(c.config.ConfigFile, []byte(configContent), 0644); err != nil {
-		return c.abortConfigChange(ctx, err)
+		err = c.abortConfigChange(ctx, err)
+		c.restoreUpstreamSet(ctx, "ApplyCoreConfig")
+		return err
 	}
 
 	// Restart both broker and event since they share the config.
