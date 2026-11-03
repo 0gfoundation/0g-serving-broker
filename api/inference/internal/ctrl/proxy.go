@@ -748,9 +748,9 @@ func isUpstreamLeakHeader(key string) bool {
 		// TEE-signed routing proof.
 		return true
 	case "location":
-		// An upstream redirect Location would name the upstream host. Go's http
-		// client auto-follows redirects so this rarely reaches the response today,
-		// but strip it defensively so a future CheckRedirect change can't leak it.
+		// An upstream redirect Location would name the upstream host. The forwarding
+		// client follows only same-origin redirects (sameOriginRedirectsOnly), so a
+		// cross-origin one reaches this response with its Location — stripped here.
 		return true
 	}
 	return strings.HasPrefix(k, "x-openrouter") ||
