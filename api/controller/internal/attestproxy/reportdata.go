@@ -211,7 +211,12 @@ func (p *Proxy) checkBrokerReportData(ctx context.Context, rd []byte) error {
 			return nil
 		}
 	}
-	return errNotAllowed{"not the legacy or v1 layout for the current keys"}
+	if v2, err := p.v2ReportData(ctx); err == nil && got == padReportData(v2) {
+		return nil
+	} else if err != nil && p.stateFn != nil {
+		p.logger.Warnf("[attestproxy] no v2 report_data can be quoted: %v", err)
+	}
+	return errNotAllowed{"not the legacy, v1 or v2 layout for the current keys and state"}
 }
 
 // checkIngressReportData allows any first half and a zero second half.

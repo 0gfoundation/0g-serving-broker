@@ -95,6 +95,9 @@ func Main() {
 		// only ever derived for the image that is actually running — and, once a set is
 		// recorded, for the destinations that deployment permits.
 		proxy := attestproxy.New(socket, tee.DefaultDstackSocket, controller.CurrentKeyIdentity, logger)
+		// report_data v2: the state document the broker serves next to its quote, and the only
+		// v2 report_data this proxy quotes (doc/design/report-data-v2.md).
+		proxy.SetStateSource(controller.StateDocument)
 		defer func() { _ = proxy.Close() }()
 		defer stopProxy()
 

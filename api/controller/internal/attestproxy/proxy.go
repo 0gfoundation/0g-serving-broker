@@ -98,6 +98,9 @@ type Proxy struct {
 	// per response.
 	keyClient         *http.Client
 	currentIdentityFn CurrentKeyIdentityFunc
+	// stateFn builds the state document (report_data v2). Nil: /State is not served and no
+	// v2 report_data is quoted.
+	stateFn StateFunc
 	// signing is whether the local signing operations are served at all. False on the
 	// ingress's socket, where only the forwarded methods exist.
 	signing  bool
