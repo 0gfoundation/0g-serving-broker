@@ -32,6 +32,22 @@ from the party you are checking.** Where you keep it does not matter (a constant
 line in a notes file). Only its provenance does. An "expected value" fetched from the
 provider under examination is not a check; it is a restatement.
 
+**Two kinds of deployment, and which path applies.** What a CVM runs after boot — which
+broker image, which keys, where plaintext may go — is not in the manifest, and reaches you one
+of two ways:
+
+- **the ledger** (records the controller appends to `RTMR3`, replayed out of the event log) —
+  **dstack 0.5 only**.
+- **the state document** (`report_data` layout v2: the controller states the current state in
+  a short text document, and the 64 bytes the hardware signs carry its hash) — served on
+  dstack 0.5 and 0.6.
+
+dstack 0.6 removed `EmitEvent` for applications, so a 0.6 CVM runs the controller with the
+compose literal `ZG_CONTROLLER_LEDGER=none` and **has no records at all**. **On dstack 0.6, v2
+is the only path that can be verified. On 0.5 both work**, and a reader may check one against
+the other. Wherever below "the ledger" carries an argument, the v2 reading is given beside it;
+the normative steps are `doc/rtmr3-records.md` §2 (ledger) and §8 (v2).
+
 ---
 
 # Layer 1: the three questions a user actually asks
@@ -155,13 +171,23 @@ verifiable fact.** Several later premises build on that.
 
 **Step two: the program version is not in the manifest.** The manifest names an image and a
 version, and a version can point at different content — a restart alone can change it. So a
-second mechanism is needed: **inside the CVM there is an append-only, tamper-proof ledger**
-(really a measurement register in the CPU, called `RTMR3` in the spec; "ledger" and `RTMR3`
-below mean the same thing). The program writes its own content hash there at startup, and
-the ledger's contents also enter the Intel-signed report. So you can read out **which
-version is running right now**. That is `N6`.
+second mechanism is needed, one the hardware also signs. There are two, depending on the
+dstack version:
 
-Who may write the ledger is governed by the manifest — so this step stands on step one.
+- **dstack 0.5: an append-only, tamper-proof ledger** (really a measurement register in the
+  CPU, called `RTMR3` in the spec; "ledger" and `RTMR3` below mean the same thing). The one
+  component allowed to change the program — not the program itself — writes a record there
+  **before** each upgrade, naming the new content hash; and the ledger's contents enter the
+  Intel-signed report.
+- **dstack 0.6 (served on 0.5 too): a state document.** 0.6 no longer lets applications write
+  that register. Instead the same component computes, from the container actually running, a
+  short document naming its content hash and the keys derived for it, and the 64 bytes the
+  hardware signs carry that document's hash.
+
+Either way you can read out **which version is running right now**. That is `N6`.
+
+Who may write the ledger, or have a quote taken over a document, is governed by the manifest
+— so this step stands on step one.
 
 **The last premise of `N6` is where this chain closes, and it deserves its own note.** The
 first three give you a content hash — and **a hash does not tell you which source it came
@@ -180,9 +206,9 @@ program I reviewed and the model I asked for". **They do not say the text in you
 produced by that machine** — any hop in between could replace the response wholesale while
 all three proofs remain correct.
 
-Hence `N8`: every response carries a signature, under a key **only that program version can
-derive** — change the program and the key changes, so the signature stops verifying
-immediately.
+Hence `N8`: every response carries a signature, under a key **only that program version, with
+that set of permitted upstream destinations, can derive** — change the program or widen where
+it may forward and the key changes, so the signature stops verifying immediately.
 
 The signature covers `sha256(request):sha256(response)` —
 **the request's hash is inside the signature** — so an old response replayed at you will not
@@ -245,8 +271,9 @@ holds while the conclusion does not.**
 
 **Segment four is the program inside writing outward.** Once the plaintext is inside, it can
 be **written to logs**, **forwarded upstream**, or **stored in a database**. Each of those
-destinations has to be a measured value, not a setting the provider can quietly repoint. That
-is `N12`.
+destinations has to be a measured value — a literal in the manifest, or a member of the
+upstream set the keys are bound to and the quote states — not a setting the provider can
+quietly repoint. That is `N12`.
 
 **Why these three segments lean on the first two questions:** confidentiality is ultimately a
 claim about a **boundary** — safe inside, unsafe outside. The boundary is drawn by hardware
@@ -321,13 +348,13 @@ one something you can check yourself**.
 **How to read that table:** only three parties must be honest — **Intel, dstack, and the
 component on the third row**. And **the party you most need to defend against (the program
 handling your request) sits in the "No" column** — what code it runs is governed by the ledger
-and by key derivation, not by its own word.
+(or the state document) and by key derivation, not by its own word.
 
 **Why the third row has to be trusted:** some component in a CVM has to be able to derive keys
 and to change which program runs — otherwise neither upgrades nor signing could happen. And
 that capability means: if the component itself has been swapped, it can run any program and
-then write a record internally consistent with it, and **the whole chain looks perfectly
-normal**.
+then write a record — or build a state document — internally consistent with it, and **the
+whole chain looks perfectly normal**.
 
 **And its own image is covered by no measurement — the manifest is the only thing pinning
 it.**
@@ -344,7 +371,7 @@ Five of the fourteen are used by more than one question. They are proved once, i
 
 | Premise | Used by |
 |---|---|
-| **N6** the ledger and image identity | Q1 · Q2 · Q3 |
+| **N6** the ledger / state document and image identity | Q1 · Q2 · Q3 |
 | **N1** + **N2** hardware and OS | Q1 · Q3 |
 | **N5** the anchored manifest | Q2 · Q3 |
 | **N8** the signer binding | Q1 · Q2 |
@@ -431,8 +458,9 @@ Finally `N2.3`: the first two can both hold while the machine still carries a pu
 exploitable firmware defect. That is not forgery, it is **bypass** — the hardware protection
 itself fails while every signature stays correct.
 
-**`N2.1` is also a premise of `N6`** — the ledger read there is trustworthy for exactly this
-reason.
+**`N2.1` is also a premise of `N6` on the ledger path** — the ledger read there is trustworthy
+for exactly this reason. (The v2 path reads nothing from the event log; it anchors its document
+in `report_data` instead.)
 
 ## N4 the GPU is real and its memory is protected
 
@@ -491,9 +519,10 @@ steps in this document, but this one carries the most reading and the most downs
 dependencies.)
 
 **What that one review produces is used repeatedly.** Reading the manifest also tells you:
-who may write the ledger, whether any login channel exists, how many containers are inside
-the boundary, and whether the plaintext exits are literals or variables. **Nine later checks
-draw their evidence from this single reading** — `N5.3` in Layer 3 carries the full table.
+who may write the ledger or obtain a quote, which ledger mode the controller runs in, whether
+any login channel exists, how many containers are inside the boundary, and whether the
+plaintext exits are literals or variables. **Most later 👤 checks draw their evidence from this
+single reading** — `N5.3` in Layer 3 carries the full table.
 
 **So do that reading against the table, item by item.** Miss one item and the corresponding
 check quietly loses its evidence, **and you will get no warning.**
@@ -508,9 +537,9 @@ hardware, so if the manifest changes you find out immediately.
 
 | Premise | Why it is needed |
 |---|---|
-| **N6.1 only the controller can write the ledger** | a ledger anyone may write may be recording an attacker's words |
-| **N6.2 records are append-only and cannot be altered** | |
-| **N6.3 the last record names the version running now** | |
+| **N6.1 only the controller can write the ledger, or choose what a quote commits to** | a ledger anyone may write, or a quote over anyone's bytes, may be stating an attacker's words |
+| **N6.2 what you read is what the hardware signed** — ledger: records are append-only; v2: the document hashes to `report_data[32:64]` | |
+| **N6.3 the state names the version running now** — ledger: the last record; v2: the document's `image` line | |
 | **N6.4 the version read out is on my own accepted list** | a hash does not say which source it came from; this premise connects it to a commit |
 
 **Derivation — these four have a strict order; reverse it and you are reading an attacker's
@@ -520,17 +549,28 @@ The background is a specific hazard: dstack puts "append a record" and "fetch a 
 behind **the same unauthenticated endpoint**, and access to it is open to every container.
 Which means **any container can append a record describing itself and then take a genuine
 report** — the replay matches, the manifest hash matches, the signature verifies. **The whole
-chain looks entirely normal while the content is self-authored.**
+chain looks entirely normal while the content is self-authored.** (This one is 0.5-only: on
+0.6 nobody can append.)
 
 **And that socket does more than write records — it also hands out keys.** `GetKey` sits
 behind the same socket: **whoever holds it can derive the signing key of any image version.**
-So the requirement "the broker does not mount this socket" blocks two things: writing false
-records, and taking keys that are not its own.
 
-So the order must be: first restrict the writer — only the controller may write, the broker
-may not (`N6.1`, read out of the `N5.3` review); then confirm records are append-only and
-cannot be erased (`N6.2`). **Only after those two is what the ledger says worth reading.**
-Then read the current version (`N6.3`).
+**And a third thing: whoever holds it chooses what a quote says.** `GetQuote` signs whatever 64
+bytes the caller hands it — an `enc_pub` of the caller's own beside the real signer, or a state
+document of the caller's own. DCAP passes; nothing in the quote says who chose the bytes. On 0.6,
+with no record to compare against, nothing would catch it.
+
+So the requirement "the broker does not mount this socket" blocks three things: writing false
+records, taking keys that are not its own, and obtaining quotes over bytes of its choosing. The
+broker instead gets a socket served by the controller's attestation proxy, which forwards no
+`EmitEvent` and no `GetKey`, and **since #778 quotes only `report_data` it computed itself**:
+the legacy and v1 layouts for the current keys, and v2 only for the document the controller
+builds at that moment (`api/controller/internal/attestproxy/reportdata.go`, `state.go`).
+
+So the order must be: first restrict the writer — only the controller may write or choose the
+bytes, the broker may not (`N6.1`, read out of the `N5.3` review); then confirm what you read is
+what the hardware signed (`N6.2`). **Only after those two is what the ledger or the document says
+worth reading.** Then read the current version (`N6.3`).
 
 **The last premise, `N6.4`, is where this chain closes.** The first three hand you a content
 hash — and **a hash does not tell you which source it came from**. Closing that gap does not
@@ -578,7 +618,7 @@ manifests. See `N13`.
 | Premise | Why it is needed |
 |---|---|
 | **N8.1 every response carries a signature** | the premises above describe the machine, not this one response |
-| **N8.2 the signing key belongs to the version in the record** | a valid signature still leaves open who signed |
+| **N8.2 the signing key belongs to the version in the record (or `image` line)** | a valid signature still leaves open who signed |
 | **N8.3 change the program and an old conclusion self-invalidates** | |
 
 **Derivation —** There is a signature (`N8.1`), the signer is the right one (`N8.2`), and
@@ -598,9 +638,18 @@ names**; and the 64 bytes the hardware signed must point at the **same address**
 only inside the CVM, so whoever filled `report_data` and whoever wrote the record must have
 held the same one.
 
-`N8.3` is the entire basis for "verify once and reuse": the key follows the program version,
-so the moment the version changes, the address you hold stops verifying anything. **So you do
-not need to re-run the full verification per request — a failing signature is the signal.**
+**v2 moves the address out of `report_data`.** The 64 bytes carry `enc_pub` and the hash of
+the state document; the signer is named only by the document's `image` line. What makes that
+line trustworthy is `N6.1`: the controller's proxy quotes a v2 `report_data` only over the
+document it built itself, with keys it derived itself. The cross-check is then two equalities:
+the `image` line's `enc_pub` equals `report_data[0:32]`, and its signer equals the provider's
+on-chain, acknowledged `teeSignerAddress` (`doc/rtmr3-records.md` §8.4).
+
+`N8.3` is the entire basis for "verify once and reuse": the key follows the program version
+and the upstream set it is bound to, so the moment either changes, the address you hold stops
+verifying anything. **So you do not need to re-run the full verification per request — a
+failing signature is the signal.** What does not rotate the key — a config change that leaves
+the upstream set alone — you see only by fetching a new quote; see `N8.3`.
 
 ## N9 nothing in transit can read the content
 
@@ -639,7 +688,8 @@ stops affecting the conclusion.
 
 But the recipient is a public key, and **a public key can be anybody's**. So `N10.2` requires
 that key to satisfy two things at once: it appears in the hardware-signed report, and it
-matches the key bound in the ledger record — which needs `N6` and `N8.2`.
+matches the key bound in the ledger record or the state document's `image` line — which needs
+`N6` and `N8.2`.
 
 **`N10.3` looks like a triviality and is not.** Send first and verify after, and **by the time
 you begin checking "should I hand this over", the plaintext is already handed over.** Sending
@@ -671,6 +721,8 @@ to a conclusion already established.
   `N5` review.
 - **containers inside the boundary other than the main program** — a database, log
   collection, monitoring; they are inside the same boundary, **so they have to be counted.**
+- **plaintext handlers the manifest does not spell out** — containers the controller may
+  create after launch, and extra provider instances with their own configs; see `N11.4`.
 
 **Completeness is the whole point: miss one party and every proof above is still correct
 while the conclusion does not hold.** The last item is the one most often missed — attention
@@ -683,8 +735,8 @@ and see the same plaintext.
 
 | Premise | Why it is needed |
 |---|---|
-| **N12.1 ⚠️ no log level can print plaintext content** | once inside, the first destination is a log |
-| **N12.2 both plaintext exits are signed literals** | |
+| **N12.1 ⚠️ no log level can print plaintext content** — with three stated exceptions | once inside, the first destination is a log |
+| **N12.2 every plaintext exit is measured** — a signed literal, or a member of the bound upstream set | |
 | **N12.3 the remaining config keys do not decide where plaintext goes** | |
 
 **Derivation —** Once the plaintext is inside, it has **only three destinations**; enumerate
@@ -694,14 +746,18 @@ them and the segment closes:
 debug" is a promise **you cannot verify** — the log level lives in a config file, and config
 file contents are not covered by the hardware signature. So the fix is not a promise but
 **structural impossibility**: everywhere content would be printed now emits only a length and
-a sha256 fingerprint. `N12.1`
+a sha256 fingerprint. Three kinds of log line still carry bounded fragments of what a client or an
+upstream sent; `N12.1` names them. `N12.1`
 
-**Two: sent out.** The plaintext has two exits — forwarded to the upstream model service, and
-written to a database (async jobs store request and response bodies verbatim). If those two
-addresses live only in a config file, the provider can quietly repoint them at an external
-host — plaintext leaves the boundary while **every hash, every signature and the ledger stay
-unchanged**. The fix is to write both **as literals in the manifest**, bringing them inside
-the hardware signature. `N12.2`
+**Two: sent out.** The plaintext is forwarded to upstream model services, and written to a
+database (unsealed async jobs store request and response bodies verbatim). If those addresses
+live only in a config file, the provider can quietly repoint them at an external host —
+plaintext leaves the boundary while **every hash, every signature and the ledger stay
+unchanged**. The default upstream and the database are fixed **as literals in the manifest**
+(`TARGET_URL`, `DATABASE_DSN`). But the config file can also name an upstream per model, and
+those have no manifest literal; what bounds them is the **upstream set** — every destination
+the running configs name, computed by the controller, bound into the signing key, and stated
+in the quote. `N12.2`
 
 **Three: decided by a switch the signature does not cover.** The remaining config keys
 (prices, allowlists, concurrency limits) are indeed uncovered, but **each has been argued not
@@ -711,8 +767,10 @@ to affect anybody else's confidentiality.** `N12.3`
 "argued to be irrelevant to what is being proved". Listing irrelevant things as gaps would
 dilute the real ones.
 
-**⚠️ `N12.1`'s caveat concerns only the old logs on disk:** the version you accepted cannot
-print content at any level, **but it cannot govern bytes it did not write.**
+**⚠️ `N12.1`'s caveat has two parts:** the version you accepted prints no request or response
+body at any level, but it does print three kinds of bounded fragment (a rejected parameter value; a video
+request's `size`; a redacted upstream error body); **and it cannot govern bytes it did not write** — old logs on
+disk.
 
 ## N13 what an old deployment left on disk does not affect this conclusion
 
@@ -749,10 +807,13 @@ lives on this disk, so by the same logic an old deployment could leave its own c
 this one to read — and the config file happens to hold "where plaintext is forwarded" and
 "which database plaintext is written to". If that worked, it would **bypass all of `N12`.**
 
-It does not work, because of the order in which config is read: **a literal in the manifest
-takes precedence over the same key in the config file.** The manifest's hash is in the
-hardware signature (`N5`), so the file on disk has no say. What it can still change is
-limited to the keys already argued not to affect confidentiality.
+It does not work, for two reasons. **A literal in the manifest takes precedence over the same
+key in the config file** (`TARGET_URL`, `DATABASE_DSN`), and the manifest's hash is in the
+hardware signature (`N5`). And every other destination the file can name — a per-model
+`targetUrl` — is a member of the **upstream set**, which the controller computes from the
+config actually in use and which the quote states (`N12.2`); a destination left behind by an
+old deployment shows there like any other. What the file can still change unseen is limited to
+the keys already argued not to affect confidentiality.
 
 **So the one crossing point that remains is logs.** The disk still holds logs written by older
 program versions, and older versions did print request bodies at debug level. `N12.1` proves
@@ -770,7 +831,7 @@ clear; all that is left is running it.
 | | Which | ① why the proof cannot cover it | ② who can actually do it | ③ how to check whether it happened |
 |---|---|---|---|---|
 | ⚠️ | `N7.2` weight contents | disk contents enter no measurement | **only a deployment approved in the past** — the host, the cloud operator and the network cannot touch that disk | read the on-chain approved manifests (append-only, enumerable) and confirm none could write that directory |
-| ⚠️ | `N12.1` old logs | the invariant governs code, not bytes already on disk | **depends on who can read container logs** — if logs are readable, no "exploit" is needed | same: check whether any version that printed request bodies appears in the history |
+| ⚠️ | `N12.1` logs | the invariant governs code, not bytes already on disk; and three kinds of log line carry bounded fragments | **depends on who can read container logs** — if logs are readable, no "exploit" is needed | old logs: check whether any version that printed request bodies appears in the history; fragments: read the lines `N12.1` names |
 | ❌ | `N4.5` GPU release | nothing measured records who set it, or whether anything was verified first | — | **no need to check** — doing `N4.4` yourself gives you the fact directly |
 
 **Read the marks as applying to column ① only.** ⚠️ and ❌ mean "this attestation has nothing
@@ -821,11 +882,12 @@ below states who actually could, and how to check.
 | How to check | the commands below — the provider only supplies the report, it takes no part in the judgement |
 
 ```bash
-# Your own verifier, on your own machine
+# Your own verifier, on your own machine — 0.5.11 for dstack 0.5 CVMs; see below for 0.6
 docker run -d -p 8080:8080 dstacktee/dstack-verifier:0.5.11
 
 # From the provider, take only the report itself
-curl -s -D h.txt "$PROVIDER/v1/quote?legacy=false" > q.json
+curl -s -D h.txt "$PROVIDER/v1/quote?legacy=false" > q.json               # v1 layout, dstack 0.5
+curl -s -D h.txt "$PROVIDER/v1/quote?report_data_version=2" > q.json      # v2 layout, the only one on 0.6
 
 # Hand it to your copy to judge
 curl -s -X POST localhost:8080/verify -H 'Content-Type: application/json' \
@@ -849,6 +911,13 @@ on your machine.
   the image up in a table of known measurements it ships with. **Note that using a verifier of
   the same version as the machine is exactly what does not work** — the older request format
   differs.
+
+  **By that rule `0.5.11` cannot verify a dstack 0.6 CVM** (0.6 GPU machines run
+  `dstack-0.6.1`). ⚠️ As of this writing Docker Hub carries no released 0.6 tag of
+  `dstacktee/dstack-verifier` — only `0.6.0-rc0`, `0.6.0-rc3` and `latest` — and an `rc` of
+  0.6.0 is older than 0.6.1. Use a verifier whose version is **at least the OS image's**; until
+  one is published that means building it yourself from the dstack release matching the
+  machine. This document has not run the 0.6 verifier, so the output shape below is 0.5.11's.
 
 **Its output looks like this** (0.5.11):
 
@@ -896,33 +965,61 @@ determination.
 
 ## A field used repeatedly: `report_data`
 
-**This is not a proposition; it is a field reference** — `N4.2`, `N4.3`, `N8.2` and `N10.2`
-all take something out of these 64 bytes.
+**This is not a proposition; it is a field reference** — `N4.2`, `N4.3`, `N6.2`, `N8.2` and
+`N10.2` all take something out of these 64 bytes.
 
 `report_data` is **the 64 bytes the hardware signature covers**. Its contents are handed to the
-hardware by the program inside the CVM; the hardware signs them and does not check them. There
-are two layouts:
+hardware by the program inside the CVM; the hardware signs them and does not check them (who
+chooses them is `N6.1`'s business). There are three layouts:
 
 ```
-version == 1:  enc_pub(32) || signer_addr(20) || version(4 BE) || reserved(8)
-version == 0:  the signer address as ASCII text (42 bytes), zero-padded to 64
+v1:      enc_pub(32) || signer_addr(20) || version(4 BE) = 1 || reserved(8) = 0
+legacy:  the signer address as ASCII text (42 bytes), zero-padded to 64
+v2:      enc_pub(32) || SHA-256(state_document)(32)          -- no version bytes
 ```
+
+v2 has no version field, so the layouts are told apart by shape (`doc/rtmr3-records.md` §8.2):
 
 ```python
-rd = bytes.fromhex(D["report_data"].removeprefix("0x"))
-v1 = int.from_bytes(rd[52:56], "big") == 1          # every v1 below means this
+rd = bytes.fromhex(D["report_data"].removeprefix("0x"))   # from the quote, not the reply's member
+v1 = rd[52:56] == b"\x00\x00\x00\x01" and rd[56:64] == bytes(8)
+text = rd.rstrip(b"\x00")
+legacy = not v1 and len(text) > 0 and all(0x20 <= b < 0x7f for b in text)
+v2 = not v1 and not legacy          # every v1 / legacy / v2 below means these
 ```
 
-| Field | Who uses it | For what |
-|---|---|---|
-| `rd[0:32]` enc_pub | `N10.2` | the recipient public key for an encrypted request |
-| `rd[32:52]` signer | `N4.2`, `N8.2` | the address responses are verified against |
-| all 64 bytes | `N4.3` | the input to the nonce in the GPU evidence |
+A v2 value lands in the v1 or legacy branch only by accident of its hash (2^-64 / not ASCII),
+and a reader that asked for v2 then fails the document-hash check in `N6.2` rather than
+misreading it. **Do not test `rd[52:56] == 1` alone** — on v2 those four bytes are part of a hash.
 
-**Note that `GET /v1/quote` returns the old layout by default** (for clients that have not
-migrated); the newer one needs `?legacy=false`. **The old layout has no enc_pub field at all**
-— so `N10.2` requires explicitly requesting the new layout, and **requires asserting `v1` and
-refusing to fall back**.
+| Field | Layout | Who uses it | For what |
+|---|---|---|---|
+| `rd[0:32]` enc_pub | v1, v2 | `N10.2` | the recipient public key for an encrypted request |
+| `rd[32:52]` signer | v1 | `N4.2`, `N8.2` | the address responses are verified against |
+| ASCII signer | legacy | `N4.2`, `N8.2` | the same, as text |
+| `rd[32:64]` document hash | v2 | `N6.2` | commits to the state document; the signer is in its `image` line |
+| the bytes handed to the quote | all | `N4.3` | the input to the nonce in the GPU evidence |
+
+**Which endpoint returns which layout** (`api/inference/internal/handler/quote.go`):
+
+| Request | Layout | Notes |
+|---|---|---|
+| `GET /v1/quote` | legacy | the default, for clients that have not migrated |
+| `GET /v1/quote?legacy=false` | v1 | falls back to the legacy quote if the v1 one was not generated — so assert `v1` |
+| `GET /v1/quote?report_data_version=2` | v2 | takes precedence over `legacy`; the reply carries one more member, `state_document` (a JSON string). **404** when the deployment serves no v2 quote, and it **never falls back** to another layout; any other value is **400** |
+
+**The legacy layout has no enc_pub field at all** — so `N10.2` requires explicitly requesting
+v1 or v2, and **requires asserting the layout you asked for and refusing to fall back**.
+
+**On dstack 0.6 request v2**: a v1 quote still carries the keys, but nothing on 0.6 names the
+image they were derived for — there is no record to bind them to (`N6.3`), and only the v2
+document says it. On 0.5 either works.
+
+A v2 404 has a narrow set of causes: no attestation proxy, a controller that predates v2, a
+controller that could not build the document when the broker started, or a state change landing
+between the broker's fetch of the document and its quote request (the proxy then refuses the
+quote). The v2 quote is taken once, at broker start, and is best effort, so a 404 lasts until
+the broker next restarts (`api/common/tee/tee.go`, `syncStateQuote`).
 
 ---
 
@@ -949,9 +1046,10 @@ individual field checks do not cover a rejection it made for some other reason.
 | On what grounds | ⚙ the verifier recomputes each entry's digest, folds it into the registers, and compares against the signed quote |
 | How to check | on the response from `N0.1`: `assert D["event_log_verified"]` |
 
-**This is a premise of `N6`.** `event_log` arrives over plain HTTP from the party being
-described; only this step turns it from an assertion into evidence — and every record read in
-`N6` comes out of **the bytes you sent to be verified**.
+**This is a premise of `N6` on the ledger path.** `event_log` arrives over plain HTTP from the
+party being described; only this step turns it from an assertion into evidence — and every record
+read in `N6` comes out of **the bytes you sent to be verified**. (The v2 path reads its state from
+`state_document`, anchored by `report_data` instead; `N6.2`.)
 
 ### N2.2 that hash corresponds to a publicly released version
 
@@ -967,7 +1065,9 @@ passing, **which is worse than not checking.**
 
 The replacement: a development build is a **different published hash**, not a boolean. The name
 in `vm_config.image` carries it — e.g. `dstack-nvidia-dev-0.5.9-0e09f2bc`, with `-dev-` written
-in plainly — and `vm_config` participates in the measurement computation.
+in plainly — and `vm_config` participates in the measurement computation. (On dstack 0.6 the
+GPU machines run the single `dstack-0.6.1` image rather than a separate `-nvidia-` build; the
+rule is the same — a `-dev-` name, or a hash you did not record, is a different build.)
 
 **`acpi_tables_verified` does not exist either.** There is no replacement for that one today:
 `quote_verified` covers the DCAP chain, and no field in the response speaks to the ACPI tables
@@ -1016,7 +1116,7 @@ dstack's own boot events. **The CPU report simply has no field describing a grap
 |---|---|
 | Establishes | this machine really has N GPUs passed through, and that configuration was not altered |
 | On what grounds | ⚙ `vm_config` participates in computing the expected measurement, and it carries `num_gpus` |
-| How to check | read `vm_config`, e.g. `{"num_gpus":1,"num_nvswitches":0,"image":"dstack-nvidia-dev-0.5.9-…"}` |
+| How to check | read `vm_config`, e.g. `{"num_gpus":1,"num_nvswitches":0,"image":"dstack-nvidia-dev-0.5.9-…"}` (0.5); 0.6 GPU machines name `dstack-0.6.1` |
 
 **You can confirm `vm_config` really participates:** drop it from the request and
 `os_image_hash_verified` turns false. That shows the expected measurement is computed together
@@ -1073,15 +1173,17 @@ You still know which program is running; you do not know what card it runs on.
 | How to check | the two layouts use different formulas — see below |
 
 ```python
-challenged = rd if v1 else rd[:42]                  # v1 from the field reference above
+challenged = rd[:42] if legacy else rd              # layouts from the field reference above
 assert Q["nvidia_payload"]["nonce"] == keccak(challenged).hex()
 ```
 
-**The two layouts hand the quote different lengths:** the newer one hands over all 64 bytes;
-the old one hands over a 42-byte ASCII address which the hardware then zero-pads to 64. **Take
-the 64 bytes you got back and hash them directly, and the old layout never matches** — a
-completely honest provider fails a check you computed wrongly, and you conclude you found
-something. So use the formula for the layout you actually have.
+The broker computes the nonce as `keccak256` of exactly the `report_data` it handed to the
+quote (`api/common/tee/phala.go`, `TdxQuote`). **The layouts hand the quote different
+lengths:** v1 and v2 hand over all 64 bytes; legacy hands over a 42-byte ASCII address which
+the hardware then zero-pads to 64. **Take the 64 bytes you got back and hash them directly, and
+the legacy layout never matches** — a completely honest provider fails a check you computed
+wrongly, and you conclude you found something. So use the formula for the layout you actually
+have.
 
 **This blocks replay, not substitution.** The nonce is a hash of `report_data`, which is public
 — anyone with a CC-mode GPU can have their card sign fresh evidence over that nonce. **What
@@ -1117,8 +1219,16 @@ copy**, because the provider is the object of the check.
 To stay fully local, use `Environment.LOCAL` with `nv-local-gpu-verifier`, at the cost of
 maintaining an RIM cache and OCSP checking yourself.
 
-**⚠️ `nv-attestation-sdk` is end-of-support on 2026-09-15**; the SDK warns about this itself,
-and the migration target is the C++ SDK.
+**Posting `nvidia_payload` to NRAS as-is failed on Blackwell (B300) before #785.** NRAS checks
+the certificate chain against the payload's top-level `arch`, and the broker wrote a fixed
+`HOPPER` there; every evidence item then failed with `INVALID_CERTIFICATE_CHAIN`. Since #785 the
+top-level `arch` follows the architecture the evidence items carry
+(`api/common/tee/payload.go`, `parseGpuPayload`). A quote taken by an older broker image still
+carries `HOPPER`: on a Blackwell machine, a failure there is that bug, not forged evidence. The
+broker's `POST /v1/quote/verify/gpu` forwards the body to NRAS unchanged, so it behaves the same.
+
+**⚠️ `nv-attestation-sdk` has passed its announced end-of-support date (2026-09-15)**; the SDK
+warns about this itself, and the migration target is the C++ SDK.
 
 ### N4.5 ❌ the GPU was only allowed into service after passing verification
 
@@ -1174,9 +1284,11 @@ because what you verified is the state as of your request.
 **So the only readers affected by this one are those who choose to believe "the platform
 already verified it" and skip `N4.4`.**
 
-**If Phala verified once inside the CVM and emitted the result into the ledger, this premise
-would become checkable through `N6`'s mechanism** — that is the smallest change that would turn
-it from ❌ into ⚙.
+**If Phala verified once inside the CVM and the result entered a measurement, this premise would
+become checkable** — that is the smallest change that would turn it from ❌ into ⚙. On 0.5 that
+could be a ledger record; on 0.6 applications can no longer append to RTMR3 ("runtime RTMR3
+events are system-owned"), so it would have to be written by dstack itself, or carried in what
+`report_data` commits to.
 
 ---
 
@@ -1239,16 +1351,20 @@ silently removes the evidence under the corresponding premise.
 | the broker mounts no `dstack.sock`; only the controller does | N6.1 | the broker could both write false records **and derive the signing key of any version** |
 | the controller's own image is pinned by content hash | N6.1 | **nothing measures the controller's own image** — the manifest is the only thing pinning it. An unreviewed controller can run any broker image and write a record consistent with it |
 | **no container other than the broker and the event service mounts the attestation socket** (`zg-tee`) | N6.1 | that socket **signs any 32-byte hash under the broker image's key**. A fourth container mounting it can mint response proofs attributed to a reviewed image — **and the ledger records nothing about that container's existence** |
+| if the ingress mounts dstack's socket at all, it is the controller's **read-only** proxy socket (`ATTEST_PROXY_READONLY_SOCKET`), in a volume that does not also hold the broker's signing socket (`ATTEST_PROXY_SOCKET`) — reachability is the volume mount | N6.1, N9.1 | `dstack.sock` lets it append records and quote any bytes; the signing socket lets it sign as the broker. An ingress still mounting `dstack.sock` (deployments from before #763) holds every capability of the controller's socket |
+| the controller's `ZG_CONTROLLER_LEDGER`: absent or `rtmr3` on dstack 0.5, `none` on 0.6 | N6.3 | it decides whether records exist at all. On 0.6 without `none` every recorded change is refused, and with `recordUpstreamSet` on the controller does not start; `none` on 0.5 throws the ledger away and leaves only v2 (`api/controller/internal/ctrl/ledger.go`) |
+| the controller's `ZG_CONTROLLER_ENGINES` is absent (anything but `on`) | N11.4 | with `on` the controller may create containers the manifest does not list (`POST /v1/engines`); they appear only in `zg-engine-set` / the `engines` line |
+| whether the controller declares `ZG_CONTROLLER_INSTANCES`, and the broker `CONFIG_DIR` | N11.4, N12.2 | each is another plaintext handler whose config the manifest does not measure |
 | no service mounts docker's data root | N6.2 | mounting it means swapping containers without going through the ledger |
 | all three login channels are absent | N11.3 | somebody can log in and read memory and files directly |
-| `TARGET_URL` and `DATABASE_DSN` are **literals**, not `${...}` | N12.2 | both plaintext exits can be quietly repointed outside the CVM |
+| `TARGET_URL` and `DATABASE_DSN` are **literals**, not `${...}` | N12.2 | the default upstream and the database server can be quietly repointed outside the CVM |
 | every container inside the boundary is pinned by content hash, not a tag | N11.4 | tags are re-resolved at every boot, so one `compose_hash` can run different content |
 | whether `allowed_envs` (the allowlist of injectable environment variables) carries the two SSH variables | N11.3 | the variables themselves are unmeasured, so the allowlist is the only side you can see |
 | whether the OS image name contains `-dev-` | N2.2 | a development build ships sshd, which voids the login-channel row |
 
 **This review has to be done by a person; it cannot be handed to a program.** To judge "does
-this deployment restrict who may write the ledger", you have to see whether each container in
-the manifest can reach that socket. There are many ways for it to do so — mounting it directly,
+this deployment restrict who may write the ledger or obtain a quote", you have to see whether
+each container in the manifest can reach that socket. There are many ways for it to do so — mounting it directly,
 mounting a parent directory, sharing another container's namespace — and **that list has no
 end**. Nor is there any reliable test for "which container is the main program".
 
@@ -1266,12 +1382,12 @@ approved** — see `N13`.
 
 ## N6 the running program is the version I accept
 
-### N6.1 only the controller can write the ledger
+### N6.1 only the controller can write the ledger, or choose what a quote commits to
 
 | | |
 |---|---|
-| Establishes | the records in the ledger can only have been written by the controller |
-| On what grounds | 👤 read out of the reviewed manifest: the broker mounts no `dstack.sock`; ⚙ changing that changes `compose_hash`, which `N5.3` catches |
+| Establishes | the records in the ledger, and the bytes any quote commits to, can only have been chosen by the controller |
+| On what grounds | 👤 read out of the reviewed manifest: the broker mounts no `dstack.sock`, only the controller's proxy socket; ⚙ changing that changes `compose_hash`, which `N5.3` catches |
 | How to check | it is the conclusion of the `N5.3` review |
 
 **Everything in `N6` rests on this one, for a concrete reason:** dstack puts `EmitEvent` and `GetQuote`
@@ -1279,16 +1395,34 @@ behind the same unauthenticated handler, with socket permissions 0777. So any co
 that socket can append arbitrary records to the ledger — **including one describing the image it
 is itself running** — and then obtain a genuine quote covering it: the replay matches, the manifest
 hash matches, the signature verifies. **The whole chain looks entirely normal while the content
-is self-authored.**
+is self-authored.** (dstack 0.5 only: on 0.6 `EmitEvent` fails for every application.)
 
 **And that socket does more than write records — it also hands out keys.** `GetKey` sits behind
-the same socket: **whoever holds it can derive the signing key of any image version.** So this
-requirement blocks two things: writing false records, and obtaining keys that belong to a
-different image.
+the same socket: **whoever holds it can derive the signing key of any image version.**
 
-**A deployment that gives the socket only to the controller does not have this problem**, and
-only then do the records carry real weight: each one binds the addresses of **two keys derived
-from the program version it names** (see `N8.2` below).
+**And it quotes whatever `report_data` it is handed.** A holder can obtain a genuine quote over
+`its own enc_pub ‖ the real signer ‖ 1 ‖ 0`, or over `enc_pub ‖ SHA-256(a document of its own)`.
+DCAP passes and the signer matches the chain; a client that seals to the `enc_pub` in a verified
+quote seals to the holder. On 0.5 the image record's `enc_pub` catches the first; on 0.6 there is
+no record, and only the confinement below stops either.
+
+So this requirement blocks three things: writing false records, obtaining keys that belong to a
+different image, and obtaining quotes over bytes of the holder's choosing.
+
+**What the broker holds instead is the controller's attestation proxy socket**
+(`api/controller/internal/attestproxy/proxy.go`). It forwards `GetQuote` and `Info` and answers
+`/Sign`, `/SignerAddress`, `/GetEncKey` and `/State` itself; it never forwards `EmitEvent` or
+`GetKey`. **Since #778 it does not pass `GetQuote`'s argument through**
+(`attestproxy/reportdata.go`): on the broker's socket it quotes only the legacy and v1 layouts
+for the keys it derives for the current identity, and v2 only for the state document the
+controller builds at that moment with the `enc_pub` derived for that document's identity; on the
+ingress's read-only socket, only values whose second half is zero, which no accepted layout has.
+Anything else is refused with 403, and the request dstack receives is rebuilt from the validated
+bytes.
+
+**A deployment that gives `dstack.sock` only to the controller does not have this problem**, and
+only then do the records — and the state document — carry real weight: each binds the addresses
+of **two keys derived from the program version it names** (see `N8.2` below).
 
 **Which way the causality runs matters here:** that binding is trustworthy only if **the main
 program cannot derive keys itself**. If the main program could reach the socket, it
@@ -1296,13 +1430,26 @@ could write a record saying "I am version X" while filling in its own key addres
 binding would be internally consistent and the content false. **So it is the isolation that
 makes the binding meaningful, not the binding on its own.**
 
-### N6.2 records are append-only and cannot be altered
+### N6.2 what you read is what the hardware signed
 
 | | |
 |---|---|
-| Establishes | records cannot be deleted or edited, nor forged in |
-| On what grounds | ⚙ RTMR3 only supports extension and its value enters the signed quote; `N2.1` guarantees the boot log replays to that value |
-| How to check | two filters, neither optional |
+| Establishes | ledger: records cannot be deleted or edited, nor forged in. v2: the state document is byte for byte the one the quote commits to |
+| On what grounds | ⚙ ledger: RTMR3 only supports extension and its value enters the signed quote; `N2.1` guarantees the boot log replays to that value. v2: `report_data[32:64]` is SHA-256 of the document |
+| How to check | v2: one hash; ledger: two filters, neither optional |
+
+**v2** (the reply of `?report_data_version=2`):
+
+```python
+import hashlib
+doc = Q["state_document"]                                  # a JSON string in the reply
+assert v2 and hashlib.sha256(doc.encode()).digest() == rd[32:64]
+```
+
+The hash is over the exact UTF-8 bytes of the string's value (no final LF). A mismatch means the
+document is not the one the quote commits to: stop.
+
+**Ledger** (dstack 0.5):
 
 ```python
 events = [e for e in json.loads(Q["event_log"])
@@ -1322,32 +1469,66 @@ container.
 read as a normal program-version record. **Cutting at `system-ready` separates "what the system
 wrote" from "what a container wrote".**
 
-### N6.3 the last record names the version running now
+### N6.3 the state names the version running now
 
 | | |
 |---|---|
-| Establishes | you can read the current image's content hash out of the ledger |
-| On what grounds | ⚙ the record's contents; or, with no records, the manifest anchored by `N5` |
+| Establishes | you can read the current image's content hash, and the two keys derived for it, out of the state document or the ledger |
+| On what grounds | ⚙ v2: the `image` line, computed from the broker container actually running when the quote was taken; ledger: the last `zg-image-update` record |
 | How to check | below |
 
 ```python
-records = [e for e in ledger if e["event"] == "zg-image-update"]
-if records:
-    ref, bound_signer, bound_enc_pub = bytes.fromhex(records[-1]["event_payload"]).decode().split()
-    source = "ledger"
-else:
-    ref = compose["services"]["0g-serving-provider-broker"]["image"]
-    bound_signer = bound_enc_pub = None; source = "compose"
-assert "@" in ref, f"{ref} from {source} does not pin a digest — refuse"
+import base64
+def unb64(s): return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4)).decode()
+
+if v2:                                                     # dstack 0.6, or 0.5
+    lines = doc.split("\n")
+    assert lines[0] == "zg-state-v2"
+    state = dict(l.split(" ", 1) for l in lines[1:] if not l.startswith("instance "))
+    ref, bound_signer, bound_enc_pub = unb64(state["image"]).split()
+    source = "state document"
+else:                                                      # dstack 0.5 only
+    records = [e for e in ledger if e["event"] == "zg-image-update"]
+    if records:
+        ref, bound_signer, bound_enc_pub = bytes.fromhex(records[-1]["event_payload"]).decode().split()
+        source = "ledger"
+    else:                                                  # no v2 quote, no image record since boot
+        ref = compose["services"]["0g-serving-provider-broker"]["image"]
+        bound_signer = bound_enc_pub = None; source = "compose"   # weaker: see N8.2
+assert "@sha256:" in ref, f"{ref} from {source} does not pin a digest — refuse"
 ```
 
-**Reading zero records is normal, not an error.** The ledger is cleared at every boot, so a
-machine that has not been upgraded since boot simply has no upgrade records. The answer then
-comes from the version written in the manifest — and that manifest is trustworthy now, because
-`N5.2` anchored it back to the quote.
+**The state document** (`api/controller/internal/ctrl/state.go`; grammar in
+`doc/rtmr3-records.md` §8.3) has one line per kind, in fixed order, each payload base64url
+without padding and in exactly the grammar of the RTMR3 record of the same kind:
 
-**You can tell the two cases apart by reading:** records present, use the last one; no records,
-use the manifest. You do not need anyone to tell you which case you are in.
+| Line | States, as of when the quote was taken |
+|---|---|
+| `image` | `<repo>@sha256:<digest> <signer> <enc_pub>` — the digest the broker container runs, and both keys derived for it **and** the bound upstream set. `<repo>` is the controller's configured repository and is not attested; judge the digest |
+| `config` | the SHA-256 of the primary config file on disk |
+| `upstreams` | the upstream set the keys are bound to (`N12.2`); `unrecorded` or the payload `invalidated` means nothing bounds where plaintext goes |
+| `engines` | the containers the controller created (`N11.4`); `count=0` when none |
+| `instance <name>` | one per extra instance, the hash of its config file |
+| `ledger` | `rtmr3` (dstack 0.5: records exist too) or `unavailable` (`ZG_CONTROLLER_LEDGER=none`, dstack 0.6) |
+
+Every line is computed from the running deployment, not copied from the last record, so a
+deployment that has changed nothing since boot still has a complete document. On `ledger rtmr3`
+you may additionally replay the records and require the last record of each kind (per instance
+name for `zg-instance-config-update`) to equal the document's line — a consistency check, not a
+second source. A kind with no record is not a mismatch (below).
+
+**On the ledger path, reading zero image records is normal, not an error.** RTMR3 starts empty
+at every boot, and the controller writes a `zg-image-update` at boot **only when the deployment
+records its upstream set** (the binding of keys to the set writes one); otherwise it writes one
+only on an upgrade (`api/controller/cmd/server/main.go`, `ctrl/upstream_set.go`). So a 0.5
+machine with the set unrecorded and no upgrade since boot has no image record, and the answer
+is in the v2 document. Only a deployment that serves no v2 quote (the request 404s; see the
+`report_data` field reference) leaves the version written in the manifest as the sole answer —
+trustworthy as a manifest, because `N5.2` anchored it, but it binds no signer; see the residual
+assumptions.
+
+**You can tell the cases apart by reading:** a document, use its `image` line; records present,
+use the last one. You do not need anyone to tell you which case you are in.
 
 **If what you read is a tag (`:latest`, `:dev1`) rather than a content hash, refuse outright —
 do not try to resolve it.** Resolving a tag into concrete content is done by docker on the
@@ -1355,9 +1536,10 @@ provider's machine, and the provider is the party you are checking; what they re
 unverifiable to you.
 
 So: a deployment using a tag rather than a content hash **cannot be verified on this premise**
-until it either pins a hash or records an upgrade.
+until it either pins a hash or records an upgrade. (The v2 `image` line always carries a
+digest — the controller refuses to build a document for a broker whose digest it cannot pin.)
 
-**After two successive upgrades the records look like this:**
+**After two successive upgrades the records look like this** (ledger path):
 
 ```
 #1  sha256:<content hash of version A>   signer=0x<address A>   encPub=<pubkey A>
@@ -1365,7 +1547,9 @@ until it either pins a hash or records an upgrade.
 ```
 
 Records are appended in order. And **key derivation is deterministic** — roll back to an earlier
-version and both key addresses return exactly to that earlier pair.
+version (with the same upstream set) and both key addresses return exactly to that earlier pair.
+The key's identity is the image digest **plus** the hash of the upstream set it is bound to
+(`api/controller/internal/attestproxy/signing.go`, `KeyIdentity`; #717/#718); `N8.3`.
 
 **But "deterministic" holds only within one machine.** The keys derive from "this machine's root
 key + the program version", and the root key differs per machine. So **moving to a new machine
@@ -1412,7 +1596,8 @@ cosign verify-attestation --type slsaprovenance \
 connects:
 
 ```
-content hash in the ledger  ->  cosign signature (Sigstore public log)
+content hash in the ledger
+or the image line           ->  cosign signature (Sigstore public log)
                             ->  the commit in the provenance attestation
                             ->  source you can read
 ```
@@ -1543,19 +1728,34 @@ again — because that old response's signature really is valid.
 **So the only harm the router can do is not forwarding** — you get nothing. And "getting
 nothing" you notice at once, which is a different kind of problem from "getting something false".
 
-### N8.2 the signing key belongs to the version in the record
+### N8.2 the signing key belongs to the version in the record (or `image` line)
 
 | | |
 |---|---|
 | Establishes | the key that signed the response derives from the content hash `N6.3` read out |
-| On what grounds | ⚙ the ledger record binds an address, and the quote's `report_data` must name the same one |
+| On what grounds | ⚙ v1 / legacy: the ledger record binds an address, and the quote's `report_data` must name the same one. v2: `report_data` names no address; the `image` line of the document it commits to does, and the chain must name the same one |
 | How to check | below |
 
 ```python
-signer = "0x" + rd[32:52].hex() if v1 else rd.rstrip(b"\x00").decode().lower()
+if v2:
+    signer = bound_signer.lower()                   # report_data carries no signer; the image line does
+elif v1:
+    signer = "0x" + rd[32:52].hex()
+else:
+    signer = rd.rstrip(b"\x00").decode().lower()
 if bound_signer:
     assert signer == bound_signer.lower()
+# The provider's on-chain service: its teeSignerAddress, acknowledged by the contract owner.
+# Required on every path; on v2 it is the only thing outside the CVM the signer is checked against.
+assert signer == onchain_tee_signer.lower() and onchain_acknowledged
 ```
+
+**On v2, why the `image` line can be trusted for the address at all:** the controller's proxy
+quotes `enc_pub ‖ SHA-256(document)` only for the document it builds itself and the `enc_pub` it
+derives for that document's key identity (`N6.1`). So the signer in a document the quote commits
+to was derived by the controller, for the digest on the same line. Comparing it with the on-chain
+acknowledged `teeSignerAddress` is what ties "the key this CVM's controller derived" to "the key
+this provider registered" (`doc/rtmr3-records.md` §8.4 step 4).
 
 **Why both sides must be checked:** the 64 bytes of `report_data` are handed to the hardware by
 the program itself — the hardware only signs them, it does not validate their contents. And the
@@ -1571,9 +1771,10 @@ record in the ledger was written by the controller.
 the CVM, so whoever filled `report_data` and whoever wrote the record must have held the same
 one.
 
-**With an empty ledger (`N6.3`'s second case) this premise weakens by exactly one notch:** the
-program version is still pinned by the manifest's hash, but **nothing separately vouches for
-that key.**
+**With neither a document nor an image record (`N6.3`'s last case: a 0.5 deployment that
+serves no v2 quote and has not recorded an image since boot) this premise weakens by exactly
+one notch:** the program version is still pinned by the manifest's hash, but **nothing
+separately vouches for that key.**
 
 How solid the conclusion is then depends on one thing: **whether "the version the manifest
 names" really is "the one running".** The mechanism that makes that true is the controller
@@ -1587,7 +1788,7 @@ the manifest while **unreviewed code answers you.**
 | | |
 |---|---|
 | Establishes | having verified once, you may reuse that address rather than re-verifying per request |
-| On what grounds | ⚙ the key follows the image |
+| On what grounds | ⚙ the key follows the image and the bound upstream set |
 | How to check | nothing extra — a failing signature is the signal |
 
 Suppose the provider upgrades an hour after you verified. The controller derives from the image
@@ -1603,11 +1804,32 @@ which is what a deployment without per-image derivation has — a reused address
 verifying across upgrades indefinitely, and re-fetching the quote would not help either, since
 the address in it would not have changed.
 
-**But there is one thing it cannot detect: a config change.** Changing config does not change
-the program version, so the key address is unchanged and signatures keep passing. **If a config
-change happens while you are reusing an address, you get no signal.** Seeing it requires
-re-reading the records in the quote — that is the one thing per-request verification actually
-buys.
+**The same holds for where plaintext may go.** A key's identity is the image digest **plus**
+the hash of the upstream set it is bound to (`api/controller/internal/attestproxy/signing.go`,
+`KeyIdentity`; #717/#718), so a config change that adds, removes or repoints an upstream
+rotates the signer just as an upgrade does — and needs the new signer acknowledged on chain.
+Binding is on whenever the set is recorded: always with `ZG_CONTROLLER_LEDGER=none`
+(`ctrl/ledger.go`, `recordsUpstreamSet`), and with `controller.recordUpstreamSet` on a 0.5
+deployment. A 0.5 deployment with it off binds nothing — its `upstreams` line reads
+`unrecorded` — and an upstream change rotates no key there.
+
+**But there is one thing it cannot detect: a config change that leaves the set alone.** The
+program version and the set are unchanged, so the key address is unchanged and signatures keep
+passing. **If such a change happens while you are reusing an address, you get no signal.**
+Seeing it requires a fresh quote: on 0.5 a `zg-config-update` record, in v2 the `config` line.
+A primary-config change goes through the controller's `ApplyCoreConfig`, which restarts the
+broker, and the broker takes its quotes afresh at start — so the new `config` line is in the
+next quote it serves. That is the one thing per-request verification actually buys.
+
+**One staleness to know about** (`doc/rtmr3-records.md` §8.5): the broker takes its v2 quote
+once, at start, and serves it until it restarts. Two changes do not restart the primary broker
+— the controller creating an engine, and a config change to a container instance
+(`ZG_CONTROLLER_INSTANCES`) — so the `engines` and container-`instance` lines can lag the
+running deployment until the next broker restart. Both exist only with a ledger (without one
+the controller refuses them). Their RTMR3 records are appended at once, but they reach you only
+in a quote's event log, and that too is the one taken at start — so the ledger lags the same
+way. After an engine or instance change, ask for a restart (or wait for one) before relying on
+either.
 
 **Last point: when a signature fails, do not treat it as a retryable network error.** It is a
 definite notification: **the program changed.** What to do is return to `N6.4` and ask again
@@ -1622,12 +1844,20 @@ whether you accept this new version — and that question needs a person.
 | | |
 |---|---|
 | Establishes | the TLS private key is inside the CVM; neither the host nor the gateway sees plaintext |
-| On what grounds | ⚙ the ingress container runs inside the CVM and its certificate key is derived by dstack's `GetTlsKey`; 👤 confirmed from the reviewed manifest |
+| On what grounds | ⚙ the ingress container runs inside the CVM and terminates TLS there; 👤 confirmed from the reviewed manifest |
 | How to check | confirmed during the `N5.3` review |
 
-**One cost has to be stated here:** the container that terminates TLS must be able to reach
-dstack's socket in order to obtain the certificate key. **Which means it sits inside the trust
-boundary, like the controller** — it sees plaintext.
+**One cost has to be stated here:** the container that terminates TLS sees plaintext. **So it
+sits inside the trust boundary, like the controller.** It also asks dstack for two things — `Info`
+(the app id it publishes in a DNS TXT record) and `GetQuote` over its certificate evidence; its
+certificate itself comes from Let's Encrypt, not from `GetTlsKey` (`doc/controller-design.md`).
+
+Mounted the usual way it holds `dstack.sock`, with every capability `N6.1` lists. **Since #763
+it can be given the controller's read-only proxy socket instead**
+(`api/controller/internal/attestproxy/proxy.go`, `NewReadOnly`): that socket forwards only `Info`
+and `GetQuote` — restricted to `report_data` whose second half is zero — and answers nothing
+itself: no `EmitEvent`, no `GetKey`, no `GetTlsKey`, no signing. Which one this deployment does
+is an `N5.3` row.
 
 So its image **must be pinned by content hash, not a tag.** With a tag, the image can be swapped
 while the manifest's hash stays the same — and you cannot detect it.
@@ -1686,18 +1916,22 @@ merely encrypted the request to the provider. Hence `N10.2`.
 | | |
 |---|---|
 | Establishes | the key you sealed to derives from the content hash `N6.3` read out |
-| On what grounds | ⚙ the enc_pub binding in `report_data` plus the ledger record's binding |
+| On what grounds | ⚙ the enc_pub in `report_data` plus the binding in the ledger record or the `image` line |
 | How to check | below |
 
 ```python
 if bound_enc_pub:
-    assert v1                                       # the old layout has no such field
-    assert rd[:32].hex() == bound_enc_pub.lower()
+    assert v1 or v2                                 # legacy has no such field
+    assert rd[:32].hex() == bound_enc_pub.lower()   # v2: the image line's enc_pub
     seal_to = rd[:32].hex()
 ```
 
-**Why checking only the signer is not enough:** the address bound in the ledger is **public** —
-it is right there in the boot log you just read. So a process that is not the recorded image can
+On v2 this is `doc/rtmr3-records.md` §8.4 step 3: `rd[0:32]` must equal the `image` line's
+`enc_pub`, else stop. With neither a document nor a record there is no `bound_enc_pub`, and
+nothing here lets you seal.
+
+**Why checking only the signer is not enough:** the address bound in the ledger or the document
+is **public** — it is right there in what you just read. So a process that is not the recorded image can
 publish that address alongside **an enc_pub of its own**. It will never produce a valid response
 signature, **but you have already sealed your request to its key.**
 
@@ -1707,7 +1941,8 @@ That is why a record binding only one of the two keys must be rejected rather th
 verified quote, then confirm what that endpoint returns equals it.
 
 **These three values must be equal; compare them yourself:** the quote's `report_data[0:32]` ==
-the `enc_pub` returned by `/v1/e2ee/pubkey` == the third field in the ledger record. Any
+the `enc_pub` returned by `/v1/e2ee/pubkey` == the third field in the ledger record or the
+`image` line. Any
 mismatch means somebody is receiving your request under a key that does not belong to that
 program.
 
@@ -1735,7 +1970,7 @@ convenient.
 | the enc_pub check | **confidentiality** | **No** — you seal, then send; wrong key means the plaintext is already out |
 
 **Doing both is what lets you notice a mismatch between the two sides.** Do only one and
-`report_data` and the ledger become two unrelated statements — and it is precisely their
+`report_data` and the ledger (or document) become two unrelated statements — and it is precisely their
 disagreement that exposes a problem: a program publishing keys of its own, or the half-record
 left by an upgrade that never completed. **Check only one side and all of those pass as normal.**
 
@@ -1822,19 +2057,29 @@ the confidentiality boundary:
 |---|---|
 | broker | it unseals the request |
 | **the inference engine container** | it receives the unsealed plaintext, and it is the code the version pinning governs |
-| **the database container** (here `mysql`) | the async-job table stores request and response bodies verbatim — **not just billing metadata** |
+| **the database container** (here `mysql`) | the async-job table stores unsealed request and response bodies verbatim — **not just billing metadata** |
 | **the config-init container** | it holds `PRIVATE_KEY` and sits on a network with egress |
 | controller | it holds dstack.sock and docker.sock |
-| ingress | it holds dstack.sock (for `GetTlsKey`) |
+| ingress | it terminates TLS; it holds dstack.sock, or since #763 the read-only proxy socket (`N9.1`) |
+
+**Three more kinds of plaintext handler are not read off the manifest's service list**, and each
+has to be accounted for separately:
+
+| Handler | Where it is stated | What bounds it |
+|---|---|---|
+| **engines the controller creates** after launch (`POST /v1/engines`) | not in `app_compose`; in `zg-engine-set` (0.5) and the `engines` line | possible only with `ZG_CONTROLLER_ENGINES=on` in the controller's compose literal, and refused outright with `ZG_CONTROLLER_LEDGER=none` (`api/controller/internal/ctrl/engine.go`). Absent the literal, `engines` reads `count=0` |
+| **container instances** (`ZG_CONTROLLER_INSTANCES`) — extra brokers, each with its own config | their containers are in the compose; their configs are not measured, and only their hashes reach `zg-instance-config-update` / the `instance` lines | refused whenever the upstream set is recorded, so always without a ledger (`ctrl/instances.go`, `parseInstances`): **their upstreams are not in the set**, so a privacy claim for a CVM declaring them does not hold |
+| **in-process instances** — extra providers the broker serves from `CONFIG_DIR` | inside the broker container; one config file each, hashed into an `instance` line | their upstreams **are** in the set, tagged `provider=<address>` (`ctrl/upstream_set.go`); their database server is the `DATABASE_DSN` literal's (`api/inference/config/instances.go`) |
 
 **So every container inside the boundary must be pinned by content hash, not a tag.** On dstack,
 tags are re-resolved at every boot (`app-compose.sh` runs `docker compose pull` and then
 `docker image prune -af`), so **one `compose_hash` can run different content across boots** —
-which is why a tag is no constraint at all.
+which is why a tag is no constraint at all. (An engine's image is digest-pinned by the
+controller's own allowlist, `controller.engines`, and named by digest in its record.)
 
 **The database row is the one most often judged wrongly:** looking only at the billing table
 suggests it holds nothing but addresses, token counts and fees, like pure metadata — whereas **the
-async-job table is the one storing request and response bodies verbatim**. When judging "is the
+async-job table is the one storing unsealed request and response bodies verbatim**. When judging "is the
 database inside the boundary", judge by the table that stores the bodies.
 
 ---
@@ -1845,7 +2090,7 @@ database inside the boundary", judge by the table that stores the bodies.
 
 | | |
 |---|---|
-| Establishes | no log level can print the user's request or response content |
+| Establishes | no log level can print the user's request or response body; the two bounded exceptions below are stated |
 | On what grounds | 👤 code review — but what you are reviewing is **impossibility**, not correct configuration |
 | How to check | read the source for the version you accepted; the fingerprint helper is the invariant |
 
@@ -1871,25 +2116,40 @@ The approach now is redaction **by value**: substitute every secret from the loc
 out of the text. **Not by pattern matching** — "strings that look like a key" can never be
 enumerated completely, whereas substitution by value misses no form of it.
 
+**⚠️ Three kinds of log line are exceptions to "only a length and a fingerprint", and they are
+stated here rather than hidden:**
+
+| Line | Level | What it carries |
+|---|---|---|
+| a request profile dropping a parameter the upstream engine rejects (`api/inference/internal/ctrl/request_profile.go`) | **Info** | the **value the client chose** for that field (e.g. `reasoning_effort`, `thinking.display`), truncated to 64 bytes, with its path and the model |
+| an upstream error response (`api/inference/internal/ctrl/proxy.go`, `logsafe.go`) | **Error**, printed by default | the upstream's **error body**, up to 512 bytes, with only this deployment's configured secrets redacted — and some vendors echo the request in it |
+| a video job whose billing proof is skipped (`api/inference/internal/ctrl/video.go`, `video_reserve.go`, via `logProofSkip`) | **Error**, throttled | the request's free-text **`size`** value, truncated to 80 bytes |
+
+None is a request body, and all are bounded; but the error body can carry a fragment of what you
+sent, and the other two carry values you chose. Whoever can read the container logs (`GET /v1/logs` authenticates with the provider's own key)
+can read these.
+
 **This premise has a tail:** it proves "**the version you accepted** cannot print content", and
 the logs on the disk were not all written by it — **bytes written by older versions are still
 there, and earlier versions did print request bodies at debug level.** The invariant is about
 code; it cannot govern content already on disk. **See `N13`.**
 
-### N12.2 both plaintext exits are signed literals
+### N12.2 every plaintext exit is measured — a signed literal, or a member of the bound upstream set
 
 | | |
 |---|---|
-| Establishes | who the broker forwards the unsealed plaintext to, and where it writes it, are both values the user can read and that are measured |
-| On what grounds | ⚙ both variables are written as **literals** in the manifest, so they enter `compose_hash` |
-| How to check | find both lines in `app_compose`'s `docker_compose_file` |
+| Establishes | who the broker forwards the unsealed plaintext to, and where it writes it, are values the user can read and that are measured |
+| On what grounds | ⚙ the default upstream and the database server are **literals** in the manifest, so they enter `compose_hash`; every other upstream is a member of the upstream set, which is bound into the signing key and stated in the quote |
+| How to check | find both literals in `app_compose`'s `docker_compose_file`; then read the upstream set and require every member to be inside the CVM |
 
-| Exit | Variable | What goes out |
+| Exit | Where it is set | What goes out |
 |---|---|---|
-| forwarded upstream | `TARGET_URL` | the entire unsealed request |
-| written to a database | `DATABASE_DSN` | the async job's request and response bodies |
+| forwarded upstream, by default | `TARGET_URL` (manifest literal; overrides `service.targetUrl`) | the entire unsealed request |
+| forwarded upstream, per model | every `modelPricing[].targetUrl` in the config file — **no env override**, unmeasured by `compose_hash` (`api/inference/config/config.go`) | the entire unsealed request, for that model |
+| forwarded upstream, per in-process instance | every `targetUrl` in each `CONFIG_DIR` file — `TARGET_URL` does not apply to them (`api/inference/config/instances.go`) | the same, for that provider |
+| written to a database | `DATABASE_DSN` (manifest literal; also fixes every in-process instance's database **server** — only the database name may come from its file) | unsealed async jobs' request and response bodies |
 
-**Only a literal counts** — the rule is identical for both:
+**Only a literal counts** for the two manifest exits — the rule is identical for both:
 
 ```yaml
 - TARGET_URL=http://<inference container name>:8000/v1                ✅ covered
@@ -1933,8 +2193,36 @@ boundary.
 
 One scope limit: the async job table is the **asynchronous path** (images, video). Synchronous
 chat completions do not persist bodies; the database receives the billing table's metadata
-(addresses, token counts, fees). **Metadata exists on both paths; plaintext only on the
-asynchronous one.**
+(addresses, token counts, fees). And a **sealed** async text-to-image job stores the request
+envelope and the sealed result, not plaintext (commit `1cc96ca7`; 0g-pc SPEC §7.5). **Metadata
+exists on every path; plaintext only on the unsealed asynchronous one.**
+
+**The per-model upstreams have no literal, and that is what the upstream set is for.** The
+config file can send any model to its own `targetUrl`, and the file is outside `compose_hash`.
+The controller therefore computes the **whole** set of destinations the broker may forward to —
+the broker container's actual `TARGET_URL`, plus every `modelPricing[].targetUrl`, plus every
+in-process instance's, each tagged with its provider — from the configs in use
+(`api/controller/internal/ctrl/upstream_set.go`; #783 made it read the broker's own `TARGET_URL`
+rather than the file's `targetUrl`). It is stated:
+
+- on 0.5, as a `zg-upstream-set` record when `controller.recordUpstreamSet` is on;
+- in v2, as the `upstreams` line — always bound with `ZG_CONTROLLER_LEDGER=none`.
+
+**The check** (`doc/rtmr3-records.md` §4.3, §8.4 step 5): every member must be **inside the
+CVM** — its URL's host has no dot and equals a service name in `app_compose`, which also tells
+you the image serving it. `upstreams unrecorded`, a payload of `invalidated`, or no record at
+all mean **nothing bounds where plaintext goes: not private.** A member outside the CVM is a
+plaintext exit you either accept by name or refuse.
+
+**Why a set of base URLs is a bound by origin:** the broker's forwarding client follows a
+redirect only to the same scheme and host:port it first sent to; any other `3xx` is handed back
+and answered as a `502` with a fixed body, so neither the body (Go replays it on 307/308) nor a
+vendor credential follows it elsewhere, and the `Location` is not revealed
+(`api/inference/internal/ctrl/redirect.go`; #780).
+
+**And the set is bound into the key** (`N8.3`): changing it changes the signer, which needs the
+new signer acknowledged on chain. A provider cannot widen where plaintext goes without that
+visible event.
 
 ### N12.3 the remaining config keys do not decide where plaintext goes
 
@@ -1954,17 +2242,23 @@ gap, because none of them decides where plaintext goes:**
 | `whitelist.userAddresses` | who gets free usage — affects billing fairness, not anyone else's confidentiality |
 | `chatCacheExpiration`, `cacheTokenBilling` | billing accounting |
 | `revenueTransfer.targetAddress` | where the provider's own revenue goes, not the user's money |
-| `logger.level` / `logPaths` | **no level can print content** (see `N12.1`) |
+| `logger.level` / `logPaths` | **no level can print a body** (see `N12.1`, and the two lines it names, both at Info or above) |
 | `priceFeed.coinGeckoApiKey` | the provider's own credential |
 
 **This one carries no caveat marker, and the reason has to be stated:** it is not "proved", it is
 "argued item by item to be unrelated to what is being proved". That distinction matters — listing
 irrelevant things as gaps costs the real gaps their weight.
 
-**Making them verifiable too would be simple:** record a hash of the config's contents into the
-ledger at startup. Because for these keys you only need to know **they were not changed behind
-your back**; you do not need to read the values. Runtime config changes are already recorded;
-**what is missing is only the initial config at startup.**
+**Not in this table: `modelPricing[].targetUrl`.** It decides where plaintext goes, so it is an
+exit, handled in `N12.2` through the upstream set.
+
+**Whether they changed behind your back is now visible**, without reading the values. For these
+keys you only need to know **they were not changed**, and the v2 `config` line is the SHA-256 of
+the primary config file on disk when the quote was taken; each `instance` line is the same for
+one extra instance's file (`api/controller/internal/ctrl/state.go`). Compare it with the hash of
+a config you reviewed, or with the previous quote. On 0.5 a change through the controller is
+also a `zg-config-update` / `zg-instance-config-update` record; on 0.6 nothing records changes
+between two quotes — config-only changes leave no trace except the next quote's `config` line.
 
 ---
 
@@ -2021,7 +2315,7 @@ ever approved to run could have left something on the disk.**
 | Persistent object | What one old deployment could do | Affects which premise |
 |---|---|---|
 | the model weight cache | write a file with the right name and wrong content | `N7.2` |
-| **the `config.yaml` in the config volume** | leave a config of its own — the init container's `if [ ! -f ]` guard **preserves** it | only `N12.3` now (see below) |
+| **the `config.yaml` in the config volume** | leave a config of its own — the init container's `if [ ! -f ]` guard **preserves** it | `N12.3`; its per-model upstreams show in the upstream set (`N12.2`) — see below |
 | container logs (under `/var/lib/docker`) | leave logs **written by an older version**, and earlier versions printed request bodies at debug level | `N12.1` |
 | the database's data directory | alter historical request records, settlement state | billing; not confidentiality |
 | image layers under `/var/lib/docker` | leave a layer for some tag to resolve to | `N11.4` (this is why content-hash pinning is required) |
@@ -2041,10 +2335,16 @@ read config file -> migrate legacy keys -> apply TARGET_URL / DATABASE_DSN env o
 ```
 
 **The environment variable is applied last, and it is a literal in the manifest, covered by
-`compose_hash`.** So a `config.yaml` left on the disk has no say even if it points `targetUrl`
-somewhere else — the two plaintext exits are no longer reachable through this channel. What it
-can still change is limited to the keys in `N12.3`'s table (prices, allowlists, concurrency,
-`logger.level`), **all of which have already been argued not to affect confidentiality.**
+`compose_hash`.** So a `config.yaml` left on the disk has no say even if it points
+`service.targetUrl` somewhere else, nor over the database server.
+
+**It can still name per-model upstreams** (`modelPricing[].targetUrl`), which no literal
+overrides. Those are members of the upstream set, computed from the config actually in use and
+stated in the quote (`N12.2`) — a destination an old deployment left behind shows there like any
+other, and fails the "every member inside the CVM" check if it is outside. What the file can
+still change unseen is limited to the keys in `N12.3`'s table (prices, allowlists, concurrency,
+`logger.level`), **all of which have already been argued not to affect confidentiality** — and
+the v2 `config` line shows that the file differs from the one you reviewed.
 
 In other words: **`N12.2`'s fix closed `N13`'s config channel as a side effect.** That is not a
 coincidence — "make the unverifiable half have no say" solves both the space and the time
@@ -2113,15 +2413,15 @@ question than a full review, which is what makes reading many manifests feasible
 | everything in `N13.2`'s table | **proportional to deployment history** — read every manifest ever approved |
 
 **So the honest statement is: this class of question is closable, but its cost grows with the
-deployment's history.** A record in the ledger naming the loaded weights would compress the
-weight row back to constant; that is not in place today.
+deployment's history.** A record in the ledger, or a line in the state document, naming the
+loaded weights would compress the weight row back to constant; that is not in place today.
 
 ---
 
 ## Residual assumptions, stated plainly
 
 - **One step must be done by a person and cannot be automated.** Judging "does this deployment
-  restrict who may write the ledger" requires a human reading the manifest — the reason a program
+  restrict who may write the ledger or obtain a quote" requires a human reading the manifest — the reason a program
   cannot is in `N5.3`. The good news is that this reading is needed once: the manifest's hash is
   pinned by the hardware, so if it changes you find out immediately.
 
@@ -2129,17 +2429,29 @@ weight row back to constant; that is not in place today.
   the keys it currently holds. What per-image derivation guarantees is that **after an upgrade** it
   can no longer use them, and cannot obtain any other version's keys.
 
-- **With an empty ledger, the answer rests on the version written in the manifest.** The ledger is
-  cleared at every boot, so a machine not upgraded since boot has no records — and then only the
-  manifest's pinned version can answer. **That path binds no signing address** (there is no record
-  to carry one), so it holds on the condition that **"the version the manifest names" really is
-  "the one running"**.
+- **The v2 document is the answer on dstack 0.6, and the fallback for an empty ledger on 0.5.**
+  On 0.6 there are no records at all (`ZG_CONTROLLER_LEDGER=none`). On 0.5 RTMR3 starts empty at
+  every boot, and the controller writes a `zg-image-update` at boot only when the deployment
+  records its upstream set; otherwise only on an upgrade. Either way the `image` line answers,
+  computed from the broker container actually running, with both keys.
+
+- **On dstack 0.6 the state is a snapshot, not a history.** Nothing records the states between
+  two quotes: changes that rotate the keys leave an on-chain acknowledgement; config-only changes
+  leave nothing but a different `config` line in the next quote. And a quote is only as fresh as
+  the broker's last start (`N8.3`; `doc/rtmr3-records.md` §8.5).
+
+- **With neither a v2 document nor an image record, the answer rests on the version written in
+  the manifest.** That happens only on a 0.5 deployment whose controller serves no v2 quote and
+  has recorded no image since boot. **That path binds no signing address** (there is nothing to
+  carry one), so it holds on the condition that **"the version the manifest names" really is "the
+  one running"**.
 
   The mechanism making that true: during an upgrade the controller invalidates the label on the
   replaced container that is used for comparing against the manifest. **Without that step**, a
   reboot after an upgrade has docker start the upgraded container as before while the ledger has
   been cleared — so you read the reviewed version from the manifest while **unreviewed code
-  answers you.** That invalidation is therefore part of the chain, not incidental tidying.
+  answers you.** That invalidation is therefore part of the chain, not incidental tidying. (The v2
+  `image` line does not depend on it: it is read off the running container.)
 
 - **A reboot rolls an in-place upgrade back.** A corollary of the above: after a reboot the
   container returns to the image pinned in the manifest.
@@ -2167,6 +2479,13 @@ weight row back to constant; that is not in place today.
   **So every in-place upgrade necessarily requires somebody to acknowledge again on-chain.** That
   is `N8.2`'s expected cost, not a defect — **an upgrade the user cannot fail to notice is exactly
   the intended effect.**
+
+  **The same goes for a change to the upstream set.** The key is derived for the image digest and
+  the bound set's hash (`N8.3`), so adding, removing or repointing an upstream rotates the signer
+  and clears the marker too — with in-process instances, for every provider address the CVM
+  serves, since they share one signer. Widening where plaintext may go cannot happen without that
+  on-chain re-acknowledgement. (A 0.5 deployment that does not record its set binds nothing, and
+  its upstream changes rotate nothing.)
 
 - **Who holds the on-chain allow-list decides whether that gate stops the provider.** For this
   machine to obtain keys, its manifest hash must already be on an allow-list in an on-chain
@@ -2197,7 +2516,7 @@ weight row back to constant; that is not in place today.
   on-chain allow-list"** — i.e. the assumption above.
 
 - **The client SDK does not walk this chain yet.** Today's SDK verifies signatures against the
-  address recorded on-chain and does not read the ledger. **Which means the guarantees `N6` and
+  address recorded on-chain and reads neither the ledger nor the state document. **Which means the guarantees `N6` and
   `N8` provide are, today, only obtainable by someone verifying by hand against this document.**
   Whoever wires it into the SDK later **must not persist the address across sessions in a config
   file** — doing so is precisely what would remove the "an old conclusion self-invalidates"
