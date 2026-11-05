@@ -71,6 +71,14 @@ service:
   #   supportedFormats:
   #     - openai
   #     - anthropic
+  #   # Optional, for a model with "thinking" in supportedParameters and no
+  #   # "anthropic" in supportedFormats (MiniMax / Zhipu GLM on the OpenAI
+  #   # surface; load fails otherwise): the thinking.type values the upstream accepts. The
+  #   # broker writes reasoning_effort on as "adaptive" if listed, else "enabled",
+  #   # and off as "disabled" if listed (otherwise it forwards the request as sent).
+  #   # Unset = enabled/disabled. Set it on every modelPricing entry of the model.
+  #   # MiniMax-M3 rejects "enabled", so it needs:
+  #   # thinkingTypes: [adaptive, disabled]
 # Optional: per-modality chat pricing, as multiples ("num" or "num/den", no
 # spaces) of inputPrice / outputPrice. Billed from the upstream's
 # prompt_tokens_details (text/image/video/audio_tokens) and

@@ -789,6 +789,35 @@ func TestOpenAISDK_ReasoningEffortGradedTranslation(t *testing.T) {
 	}
 }
 
+// TestOpenAISDK_ReasoningEffortThinkingTypes is the same SDK request against a
+// `thinking`-object model that declares the type values its upstream accepts
+// (MiniMax-M3: adaptive/disabled, rejecting "enabled" — issue 0g-router#1229):
+// the request must reach the upstream as thinking.type "adaptive".
+func TestOpenAISDK_ReasoningEffortThinkingTypes(t *testing.T) {
+	baseURL, authHeader := setupContractEnv(t, func(cfg *config.Config) {
+		mi := chatContractModelInfo("reasoning_split", "thinking")
+		mi.ThinkingTypes = []string{"adaptive", "disabled"}
+		cfg.Service.ModelInfo = mi
+	})
+
+	// The scenario sends reasoning_effort: "high".
+	res := runNodeSDKScenario(t, baseURL, authHeader, "reasoning")
+	if !res.OK {
+		t.Fatalf("reasoning scenario failed: %s (%s)", res.Error, res.ErrType)
+	}
+	debug, _ := res.Result["debugReceivedBody"].(map[string]interface{})
+	if debug == nil {
+		t.Fatal("expected _debug_received_body to be echoed back by the mock upstream")
+	}
+	if _, present := debug["reasoning_effort"]; present {
+		t.Errorf("upstream received reasoning_effort=%v; expected it consumed and re-expressed natively", debug["reasoning_effort"])
+	}
+	thinking, _ := debug["thinking"].(map[string]interface{})
+	if thinking == nil || thinking["type"] != "adaptive" {
+		t.Errorf("upstream received thinking=%v, want {type: \"adaptive\"}", debug["thinking"])
+	}
+}
+
 // ==========================================================================
 // Response headers the SDK relies on
 // ==========================================================================
