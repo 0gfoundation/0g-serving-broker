@@ -460,6 +460,13 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	// handed to MaybeUnsealRequest for the E2EE profile's route scoping. A second
 	// copy of it was a bypass; see SplitTargetRoute.
 	targetRoute, targetPath := constant.SplitTargetRoute(ctx.Request.RequestURI)
+	if constant.UnsafeMatchPath(targetPath) {
+		p.logger.Warnf("Refused non-canonical proxy path: path=%s, method=%s, remote=%s, user_agent=%s",
+			targetPath, ctx.Request.Method, ctx.Request.RemoteAddr, ctx.Request.UserAgent())
+		ctx.Set("ignoreError", true)
+		p.handleBrokerError(ctx, errors.NewBadRequest("invalid request path"), "")
+		return
+	}
 	if targetRoute != "/" {
 		targetURL += targetRoute
 	}
@@ -525,7 +532,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		// Check if this path matches any free prefixes (attestation, signature, etc.)
 		isFree := false
 		for _, prefix := range constant.FreePrefixes {
-			if strings.HasPrefix(strings.ToLower(targetPath), prefix) {
+			if constant.MatchesPrefix(targetPath, prefix) {
 				isFree = true
 				break
 			}

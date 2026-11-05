@@ -1,6 +1,7 @@
 package constant
 
 import (
+	"path"
 	"strings"
 	"time"
 
@@ -346,4 +347,27 @@ func SplitTargetRoute(requestURI string) (route, matchPath string) {
 		matchPath = strings.TrimRight(matchPath, "/")
 	}
 	return route, matchPath
+}
+
+// UnsafeMatchPath reports whether matchPath (from SplitTargetRoute) is spelled in
+// a way the upstream may resolve to a different path than the one we matched.
+// The proxy forwards the raw route, so `/signature;/../chat/completions` matched
+// FreePrefixes here (no session, no billing) while nginx/uvicorn normalized it to
+// /chat/completions upstream — free inference on the provider's upstream key
+// (probed in production 2026-11-05). Dot segments, empty segments, `;` path
+// parameters, percent-encoding (%2e, %2f, %3b, …) and backslashes are all refused
+// rather than normalized: no legitimate route spells itself that way, and a
+// normalization that differs from any one upstream's is the same bypass again.
+func UnsafeMatchPath(matchPath string) bool {
+	if matchPath == "" || matchPath == "/" {
+		return false
+	}
+	return path.Clean(matchPath) != matchPath || strings.ContainsAny(matchPath, ";%\\")
+}
+
+// MatchesPrefix reports whether matchPath is prefix itself or below it, so
+// "/signature" covers "/signature/{id}" but not "/signaturefoo".
+func MatchesPrefix(matchPath, prefix string) bool {
+	lower := strings.ToLower(matchPath)
+	return lower == prefix || strings.HasPrefix(lower, strings.TrimSuffix(prefix, "/")+"/")
 }
