@@ -286,6 +286,33 @@ const (
 // it, so it lives here as the single source of truth.
 const ParamChatTemplateKwargs = "chat_template_kwargs"
 
+// ParamThinking is the supportedParameters entry naming the OpenAI-surface
+// `thinking` object (MiniMax, Zhipu GLM): {"type": <ThinkingType…>}. Like
+// ParamChatTemplateKwargs it is shared by the request-path translation
+// (ctrl.nativeParamThinking) and ModelInfo.Validate.
+const ParamThinking = "thinking"
+
+// The values a `thinking` object's "type" may take on the OpenAI surface. Which
+// of them an upstream accepts differs per model, even within one vendor — see
+// ModelInfo.ThinkingTypes.
+const (
+	ThinkingTypeEnabled  = "enabled"
+	ThinkingTypeAdaptive = "adaptive"
+	ThinkingTypeDisabled = "disabled"
+)
+
+// thinkingTypeValues lists the ThinkingType constants, for validation messages.
+var thinkingTypeValues = []string{ThinkingTypeEnabled, ThinkingTypeAdaptive, ThinkingTypeDisabled}
+
+// NormalizeThinkingType returns the canonical spelling of a thinking.type value
+// (trimmed, lower-cased) and whether it is one the broker knows. The request
+// path writes the canonical spelling, so a "Adaptive" in config still reaches
+// the upstream as "adaptive".
+func NormalizeThinkingType(t string) (string, bool) {
+	n := strings.ToLower(strings.TrimSpace(t))
+	return n, slices.Contains(thinkingTypeValues, n)
+}
+
 // ReasoningEffortLadder is the reasoning_effort ladder in increasing depth, as
 // accepted by vLLM's ChatCompletionRequest. "none" is deliberately absent: it
 // means "no reasoning at all" rather than a depth, and the broker expresses off
@@ -347,6 +374,31 @@ type ModelInfo struct {
 	// in. See docs/design/reasoning-translation.md.
 	ReasoningEffortLevels []string `yaml:"reasoningEffortLevels"`
 
+	// ThinkingTypes lists the thinking.type values this model's OpenAI-surface
+	// `thinking` object accepts, e.g. ["adaptive", "disabled"] for MiniMax-M3.
+	// Optional, and only meaningful alongside "thinking" in supportedParameters on
+	// a model that does not declare the anthropic surface (there `thinking` is
+	// Anthropic's own budgeted control and never a translation target). Unset
+	// keeps the pair the broker has always written: "enabled" for on, "disabled"
+	// for off.
+	//
+	// When set, a client's reasoning_effort is re-expressed as:
+	//   - on:  "adaptive" when declared, otherwise "enabled";
+	//   - off: "disabled" when declared. A model that declares no "disabled"
+	//     cannot turn thinking off, so the request is forwarded as the client
+	//     sent it and the upstream answers it.
+	//
+	// The accepted set differs per model even within one vendor: MiniMax-M3 takes
+	// adaptive/disabled and rejects "enabled" with HTTP 400, MiniMax-M3.1-Flash
+	// takes adaptive/enabled and rejects "disabled", MiniMax-M2.x takes all three.
+	//
+	// It is read only when "thinking" is the model's translation target, i.e. the
+	// first native thinking control listed in supportedParameters (see
+	// ctrl.nativeReasoningParamFor). On a model served by several upstreams, set
+	// it on each entry's modelInfo: a per-model modelInfo replaces the
+	// service-level one wholesale. See docs/design/reasoning-translation.md.
+	ThinkingTypes []string `yaml:"thinkingTypes"`
+
 	// VideoSizeRatios maps output resolution (e.g., "1280x720") to a cost multiplier.
 	// Used for video generation billing: fee = seconds × sizeRatio × outputPrice.
 	// Defaults are applied if not configured (see DefaultVideoSizeRatios).
@@ -404,6 +456,36 @@ func (m *ModelInfo) Validate(serviceType string) error {
 		}
 		if !slices.Contains(m.SupportedParameters, ParamChatTemplateKwargs) {
 			return fmt.Errorf("service.modelInfo.reasoningEffortLevels requires %q in supportedParameters (it names values for the nested chat_template_kwargs.reasoning_effort key)", ParamChatTemplateKwargs)
+		}
+	}
+	// thinkingTypes is optional, but a mistake in it would look like a fix while
+	// changing nothing: the request path writes only the known values, so a
+	// misspelt one is silently ignored (the request keeps "enabled" or goes out
+	// untranslated), and a declaration it can never read (no "thinking", or the
+	// anthropic surface) is inert. Fail all of these at load time. Ordering is not
+	// checked: a native control listed before "thinking" is translated into
+	// instead (see the field's doc).
+	if len(m.ThinkingTypes) > 0 {
+		canTurnOn := false
+		for _, t := range m.ThinkingTypes {
+			n, ok := NormalizeThinkingType(t)
+			if !ok {
+				return fmt.Errorf("service.modelInfo.thinkingTypes contains unknown type %q (allowed: %s)", t, strings.Join(thinkingTypeValues, ", "))
+			}
+			if n != ThinkingTypeDisabled {
+				canTurnOn = true
+			}
+		}
+		if !canTurnOn {
+			return fmt.Errorf("service.modelInfo.thinkingTypes must include %q or %q: the broker needs a value that turns thinking on", ThinkingTypeAdaptive, ThinkingTypeEnabled)
+		}
+		if !slices.Contains(m.SupportedParameters, ParamThinking) {
+			return fmt.Errorf("service.modelInfo.thinkingTypes requires %q in supportedParameters (it names values for that object's type)", ParamThinking)
+		}
+		for _, f := range m.SupportedFormats {
+			if strings.EqualFold(strings.TrimSpace(f), APIFormatAnthropic) {
+				return fmt.Errorf("service.modelInfo.thinkingTypes has no effect on a model declaring the %q surface: its %q is Anthropic's budgeted control, which the broker does not translate", APIFormatAnthropic, ParamThinking)
+			}
 		}
 	}
 	// Parse the optional expiration once at load time so the request path never

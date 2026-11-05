@@ -4590,3 +4590,45 @@ service:
 		}
 	}
 }
+
+func TestModelInfo_Validate_ThinkingTypes(t *testing.T) {
+	cases := []struct {
+		name    string
+		types   []string
+		params  []string
+		formats []string
+		wantErr string
+	}{
+		{"unset ok", nil, []string{"temperature"}, nil, ""},
+		{"minimax-m3 ok", []string{"adaptive", "disabled"}, []string{"temperature", ParamThinking}, nil, ""},
+		{"cannot disable ok", []string{"adaptive", "enabled"}, []string{ParamThinking}, nil, ""},
+		{"openai surface ok", []string{"adaptive"}, []string{ParamThinking}, []string{"openai"}, ""},
+		{"case-insensitive ok", []string{" Adaptive", "DISABLED "}, []string{ParamThinking}, nil, ""},
+		// A typo would put a value the upstream rejects on every thinking request.
+		{"unknown type rejected", []string{"adaptive", "auto"}, []string{ParamThinking}, nil, "unknown type"},
+		// Off alone gives the broker nothing to write for reasoning on.
+		{"disabled only rejected", []string{"disabled"}, []string{ParamThinking}, nil, "must include"},
+		// Declared types without the object they belong to are inert.
+		{"requires thinking", []string{"adaptive"}, []string{"temperature", "reasoning_split"}, nil, "requires"},
+		// On the anthropic surface `thinking` is never translated, so inert too.
+		{"anthropic surface rejected", []string{"adaptive"}, []string{ParamThinking}, []string{"openai", " Anthropic"}, "no effect"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			m := validModelInfo()
+			m.ThinkingTypes = tt.types
+			m.SupportedParameters = tt.params
+			m.SupportedFormats = tt.formats
+			err := m.Validate("chatbot")
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("expected no error, got %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("err = %v, want one containing %q", err, tt.wantErr)
+			}
+		})
+	}
+}

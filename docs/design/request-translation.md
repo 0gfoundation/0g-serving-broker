@@ -31,7 +31,9 @@ The OpenAI input is `reasoning_effort`. It is normalized to a binary on/off inte
 → **on**. That intent is then written in the upstream's dialect. On
 `chat_template_kwargs` the graded depth additionally survives when the model
 declares the levels its chat template accepts (`reasoningEffortLevels`) — see
-[reasoning-translation.md](reasoning-translation.md#graded-depth-on-chat_template_kwargs):
+[reasoning-translation.md](reasoning-translation.md#graded-depth-on-chat_template_kwargs).
+On the `thinking` object the type values come from the model's `thinkingTypes` —
+see [reasoning-translation.md](reasoning-translation.md#per-model-thinking-types):
 
 | OpenAI schema (client sends) | Third-party schema (broker writes) | Upstream dialect (advertised param) |
 |------------------------------|-------------------------------------|-------------------------------------|
@@ -39,8 +41,9 @@ declares the levels its chat template accepts (`reasoningEffortLevels`) — see
 | `"reasoning_effort": "none"` | `"chat_template_kwargs": {"enable_thinking": false}` | Qwen3 / GLM on vLLM (`chat_template_kwargs`) |
 | `"reasoning_effort": "low"` | `"chat_template_kwargs": {"enable_thinking": true, "reasoning_effort": "low"}` | as above **and** `reasoningEffortLevels` declared (graded depth) |
 | `"reasoning_effort": "high"` | `"enable_thinking": true` | DashScope / Aliyun (top-level `enable_thinking`) |
-| `"reasoning_effort": "high"` | `"thinking": {"type": "enabled"}` | MiniMax / Zhipu GLM (`thinking`, OpenAI surface) |
-| `"reasoning_effort": "none"` | `"thinking": {"type": "disabled"}` | MiniMax / Zhipu GLM (`thinking`, OpenAI surface) |
+| `"reasoning_effort": "high"` | `"thinking": {"type": "enabled"}` | MiniMax / Zhipu GLM (`thinking`, OpenAI surface), no `thinkingTypes` declared |
+| `"reasoning_effort": "none"` | `"thinking": {"type": "disabled"}` | as above, or `thinkingTypes` declaring `disabled` |
+| `"reasoning_effort": "high"` | `"thinking": {"type": "adaptive"}` | `thinking` with `thinkingTypes` declaring `adaptive` (MiniMax-M3) |
 | `"reasoning_effort": "high"` | `"reasoning": {"enabled": true}` | OpenRouter (`reasoning`) |
 | `"reasoning_effort": "none"` | `"reasoning": {"enabled": false}` | OpenRouter (`reasoning`) |
 

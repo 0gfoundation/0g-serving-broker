@@ -73,6 +73,7 @@ OpenAI-shaped mock, never a live model.
 | `TestOpenAISDK_MaxTokensTranslation` | `max_completion_tokens` → `max_tokens` translation reaches the upstream correctly (see [request-translation.md](request-translation.md)) |
 | `TestOpenAISDK_ReasoningEffortTranslation` | `reasoning_effort` → native thinking toggle translation reaches the upstream correctly (see [reasoning-translation.md](reasoning-translation.md)) |
 | `TestOpenAISDK_ReasoningEffortGradedTranslation` | the same request against a model declaring `reasoningEffortLevels` reaches the upstream as a graded `chat_template_kwargs.reasoning_effort` rather than a bool |
+| `TestOpenAISDK_ReasoningEffortThinkingTypes` | the same request against a `thinking`-object model declaring `thinkingTypes` (MiniMax-M3: `adaptive`/`disabled`) reaches the upstream as `thinking.type: "adaptive"`, not the `enabled` MiniMax-M3 rejects |
 | `TestOpenAISDK_ResponseHeaders_ZGResKey` | The `ZG-Res-Key` header (routing-proof retrieval) is readable via the SDK's raw response (`.withResponse()`) |
 
 Not covered: insufficient-balance (HTTP 402-equivalent) mapping — see
