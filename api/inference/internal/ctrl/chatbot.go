@@ -213,6 +213,19 @@ func (c *Ctrl) handleChatbotResponse(ctx *gin.Context, resp *http.Response, acco
 		c.handleBrokerError(ctx, err, "check if stream")
 		return err
 	}
+	// The stream branch is chosen by the CLIENT's `stream: true`, but only the
+	// upstream decides whether it actually answers with SSE. An upstream that
+	// ignores the flag replies with one `application/json` body, and running
+	// that through sanitizeStreamLine drops every line (nothing matches
+	// "data: {...}") — the client got 200 and zero bytes while the raw body was
+	// still read and BILLED. Fall back to the non-stream path so the user gets
+	// what they paid for; it is not SSE, but it is the answer.
+	if isStream && !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
+		c.logger.Warnf("request %s asked for stream but upstream replied Content-Type %q; forwarding non-streamed",
+			reqModel.RequestHash, resp.Header.Get("Content-Type"))
+		isStream = false
+	}
+
 	if !isStream {
 		return c.handleChargingResponse(ctx, resp, account, outputPrice, reqBody, reqModel)
 	} else {

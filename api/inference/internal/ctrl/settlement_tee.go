@@ -73,6 +73,8 @@ type SettlementOutcome struct {
 	AdjustedRequest *contract.TEESettlementData // nil if failed completely
 	SettledRequests []*model.Request            // requests that were actually settled
 	UnsettledAmount *big.Int                    // amount that couldn't be settled (for partial)
+	PendingID       uint64                      // pending_settlement row for this user's tx (0 = none)
+	Remainder       []*model.Request            // PARTIAL: rows the chain did not pay for; released after the settled ones are deleted
 }
 
 // SettlementBatch represents a complete settlement operation
@@ -162,6 +164,10 @@ func (c *Ctrl) SettleFeesWithTEE(ctx context.Context) error {
 		c.logger.Errorf("Settlement skipped this round: %s", why)
 		return nil
 	}
+	// Once per round, on every exit path below (empty round, error, success): for spml
+	// this is the invoice retry, and it must not depend on the round having settled
+	// anything or on the round having succeeded.
+	defer c.providerHooks().afterSettlement(ctx)
 
 	// Clear expired skipUntil flags for both requests and users
 	if err := c.db.ClearExpiredSkipUntil(); err != nil {
@@ -227,9 +233,8 @@ func (c *Ctrl) SettleFeesWithTEE(ctx context.Context) error {
 			// Don't return immediately — always process outcomes for completed batches
 		}
 
-		c.providerHooks().afterSettlement(ctx, batch.Outcomes)
-
-		// Process outcomes (delete/skip requests) — runs even if execution had partial errors
+		// Process outcomes (delete/skip requests) — runs even if execution had partial errors.
+		// For SPML the delete also accrues the payout, in one transaction (db.deleteSettledTx).
 		c.processOutcomes(batch.Outcomes)
 
 		// Sync user balances from contract AFTER settlement execution.
@@ -482,32 +487,51 @@ func (c *Ctrl) executeAndProcessResults(ctx context.Context, batch *SettlementBa
 	// Update pending_settlement records with tx hashes
 	c.updatePendingTxHashes(pendingIDs, execResult.TxHashes)
 
-	// If no tx was submitted at all (e.g., gas price error), the requests are
-	// stuck with settling=true until reconciliation expires them. Clear immediately
-	// so they're available for the next settlement round.
-	if len(execResult.TxHashes) == 0 && execErr != nil {
-		c.logger.Warnf("No transactions submitted, clearing settling state for immediate retry")
-		for _, outcome := range batch.Outcomes {
-			if outcome.AdjustedRequest == nil {
-				continue
-			}
-			hashes := c.getRequestHashes(outcome.SettledRequests)
-			if err := c.db.MarkRequestsSettling(hashes, false); err != nil {
-				c.logger.Warnf("Failed to clear settling flag for user %s: %v", outcome.User.Hex(), err)
-			}
-		}
-		// Also mark pending settlement records as expired since no tx exists
+	c.applyExecutionResults(batch, pendingIDs, execResult, execErr)
+	return execErr
+}
+
+// applyExecutionResults folds what the chain said into the outcomes. What
+// happens to a user's pending_settlement row and its settling rows depends
+// only on what is KNOWN about the tx:
+//
+//	full success / PARTIAL with some fit   rows deleted+accrued by processOutcomes, then "confirmed"
+//	PARTIAL with nothing fit, FAILURE      rows released here, row "failed" (receipt is final)
+//	reverted receipt                       same: released, "failed"
+//	receipt timeout (tx hash, fate unknown) rows stay settling, row stays "pending" → Layer 2 / expiry
+//	batch never sent (no tx hash)          rows released here, row "expired"
+//
+// Only processOutcomes confirms, and only after its delete succeeded: a row
+// confirmed with its requests still settling is invisible to Layer 2 and to
+// expiry, so those requests would never be released or accrued.
+func (c *Ctrl) applyExecutionResults(batch *SettlementBatch, pendingIDs []pendingSettlementRecord, execResult *executeBatchesResult, execErr error) {
+	// Batches after the failed one were never sent: no tx exists for them.
+	unsent := make(map[uint64]bool)
+	if execErr != nil {
 		for _, rec := range pendingIDs {
-			if err := c.db.UpdatePendingSettlementStatus(rec.ID, "expired"); err != nil {
-				c.logger.Warnf("Failed to expire pending settlement %d: %v", rec.ID, err)
+			if rec.BatchIndex >= len(execResult.TxHashes) {
+				unsent[rec.ID] = true
 			}
 		}
 	}
 
-	// Update outcomes with execution results
 	for _, outcome := range batch.Outcomes {
 		if outcome.AdjustedRequest == nil {
 			continue // Already marked as failed
+		}
+		if outcome.PendingID != 0 && unsent[outcome.PendingID] {
+			c.logger.Warnf("User %s: settlement never submitted, releasing for the next round", outcome.User.Hex())
+			c.releasePending(outcome, "expired")
+			continue
+		}
+		if execResult.Unresolved[outcome.User] {
+			// The tx is out and its receipt did not come back: leave the row
+			// pending and the requests settling. Layer 2 settles it from the
+			// on-chain event, or expiry releases it.
+			outcome.AdjustedRequest = nil
+			outcome.SettledRequests = nil
+			outcome.PendingID = 0
+			continue
 		}
 
 		result, hasResult := execResult.Results[outcome.User]
@@ -519,25 +543,46 @@ func (c *Ctrl) executeAndProcessResults(ctx context.Context, batch *SettlementBa
 		case uint8(SettlementPartial):
 			// PARTIAL: some funds were deducted on-chain
 			settledAmount := new(big.Int).Sub(outcome.AdjustedRequest.TotalFee, result.UnsettledAmount)
+			var settledReqs []*model.Request
 			if settledAmount.Cmp(big.NewInt(0)) > 0 && len(outcome.SettledRequests) > 0 {
-				settledReqs, _ := c.getRequestsWithinBudget(outcome.SettledRequests, settledAmount)
-				outcome.SettledRequests = settledReqs
-				outcome.Status = SettlementPartial
-				outcome.UnsettledAmount = result.UnsettledAmount
-			} else {
-				outcome.AdjustedRequest = nil
-				outcome.SettledRequests = nil
-				outcome.Status = SettlementPartial
+				settledReqs, _ = c.getRequestsWithinBudget(outcome.SettledRequests, settledAmount)
 			}
+			outcome.Status = SettlementPartial
+			outcome.UnsettledAmount = result.UnsettledAmount
+			if len(settledReqs) == 0 {
+				c.releasePending(outcome, "failed")
+				continue
+			}
+			// The remainder was not paid for. It is released by
+			// processOutcomes AFTER the settled rows are deleted: released
+			// earlier, a failed delete would leave the settled rows behind
+			// while the remainder re-settles under a new tx, and Layer 2
+			// (seeing rows gone) would then release the charged ones too.
+			outcome.Remainder = diffRequests(outcome.SettledRequests, settledReqs)
+			outcome.SettledRequests = settledReqs
 		default:
-			// Complete failure
+			// Complete failure, known from the receipt: nothing to wait for.
 			outcome.Status = SettlementStatus(result.Status)
-			outcome.AdjustedRequest = nil
-			outcome.SettledRequests = nil
+			c.releasePending(outcome, "failed")
 		}
 	}
+}
 
-	return execErr
+// releasePending puts an outcome's requests back for the next round and
+// closes its pending_settlement row with status (nothing was settled, so
+// there is nothing for processOutcomes to delete or confirm).
+func (c *Ctrl) releasePending(outcome *SettlementOutcome, status string) {
+	if err := c.db.MarkRequestsSettling(c.getRequestHashes(outcome.SettledRequests), false); err != nil {
+		c.logger.Warnf("Failed to clear settling flag for user %s: %v", outcome.User.Hex(), err)
+	}
+	if outcome.PendingID != 0 {
+		if err := c.db.UpdatePendingSettlementStatus(outcome.PendingID, status); err != nil {
+			c.logger.Warnf("Failed to mark pending settlement %d %s: %v", outcome.PendingID, status, err)
+		}
+	}
+	outcome.AdjustedRequest = nil
+	outcome.SettledRequests = nil
+	outcome.PendingID = 0
 }
 
 // filterByGasProfitability removes users whose accumulated fee is below
@@ -633,6 +678,7 @@ func (c *Ctrl) recordPendingSettlements(ctx context.Context, batch *SettlementBa
 
 		batchIdx := executableUserBatch[outcome.User]
 		records = append(records, pendingSettlementRecord{ID: ps.ID, BatchIndex: batchIdx})
+		outcome.PendingID = ps.ID
 
 		// Mark requests as settling so they won't be picked up by the next settlement cycle
 		if err := c.db.MarkRequestsSettling(requestHashes, true); err != nil {
@@ -662,14 +708,30 @@ func (c *Ctrl) processOutcomes(outcomes []*SettlementOutcome) {
 	for _, outcome := range outcomes {
 		switch outcome.Status {
 		case SettlementSuccess, SettlementPartial:
-			if len(outcome.SettledRequests) > 0 {
-				if err := c.deleteRequests(outcome.SettledRequests); err != nil {
-					c.logger.Errorf("User %s: failed to delete %d settled requests: %v",
-						outcome.User.Hex(), len(outcome.SettledRequests), err)
-					continue
+			if len(outcome.SettledRequests) == 0 {
+				continue // nothing settled for this user (see applyExecutionResults)
+			}
+			if err := c.deleteRequests(outcome.SettledRequests, true); err != nil {
+				c.logger.Errorf("User %s: failed to delete %d settled requests: %v",
+					outcome.User.Hex(), len(outcome.SettledRequests), err)
+				continue
+			}
+			c.logger.Infof("User %s: deleted %d settled requests",
+				outcome.User.Hex(), len(outcome.SettledRequests))
+			// Done with this tx: a still-"pending" row would make the event
+			// process reconcile (and for a PARTIAL, accrue) it a second time.
+			// Dying before this line leaves the row pending for Layer 2 —
+			// that is the recovery path, by design. Confirmed ONLY here, after
+			// the delete: a confirmed row with rows still settling is lost.
+			if outcome.PendingID != 0 {
+				if err := c.db.UpdatePendingSettlementStatus(outcome.PendingID, "confirmed"); err != nil {
+					c.logger.Warnf("User %s: failed to confirm pending settlement %d: %v", outcome.User.Hex(), outcome.PendingID, err)
 				}
-				c.logger.Infof("User %s: deleted %d settled requests",
-					outcome.User.Hex(), len(outcome.SettledRequests))
+			}
+			if len(outcome.Remainder) > 0 {
+				if err := c.db.MarkRequestsSettling(c.getRequestHashes(outcome.Remainder), false); err != nil {
+					c.logger.Warnf("Failed to release unsettled remainder for user %s: %v", outcome.User.Hex(), err)
+				}
 			}
 
 		case SettlementNoSigner:
@@ -678,7 +740,7 @@ func (c *Ctrl) processOutcomes(outcomes []*SettlementOutcome) {
 			if err != nil {
 				c.logger.Infof("Error getting requests for permanent failure user %s: %v", outcome.User.Hex(), err)
 			} else if userReqs != nil {
-				if err := c.deleteRequests(userReqs.Requests); err != nil {
+				if err := c.deleteRequests(userReqs.Requests, false); err != nil {
 					c.logger.Errorf("User %s: failed to delete requests for permanent failure: %v",
 						outcome.User.Hex(), err)
 				} else {
@@ -692,6 +754,21 @@ func (c *Ctrl) processOutcomes(outcomes []*SettlementOutcome) {
 			c.logger.Infof("User %s: temporary failure %s", outcome.User.Hex(), outcome.Status.String())
 		}
 	}
+}
+
+// diffRequests returns the requests in all that are not in sub (by hash).
+func diffRequests(all, sub []*model.Request) []*model.Request {
+	in := make(map[string]bool, len(sub))
+	for _, r := range sub {
+		in[r.RequestHash] = true
+	}
+	var out []*model.Request
+	for _, r := range all {
+		if !in[r.RequestHash] {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // Helper functions (simplified and consolidated)
@@ -797,9 +874,17 @@ func (c *Ctrl) getRequestHashes(requests []*model.Request) []string {
 	return hashes
 }
 
-func (c *Ctrl) deleteRequests(requests []*model.Request) error {
+// deleteRequests removes request rows. settled says the rows were paid for
+// on-chain: for an SPML provider their fees then accrue to the serving nodes'
+// payout cumulatives in the same transaction. A permanent-failure purge is not
+// settled and must not accrue.
+func (c *Ctrl) deleteRequests(requests []*model.Request, settled bool) error {
 	if len(requests) == 0 {
 		return nil
+	}
+	var payout *db.AssayPayoutOptions
+	if settled {
+		payout = c.assayPayoutOptions()
 	}
 
 	// Atomically accumulate stats and delete requests in a single transaction
@@ -817,6 +902,7 @@ func (c *Ctrl) deleteRequests(requests []*model.Request) error {
 		ServiceType:     c.Service.Type,
 		RecordPerWallet: c.userUsageStats.Enabled,
 		FallbackModel:   c.Service.ModelType,
+		AssayPayout:     payout,
 	}); err != nil {
 		c.logger.Errorf("CRITICAL: failed to accumulate stats and delete settled requests: %v", err)
 		return err
@@ -828,11 +914,15 @@ func (c *Ctrl) deleteRequests(requests []*model.Request) error {
 type executeBatchesResult struct {
 	Results  map[common.Address]*providercontract.SettlementResult
 	TxHashes []common.Hash
+	// Unresolved: the batch's tx was sent but its receipt never came back,
+	// so these users' fate is unknown (not a failure, not a success).
+	Unresolved map[common.Address]bool
 }
 
 func (c *Ctrl) executeBatches(ctx context.Context, settlements []contract.TEESettlementData) (*executeBatchesResult, error) {
 	result := &executeBatchesResult{
-		Results: make(map[common.Address]*providercontract.SettlementResult),
+		Results:    make(map[common.Address]*providercontract.SettlementResult),
+		Unresolved: make(map[common.Address]bool),
 	}
 	var batchErr error
 
@@ -850,12 +940,19 @@ func (c *Ctrl) executeBatches(ctx context.Context, settlements []contract.TEESet
 			result.TxHashes = append(result.TxHashes, txHash)
 		}
 		if err != nil {
-			// Mark all users in this and remaining batches as failed
+			// Mark all users in this and remaining batches as unsettled.
+			// A tx hash with a non-revert error is a receipt timeout: this
+			// batch's fate is unknown and is left to Layer 2 (Unresolved).
+			// A reverted receipt or a send failure is final.
+			inFlight := txHash != (common.Hash{}) && !errors.Is(err, providercontract.ErrTxReverted)
 			for j := i; j < len(settlements); j++ {
 				result.Results[settlements[j].User] = &providercontract.SettlementResult{
 					User:            settlements[j].User,
 					Status:          uint8(SettlementPartial),
 					UnsettledAmount: settlements[j].TotalFee,
+				}
+				if inFlight && j < end {
+					result.Unresolved[settlements[j].User] = true
 				}
 			}
 			batchErr = errors.Wrapf(err, "settlement batch %d-%d failed", i, end-1)

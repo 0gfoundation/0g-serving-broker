@@ -10,7 +10,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/config"
 )
 
-// Phase 2 of docs/spml-broker-assay-tls.md: instead of trusting a pin frozen
+// §7 of docs/spml-design.md: instead of trusting a pin frozen
 // in the config, the broker periodically re-attests the assay verifier by
 // reading tappscan's record for the app, cross-checking the signer against the
 // TappRegistry and the TLS key against the assay's live port (attestation_scan.go).
