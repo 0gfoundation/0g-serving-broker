@@ -2,16 +2,19 @@ package ctrl
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"unicode/utf8"
 
 	"github.com/google/uuid"
 
+	"github.com/0gfoundation/0g-pc-e2ee/protocol/proof"
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/util"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/model"
+	"github.com/0glabs/0g-serving-broker/inference/monitor"
 	"github.com/gin-gonic/gin"
 )
 
@@ -51,7 +54,10 @@ func (c *Ctrl) handleDecisionsResponse(ctx *gin.Context, resp *http.Response, _ 
 	defer resp.Body.Close()
 
 	chatKey := uuid.NewString()
-	if !c.Service.TargetSeparated || c.Service.IsCentralized() {
+	// A sealed turn always gets the handle: the sealed path below signs §8 on
+	// every topology, and an E2EE client refuses a response it cannot verify.
+	_, e2eeSealed := e2eeSealedRequest(ctx)
+	if !c.Service.TargetSeparated || c.Service.IsCentralized() || e2eeSealed {
 		ctx.Writer.Header().Set("ZG-Res-Key", chatKey)
 	}
 
@@ -72,31 +78,8 @@ func (c *Ctrl) handleDecisionsResponse(ctx *gin.Context, resp *http.Response, _ 
 		body = c.sanitizeForwarderResponseBodyExcept(ctx, body, resp.Header.Get("Content-Encoding"), "answers", chatKey)
 	}
 
-	// Signing dispatch and its asymmetric error handling mirror
-	// handleEmbeddingResponse exactly, including cache-BEFORE-flush (#619).
-	switch {
-	case c.Service.IsCentralized():
-		fingerprint := ctx.GetString(CtxKeyUpstreamCertFingerprint)
-		if err := c.signCentralizedRoutingProof(reqBody, body, chatKey, fingerprint, ""); err != nil {
-			c.logger.Errorf("routing proof not created for decisions %s: %v", chatKey, err)
-		}
-	case !c.Service.TargetSeparated:
-		if err := c.signChatWithKey(reqBody, body, chatKey); err != nil {
-			c.handleBrokerError(ctx, errors.Internal(err), "sign decisions response")
-			return err
-		}
-	}
-
-	if _, writeErr := ctx.Writer.Write(body); writeErr != nil {
-		if c.isClientDisconnectError(writeErr) {
-			ctx.Set("ignoreError", true)
-			c.logger.Warnf("Client disconnected during decisions response, billing for completed response (%d bytes)", len(body))
-		} else {
-			c.handleBrokerError(ctx, writeErr, "write decisions response")
-			// Still proceed to billing below.
-		}
-	}
-
+	// Decompress and read usage before signing and flushing: the sealed path
+	// puts the billable count in the frame (SPEC §7.7).
 	decompressedBody := body
 	if contentEncoding := resp.Header.Get("Content-Encoding"); contentEncoding != "" && !c.Service.IsForwarder() {
 		if decoded, derr := decodeBody(body, contentEncoding); derr == nil {
@@ -114,12 +97,88 @@ func (c *Ctrl) handleDecisionsResponse(ctx *gin.Context, resp *http.Response, _ 
 	// bogus, and the whole block is replaced by the request-side estimate.
 	// A negative output_tokens beside a sane input_tokens is clamped rather
 	// than estimated — there is nothing in the request to estimate it from.
+	// reqBody is the decrypted request on a sealed turn, so the estimate
+	// measures the real input either way.
 	usage := parsed.Usage
 	if usage == nil || usage.InputTokens <= 0 {
 		usage = estimateDecisionsUsageFromRequest(reqBody)
 	}
 	if usage.OutputTokens < 0 {
 		usage.OutputTokens = 0
+	}
+
+	// E2EE (SPEC §7.7): seal `answers` to the client's ephemeral key and publish
+	// the billable count as cleartext `usage.input_tokens`, so the router bills
+	// without seeing the answers. Mirrors handleEmbeddingResponse's sealed
+	// branch step for step, fail-closed: a sealed request never gets plaintext.
+	outBody := body
+	signedEarly := false
+	if e2eeSealed {
+		ctx.Writer.Header().Del("Content-Encoding")
+		_, profileInHand := e2eeProfile(ctx)
+
+		withUsage, usageErr := withDecisionsUsage(decompressedBody, usage.InputTokens)
+		if usageErr != nil {
+			ctx.Writer.Header().Del("ZG-Res-Key")
+			if profileInHand {
+				ctx.Set(monitor.CtxKeyFailureSource, monitor.FailureSourceUpstream)
+			}
+			c.handleBrokerError(ctx, usageErr, "sealed decisions response")
+			return usageErr
+		}
+		sealed, _, respBindHash, sealErr := c.maybeSealNonStreamResponse(ctx, withUsage)
+		if sealErr != nil {
+			ctx.Writer.Header().Del("ZG-Res-Key")
+			if profileInHand {
+				ctx.Set(monitor.CtxKeyFailureSource, monitor.FailureSourceUpstream)
+			}
+			c.handleBrokerError(ctx, sealErr, "seal decisions response")
+			return sealErr
+		}
+		outBody = sealed
+
+		reqBindHash, ok := e2eeReqBindHash(ctx)
+		if !ok {
+			err := fmt.Errorf("e2ee decisions response: request binding hash missing from context")
+			ctx.Writer.Header().Del("ZG-Res-Key")
+			c.handleBrokerError(ctx, err, "sign decisions response")
+			return err
+		}
+		e2eeSignedText := proof.SignedTextE2EEFromHashes(reqBindHash, respBindHash)
+		if err := c.signChatResponse(ctx, reqBody, outBody, chatKey, e2eeSignedText, reqModel.Upstream); err != nil {
+			ctx.Writer.Header().Del("ZG-Res-Key")
+			c.handleBrokerError(ctx, errors.Internal(err), "sign decisions response")
+			return err
+		}
+		signedEarly = true
+	}
+
+	// Signing for the UNSEALED turn, unchanged: dispatch and asymmetric error
+	// handling mirror handleEmbeddingResponse, including cache-BEFORE-flush
+	// (#619).
+	if !signedEarly {
+		switch {
+		case c.Service.IsCentralized():
+			fingerprint := ctx.GetString(CtxKeyUpstreamCertFingerprint)
+			if err := c.signCentralizedRoutingProof(reqBody, body, chatKey, fingerprint, ""); err != nil {
+				c.logger.Errorf("routing proof not created for decisions %s: %v", chatKey, err)
+			}
+		case !c.Service.TargetSeparated:
+			if err := c.signChatWithKey(reqBody, body, chatKey); err != nil {
+				c.handleBrokerError(ctx, errors.Internal(err), "sign decisions response")
+				return err
+			}
+		}
+	}
+
+	if _, writeErr := ctx.Writer.Write(outBody); writeErr != nil {
+		if c.isClientDisconnectError(writeErr) {
+			ctx.Set("ignoreError", true)
+			c.logger.Warnf("Client disconnected during decisions response, billing for completed response (%d bytes)", len(outBody))
+		} else {
+			c.handleBrokerError(ctx, writeErr, "write decisions response")
+			// Still proceed to billing below.
+		}
 	}
 
 	if reqModel.IsWhitelisted {
@@ -136,6 +195,45 @@ func (c *Ctrl) handleDecisionsResponse(ctx *gin.Context, resp *http.Response, _ 
 	}
 
 	return c.updateDecisionsWithUsage(ctx, usage, reqModel.RequestHash)
+}
+
+// decisionsRoute is the one route a sealed decisions request is accepted on
+// (see MaybeUnsealRequest).
+const decisionsRoute = "/decisions"
+
+// withDecisionsUsage writes the billable count into the response's
+// `usage.input_tokens` (SPEC §7.7), keeping whatever else the upstream's usage
+// object carried (output_tokens included), so a sealed frame always states the
+// number the router bills on.
+func withDecisionsUsage(body []byte, inputTokens int) ([]byte, error) {
+	var resp map[string]json.RawMessage
+	if err := json.Unmarshal(body, &resp); err != nil || resp == nil {
+		// fmt.Errorf rather than errors.Wrap: a `null` body gives a nil map and a
+		// nil err, and errors.Wrap(nil, …) would return nil.
+		return nil, fmt.Errorf("attach usage.input_tokens: decisions response is not a JSON object: %v", err)
+	}
+	usage := map[string]json.RawMessage{}
+	if raw, ok := resp["usage"]; ok {
+		var upstream map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &upstream); err == nil && upstream != nil {
+			usage = upstream
+		}
+	}
+	count, err := json.Marshal(inputTokens)
+	if err != nil {
+		return nil, errors.Wrap(err, "attach usage.input_tokens: encode count")
+	}
+	usage["input_tokens"] = count
+	merged, err := json.Marshal(usage)
+	if err != nil {
+		return nil, errors.Wrap(err, "attach usage.input_tokens: encode usage")
+	}
+	resp["usage"] = merged
+	out, err := json.Marshal(resp)
+	if err != nil {
+		return nil, errors.Wrap(err, "attach usage.input_tokens: encode response")
+	}
+	return out, nil
 }
 
 // updateDecisionsWithUsage bills InputTokens × InputPrice + OutputTokens ×
