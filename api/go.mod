@@ -3,12 +3,13 @@ module github.com/0glabs/0g-serving-broker
 go 1.25.0
 
 require (
-	github.com/0gfoundation/0g-pc-e2ee/protocol v0.0.0-20261014061422-e320272f41c7
+	github.com/0gfoundation/0g-pc-e2ee/protocol v0.0.0-20261109082046-626c22a6daf2
 	github.com/0gfoundation/0g-storage-client v1.2.2
 	github.com/Dstack-TEE/dstack/sdk/go v0.0.0-20251023024755-9304e6d533e7
 	github.com/andybalholm/brotli v1.1.0
 	github.com/cloudflare/circl v1.6.4
 	github.com/docker/docker v28.0.0+incompatible
+	github.com/docker/go-connections v0.5.0
 	github.com/ecies/go/v2 v2.0.11
 	github.com/ethereum/go-ethereum v1.17.0
 	github.com/gammazero/workerpool v1.1.3
@@ -27,6 +28,7 @@ require (
 	github.com/prometheus/client_model v0.6.1
 	github.com/rifflock/lfshook v0.0.0-20180920164130-b9218ef580f5
 	github.com/sirupsen/logrus v1.9.3
+	github.com/stretchr/testify v1.11.1
 	github.com/swaggo/swag v1.16.3
 	github.com/testcontainers/testcontainers-go v0.34.0
 	github.com/testcontainers/testcontainers-go/modules/mysql v0.34.0
@@ -84,7 +86,6 @@ require (
 	github.com/deckarep/golang-set/v2 v2.6.0 // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.0 // indirect
 	github.com/distribution/reference v0.6.0 // indirect
-	github.com/docker/go-connections v0.5.0 // indirect
 	github.com/docker/go-units v0.5.0 // indirect
 	github.com/emicklei/dot v1.6.2 // indirect
 	github.com/emicklei/go-restful/v3 v3.11.0 // indirect
@@ -185,7 +186,6 @@ require (
 	github.com/shirou/gopsutil/v3 v3.23.12 // indirect
 	github.com/shoenig/go-m1cpu v0.1.6 // indirect
 	github.com/spf13/pflag v1.0.6 // indirect
-	github.com/stretchr/testify v1.11.1 // indirect
 	github.com/supranational/blst v0.3.16-0.20250831170142-f48500c1fdbe // indirect
 	github.com/syndtr/goleveldb v1.0.1-0.20210819022825-2ae1ddf74ef7 // indirect
 	github.com/tklauser/go-sysconf v0.3.12 // indirect

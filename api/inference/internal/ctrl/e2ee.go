@@ -440,6 +440,10 @@ func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, targetPath string, reqBody [
 	if profile == wire.ProfileEmbedding && targetPath != embeddingRoute {
 		return nil, fmt.Errorf("a sealed %s request is only accepted on %s, not %q (SPEC §7.4)", profile, embeddingRoute, ctx.Request.URL.Path)
 	}
+	// And decisions, for the same reason (SPEC §7.7).
+	if profile == wire.ProfileDecisions && targetPath != decisionsRoute {
+		return nil, fmt.Errorf("a sealed %s request is only accepted on %s, not %q (SPEC §7.7)", profile, decisionsRoute, ctx.Request.URL.Path)
+	}
 
 	reconstructed, clientEphPub, reqBindHash, err := c.openSealedEnvelope(profile, env, e2ee)
 	if err != nil {
@@ -620,6 +624,9 @@ func profileForRequest(svcType, surface string) (p wire.Profile, sealable bool) 
 		// SPEC §7.4. Resolution here is route-blind, like every arm; the route is
 		// scoped to /embeddings in MaybeUnsealRequest, next to speech's check.
 		return wire.ProfileEmbedding, true
+	case constant.ServiceTypeDecisions:
+		// SPEC §7.7. Scoped to /decisions in MaybeUnsealRequest, as embedding is.
+		return wire.ProfileDecisions, true
 	default:
 		return "", false
 	}
