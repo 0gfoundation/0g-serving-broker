@@ -139,6 +139,8 @@ func TestProfileForRequest(t *testing.T) {
 		// in MaybeUnsealRequest.
 		{"embedding", constant.ServiceTypeEmbedding, "", wire.ProfileEmbedding, true},
 		{"embedding on a chat path", constant.ServiceTypeEmbedding, config.APIFormatOpenAI, wire.ProfileEmbedding, true},
+		// SPEC §7.7, the same: route checked in MaybeUnsealRequest.
+		{"decisions", constant.ServiceTypeDecisions, "", wire.ProfileDecisions, true},
 		// Still an ALLOWLIST, not a switch with a default. image-editing is the
 		// other multipart endpoint and §5.3 does not cover it yet, so it has no
 		// profile; video-generation and anything added later likewise. Guessing
@@ -172,8 +174,8 @@ func TestEveryChatRouteHasARecognizedSurface(t *testing.T) {
 		"/images/generations":   {},
 		"/audio/transcriptions": {},
 		"/videos":               {},
-		"/embeddings":           {}, // OpenAI Embeddings API — no choices/messages, not chat-shaped; E2EE sealing not wired for it, same as images/audio/video above
-		"/decisions":            {}, // OpenRouter Decisions API — state/questions/answers, not chat-shaped; E2EE sealing not wired for it either
+		"/embeddings":           {}, // OpenAI Embeddings API — not chat-shaped; sealed under its own profile (SPEC §7.4), not a chat surface
+		"/decisions":            {}, // OpenRouter Decisions API — not chat-shaped; sealed under its own profile (SPEC §7.7), not a chat surface
 	}
 	for route := range constant.TargetRoute {
 		if _, nonChat := nonChatRoutes[route]; nonChat {
