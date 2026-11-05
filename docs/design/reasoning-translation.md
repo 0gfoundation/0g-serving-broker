@@ -20,7 +20,7 @@ same on/off concept. The dialects actually seen in the model catalog:
 | OpenAI                 | `reasoning_effort`     | top-level (no translation needed)                 |
 | Qwen3 / GLM on vLLM    | `chat_template_kwargs` | `chat_template_kwargs.enable_thinking` = `bool`   |
 | DeepSeek / Qwen on DashScope | `enable_thinking`| top-level `enable_thinking` = `bool`              |
-| MiniMax                | `thinking`             | `thinking` = `{"type": "enabled"｜"disabled"}`    |
+| MiniMax / Zhipu GLM    | `thinking`             | `thinking` = `{"type": …}`, values per model — see [Per-model `thinking` types](#per-model-thinking-types) |
 | OpenRouter             | `reasoning`            | `reasoning` = `{"enabled": bool}`                 |
 
 Note the **advertised name is not always the toggle key**: a vLLM model advertises
@@ -127,15 +127,17 @@ case "chat_template_kwargs": // Qwen3/GLM on vLLM: nested bool
     bodyMap["chat_template_kwargs"]["enable_thinking"] = on
 case "enable_thinking":      // DashScope: top-level bool
     bodyMap["enable_thinking"] = on
-case "thinking":             // MiniMax: object
-    bodyMap["thinking"] = map[string]any{"type": onOff(on)} // "enabled"｜"disabled"
+case "thinking":             // MiniMax / Zhipu GLM: object
+    bodyMap["thinking"] = map[string]any{"type": thinkingType} // resolved per model
 case "reasoning":            // OpenRouter: object
     bodyMap["reasoning"]["enabled"] = on
 }
 ```
 
-The shape of each native control (bool, or MiniMax's object) lives inline in its
-`switch` arm — so there is no separate `type` / on-value / off-value data to store.
+The shape of each native control (bool, or an object) lives inline in its
+`switch` arm, and so do its values — with one exception, the `thinking` object's
+`type`, whose accepted values differ per model (see
+[Per-model `thinking` types](#per-model-thinking-types)).
 A new object-shaped control is simply another `case` that builds its own shape; the
 set of names recognized in step 1 stays in sync with the `switch` cases by
 construction (same vocabulary). The apply step returns whether it wrote anything,
@@ -195,13 +197,65 @@ is fully expressed by `enable_thinking: false`, and pairing that with a level
 would be contradictory. The precedence rule below still comes first — a client
 that wrote its own nested `reasoning_effort` gets neither key derived for it.
 
+## Per-model `thinking` types
+
+The `thinking` object's on/off values are the one place where the dialect does
+not fix the values: they differ per model, even within one vendor. Measured
+against `api.minimax.io` on 2026-11-04/05:
+
+| Model | `"enabled"` | `"adaptive"` | `"disabled"` |
+|---|---|---|---|
+| MiniMax-M3 | **400** `invalid thinking.type: "enabled" (allowed: adaptive, disabled)` | 200, thinks | 200, no reasoning |
+| MiniMax-M3.1-Flash | 200 | 200 | **400** `requires adaptive thinking` |
+| MiniMax-M2.7 / M2.5 | 200 | 200 | 200 (still reasons) |
+
+The broker used to write `"enabled"` for every thinking-on request, so every
+`reasoning_effort` above `minimal` failed on MiniMax-M3 (0g-router#1229). A
+model therefore declares the values its upstream accepts:
+
+```yaml
+supportedParameters: [temperature, tools, thinking, reasoning_split]
+thinkingTypes: [adaptive, disabled]   # MiniMax-M3
+```
+
+`resolveThinkingType` then picks:
+
+- **on** — `adaptive` when declared, otherwise `enabled`. `adaptive` is preferred
+  because every MiniMax model accepts it; like `enabled` it leaves the depth to
+  the model.
+- **off** — `disabled` when declared. A model that declares no `disabled` cannot
+  turn thinking off (MiniMax-M3.1-Flash), so nothing is translated: the request
+  is forwarded as the client sent it and the upstream answers it. Silently
+  dropping the client's `none` would bill reasoning the client tried to turn off;
+  what the broker *should* do there is the open question below.
+
+A model that declares nothing keeps the pair the broker has always written,
+`enabled` / `disabled`, so a configuration written before the knob existed is
+translated exactly as before. Declared values are written in their canonical
+lower-case spelling. `ModelInfo.Validate` rejects an unknown value, a list with
+no value that turns thinking on, a list without `thinking` in
+`supportedParameters`, and a list on a model declaring the `anthropic` surface
+(where `thinking` is never translated) — each of those would otherwise load and
+then change nothing: the request path writes only the three known values, so a
+misspelt one is silently ignored and the requests it was meant to fix keep
+getting `enabled` or go out untranslated. Two cases it does
+not catch: `thinkingTypes` is read only when `thinking` is the translation target,
+so a model listing another native control before it (e.g. `chat_template_kwargs`)
+translates into that one and ignores the declaration; and on a model served by
+several upstreams the declaration belongs on each entry's `modelInfo`, since a
+per-model `modelInfo` replaces the service-level one wholesale.
+
 ### Why not a per-model translation table
 
 An earlier draft proposed a per-model `{param, placement, type, on, off}` config
-block. That is redundant with the `switch`: placement/type/values are properties of
-the *named* parameter, not of the model, so they belong in one shared `switch`,
-not duplicated into every model's config. The model only needs to declare *which*
-native name its upstream speaks — which it already does via `supportedParameters`.
+block. That is mostly redundant with the `switch`: placement and shape are
+properties of the *named* parameter, not of the model, so they belong in one shared
+`switch`, not duplicated into every model's config. The model only needs to declare
+*which* native name its upstream speaks — which it already does via
+`supportedParameters`. Values are the exception, and only where they measurably
+differ between models speaking the same dialect: that is what the two declarations
+that do exist, `reasoningEffortLevels` and `thinkingTypes`, carry — value sets, never
+placement or shape.
 
 ## Precedence: explicit native parameter wins
 
@@ -272,7 +326,9 @@ value. This is why no `defaultOn` flag is needed.
   canonical model id the portable request either works or 400s depending on which
   provider the router picked. Options: reject broker-side with a clear error, or
   downgrade to the shallowest supported level. Needs a config field expressing
-  "this upstream cannot turn thinking off".
+  "this upstream cannot turn thinking off". On the `thinking` dialect that field
+  now exists — `thinkingTypes` without `disabled` — and the broker forwards such
+  a request unchanged; the other dialects have no equivalent yet.
 - Whether to validate an inbound native parameter against the model's declared
   `supportedParameters` and reject mismatches, or forward leniently (today:
   lenient — an explicit native parameter is forwarded untouched).

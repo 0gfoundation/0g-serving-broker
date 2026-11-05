@@ -549,6 +549,10 @@ func TestTranslateReasoning_TopLevelEnableThinking(t *testing.T) {
 	}
 }
 
+// TestTranslateReasoning_MiniMaxThinkingObject covers a `thinking` model that
+// declares no thinkingTypes: it keeps the enabled/disabled pair the broker has
+// always written (MiniMax-M2.x accepts it). MiniMax-M3, which rejects "enabled",
+// must declare its types — see TestTranslateReasoning_DeclaredThinkingTypes.
 func TestTranslateReasoning_MiniMaxThinkingObject(t *testing.T) {
 	c := newTestCtrlForReasoning(t, "reasoning_effort", "thinking", "reasoning_split")
 	tests := []struct {
@@ -560,8 +564,8 @@ func TestTranslateReasoning_MiniMaxThinkingObject(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.effort, func(t *testing.T) {
-			body := []byte(`{"model":"MiniMax-M3","reasoning_effort":"` + tt.effort + `","messages":[]}`)
-			got, err := c.TranslateReasoning(body, "MiniMax-M3")
+			body := []byte(`{"model":"MiniMax-M2.7","reasoning_effort":"` + tt.effort + `","messages":[]}`)
+			got, err := c.TranslateReasoning(body, "MiniMax-M2.7")
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -919,5 +923,140 @@ func TestTranslateReasoning_NonJSONUnchanged(t *testing.T) {
 	}
 	if string(got) != "not json" {
 		t.Errorf("non-JSON body should be returned unchanged, got %q", got)
+	}
+}
+
+func TestResolveThinkingType(t *testing.T) {
+	tests := []struct {
+		name     string
+		on       bool
+		declared []string
+		want     string
+	}{
+		// Undeclared: the pair the broker has always written.
+		{"undeclared on", true, nil, "enabled"},
+		{"undeclared off", false, nil, "disabled"},
+		// MiniMax-M3 takes adaptive/disabled and rejects "enabled".
+		{"m3 on", true, []string{"adaptive", "disabled"}, "adaptive"},
+		{"m3 off", false, []string{"adaptive", "disabled"}, "disabled"},
+		// MiniMax-M3.1-Flash cannot turn thinking off.
+		{"no disabled on", true, []string{"adaptive", "enabled"}, "adaptive"},
+		{"no disabled off", false, []string{"adaptive", "enabled"}, ""},
+		// Declared enabled only for on.
+		{"enabled on", true, []string{"enabled", "disabled"}, "enabled"},
+		// Canonical spelling is written whatever the config spelling.
+		{"case folded", true, []string{" Adaptive ", "DISABLED"}, "adaptive"},
+		{"case folded off", false, []string{" Adaptive ", "DISABLED"}, "disabled"},
+		// No on value declared (Validate rejects this; resolution stays safe).
+		{"disabled only on", true, []string{"disabled"}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := resolveThinkingType(tt.on, tt.declared); got != tt.want {
+				t.Errorf("resolveThinkingType(%v, %v) = %q, want %q", tt.on, tt.declared, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestTranslateReasoning_DeclaredThinkingTypes is issue 0g-router#1229: MiniMax-M3
+// answers thinking.type "enabled" with HTTP 400 (allowed: adaptive, disabled), so
+// every reasoning_effort above "minimal" failed once the broker translated it.
+func TestTranslateReasoning_DeclaredThinkingTypes(t *testing.T) {
+	newCtrl := func(types ...string) *Ctrl {
+		c := newTestCtrlForReasoning(t, "reasoning_effort", "thinking", "reasoning_split")
+		c.Service.ModelInfo.ThinkingTypes = types
+		return c
+	}
+	tests := []struct {
+		name     string
+		types    []string
+		effort   string
+		wantType string // "" = body forwarded unchanged
+	}{
+		{"m3 high", []string{"adaptive", "disabled"}, "high", "adaptive"},
+		{"m3 low", []string{"adaptive", "disabled"}, "low", "adaptive"},
+		{"m3 medium", []string{"adaptive", "disabled"}, "medium", "adaptive"},
+		{"m3 none", []string{"adaptive", "disabled"}, "none", "disabled"},
+		{"m3 minimal", []string{"adaptive", "disabled"}, "minimal", "disabled"},
+		{"cannot disable high", []string{"adaptive", "enabled"}, "high", "adaptive"},
+		{"cannot disable none", []string{"adaptive", "enabled"}, "none", ""},
+		{"enabled declared", []string{"enabled", "disabled"}, "high", "enabled"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := []byte(`{"model":"MiniMax-M3","reasoning_effort":"` + tt.effort + `","messages":[]}`)
+			got, err := newCtrl(tt.types...).TranslateReasoning(body, "MiniMax-M3")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tt.wantType == "" {
+				if !bytes.Equal(got, body) {
+					t.Fatalf("body = %s, want it forwarded unchanged", got)
+				}
+				return
+			}
+			var out map[string]interface{}
+			if err := json.Unmarshal(got, &out); err != nil {
+				t.Fatalf("invalid json: %v", err)
+			}
+			th, ok := out["thinking"].(map[string]interface{})
+			if !ok || th["type"] != tt.wantType {
+				t.Errorf("thinking = %v, want {type: %q}", out["thinking"], tt.wantType)
+			}
+			if _, present := out["reasoning_effort"]; present {
+				t.Errorf("reasoning_effort still present after translation: %v", out["reasoning_effort"])
+			}
+		})
+	}
+}
+
+// TestTranslateReasoning_DeclaredThinkingTypesExplicitNativeWins keeps the
+// precedence rule with a declaration: a client's own thinking object is
+// forwarded as sent, even a value the declaration would not have chosen.
+func TestTranslateReasoning_DeclaredThinkingTypesExplicitNativeWins(t *testing.T) {
+	c := newTestCtrlForReasoning(t, "reasoning_effort", "thinking")
+	c.Service.ModelInfo.ThinkingTypes = []string{"adaptive", "disabled"}
+	body := []byte(`{"model":"MiniMax-M3","reasoning_effort":"high","thinking":{"type":"disabled"},"messages":[]}`)
+	got, err := c.TranslateReasoning(body, "MiniMax-M3")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Errorf("body = %s, want it forwarded unchanged", got)
+	}
+}
+
+// TestTranslateReasoning_ThinkingTypesPerIdentity reads the declaration from the
+// upstream the router named, like the native-param lookup: one model served by
+// two upstreams that take different thinking.type values.
+func TestTranslateReasoning_ThinkingTypesPerIdentity(t *testing.T) {
+	params := []string{"reasoning_effort", "thinking"}
+	svc := config.Service{
+		Type:      "chatbot",
+		ModelType: "default-model",
+		ModelPricing: []config.ModelPricingEntry{
+			{Model: "minimax-m3", ProviderIdentity: "minimax", InputPrice: "1", OutputPrice: "2",
+				ModelInfo: &config.ModelInfo{SupportedParameters: params, ThinkingTypes: []string{"adaptive", "disabled"}}},
+			{Model: "minimax-m3", ProviderIdentity: "other", InputPrice: "3", OutputPrice: "4",
+				ModelInfo: &config.ModelInfo{SupportedParameters: params}},
+		},
+	}
+	if err := svc.BuildModelPricingMap(); err != nil {
+		t.Fatalf("BuildModelPricingMap: %v", err)
+	}
+	c := &Ctrl{Service: svc, logger: testLogger(), whitelistUsers: make(map[string]struct{})}
+	for identity, want := range map[string]string{"minimax": "adaptive", "other": "enabled"} {
+		got, err := c.TranslateReasoningFor([]byte(`{"model":"minimax-m3","reasoning_effort":"high","messages":[]}`), "minimax-m3", identity)
+		if err != nil {
+			t.Fatalf("%s: unexpected error: %v", identity, err)
+		}
+		var out map[string]interface{}
+		if err := json.Unmarshal(got, &out); err != nil {
+			t.Fatalf("%s: invalid json: %v", identity, err)
+		}
+		if th, _ := out["thinking"].(map[string]interface{}); th == nil || th["type"] != want {
+			t.Errorf("%s: thinking = %v, want {type: %q}", identity, out["thinking"], want)
+		}
 	}
 }

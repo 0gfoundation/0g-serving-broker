@@ -53,8 +53,10 @@ const (
 	// nativeParamEnableThinking is the top-level bool DashScope (Aliyun) accepts
 	// as an extra_body key — distinct from the vLLM nested form above.
 	nativeParamEnableThinking = "enable_thinking"
-	// nativeParamThinking is MiniMax's object control: {"type": "enabled"|"disabled"}.
-	nativeParamThinking = "thinking"
+	// nativeParamThinking is the OpenAI-surface object control MiniMax and Zhipu
+	// GLM take: {"type": …}. Which type values turn thinking on and off is a
+	// property of the model, not of the dialect (see resolveThinkingType).
+	nativeParamThinking = config.ParamThinking
 	// nativeParamReasoning is OpenRouter's unified object control:
 	// {"enabled": bool}. OpenRouter also accepts an "effort" (low|medium|high) or
 	// "max_tokens" sub-field for finer-grained control, but the broker's intent is
@@ -199,6 +201,54 @@ func (c *Ctrl) chatTemplateEffortLevels(model, identity string) []string {
 	return mi.ReasoningEffortLevels
 }
 
+// resolveThinkingType picks the thinking.type to write for a binary intent,
+// given the values the model declares (ModelInfo.ThinkingTypes). It returns ""
+// when the model declares no value for the intent — an upstream that cannot turn
+// thinking off — and the caller then forwards the request untouched.
+//
+// A model that declares nothing gets the pair the broker has always written,
+// "enabled"/"disabled", so models configured before the knob existed are
+// translated exactly as before. With a declaration, on prefers "adaptive" over
+// "enabled": it is the value every MiniMax model accepts (MiniMax-M3 rejects
+// "enabled"), and it leaves the depth to the model, as "enabled" does.
+func resolveThinkingType(on bool, declared []string) string {
+	if len(declared) == 0 {
+		if on {
+			return config.ThinkingTypeEnabled
+		}
+		return config.ThinkingTypeDisabled
+	}
+	has := func(want string) bool {
+		for _, t := range declared {
+			if n, _ := config.NormalizeThinkingType(t); n == want {
+				return true
+			}
+		}
+		return false
+	}
+	switch {
+	case !on && has(config.ThinkingTypeDisabled):
+		return config.ThinkingTypeDisabled
+	case on && has(config.ThinkingTypeAdaptive):
+		return config.ThinkingTypeAdaptive
+	case on && has(config.ThinkingTypeEnabled):
+		return config.ThinkingTypeEnabled
+	}
+	return ""
+}
+
+// declaredThinkingTypes returns the thinking.type values the resolved model
+// declares, or nil when it declares none. identity is the router-named upstream
+// (config.UpstreamIdentityHeader), matching nativeReasoningParamFor's resolution
+// so both read the same entry.
+func (c *Ctrl) declaredThinkingTypes(model, identity string) []string {
+	mi := c.Service.EffectiveModelInfoFor(model, identity)
+	if mi == nil {
+		return nil
+	}
+	return mi.ThinkingTypes
+}
+
 // AdvertisedSupportedParameters returns supportedParameters as it should appear in
 // the GET /v1/models response. When the model advertises a native thinking toggle
 // the broker can translate into (chat_template_kwargs / enable_thinking / thinking /
@@ -314,11 +364,12 @@ func nativeReasoningParamSet(bodyMap map[string]interface{}, nativeParam string)
 
 // applyNativeReasoning writes the native thinking control for `on` into bodyMap,
 // in the wire location the upstream dialect expects, and reports whether it wrote
-// anything. Each case owns its own value shape (bool, or MiniMax's object) — there
-// is no shared value/type data. A name handled here must also be recognized by
-// isNativeReasoningParam; the bool return guards TranslateReasoning against
-// dropping reasoning_effort when a recognized-but-unhandled name writes nothing.
-func applyNativeReasoning(bodyMap map[string]interface{}, nativeParam string, on bool, chatTemplateEffort string) bool {
+// anything. Each case owns its own value shape (bool, or an object). The values
+// themselves are fixed by the dialect, except the `thinking` object's type, which
+// is per model and arrives resolved as thinkingType. A name handled here must
+// also be recognized by isNativeReasoningParam; the bool return guards
+// TranslateReasoning against dropping reasoning_effort when nothing was written.
+func applyNativeReasoning(bodyMap map[string]interface{}, nativeParam string, on bool, chatTemplateEffort, thinkingType string) bool {
 	switch nativeParam {
 	case nativeParamChatTemplateKwargs:
 		// Qwen3/GLM on vLLM/SGLang: bool nested under chat_template_kwargs.
@@ -342,10 +393,11 @@ func applyNativeReasoning(bodyMap map[string]interface{}, nativeParam string, on
 		bodyMap[nativeParamEnableThinking] = on
 		return true
 	case nativeParamThinking:
-		// MiniMax: object {"type": "enabled"|"disabled"}.
-		thinkingType := "disabled"
-		if on {
-			thinkingType = "enabled"
+		// MiniMax / Zhipu GLM: object {"type": thinkingType}, the value already
+		// resolved for this model and intent (resolveThinkingType). "" means the
+		// model has no value for the intent: write nothing.
+		if thinkingType == "" {
+			return false
 		}
 		bodyMap[nativeParamThinking] = map[string]interface{}{"type": thinkingType}
 		return true
@@ -375,7 +427,9 @@ func applyNativeReasoning(bodyMap map[string]interface{}, nativeParam string, on
 //   - the body is empty or not a JSON object (mirrors EnsureStreamOptions);
 //   - the resolved model advertises no native reasoning parameter;
 //   - the client already set that native parameter (explicit native wins);
-//   - the client sent no reasoning_effort (intent Unset) — upstream default stands.
+//   - the client sent no reasoning_effort (intent Unset) — upstream default stands;
+//   - the model's `thinking` declares no type for the intent (ModelInfo.ThinkingTypes
+//     without "disabled" on an off request) — the upstream answers it as sent.
 //
 // When translation occurs, reasoning_effort is removed from the outgoing body:
 // it has been consumed and re-expressed natively, and a Qwen/vLLM upstream that
@@ -440,11 +494,19 @@ func (c *Ctrl) TranslateReasoningFor(body []byte, model, identity string) ([]byt
 	if intent == reasoningOn && nativeParam == nativeParamChatTemplateKwargs {
 		chatTemplateEffort = resolveChatTemplateEffort(effort, c.chatTemplateEffortLevels(model, identity))
 	}
+	// The `thinking` object's type values are per model (MiniMax-M3 rejects the
+	// "enabled" other models take), so resolve them from the model's declaration.
+	var thinkingType string
+	if nativeParam == nativeParamThinking {
+		thinkingType = resolveThinkingType(intent == reasoningOn, c.declaredThinkingTypes(model, identity))
+	}
 
-	if !applyNativeReasoning(bodyMap, nativeParam, intent == reasoningOn, chatTemplateEffort) {
-		// Recognized but unhandled (should not happen while detection and the
-		// apply switch stay in sync): write nothing and leave the body untouched
-		// rather than stripping reasoning_effort without a replacement.
+	if !applyNativeReasoning(bodyMap, nativeParam, intent == reasoningOn, chatTemplateEffort, thinkingType) {
+		// Nothing written: the model declares no `thinking` type for this intent
+		// (it cannot turn thinking off), or a recognized name has no apply case
+		// (should not happen while detection and the switch stay in sync). Leave
+		// the body untouched rather than stripping reasoning_effort without a
+		// replacement, so the upstream answers the request as the client sent it.
 		return body, nil
 	}
 	// reasoning_effort has been re-expressed natively; drop it so a vLLM-style
