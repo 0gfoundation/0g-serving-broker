@@ -334,10 +334,29 @@ func TestInvoiceUnaccruesCutOfRefusedHash(t *testing.T) {
 	ctx := context.Background()
 
 	// h1 (900+100) and h2 (450+50) accrued; cut row holds both cuts, not yet vouched.
-	if err := c.db.UpsertAssayPayout(model.AssayPayout{Node: "node_0", Cumulative: "1350", Epoch: 7,
-		PendingCovered: db.EncodeCovered([]db.CoveredEntry{{Hash: "h1", Fee: "900", Cut: "100"}, {Hash: "h2", Fee: "450", Cut: "50"}})}); err != nil {
+	seedNode := func() {
+		if err := c.db.UpsertAssayPayout(model.AssayPayout{Node: "node_0", Cumulative: "1350", Epoch: 7,
+			PendingCovered: db.EncodeCovered([]db.CoveredEntry{{Hash: "h1", Fee: "900", Cut: "100"}, {Hash: "h2", Fee: "450", Cut: "50"}})}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seedNode()
+
+	// 0. Atomicity: a cut row that cannot absorb h2's cut (hand-edited to 20)
+	//    fails the node's write as a whole — node_0 keeps 1350 with both hashes
+	//    pending instead of losing h2's share while the verifier keeps its cut.
+	if err := c.db.UpsertAssayPayout(model.AssayPayout{Node: model.VerifierCutNode, Cumulative: "20", Epoch: 7, PendingCovered: "[]"}); err != nil {
 		t.Fatal(err)
 	}
+	c.settleAssayPayout(ctx)
+	states, _ := c.loadPayoutStates()
+	if st := states["node_0"]; st.Invoiced || st.Cumulative != "1350" || !reflect.DeepEqual(coveredHashes(decodeCovered(st.PendingCovered)), []string{"h1", "h2"}) {
+		t.Fatalf("node after a failed cut un-accrue: %+v (want untouched: 1350, h1+h2 pending)", st)
+	}
+	if st := states[model.VerifierCutNode]; st.Cumulative != "20" {
+		t.Fatalf("cut row after a failed un-accrue: %+v (want untouched 20)", st)
+	}
+
 	if err := c.db.UpsertAssayPayout(model.AssayPayout{Node: model.VerifierCutNode, Cumulative: "150", Epoch: 7, PendingCovered: "[]"}); err != nil {
 		t.Fatal(err)
 	}
@@ -346,7 +365,7 @@ func TestInvoiceUnaccruesCutOfRefusedHash(t *testing.T) {
 	//    h2's share (1350→900, h1 still pending), cut row marked invoiced and
 	//    then lowered by h2's cut (150→100).
 	c.settleAssayPayout(ctx)
-	states, _ := c.loadPayoutStates()
+	states, _ = c.loadPayoutStates()
 	if st := states["node_0"]; st.Invoiced || st.Cumulative != "900" || !reflect.DeepEqual(coveredHashes(decodeCovered(st.PendingCovered)), []string{"h1"}) {
 		t.Fatalf("node after refusal: %+v (want 900, only h1 pending)", st)
 	}
@@ -363,8 +382,8 @@ func TestInvoiceUnaccruesCutOfRefusedHash(t *testing.T) {
 	mu.Lock()
 	n := len(cutOKs)
 	mu.Unlock()
-	if n != 1 {
-		t.Fatalf("cut sent %d times, want 1 (invoiced row is not re-sent)", n)
+	if n != 2 { // step 0 (20 vouched) and step 1 (150); step 2 re-sends nothing
+		t.Fatalf("cut sent %d times, want 2 (invoiced row is not re-sent)", n)
 	}
 
 	// 3. New cut accrues: 100+20=120, below the vouched 150 → refused, row stays un-invoiced.
@@ -388,7 +407,8 @@ func TestInvoiceUnaccruesCutOfRefusedHash(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if !reflect.DeepEqual(cutOKs, []bool{true, false, true}) || issuedCut != "160" {
-		t.Fatalf("cut answers %v issued %s, want [true false true] / 160", cutOKs, issuedCut)
+	// Step 0's 20 was vouched before the refused un-accrue, then 150, 120 refused, 160.
+	if !reflect.DeepEqual(cutOKs, []bool{true, true, false, true}) || issuedCut != "160" {
+		t.Fatalf("cut answers %v issued %s, want [true true false true] / 160", cutOKs, issuedCut)
 	}
 }
