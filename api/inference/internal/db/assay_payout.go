@@ -161,41 +161,60 @@ func upsertAssayPayoutTx(tx *gorm.DB, row model.AssayPayout) error {
 // when the row moved: the caller leaves it and re-invoices next round — the
 // assay answers "already covered" for what it has vouched and the broker
 // reconciles.
-func (d *DB) UpdateAssayPayoutIfUnchanged(prev, next model.AssayPayout) (bool, error) {
-	now := time.Now()
-	res := d.db.Model(&model.AssayPayout{}).
-		Where("node = ? AND cumulative = ? AND epoch = ? AND pending_covered = ?", prev.Node, prev.Cumulative, prev.Epoch, prev.PendingCovered).
-		Updates(map[string]interface{}{"cumulative": next.Cumulative, "epoch": next.Epoch, "pending_covered": next.PendingCovered, "invoiced": next.Invoiced, "updated_at": &now})
-	return res.RowsAffected == 1, res.Error
-}
-
-// UnaccrueVerifierCut takes amount back off the verifier-cut row: the cut of
-// every hash whose node share the invoice path un-accrued because the assay
-// will never vouch for it. Row-locked like accrual, so a concurrent accrual
-// from the other process is not lost. If the assay has already vouched the
-// higher cut, the row now sits below its issued cumulative and the difference
-// nets against future cuts (the cut invoice is refused as "not above
-// already-issued" until new cuts exceed it).
-func (d *DB) UnaccrueVerifierCut(amount *big.Int) error {
-	if amount == nil || amount.Sign() <= 0 {
-		return nil
+//
+// cutDrop is the assay's cut of the hashes next no longer carries (the ones
+// the assay refused for good): it comes off the verifier-cut row in the same
+// transaction, so a refused hash's node share and cut are taken back together
+// or not at all. Both rows are locked by one `node IN (...)` statement, the
+// same shape accrueAssayPayoutTx uses, so the two never acquire them in
+// opposite orders (the event process does not retry a reconcile that lost a
+// deadlock: its cursor moves on and the pending row expires). A cut row that
+// cannot absorb the drop (only reachable by a hand edit: accrual writes the
+// entry's cut and the cut row in one tx) fails the whole write, so the hash
+// stays pending and the next invoice repeats the refusal with an Error.
+func (d *DB) UpdateAssayPayoutIfUnchanged(prev, next model.AssayPayout, cutDrop *big.Int) (bool, error) {
+	drop := cutDrop != nil && cutDrop.Sign() > 0
+	nodes := []string{prev.Node}
+	if drop {
+		nodes = append(nodes, model.VerifierCutNode)
 	}
-	return d.db.Transaction(func(tx *gorm.DB) error {
-		var st model.AssayPayout
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("node = ?", model.VerifierCutNode).First(&st).Error; err != nil {
-			return fmt.Errorf("lock verifier cut row: %w", err)
+	now := time.Now()
+	var ok bool
+	err := d.db.Transaction(func(tx *gorm.DB) error {
+		var locked []model.AssayPayout
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("node IN ?", nodes).Find(&locked).Error; err != nil {
+			return err
 		}
-		cum, ok := new(big.Int).SetString(st.Cumulative, 10)
-		if !ok {
-			return fmt.Errorf("verifier cut cumulative %q is not a number", st.Cumulative)
+		res := tx.Model(&model.AssayPayout{}).
+			Where("node = ? AND cumulative = ? AND epoch = ? AND pending_covered = ?", prev.Node, prev.Cumulative, prev.Epoch, prev.PendingCovered).
+			Updates(map[string]interface{}{"cumulative": next.Cumulative, "epoch": next.Epoch, "pending_covered": next.PendingCovered, "invoiced": next.Invoiced, "updated_at": &now})
+		if res.Error != nil {
+			return res.Error
 		}
-		if cum.Cmp(amount) < 0 {
-			return fmt.Errorf("verifier cut cumulative %s is below the %s to un-accrue", st.Cumulative, amount)
+		ok = res.RowsAffected == 1
+		if !ok || !drop {
+			return nil
 		}
-		now := time.Now()
+		var cut *model.AssayPayout
+		for i := range locked {
+			if locked[i].Node == model.VerifierCutNode {
+				cut = &locked[i]
+			}
+		}
+		if cut == nil {
+			return fmt.Errorf("verifier cut row missing; cannot un-accrue %s", cutDrop)
+		}
+		cum, numeric := new(big.Int).SetString(cut.Cumulative, 10)
+		if !numeric {
+			return fmt.Errorf("verifier cut cumulative %q is not a number", cut.Cumulative)
+		}
+		if cum.Cmp(cutDrop) < 0 {
+			return fmt.Errorf("verifier cut cumulative %s is below the %s to un-accrue", cut.Cumulative, cutDrop)
+		}
 		return tx.Model(&model.AssayPayout{}).Where("node = ?", model.VerifierCutNode).
-			Updates(map[string]interface{}{"cumulative": cum.Sub(cum, amount).String(), "updated_at": &now}).Error
+			Updates(map[string]interface{}{"cumulative": cum.Sub(cum, cutDrop).String(), "updated_at": &now}).Error
 	})
+	return ok && err == nil, err
 }
 
 // DeleteSettledRequestsByHashes deletes settled request rows by hash, accruing
