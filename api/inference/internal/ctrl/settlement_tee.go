@@ -697,7 +697,11 @@ func (c *Ctrl) updatePendingTxHashes(records []pendingSettlementRecord, txHashes
 		if rec.BatchIndex < len(txHashes) {
 			txHash := txHashes[rec.BatchIndex].Hex()
 			if err := c.db.UpdatePendingSettlementTxHash(rec.ID, txHash); err != nil {
-				c.logger.Warnf("Failed to update tx hash for pending settlement %d: %v", rec.ID, err)
+				// Layer 2 matches the on-chain event by this hash. Without it a
+				// receipt timeout or a crash before processOutcomes leaves the
+				// row unmatched until expiry, which releases its requests to be
+				// settled again — so log the hash for an operator to set by hand.
+				c.logger.Errorf("Failed to update tx hash %s for pending settlement %d (set it by hand before expiry): %v", txHash, rec.ID, err)
 			}
 		}
 	}

@@ -11,25 +11,36 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/model"
 )
 
+// decodeCovered is DecodeCovered for test rows that are known to be well-formed.
+func decodeCovered(s string) []db.CoveredEntry {
+	entries, err := db.DecodeCovered(s)
+	if err != nil {
+		panic(err)
+	}
+	return entries
+}
+
 func TestEncodeDecodeCovered(t *testing.T) {
 	if got := db.EncodeCovered(nil); got != "[]" {
 		t.Fatalf("EncodeCovered(nil) = %q, want []", got)
 	}
-	entries := []db.CoveredEntry{{Hash: "0xaaa", Fee: "10"}, {Hash: "0xbbb", Fee: "20"}}
-	round := db.DecodeCovered(db.EncodeCovered(entries))
+	entries := []db.CoveredEntry{{Hash: "0xaaa", Fee: "10", Cut: "1"}, {Hash: "0xbbb", Fee: "20"}}
+	round := decodeCovered(db.EncodeCovered(entries))
 	if len(round) != 2 || round[0] != entries[0] || round[1] != entries[1] {
 		t.Fatalf("round trip = %v", round)
 	}
 	// Rows written before the fee was stored: a bare array of hashes.
-	legacy := db.DecodeCovered(`["0xaaa","0xbbb"]`)
+	legacy := decodeCovered(`["0xaaa","0xbbb"]`)
 	if len(legacy) != 2 || legacy[0].Hash != "0xaaa" || legacy[0].Fee != "" || legacy[1].Hash != "0xbbb" {
 		t.Fatalf("legacy decode = %v", legacy)
 	}
-	if db.DecodeCovered("") != nil {
-		t.Fatalf("DecodeCovered empty should be nil")
+	if got, err := db.DecodeCovered(""); got != nil || err != nil {
+		t.Fatalf("DecodeCovered empty = %v, %v; want nil, nil", got, err)
 	}
-	if db.DecodeCovered("not json") != nil {
-		t.Fatalf("DecodeCovered garbage should be nil")
+	// A corrupt row is an error, not an empty set: the caller must not accrue
+	// onto it or invoice it (review comment on PR #547, assay_payout.go:258).
+	if got, err := db.DecodeCovered("not json"); err == nil || got != nil {
+		t.Fatalf("DecodeCovered garbage = %v, %v; want error", got, err)
 	}
 }
 
@@ -114,86 +125,103 @@ func TestFailedHashes(t *testing.T) {
 
 func TestReconcileRefusal(t *testing.T) {
 	pending := db.EncodeCovered([]db.CoveredEntry{
-		{Hash: "h1", Fee: "100"}, {Hash: "h2", Fee: "200"}, {Hash: "h3", Fee: "300"}, {Hash: "h4", Fee: "400"},
+		{Hash: "h1", Fee: "100", Cut: "10"}, {Hash: "h2", Fee: "200", Cut: "20"}, {Hash: "h3", Fee: "300", Cut: "30"}, {Hash: "h4", Fee: "400", Cut: "40"},
 	})
 	st := model.AssayPayout{Node: "node_0", Cumulative: "1000", PendingCovered: pending}
 
+	t.Run("un-accrued hashes return their cut too; landed ones do not", func(t *testing.T) {
+		got, cutDrop, note := reconcileRefusal(st, []string{
+			"h1: already covered by an earlier voucher",
+			"h2: not in my ledger",
+			"h3: verdict REJECT is not payable",
+		})
+		if note == "" || got.Cumulative != "500" || cutDrop.String() != "50" {
+			t.Fatalf("got cumulative %s cutDrop %s note %q; want 500 / 50", got.Cumulative, cutDrop, note)
+		}
+	})
+
+	t.Run("nothing un-accrued -> zero cut drop, never nil", func(t *testing.T) {
+		if _, cutDrop, _ := reconcileRefusal(st, []string{"h1: audit still pending"}); cutDrop == nil || cutDrop.Sign() != 0 {
+			t.Fatalf("cutDrop = %v, want 0", cutDrop)
+		}
+	})
+
 	t.Run("unexplained refusal leaves everything pending", func(t *testing.T) {
-		got, note := reconcileRefusal(st, []string{"h1: duplicated in covered[]", "cumulative 5 not above already-issued 9"})
+		got, _, note := reconcileRefusal(st, []string{"h1: duplicated in covered[]", "cumulative 5 not above already-issued 9"})
 		if note != "" || got != st {
 			t.Fatalf("got %+v note %q, want untouched", got, note)
 		}
 	})
 
 	t.Run("audit still pending: transient, nothing dropped or un-accrued", func(t *testing.T) {
-		got, note := reconcileRefusal(st, []string{"h1: audit still pending"})
+		got, _, note := reconcileRefusal(st, []string{"h1: audit still pending"})
 		if note != "" || got != st {
 			t.Fatalf("got %+v note %q, want untouched", got, note)
 		}
 	})
 
 	t.Run("REJECT or misattributed on the assay's side: un-accrue like lost", func(t *testing.T) {
-		got, note := reconcileRefusal(st, []string{
+		got, _, note := reconcileRefusal(st, []string{
 			"h1: verdict REJECT is not payable",
 			"h2: attributed to node_1, not node_0",
 		})
 		if note == "" || got.Cumulative != "700" || got.Invoiced {
 			t.Fatalf("got %+v note %q, want cumulative 700", got, note)
 		}
-		if rem := coveredHashes(db.DecodeCovered(got.PendingCovered)); len(rem) != 2 || rem[0] != "h3" {
+		if rem := coveredHashes(decodeCovered(got.PendingCovered)); len(rem) != 2 || rem[0] != "h3" {
 			t.Fatalf("remaining = %v", rem)
 		}
 	})
 
 	t.Run("per-hash amount mismatch: un-accrue that hash only", func(t *testing.T) {
-		got, note := reconcileRefusal(st, []string{"h2: amount mismatch (got 200, expected 180)"})
+		got, _, note := reconcileRefusal(st, []string{"h2: amount mismatch (got 200, expected 180)"})
 		if note == "" || got.Cumulative != "800" || got.Invoiced {
 			t.Fatalf("got %+v note %q, want cumulative 800", got, note)
 		}
-		if rem := coveredHashes(db.DecodeCovered(got.PendingCovered)); len(rem) != 3 || rem[0] != "h1" || rem[1] != "h3" {
+		if rem := coveredHashes(decodeCovered(got.PendingCovered)); len(rem) != 3 || rem[0] != "h1" || rem[1] != "h3" {
 			t.Fatalf("remaining = %v, want [h1 h3 h4]", rem)
 		}
 	})
 
 	t.Run("landed invoice: drop hashes, keep cumulative", func(t *testing.T) {
-		got, note := reconcileRefusal(st, []string{
+		got, _, note := reconcileRefusal(st, []string{
 			"h1: already covered by an earlier voucher",
 			"h2: already covered by an earlier voucher",
 		})
 		if note == "" || got.Cumulative != "1000" || got.Invoiced {
 			t.Fatalf("got %+v note %q", got, note)
 		}
-		if rem := coveredHashes(db.DecodeCovered(got.PendingCovered)); len(rem) != 2 || rem[0] != "h3" || rem[1] != "h4" {
+		if rem := coveredHashes(decodeCovered(got.PendingCovered)); len(rem) != 2 || rem[0] != "h3" || rem[1] != "h4" {
 			t.Fatalf("remaining = %v, want [h3 h4] in order", rem)
 		}
 	})
 
 	t.Run("lost by the assay: drop hash AND un-accrue its fee", func(t *testing.T) {
-		got, note := reconcileRefusal(st, []string{"h3: not in my ledger (never verified here)"})
+		got, _, note := reconcileRefusal(st, []string{"h3: not in my ledger (never verified here)"})
 		if note == "" || got.Cumulative != "700" || got.Invoiced {
 			t.Fatalf("got %+v note %q, want cumulative 700", got, note)
 		}
-		if rem := coveredHashes(db.DecodeCovered(got.PendingCovered)); len(rem) != 3 || rem[2] != "h4" {
+		if rem := coveredHashes(decodeCovered(got.PendingCovered)); len(rem) != 3 || rem[2] != "h4" {
 			t.Fatalf("remaining = %v", rem)
 		}
 	})
 
 	t.Run("everything accounted for -> invoiced, nothing to ask", func(t *testing.T) {
-		got, _ := reconcileRefusal(st, []string{
+		got, _, _ := reconcileRefusal(st, []string{
 			"h1: already covered by an earlier voucher",
 			"h2: already covered by an earlier voucher",
 			"h3: not in my ledger",
 			"h4: not in my ledger",
 		})
-		if !got.Invoiced || got.Cumulative != "300" || len(db.DecodeCovered(got.PendingCovered)) != 0 {
+		if !got.Invoiced || got.Cumulative != "300" || len(decodeCovered(got.PendingCovered)) != 0 {
 			t.Fatalf("got %+v", got)
 		}
 	})
 
 	t.Run("lost hash stored without a fee is kept for an operator", func(t *testing.T) {
 		old := model.AssayPayout{Node: "node_0", Cumulative: "1000", PendingCovered: `["h1","h2"]`}
-		got, note := reconcileRefusal(old, []string{"h1: not in my ledger"})
-		if got.Cumulative != "1000" || len(db.DecodeCovered(got.PendingCovered)) != 2 || !strings.Contains(note, "operator") {
+		got, _, note := reconcileRefusal(old, []string{"h1: not in my ledger"})
+		if got.Cumulative != "1000" || len(decodeCovered(got.PendingCovered)) != 2 || !strings.Contains(note, "operator") {
 			t.Fatalf("got %+v note %q", got, note)
 		}
 	})
