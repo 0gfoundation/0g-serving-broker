@@ -223,7 +223,12 @@ func (c *Ctrl) handleChatbotResponse(ctx *gin.Context, resp *http.Response, acco
 // match would send a `Text/Event-Stream` body down the JSON path.
 func isEventStream(contentType string) bool {
 	mt, _, err := mime.ParseMediaType(contentType)
-	return err == nil && mt == "text/event-stream"
+	// A malformed parameter list ("text/event-stream; charset") still names
+	// the type; the old prefix match accepted it, so keep doing so.
+	if err != nil && err != mime.ErrInvalidMediaParameter { // returned unwrapped by ParseMediaType
+		return false
+	}
+	return mt == "text/event-stream"
 }
 
 // responseIDRewrite is the id the client-facing chat body gets in place of the
