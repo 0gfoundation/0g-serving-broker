@@ -113,7 +113,11 @@ func (c *Ctrl) invoiceAssay(ctx context.Context, states map[string]model.AssayPa
 			}
 			continue
 		}
-		covered := db.DecodeCovered(st.PendingCovered)
+		covered, err := db.DecodeCovered(st.PendingCovered)
+		if err != nil {
+			c.logger.Errorf("Payout: node %s NOT invoiced, its pending set is unreadable (operator action needed): %v", node, err)
+			continue
+		}
 		req.Invoices = append(req.Invoices, invoiceItem{
 			NodeID:     node,
 			Cumulative: st.Cumulative,
@@ -134,6 +138,7 @@ func (c *Ctrl) invoiceAssay(ctx context.Context, states map[string]model.AssayPa
 		return
 	}
 
+	cutDrops := big.NewInt(0)
 	for _, r := range resp.Results {
 		st, ok := states[r.NodeID]
 		if !ok {
@@ -149,7 +154,7 @@ func (c *Ctrl) invoiceAssay(ctx context.Context, states map[string]model.AssayPa
 			c.logger.Infof("Payout: voucher issued for node %s cumulative=%s epoch=%d", r.NodeID, st.Cumulative, req.Epoch)
 			continue
 		}
-		next, note := reconcileRefusal(st, r.Failures)
+		next, cutDrop, note := reconcileRefusal(st, r.Failures)
 		if note == "" {
 			// A disagreement we cannot explain: leave everything pending so
 			// nothing is lost, and let an operator look.
@@ -157,12 +162,29 @@ func (c *Ctrl) invoiceAssay(ctx context.Context, states map[string]model.AssayPa
 			continue
 		}
 		c.logger.Warnf("Payout: node %s: %s", r.NodeID, note)
-		c.markPayout(r.NodeID, st, next)
+		if c.markPayout(r.NodeID, st, next) {
+			cutDrops.Add(cutDrops, cutDrop)
+		}
 	}
-	if resp.Cut != nil && resp.Cut.OK && cutState.Node != "" {
-		next := cutState
-		next.Invoiced = true
-		c.markPayout(cutState.Node, cutState, next)
+	if resp.Cut != nil && cutState.Node != "" {
+		if resp.Cut.OK {
+			next := cutState
+			next.Invoiced = true
+			c.markPayout(cutState.Node, cutState, next)
+		} else {
+			c.logger.Warnf("Payout: assay refused the verifier cut invoice (cumulative=%s): %v", cutState.Cumulative, resp.Cut.Failures)
+		}
+	}
+	// The cut of every hash un-accrued above comes off the cut row too, so
+	// the whole fee stays in the pool rather than the assay keeping a cut of
+	// a request it refused for good. After the cut mark, so an already-vouched
+	// cut is not re-sent below its issued cumulative every round.
+	if cutDrops.Sign() > 0 {
+		if err := c.db.UnaccrueVerifierCut(cutDrops); err != nil {
+			c.logger.Errorf("Payout: failed to un-accrue %s from the verifier cut (operator action needed): %v", cutDrops, err)
+		} else {
+			c.logger.Warnf("Payout: un-accrued %s from the verifier cut for hashes the assay refused for good", cutDrops)
+		}
 	}
 }
 
@@ -203,7 +225,9 @@ func (c *Ctrl) markPayout(node string, prev, next model.AssayPayout) bool {
 //     plus a settlement check that fell back to recorded verdicts). Same
 //     answer as above — the assay will never vouch for that hash for this
 //     node, so un-accrue it rather than wedge the node; the fee stays in the
-//     pool.
+//     pool. The assay's cut of the same hash is returned alongside so the
+//     caller takes it off the cut row as well — a REJECT'd or lost request
+//     earns nobody anything.
 //   - "amount mismatch (got X, expected Y)": the assay recomputed this hash's
 //     share from its own token counts and the price in effect and disagrees
 //     with ours. It will never agree on that hash, so un-accrue it the same
@@ -212,18 +236,23 @@ func (c *Ctrl) markPayout(node string, prev, next model.AssayPayout) bool {
 //
 // With nothing left pending the cumulative is fully acknowledged, so the
 // node is marked invoiced and asks for nothing until new work accrues.
-func reconcileRefusal(st model.AssayPayout, failures []string) (model.AssayPayout, string) {
+func reconcileRefusal(st model.AssayPayout, failures []string) (next model.AssayPayout, cutDrop *big.Int, note string) {
+	cutDrop = big.NewInt(0)
 	landed := failedHashes(failures, "already covered")
 	var lost []string
 	for _, prefix := range []string{"not in my ledger", "verdict ", "attributed to ", "amount mismatch"} {
 		lost = append(lost, failedHashes(failures, prefix)...)
 	}
 	if len(landed) == 0 && len(lost) == 0 {
-		return st, ""
+		return st, cutDrop, ""
 	}
 	cum, ok := new(big.Int).SetString(st.Cumulative, 10)
 	if !ok {
-		return st, ""
+		return st, cutDrop, ""
+	}
+	entries, err := db.DecodeCovered(st.PendingCovered)
+	if err != nil {
+		return st, cutDrop, "" // unreadable pending set: touch nothing, the invoice path already flagged it
 	}
 	drop := make(map[string]bool, len(landed)+len(lost))
 	for _, h := range landed {
@@ -234,7 +263,7 @@ func reconcileRefusal(st model.AssayPayout, failures []string) (model.AssayPayou
 		drop[h] = true
 	}
 	var remaining []db.CoveredEntry
-	for _, e := range db.DecodeCovered(st.PendingCovered) {
+	for _, e := range entries {
 		if !drop[e.Hash] {
 			remaining = append(remaining, e)
 			continue
@@ -249,6 +278,9 @@ func reconcileRefusal(st model.AssayPayout, failures []string) (model.AssayPayou
 			continue
 		}
 		cum.Sub(cum, fee)
+		if c, ok := new(big.Int).SetString(e.Cut, 10); ok {
+			cutDrop.Add(cutDrop, c) // entries stored before the cut was kept have none to return
+		}
 		unaccrued++
 	}
 	st.Cumulative = cum.String()
@@ -256,12 +288,12 @@ func reconcileRefusal(st model.AssayPayout, failures []string) (model.AssayPayou
 	if len(remaining) == 0 {
 		st.Invoiced = true
 	}
-	note := fmt.Sprintf("%d hash(es) already covered by an earlier voucher (lost response), %d un-accrued as lost by the assay, %d left pending",
+	note = fmt.Sprintf("%d hash(es) already covered by an earlier voucher (lost response), %d un-accrued as lost by the assay, %d left pending",
 		len(landed), unaccrued, len(remaining))
 	if unknownFee > 0 {
 		note += fmt.Sprintf(" (%d lost hash(es) stored without a fee cannot be un-accrued — operator action needed)", unknownFee)
 	}
-	return st, note
+	return st, cutDrop, note
 }
 
 // assayDo sends a request to the assay with the shared client but never
@@ -270,10 +302,22 @@ func reconcileRefusal(st model.AssayPayout, failures []string) (model.AssayPayou
 // (same guard as the tappscan client).
 func (c *Ctrl) assayDo(req *http.Request) (*http.Response, error) {
 	cl := *c.httpClient
-	cl.CheckRedirect = func(*http.Request, []*http.Request) error {
-		return errors.New("assay redirected; redirects are not followed")
-	}
+	cl.CheckRedirect = refuseRedirects
 	return cl.Do(req)
+}
+
+// invoiceResponseLimit bounds the assay's invoice answer (see postInvoice).
+const invoiceResponseLimit = 16 << 20
+
+// refuseRedirects is the CheckRedirect policy of the assay calls (assayDo).
+// Go's client otherwise follows up to ten redirects, keeps custom headers
+// (our ZG-* signatures) across hosts, follows https→http, and turns a POST
+// into a GET on a 303. The shared upstream client keeps the default: its
+// SPML peer is SPKI-pinned on every connection, so a redirect there can only
+// come from the pinned verifier itself, and its non-SPML callers (proxy,
+// async, video polling) rely on auto-follow.
+func refuseRedirects(*http.Request, []*http.Request) error {
+	return errors.New("peer redirected; redirects are not followed")
 }
 
 // failedHashes picks out the request hashes whose failure text starts with
@@ -376,9 +420,21 @@ func (c *Ctrl) postInvoice(ctx context.Context, req invoiceRequest) (*invoiceRes
 		return nil, err
 	}
 	defer func() { _ = httpResp.Body.Close() }()
-	raw, err := io.ReadAll(io.LimitReader(httpResp.Body, 1<<20))
+	// The answer carries one failure line per refused hash, and the pending
+	// set grows across every cycle the assay is down, so the bound has to be
+	// generous: a truncated answer fails to parse and the same invoice is
+	// re-sent — and re-truncated — forever. ~130 bytes per line gives ~130k
+	// hashes under 16 MiB. Hitting it is reported as such, not as a JSON
+	// parse error on a truncated body.
+	// ponytail: a hard ceiling; chunk the covered list per invoice (fees are
+	// stored per hash, so a partial cumulative is computable) if a deployment
+	// ever approaches it.
+	raw, err := io.ReadAll(io.LimitReader(httpResp.Body, invoiceResponseLimit+1))
 	if err != nil {
 		return nil, err
+	}
+	if len(raw) > invoiceResponseLimit {
+		return nil, fmt.Errorf("invoice response exceeds %d bytes; the pending set is too large for one invoice", invoiceResponseLimit)
 	}
 	if httpResp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("%s -> %d: %s", url, httpResp.StatusCode, raw)

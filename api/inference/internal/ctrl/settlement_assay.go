@@ -63,18 +63,7 @@ func (c *Ctrl) gateSettlementWithAssay(ctx context.Context, reqs []model.Request
 			c.logger.Warnf("Assay: settlement check against %s failed (falling back to recorded verdicts): %v",
 				c.assayVerifierURL, err)
 		} else {
-			// Backfill node attribution from the settlement check for rows
-			// whose ZG-Node response header was lost (payout needs it).
-			for i := range reqs {
-				if reqs[i].Node == "" {
-					if r, ok := results[reqs[i].RequestHash]; ok && r.NodeID != "" {
-						reqs[i].Node = r.NodeID
-						if err := c.db.UpdateRequestNode(reqs[i].RequestHash, r.NodeID); err != nil {
-							c.logger.Warnf("Assay: failed to backfill node %q for request %s: %v", r.NodeID, reqs[i].RequestHash, err)
-						}
-					}
-				}
-			}
+			reqs = backfillNodes(reqs, results, c.db.UpdateRequestNode, c.logger.Warnf)
 			changed := resolveAssayVerdicts(reqs, results, c.assayVerifierAddress, c.assayStrictVerdict)
 			for hash, verdict := range changed {
 				if err := c.db.UpdateRequestVerdict(hash, verdict); err != nil {
@@ -136,6 +125,30 @@ func (c *Ctrl) gateSettlementWithAssay(ctx context.Context, reqs []model.Request
 		}
 	}
 	return settleable
+}
+
+// backfillNodes fills node attribution from the settlement check for rows
+// whose ZG-Node response header was lost (payout needs it), writing it
+// through. A row whose write fails is held back from this round: the accrual
+// re-reads the row from the DB when it deletes it, so settling it now would
+// drop its fee into the pool unattributed. Held-back rows are re-gated next
+// cycle. Pure apart from the two callbacks, so the rule is testable without a
+// database.
+func backfillNodes(reqs []model.Request, results map[string]assayVerdictResult, write func(hash, node string) error, warnf func(string, ...interface{})) []model.Request {
+	kept := make([]model.Request, 0, len(reqs))
+	for _, req := range reqs {
+		if req.Node == "" {
+			if r, ok := results[req.RequestHash]; ok && r.NodeID != "" {
+				if err := write(req.RequestHash, r.NodeID); err != nil {
+					warnf("Assay: failed to backfill node %q for request %s; holding it for the next round: %v", r.NodeID, req.RequestHash, err)
+					continue
+				}
+				req.Node = r.NodeID
+			}
+		}
+		kept = append(kept, req)
+	}
+	return kept
 }
 
 // fetchAssayVerdicts asks the verifier for the final verdicts of the given
