@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"mime"
 	"net/http"
 	"strings"
 
@@ -204,7 +205,7 @@ func (c *Ctrl) handleChatbotResponse(ctx *gin.Context, resp *http.Response, acco
 	// "data: {...}") — the client got 200 and zero bytes while the raw body was
 	// still read and BILLED. Fall back to the non-stream path so the user gets
 	// what they paid for; it is not SSE, but it is the answer.
-	if isStream && !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
+	if isStream && !isEventStream(resp.Header.Get("Content-Type")) {
 		c.logger.Warnf("request %s asked for stream but upstream replied Content-Type %q; forwarding non-streamed",
 			reqModel.RequestHash, resp.Header.Get("Content-Type"))
 		isStream = false
@@ -215,6 +216,14 @@ func (c *Ctrl) handleChatbotResponse(ctx *gin.Context, resp *http.Response, acco
 	} else {
 		return c.handleChargingStreamResponse(ctx, resp, account, outputPrice, reqBody, reqModel)
 	}
+}
+
+// isEventStream reports whether a Content-Type names SSE. Media types are
+// case-insensitive (RFC 2045 §5.1) and may carry parameters, so a plain prefix
+// match would send a `Text/Event-Stream` body down the JSON path.
+func isEventStream(contentType string) bool {
+	mt, _, err := mime.ParseMediaType(contentType)
+	return err == nil && mt == "text/event-stream"
 }
 
 // responseIDRewrite is the id the client-facing chat body gets in place of the

@@ -118,7 +118,7 @@ func TestPendingCoveredBeyondTextLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(states) != 1 || len(DecodeCovered(states[0].PendingCovered)) != 3000 {
-		t.Fatalf("round trip lost entries: %d rows, %d entries", len(states), len(DecodeCovered(states[0].PendingCovered)))
+	if len(states) != 1 || len(decodeCovered(states[0].PendingCovered)) != 3000 {
+		t.Fatalf("round trip lost entries: %d rows, %d entries", len(states), len(decodeCovered(states[0].PendingCovered)))
 	}
 }

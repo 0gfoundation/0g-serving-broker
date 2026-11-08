@@ -25,11 +25,14 @@ import (
 // up after a broker that died between the receipt and the accrual.
 
 // CoveredEntry is one settled request awaiting the assay's acknowledgement:
-// its hash and the node's share of its fee. The fee is kept so an entry the
-// assay says it has never seen can be un-accrued exactly.
+// its hash, the node's share of its fee and the assay's cut of it. Both parts
+// are kept so an entry the assay says it will never vouch for can be
+// un-accrued exactly — from the node's row and from the cut row — and the
+// whole fee stays in the pool.
 type CoveredEntry struct {
 	Hash string `json:"h"`
 	Fee  string `json:"f,omitempty"`
+	Cut  string `json:"c,omitempty"`
 }
 
 // EncodeCovered serialises pending covered entries for AssayPayout.PendingCovered.
@@ -42,14 +45,17 @@ func EncodeCovered(entries []CoveredEntry) string {
 }
 
 // DecodeCovered parses PendingCovered. Rows written before the fee was stored
-// hold a plain array of hash strings; those decode with an empty Fee.
-func DecodeCovered(s string) []CoveredEntry {
+// hold a plain array of hash strings; those decode with an empty Fee. A value
+// that is not a JSON array is an error, never an empty set: the column is
+// only ever written by EncodeCovered, and reading a corrupt row as "nothing
+// pending" would silently forget which hashes its cumulative is for.
+func DecodeCovered(s string) ([]CoveredEntry, error) {
 	if s == "" {
-		return nil
+		return nil, nil
 	}
 	var raw []json.RawMessage
 	if err := json.Unmarshal([]byte(s), &raw); err != nil {
-		return nil
+		return nil, fmt.Errorf("pending_covered is not a JSON array: %w", err)
 	}
 	out := make([]CoveredEntry, 0, len(raw))
 	for _, r := range raw {
@@ -63,7 +69,7 @@ func DecodeCovered(s string) []CoveredEntry {
 			out = append(out, CoveredEntry{Hash: h})
 		}
 	}
-	return out
+	return out, nil
 }
 
 // PayableFee decides whether a settled request's fee goes onto its node's
@@ -163,6 +169,35 @@ func (d *DB) UpdateAssayPayoutIfUnchanged(prev, next model.AssayPayout) (bool, e
 	return res.RowsAffected == 1, res.Error
 }
 
+// UnaccrueVerifierCut takes amount back off the verifier-cut row: the cut of
+// every hash whose node share the invoice path un-accrued because the assay
+// will never vouch for it. Row-locked like accrual, so a concurrent accrual
+// from the other process is not lost. If the assay has already vouched the
+// higher cut, the row now sits below its issued cumulative and the difference
+// nets against future cuts (the cut invoice is refused as "not above
+// already-issued" until new cuts exceed it).
+func (d *DB) UnaccrueVerifierCut(amount *big.Int) error {
+	if amount == nil || amount.Sign() <= 0 {
+		return nil
+	}
+	return d.db.Transaction(func(tx *gorm.DB) error {
+		var st model.AssayPayout
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("node = ?", model.VerifierCutNode).First(&st).Error; err != nil {
+			return fmt.Errorf("lock verifier cut row: %w", err)
+		}
+		cum, ok := new(big.Int).SetString(st.Cumulative, 10)
+		if !ok {
+			return fmt.Errorf("verifier cut cumulative %q is not a number", st.Cumulative)
+		}
+		if cum.Cmp(amount) < 0 {
+			return fmt.Errorf("verifier cut cumulative %s is below the %s to un-accrue", st.Cumulative, amount)
+		}
+		now := time.Now()
+		return tx.Model(&model.AssayPayout{}).Where("node = ?", model.VerifierCutNode).
+			Updates(map[string]interface{}{"cumulative": cum.Sub(cum, amount).String(), "updated_at": &now}).Error
+	})
+}
+
 // DeleteSettledRequestsByHashes deletes settled request rows by hash, accruing
 // their fees first when opt is set. Idempotent: rows already deleted (by the
 // other delete site) are neither found nor accrued again.
@@ -214,7 +249,7 @@ func accrueAssayPayoutTx(tx *gorm.DB, rows []model.Request, opt *AssayPayoutOpti
 			sums[req.Node] = big.NewInt(0)
 		}
 		sums[req.Node].Add(sums[req.Node], share)
-		covered[req.Node] = append(covered[req.Node], CoveredEntry{Hash: req.RequestHash, Fee: share.String()})
+		covered[req.Node] = append(covered[req.Node], CoveredEntry{Hash: req.RequestHash, Fee: share.String(), Cut: cut.String()})
 		cutTotal.Add(cutTotal, cut)
 	}
 	if cutTotal.Sign() > 0 {
@@ -255,7 +290,21 @@ func accrueAssayPayoutTx(tx *gorm.DB, rows []model.Request, opt *AssayPayoutOpti
 		st.Node = node
 		st.Cumulative = cum.String()
 		st.Epoch = epoch
-		st.PendingCovered = EncodeCovered(append(DecodeCovered(st.PendingCovered), covered[node]...))
+		prev, err := DecodeCovered(st.PendingCovered)
+		if err != nil {
+			// The row's pending set is unreadable. The money is still accrued:
+			// settled rows must leave the table exactly once, in this tx — a
+			// delete that kept failing would let the pending settlement expire
+			// and the same rows be settled on chain again. The column is left
+			// as it is so the invoice path keeps skipping just this node (an
+			// overwritten set would decode, and the assay would then refuse
+			// the WHOLE invoice for delta ≠ sum of fees); the entries that are
+			// not recorded go to the log for the operator to rebuild the set.
+			opt.logf("Payout: node %s: pending set unreadable (%v); accrued %s but NOT recorded %s — rebuild pending_covered by hand (raw: %q)",
+				node, err, sum, EncodeCovered(covered[node]), st.PendingCovered)
+		} else {
+			st.PendingCovered = EncodeCovered(append(prev, covered[node]...))
+		}
 		st.Invoiced = false
 		if err := upsertAssayPayoutTx(tx, st); err != nil {
 			return fmt.Errorf("persist cumulative for node %s: %w", node, err)

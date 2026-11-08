@@ -138,10 +138,10 @@ func TestInvoiceFailureKeepsStateAndRetryResendsSameInvoice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st := states["node_0"]; !st.Invoiced || st.Cumulative != "1350" || len(db.DecodeCovered(st.PendingCovered)) != 0 {
+	if st := states["node_0"]; !st.Invoiced || st.Cumulative != "1350" || len(decodeCovered(st.PendingCovered)) != 0 {
 		t.Fatalf("node_0 after OK: %+v", st)
 	}
-	if st := states["node_1"]; st.Cumulative != "0" || !st.Invoiced || len(db.DecodeCovered(st.PendingCovered)) != 0 {
+	if st := states["node_1"]; st.Cumulative != "0" || !st.Invoiced || len(decodeCovered(st.PendingCovered)) != 0 {
 		t.Fatalf("node_1 after 'not in my ledger': %+v (want fee un-accrued, hash dropped, not wedged)", st)
 	}
 	if st := states[model.VerifierCutNode]; !st.Invoiced || st.Cumulative != "180" {
@@ -233,7 +233,7 @@ func TestInvoiceAnswerDoesNotOverwriteConcurrentAccrual(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st := states["node_0"]; st.Invoiced || st.Cumulative != "2250" || st.Epoch != 8 || len(db.DecodeCovered(st.PendingCovered)) != 3 {
+	if st := states["node_0"]; st.Invoiced || st.Cumulative != "2250" || st.Epoch != 8 || len(decodeCovered(st.PendingCovered)) != 3 {
 		t.Fatalf("concurrent accrual overwritten by the invoice answer: %+v", st)
 	}
 
@@ -249,14 +249,14 @@ func TestInvoiceAnswerDoesNotOverwriteConcurrentAccrual(t *testing.T) {
 		t.Fatalf("second invoice: %+v", second)
 	}
 	states, _ = c.loadPayoutStates()
-	if st := states["node_0"]; st.Invoiced || st.Cumulative != "2250" || !reflect.DeepEqual(coveredHashes(db.DecodeCovered(st.PendingCovered)), []string{"h9"}) {
+	if st := states["node_0"]; st.Invoiced || st.Cumulative != "2250" || !reflect.DeepEqual(coveredHashes(decodeCovered(st.PendingCovered)), []string{"h9"}) {
 		t.Fatalf("after reconciliation: %+v (want cumulative 2250, only h9 pending)", st)
 	}
 
 	// 3. Third round: only h9 is sent and accepted.
 	c.settleAssayPayout(ctx)
 	states, _ = c.loadPayoutStates()
-	if st := states["node_0"]; !st.Invoiced || st.Cumulative != "2250" || len(db.DecodeCovered(st.PendingCovered)) != 0 {
+	if st := states["node_0"]; !st.Invoiced || st.Cumulative != "2250" || len(decodeCovered(st.PendingCovered)) != 0 {
 		t.Fatalf("after third round: %+v", st)
 	}
 	mu.Lock()

@@ -10,6 +10,15 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/model"
 )
 
+// decodeCovered is DecodeCovered for rows the test itself wrote.
+func decodeCovered(s string) []CoveredEntry {
+	entries, err := DecodeCovered(s)
+	if err != nil {
+		panic(err)
+	}
+	return entries
+}
+
 // A settled row leaves the request table only together with its payout
 // accrual, on both delete paths, and never twice.
 func TestSettledDeleteAccruesPayoutOnce(t *testing.T) {
@@ -61,10 +70,10 @@ func TestSettledDeleteAccruesPayoutOnce(t *testing.T) {
 			t.Errorf("%s = %+v, want cumulative %s, not invoiced", node, st, cum)
 		}
 	}
-	if got := DecodeCovered(byNode["node_0"].PendingCovered); len(got) != 2 || got[0] != (CoveredEntry{Hash: "h1", Fee: "900"}) || got[1] != (CoveredEntry{Hash: "h2", Fee: "450"}) {
+	if got := decodeCovered(byNode["node_0"].PendingCovered); len(got) != 2 || got[0] != (CoveredEntry{Hash: "h1", Fee: "900", Cut: "100"}) || got[1] != (CoveredEntry{Hash: "h2", Fee: "450", Cut: "50"}) {
 		t.Errorf("node_0 pending = %v", got)
 	}
-	if got := DecodeCovered(byNode["node_1"].PendingCovered); len(got) != 1 || got[0].Hash != "h5" {
+	if got := decodeCovered(byNode["node_1"].PendingCovered); len(got) != 1 || got[0].Hash != "h5" {
 		t.Errorf("node_1 pending = %v", got)
 	}
 
