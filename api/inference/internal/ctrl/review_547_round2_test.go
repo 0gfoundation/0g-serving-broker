@@ -25,6 +25,7 @@ func TestIsEventStream(t *testing.T) {
 		"Text/Event-Stream":                true,
 		"TEXT/EVENT-STREAM; charset=utf-8": true,
 		"text/event-stream;charset=utf-8":  true,
+		"text/event-stream; charset":       true, // malformed parameter, type still named
 		"application/json":                 false,
 		"application/json; charset=utf-8":  false,
 		"":                                 false,

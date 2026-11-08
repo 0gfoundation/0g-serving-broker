@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -264,5 +265,130 @@ func TestInvoiceAnswerDoesNotOverwriteConcurrentAccrual(t *testing.T) {
 	mu.Unlock()
 	if n != 3 {
 		t.Fatalf("expected 3 invoices, got %d", n)
+	}
+}
+
+// Review comment 4489874452 on PR #547, end to end through the invoice loop:
+// a hash the assay refuses for good is un-accrued from its node AND its cut
+// comes off the verifier-cut row, after the cut mark; a cut already vouched
+// nets against future cuts — the cut invoice is refused until new cuts exceed
+// the gap, then accepted — and node invoices are never affected.
+func TestInvoiceUnaccruesCutOfRefusedHash(t *testing.T) {
+	c := setupReconcileCtrl(t)
+	if err := c.db.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	priv, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.logger = testLogger()
+	c.teeService = &tee.TeeService{ProviderSigner: priv}
+	c.contract = &providercontract.ProviderContract{ProviderAddress: "0xprovider"}
+	c.assayPayoutEnabled = true
+	c.assayVerifierCutBps = 1000
+
+	var (
+		mu        sync.Mutex
+		issuedCut = "0" // the assay's own monotonic cut ledger
+		cutOKs    []bool
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		var req invoiceRequest
+		if err := json.Unmarshal(raw, &req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		resp := invoiceResponse{OK: true, Epoch: req.Epoch}
+		for _, it := range req.Invoices {
+			res := invoiceResult{NodeID: it.NodeID, OK: true}
+			for _, h := range it.Covered {
+				if h == "h2" {
+					res.OK = false
+					res.Failures = append(res.Failures, h+": not in my ledger (never verified here)")
+				}
+			}
+			resp.Results = append(resp.Results, res)
+		}
+		if req.Cut != nil {
+			mu.Lock()
+			issued, _ := new(big.Int).SetString(issuedCut, 10)
+			got, _ := new(big.Int).SetString(*req.Cut, 10)
+			ok := got.Cmp(issued) > 0 // payout.py validate: cumulative must be above already-issued
+			if ok {
+				issuedCut = *req.Cut
+			}
+			cutOKs = append(cutOKs, ok)
+			mu.Unlock()
+			resp.Cut = &invoiceResult{NodeID: model.VerifierCutNode, OK: ok}
+			if !ok {
+				resp.Cut.Failures = []string{"cumulative " + *req.Cut + " not above already-issued " + issued.String()}
+			}
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+	c.httpClient = srv.Client()
+	c.assayVerifierURL = srv.URL
+	ctx := context.Background()
+
+	// h1 (900+100) and h2 (450+50) accrued; cut row holds both cuts, not yet vouched.
+	if err := c.db.UpsertAssayPayout(model.AssayPayout{Node: "node_0", Cumulative: "1350", Epoch: 7,
+		PendingCovered: db.EncodeCovered([]db.CoveredEntry{{Hash: "h1", Fee: "900", Cut: "100"}, {Hash: "h2", Fee: "450", Cut: "50"}})}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.db.UpsertAssayPayout(model.AssayPayout{Node: model.VerifierCutNode, Cumulative: "150", Epoch: 7, PendingCovered: "[]"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. h2 refused for good, cut 150 vouched in the same answer: node loses
+	//    h2's share (1350→900, h1 still pending), cut row marked invoiced and
+	//    then lowered by h2's cut (150→100).
+	c.settleAssayPayout(ctx)
+	states, _ := c.loadPayoutStates()
+	if st := states["node_0"]; st.Invoiced || st.Cumulative != "900" || !reflect.DeepEqual(coveredHashes(decodeCovered(st.PendingCovered)), []string{"h1"}) {
+		t.Fatalf("node after refusal: %+v (want 900, only h1 pending)", st)
+	}
+	if st := states[model.VerifierCutNode]; !st.Invoiced || st.Cumulative != "100" {
+		t.Fatalf("cut row after refusal: %+v (want 100, invoiced)", st)
+	}
+
+	// 2. Node invoice 900/{h1} accepted; the cut row is invoiced so no cut is sent.
+	c.settleAssayPayout(ctx)
+	states, _ = c.loadPayoutStates()
+	if st := states["node_0"]; !st.Invoiced || st.Cumulative != "900" || len(decodeCovered(st.PendingCovered)) != 0 {
+		t.Fatalf("node second round: %+v", st)
+	}
+	mu.Lock()
+	n := len(cutOKs)
+	mu.Unlock()
+	if n != 1 {
+		t.Fatalf("cut sent %d times, want 1 (invoiced row is not re-sent)", n)
+	}
+
+	// 3. New cut accrues: 100+20=120, below the vouched 150 → refused, row stays un-invoiced.
+	if err := c.db.UpsertAssayPayout(model.AssayPayout{Node: model.VerifierCutNode, Cumulative: "120", Epoch: 8, PendingCovered: "[]"}); err != nil {
+		t.Fatal(err)
+	}
+	c.settleAssayPayout(ctx)
+	states, _ = c.loadPayoutStates()
+	if st := states[model.VerifierCutNode]; st.Invoiced || st.Cumulative != "120" {
+		t.Fatalf("cut row while netting: %+v (want 120, un-invoiced)", st)
+	}
+
+	// 4. More cut accrues: 160 > 150 → accepted; the 50 was netted against new cuts.
+	if err := c.db.UpsertAssayPayout(model.AssayPayout{Node: model.VerifierCutNode, Cumulative: "160", Epoch: 9, PendingCovered: "[]"}); err != nil {
+		t.Fatal(err)
+	}
+	c.settleAssayPayout(ctx)
+	states, _ = c.loadPayoutStates()
+	if st := states[model.VerifierCutNode]; !st.Invoiced || st.Cumulative != "160" {
+		t.Fatalf("cut row after netting: %+v (want 160, invoiced)", st)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !reflect.DeepEqual(cutOKs, []bool{true, false, true}) || issuedCut != "160" {
+		t.Fatalf("cut answers %v issued %s, want [true false true] / 160", cutOKs, issuedCut)
 	}
 }
