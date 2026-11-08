@@ -138,7 +138,18 @@ func (c *Ctrl) invoiceAssay(ctx context.Context, states map[string]model.AssayPa
 		return
 	}
 
-	cutDrops := big.NewInt(0)
+	// The cut mark first: a refusal below lowers the cut row, and an already-
+	// vouched cut must be marked before that so it is not re-sent below its
+	// issued cumulative every round. The results never name the cut node.
+	if resp.Cut != nil && cutState.Node != "" {
+		if resp.Cut.OK {
+			next := cutState
+			next.Invoiced = true
+			c.markPayout(cutState.Node, cutState, next, nil)
+		} else {
+			c.logger.Warnf("Payout: assay refused the verifier cut invoice (cumulative=%s): %v", cutState.Cumulative, resp.Cut.Failures)
+		}
+	}
 	for _, r := range resp.Results {
 		st, ok := states[r.NodeID]
 		if !ok {
@@ -148,7 +159,7 @@ func (c *Ctrl) invoiceAssay(ctx context.Context, states map[string]model.AssayPa
 			next := st
 			next.PendingCovered = db.EncodeCovered(nil)
 			next.Invoiced = true
-			if !c.markPayout(r.NodeID, st, next) {
+			if !c.markPayout(r.NodeID, st, next, nil) {
 				continue
 			}
 			c.logger.Infof("Payout: voucher issued for node %s cumulative=%s epoch=%d", r.NodeID, st.Cumulative, req.Epoch)
@@ -161,30 +172,11 @@ func (c *Ctrl) invoiceAssay(ctx context.Context, states map[string]model.AssayPa
 			c.logger.Errorf("Payout: assay REFUSED invoice for node %s: %v", r.NodeID, r.Failures)
 			continue
 		}
-		c.logger.Warnf("Payout: node %s: %s", r.NodeID, note)
-		if c.markPayout(r.NodeID, st, next) {
-			cutDrops.Add(cutDrops, cutDrop)
-		}
-	}
-	if resp.Cut != nil && cutState.Node != "" {
-		if resp.Cut.OK {
-			next := cutState
-			next.Invoiced = true
-			c.markPayout(cutState.Node, cutState, next)
-		} else {
-			c.logger.Warnf("Payout: assay refused the verifier cut invoice (cumulative=%s): %v", cutState.Cumulative, resp.Cut.Failures)
-		}
-	}
-	// The cut of every hash un-accrued above comes off the cut row too, so
-	// the whole fee stays in the pool rather than the assay keeping a cut of
-	// a request it refused for good. After the cut mark, so an already-vouched
-	// cut is not re-sent below its issued cumulative every round.
-	if cutDrops.Sign() > 0 {
-		if err := c.db.UnaccrueVerifierCut(cutDrops); err != nil {
-			c.logger.Errorf("Payout: failed to un-accrue %s from the verifier cut (operator action needed): %v", cutDrops, err)
-		} else {
-			c.logger.Warnf("Payout: un-accrued %s from the verifier cut for hashes the assay refused for good", cutDrops)
-		}
+		c.logger.Warnf("Payout: node %s: %s (cut %s off the verifier row)", r.NodeID, note, cutDrop)
+		// The cut of every un-accrued hash comes off the cut row in the same
+		// transaction, so the whole fee stays in the pool rather than the
+		// assay keeping a cut of a request it refused for good.
+		c.markPayout(r.NodeID, st, next, cutDrop)
 	}
 }
 
@@ -192,10 +184,10 @@ func (c *Ctrl) invoiceAssay(ctx context.Context, states map[string]model.AssayPa
 // the snapshot the invoice was built from. A row that moved meanwhile (the
 // event process accrued into it during the POST) is left alone and
 // re-invoiced next round; overwriting it would drop that accrual.
-func (c *Ctrl) markPayout(node string, prev, next model.AssayPayout) bool {
-	ok, err := c.db.UpdateAssayPayoutIfUnchanged(prev, next)
+func (c *Ctrl) markPayout(node string, prev, next model.AssayPayout, cutDrop *big.Int) bool {
+	ok, err := c.db.UpdateAssayPayoutIfUnchanged(prev, next, cutDrop)
 	if err != nil {
-		c.logger.Errorf("Payout: failed to record assay answer for node %s: %v", node, err)
+		c.logger.Errorf("Payout: failed to record assay answer for node %s (cut to un-accrue %s): %v", node, cutDrop, err)
 		return false
 	}
 	if !ok {
