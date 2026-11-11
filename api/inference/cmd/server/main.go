@@ -105,7 +105,17 @@ func Main() {
 				TotalUniqueUsers:  s.TotalUniqueUsers,
 			}, nil
 		}, 1*time.Minute, logger)
-		engine.GET("/metrics", gin.WrapH(promhttp.Handler()))
+		// Every metrics path needs a token signed by monitor.metricsReader; with
+		// none configured nothing can read them (there is no unauthenticated mode).
+		if config.Monitor.MetricsReader == "" {
+			logger.Warn("monitor.metricsReader is not set: /metrics will refuse every request")
+		}
+		metrics := engine.Group("/metrics", monitor.RequireMetricsReader(common.HexToAddress(config.Monitor.MetricsReader)))
+		metrics.GET("", gin.WrapH(promhttp.Handler()))
+		metrics.GET("/:name", monitor.ExporterHandler(config.Monitor.Exporters))
+		if config.Monitor.GPUMetrics {
+			monitor.StartGPUMetrics(monitorCtx, 15*time.Second, logger)
+		}
 	}
 
 	// Build the USD price-feed stack (cache + aggregator) when the provider
