@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/ethereum/go-ethereum/common"
 	"io"
 	"math/big"
 	"net/http"
@@ -56,6 +57,11 @@ type invoiceResult struct {
 	NodeID   string   `json:"node_id"`
 	OK       bool     `json:"ok"`
 	Failures []string `json:"failures"`
+	// Voucher: only the payee is read here (to list it on-chain); the voucher
+	// itself reaches the node from the assay or through the relay.
+	Voucher *struct {
+		Node string `json:"node"`
+	} `json:"voucher,omitempty"`
 }
 
 type invoiceResponse struct {
@@ -156,6 +162,7 @@ func (c *Ctrl) invoiceAssay(ctx context.Context, states map[string]model.AssayPa
 			continue
 		}
 		if r.OK {
+			c.listAssayPayee(ctx, r)
 			next := st
 			next.PendingCovered = db.EncodeCovered(nil)
 			next.Invoiced = true
@@ -177,6 +184,43 @@ func (c *Ctrl) invoiceAssay(ctx context.Context, states map[string]model.AssayPa
 		// transaction, so the whole fee stays in the pool rather than the
 		// assay keeping a cut of a request it refused for good.
 		c.markPayout(r.NodeID, st, next, cutDrop)
+	}
+}
+
+// listAssayPayee puts the address a voucher pays on the provider's on-chain
+// payee list the first time the assay names it: claim() pays only listed
+// addresses. The broker takes the address from the assay as is, so the list is
+// a record of who this provider was asked to pay, not a second check on the
+// assay; what guards the pool is the voucher signature. Never fails the round:
+// a node whose listing failed cannot claim until a later invoice retries it
+// (or the operator lists it by hand), and the error says so.
+func (c *Ctrl) listAssayPayee(ctx context.Context, r invoiceResult) {
+	if r.Voucher == nil {
+		return
+	}
+	if !common.IsHexAddress(r.Voucher.Node) {
+		c.logger.Errorf("Payout: node %s: voucher names no usable payee address (%q), not listed", r.NodeID, r.Voucher.Node)
+		return
+	}
+	node := common.HexToAddress(r.Voucher.Node)
+	if _, done := c.assayPayees.Load(node); done {
+		return
+	}
+	ensure := c.ensureAssayNode
+	if ensure == nil {
+		if c.contract == nil || c.contract.Contract == nil {
+			return
+		}
+		ensure = c.contract.EnsureAssayNode
+	}
+	sent, err := ensure(ctx, node)
+	if err != nil {
+		c.logger.Errorf("Payout: node %s: payee %s NOT listed on-chain, its claims revert until it is (retried on its next invoice): %v", r.NodeID, node.Hex(), err)
+		return
+	}
+	c.assayPayees.Store(node, struct{}{})
+	if sent {
+		c.logger.Infof("Payout: node %s: payee %s listed on-chain (allowAssayNode)", r.NodeID, node.Hex())
 	}
 }
 
