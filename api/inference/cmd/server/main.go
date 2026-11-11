@@ -400,6 +400,9 @@ func Main() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
+	// A new config overlay (PUT /v1/admin/overlay) is applied by restarting.
+	cfg.WatchOverlay(10*time.Second, logger.Infof)
+
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Errorf("Server error: %v", err)

@@ -145,6 +145,10 @@ func (h *Handler) Register(r *gin.Engine) {
 	// docs/design/provider-reconciliation.md.
 	group.GET("/admin/reconciliation", corsMiddleware(), middleware.RateLimitMiddleware(h.rateLimiter), h.Reconcile)
 
+	// Runtime changes to prices, limits and the whitelist, when the deployment opts in
+	// (admin_overlay.go). Off unless ZG_ADMIN_ADDRESSES and CONFIG_OVERLAY_FILE are set.
+	h.registerAdminOverlay(group)
+
 	// Async job endpoints (OpenAI-style paths)
 	asyncGroup := group.Group("/async")
 	asyncGroup.Use(corsMiddleware())
