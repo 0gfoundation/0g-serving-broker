@@ -36,6 +36,9 @@ import (
 type instance struct {
 	config *cfg.Config
 	engine *gin.Engine
+	// providerAddress is the instance's on-chain provider address. The primary's
+	// is what a metrics token must be signed for (monitor.VerifyMetricsToken).
+	providerAddress string
 	// stops tear the instance down, run in order by shutdown. The order is the
 	// one a single-provider broker always used: request-path workers first, then
 	// the price processor, and the contract client last.
@@ -60,6 +63,9 @@ func startInstance(ctx context.Context, name string, config *cfg.Config, teeServ
 
 	if name != "" {
 		logger = logger.WithFields(logrus.Fields{"instance": name})
+		if err := checkExtraMonitor(name, config); err != nil {
+			panic(err)
+		}
 		if err := database.EnsureDatabase(config.Database.DSN); err != nil {
 			panic(err)
 		}
@@ -84,6 +90,7 @@ func startInstance(ctx context.Context, name string, config *cfg.Config, teeServ
 	if err != nil {
 		panic(err)
 	}
+	inst.providerAddress = contract.ProviderAddress
 
 	// Metrics are initialised after the contract client so every series can
 	// carry the provider's on-chain address as a const label (it is derived
@@ -107,6 +114,13 @@ func startInstance(ctx context.Context, name string, config *cfg.Config, teeServ
 				TotalUniqueUsers:  s.TotalUniqueUsers,
 			}, nil
 		}, 1*time.Minute, logger)
+		// Only the primary can get here with gpuMetrics set (extras are refused
+		// above), so the process's GPUs are reported once, under the primary.
+		if config.Monitor.GPUMetrics {
+			monitor.StartGPUMetrics(monitorCtx,
+				prometheus.Labels{"server": config.Service.ServingURL, "provider_address": contract.ProviderAddress},
+				prometheus.DefaultRegisterer, 15*time.Second, logger)
+		}
 	}
 
 	// Build the USD price-feed stack (cache + aggregator) when the provider
@@ -411,17 +425,41 @@ func startInstance(ctx context.Context, name string, config *cfg.Config, teeServ
 	return inst
 }
 
+// checkExtraMonitor refuses the process-wide metrics keys on an extra instance.
+// /metrics is served once per process, on the primary, with the primary's
+// reader, exporters and GPU setting (mountMetrics); on an extra instance these
+// keys would be silently ignored.
+func checkExtraMonitor(name string, config *cfg.Config) error {
+	if m := config.Monitor; m.MetricsReader != "" || len(m.Exporters) > 0 || m.GPUMetrics {
+		return fmt.Errorf("instance %s: monitor.metricsReader / exporters / gpuMetrics belong in the primary's config (CONFIG_FILE), not an extra instance's", name)
+	}
+	return nil
+}
+
 // mountMetrics serves /metrics on the primary's engine when any instance has
 // monitoring on. Scrapes arrive by the compose service name, which matches no
 // instance's host and so always reaches the primary; the handler serves the
 // default registry, which holds every instance's series. Mounting it only where
 // the primary enables monitoring would leave an extra instance's series
 // unscrapeable behind a 404.
-func mountMetrics(primary *gin.Engine, instances []*instance) {
+//
+// instances[0] is the primary. Every path under /metrics — the registry and the
+// /metrics/<name> exporter passthroughs — needs a token signed by the primary's
+// monitor.metricsReader for the primary's provider address; with no reader
+// configured nothing can read them (there is no unauthenticated mode).
+func mountMetrics(primary *gin.Engine, instances []*instance, warnf func(string, ...interface{})) {
 	for _, inst := range instances {
-		if inst.config.Monitor.Enable {
-			primary.GET("/metrics", gin.WrapH(promhttp.Handler()))
-			return
+		if !inst.config.Monitor.Enable {
+			continue
 		}
+		p := instances[0]
+		if p.config.Monitor.MetricsReader == "" {
+			warnf("monitor.metricsReader is not set in the primary's config: /metrics will refuse every request")
+		}
+		g := primary.Group("/metrics", monitor.RequireMetricsReader(
+			common.HexToAddress(p.config.Monitor.MetricsReader), common.HexToAddress(p.providerAddress)))
+		g.GET("", gin.WrapH(promhttp.Handler()))
+		g.GET("/:name", monitor.ExporterHandler(p.config.Monitor.Exporters, warnf))
+		return
 	}
 }
