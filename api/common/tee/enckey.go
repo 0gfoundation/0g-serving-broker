@@ -19,8 +19,8 @@ import (
 // The enclave publishes an X25519 HPKE recipient key so a client can seal the
 // sensitive request fields to this enclave (SPEC §5–§6). It is a SEPARATE key
 // from the secp256k1 signer: the signer is the stable on-chain identity, while
-// the enc key is derived from a distinct path and can be rotated independently
-// for prompt forward-secrecy (§4.1). Both keys are bound into the same quote via
+// the enc key rotates independently — on a controller-less deployment it is
+// generated at random every start (see getEncKey) (§4.1). Both keys are bound into the same quote via
 // report_data (§4.2), so a verifier extracts enc_pub directly from a verified
 // quote — no side channel.
 
@@ -106,11 +106,9 @@ func buildReportData(encPub pccrypto.PublicKey, signer common.Address) ([]byte, 
 // use, so a key derived here can be handed straight to wire.OpenRequest.
 var encKemScheme = hpke.KEM_X25519_HKDF_SHA256.Scheme()
 
-// deriveEncKey turns raw TEE-derived key material into a deterministic X25519
-// HPKE keypair (§4.1). The material comes from the enclave's key-derivation
-// service on a path distinct from the signer key, so the keypair is measurement-
-// tied and rotates with the measurement; HKDF conditions it to the KEM seed size
-// with domain separation. The returned keys are the scheme's marshaled bytes,
+// deriveEncKey turns raw key material into a deterministic X25519 HPKE keypair
+// (§4.1): the controller's per-image material, or the mock backend's constant.
+// HKDF conditions it to the KEM seed size with domain separation. The returned keys are the scheme's marshaled bytes,
 // interchangeable with protocol/crypto's PrivateKey/PublicKey.
 func deriveEncKey(material []byte) (pccrypto.PrivateKey, pccrypto.PublicKey, error) {
 	if len(material) == 0 {
@@ -122,6 +120,24 @@ func deriveEncKey(material []byte) (pccrypto.PrivateKey, pccrypto.PublicKey, err
 		return nil, nil, errors.Wrap(err, "derive enc key seed")
 	}
 	pub, priv := encKemScheme.DeriveKeyPair(seed)
+	pubBytes, err := pub.MarshalBinary()
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "marshal enc public key")
+	}
+	privBytes, err := priv.MarshalBinary()
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "marshal enc private key")
+	}
+	return pccrypto.PrivateKey(privBytes), pccrypto.PublicKey(pubBytes), nil
+}
+
+// generateEncKey makes a fresh X25519 HPKE keypair from crypto/rand (via the scheme), for
+// the enc key that must exist only in this process (see getEncKey).
+func generateEncKey() (pccrypto.PrivateKey, pccrypto.PublicKey, error) {
+	pub, priv, err := encKemScheme.GenerateKeyPair()
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "generate enc key")
+	}
 	pubBytes, err := pub.MarshalBinary()
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "marshal enc public key")

@@ -281,20 +281,36 @@ func bindEncPubEnabled() bool {
 	}
 }
 
-// getEncKey derives the enclave X25519 enc key from the TEE key-derivation
-// service on a path distinct from the signer key (§4.1). The derivation is
-// deterministic in the underlying material, so the key is measurement-tied and
-// stable across restarts on a real backend, and rotates with the measurement.
+// getEncKey returns the enclave X25519 enc key (§4.1).
+//
+// Without the controller (the broker holds dstack's socket itself) the key is generated
+// at random on every start and lives only in this process's memory. It must not come from
+// GetKey: dstack derives keys from the app id and a caller-chosen path only, so any compose
+// later deployed under the same app id — including one that is not the reviewed compose —
+// can call GetKey on the same path and obtain the same key. It could then replay the quote
+// the reviewed deployment published (a quote carries no freshness) and unseal whatever
+// clients seal to that enc_pub. A key that never existed outside the reviewed deployment's
+// memory cannot be recovered that way. The cost is a new enc_pub per restart; clients
+// sealed to the old one get 409 e2ee_key_mismatch before inference and billing, and
+// re-read the quote (0g-pc client/core/keyrefresh.go).
+//
+// With the controller, the key stays the controller-derived one: the controller recomputes
+// enc_pub from the same material to judge the report_data this broker asks it to quote
+// (attestproxy/reportdata.go), and a random key would never match. The mock backend stays
+// deterministic for tests.
 func (s *TeeService) getEncKey(ctx context.Context, client TappdClient) (pccrypto.PrivateKey, pccrypto.PublicKey, error) {
 	var material string
 	var err error
-	if s.remote != nil {
+	switch {
+	case s.remote != nil:
 		// Per running image on this path, so an upgraded image cannot unseal what clients
 		// sealed to its predecessor. The controller derives it on the same suffix this
 		// package uses (EncKeyDerivePathSuffix), and returns the material verbatim.
 		material, err = s.remote.EncKeyMaterial(ctx)
-	} else {
+	case s.clientType == Mock:
 		material, err = client.DeriveKey(ctx, encKeyDerivePath)
+	default:
+		return generateEncKey()
 	}
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "deriving enc key material")
