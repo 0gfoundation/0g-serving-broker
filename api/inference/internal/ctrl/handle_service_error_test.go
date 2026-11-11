@@ -10,6 +10,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	commonconfig "github.com/0glabs/0g-serving-broker/common/config"
+	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 )
 
@@ -103,5 +105,40 @@ func TestHandleServiceError_DecentralizedForwardsErrorBodyUnchanged(t *testing.T
 	}, body)
 	if !strings.Contains(out, "\"provider\":\"self\"") {
 		t.Errorf("decentralized error body should be forwarded unchanged, got: %s", out)
+	}
+}
+
+// An upstream error body can quote the input. For a sealed request that input is what
+// the client sealed against everyone outside the enclave, the operator included, so the
+// log gets its length and hash only. An unsealed request keeps the vendor's message.
+func TestHandleServiceError_SealedBodyNotLogged(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const secret = "the prompt the user sealed"
+	body := `{"error":{"message":"invalid input: ` + secret + `"}}`
+	for _, sealed := range []bool{true, false} {
+		c := newChatbotTestCtrl(t, config.Service{})
+		lg, err := log.GetLogger(&commonconfig.LoggerConfig{Format: "text", Level: "info"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var buf bytes.Buffer
+		lg.InnerLogger().SetOutput(&buf)
+		c.logger = lg
+		ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		ctx.Request = httptest.NewRequest("POST", "/v1/proxy/chat/completions", nil)
+		if sealed {
+			ctx.Set(CtxKeyE2EESealed, true)
+		}
+		c.handleServiceError(ctx, newErrorResp(body))
+		logged := buf.String()
+		if sealed && strings.Contains(logged, secret) {
+			t.Errorf("sealed request: upstream error body reached the log: %s", logged)
+		}
+		if sealed && !strings.Contains(logged, "sha256=") {
+			t.Errorf("sealed request: want the body's fingerprint in the log, got: %s", logged)
+		}
+		if !sealed && !strings.Contains(logged, secret) {
+			t.Errorf("unsealed request: vendor message should still be logged, got: %s", logged)
+		}
 	}
 }
