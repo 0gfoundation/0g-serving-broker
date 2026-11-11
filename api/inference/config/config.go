@@ -130,6 +130,39 @@ func validateDecentralizedModelTarget(targetURL string) error {
 	return nil
 }
 
+var (
+	// exporterName is a /metrics/<name> path segment.
+	exporterName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
+	hexAddress   = regexp.MustCompile(`^0x[0-9a-fA-F]{40}$`)
+)
+
+// validateMonitor checks the metrics-reader address and the exporter table.
+// Exporter URLs get the decentralized-engine shape check: plaintext http:// to a
+// bare compose service name, so /metrics/<name> can only ever reach a container
+// in this CVM's compose (and that compose is in the measurement).
+func validateMonitor(cfg *Config) error {
+	m := cfg.Monitor
+	if m.MetricsReader != "" && !hexAddress.MatchString(m.MetricsReader) {
+		return fmt.Errorf("invalid config: monitor.metricsReader %q is not an address", m.MetricsReader)
+	}
+	for name, u := range m.Exporters {
+		if !exporterName.MatchString(name) {
+			return fmt.Errorf("invalid config: monitor.exporters key %q must be lowercase alphanumeric or '-'", name)
+		}
+		if err := validateDecentralizedModelTarget(u); err != nil {
+			return fmt.Errorf("invalid config: monitor.exporters.%s: %w", name, err)
+		}
+		// Only a metrics page: never let this point at an engine's API.
+		if p, err := url.Parse(u); err != nil || p.Path != "/metrics" || p.RawQuery != "" || p.Fragment != "" {
+			return fmt.Errorf("invalid config: monitor.exporters.%s must be http://<service>:<port>/metrics, got %q", name, u)
+		}
+	}
+	if (len(m.Exporters) > 0 || m.GPUMetrics) && !m.Enable {
+		return fmt.Errorf("invalid config: monitor.exporters / monitor.gpuMetrics need monitor.enable")
+	}
+	return nil
+}
+
 // validUpstreamDomain matches a bare lowercase FQDN: dot-separated labels of
 // letters/digits/hyphens, at least two labels. Deliberately rejects anything with a
 // scheme, port, path, or userinfo — this value is published verbatim as
@@ -1495,6 +1528,18 @@ type Config struct {
 	Monitor  struct {
 		Enable       bool   `yaml:"enable"`
 		EventAddress string `yaml:"eventAddress"`
+		// MetricsReader is the one address whose signed token may read /metrics
+		// and /metrics/<exporter> (see monitor.VerifyMetricsToken). Empty means
+		// nobody can: metrics are never served unauthenticated.
+		MetricsReader string `yaml:"metricsReader"`
+		// Exporters maps a name to an in-CVM exporter URL, served at
+		// /metrics/<name> (e.g. engine: http://sglang:8000/metrics). Only these
+		// URLs are ever fetched; a request cannot choose one.
+		Exporters map[string]string `yaml:"exporters"`
+		// GPUMetrics adds the GPUs' utilisation/power/memory to /metrics under
+		// the DCGM metric names. Turn it on in ONE broker per CVM (the GPUs are
+		// shared), or every series is counted once per broker.
+		GPUMetrics bool `yaml:"gpuMetrics"`
 	} `yaml:"monitor"`
 	ZK struct {
 		// URL is the ZK service endpoint.
@@ -3415,6 +3460,9 @@ func applyAndValidateWith(cfg *Config, raw map[string]interface{}, overrides fun
 	if cfg.Service.TargetTLSProxy && cfg.Service.ProviderType != constant.ProviderTypeCentralized {
 		return fmt.Errorf("invalid config: service.targetTLSProxy is only supported when providerType is '%s' (it feeds the centralized routing proof), got '%s'", constant.ProviderTypeCentralized, cfg.Service.ProviderType)
 	}
+	if err := validateMonitor(cfg); err != nil {
+		return err
+	}
 	if cfg.Service.TargetTLSProxy {
 		if err := validateInEnclaveTarget(cfg.Service.TargetURL); err != nil {
 			return err
@@ -3823,8 +3871,11 @@ func defaultConfig() *Config {
 			Interval:      time.Hour,
 		},
 		Monitor: struct {
-			Enable       bool   `yaml:"enable"`
-			EventAddress string `yaml:"eventAddress"`
+			Enable        bool              `yaml:"enable"`
+			EventAddress  string            `yaml:"eventAddress"`
+			MetricsReader string            `yaml:"metricsReader"`
+			Exporters     map[string]string `yaml:"exporters"`
+			GPUMetrics    bool              `yaml:"gpuMetrics"`
 		}{
 			Enable:       false,
 			EventAddress: "0g-serving-provider-event:3081",
