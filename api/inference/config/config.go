@@ -2895,11 +2895,16 @@ func ServiceFromYAML(data []byte) (*Service, error) {
 // bodies are written, so a verifier has to be able to read it from an attested source.
 const databaseDSNEnvVar = "DATABASE_DSN"
 
-func loadConfig(cfg *Config) error {
-	configPath := "/etc/config/config.yaml"
+// MainConfigPath is the main config file the process loads: CONFIG_FILE, or the default.
+func MainConfigPath() string {
 	if envPath := os.Getenv("CONFIG_FILE"); envPath != "" {
-		configPath = envPath
+		return envPath
 	}
+	return "/etc/config/config.yaml"
+}
+
+func loadConfig(cfg *Config) error {
+	configPath := MainConfigPath()
 
 	// Always set ConfigFile so Controller knows the path
 	cfg.Controller.ConfigFile = configPath
@@ -2910,6 +2915,25 @@ func loadConfig(cfg *Config) error {
 	}
 	if missing {
 		return nil
+	}
+
+	// The overlay (overlay.go) is merged before anything reads the content, so every
+	// check below judges the config the process will actually run. A refused overlay is
+	// fatal rather than skipped: running without it would silently revert a price or a
+	// limit the operator set.
+	overlay, err := readOverlay()
+	if err != nil {
+		return err
+	}
+	if overlay != nil {
+		merged, keys, err := ApplyOverlay(data, overlay)
+		if err != nil {
+			return err
+		}
+		if len(keys) > 0 {
+			log.Printf("[CONFIG-OVERLAY] %s sets %s", os.Getenv(OverlayFileEnvVar), strings.Join(keys, ", "))
+		}
+		data = merged
 	}
 
 	// Two-phase parse: the raw map lets migration logic detect which keys
