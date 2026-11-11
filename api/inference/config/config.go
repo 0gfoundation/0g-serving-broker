@@ -152,6 +152,10 @@ func validateMonitor(cfg *Config) error {
 		if err := validateDecentralizedModelTarget(u); err != nil {
 			return fmt.Errorf("invalid config: monitor.exporters.%s: %w", name, err)
 		}
+		// Only a metrics page: never let this point at an engine's API.
+		if p, err := url.Parse(u); err != nil || p.Path != "/metrics" || p.RawQuery != "" || p.Fragment != "" {
+			return fmt.Errorf("invalid config: monitor.exporters.%s must be http://<service>:<port>/metrics, got %q", name, u)
+		}
 	}
 	if (len(m.Exporters) > 0 || m.GPUMetrics) && !m.Enable {
 		return fmt.Errorf("invalid config: monitor.exporters / monitor.gpuMetrics need monitor.enable")

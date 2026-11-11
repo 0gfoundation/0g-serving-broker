@@ -110,9 +110,9 @@ func Main() {
 		if config.Monitor.MetricsReader == "" {
 			logger.Warn("monitor.metricsReader is not set: /metrics will refuse every request")
 		}
-		metrics := engine.Group("/metrics", monitor.RequireMetricsReader(common.HexToAddress(config.Monitor.MetricsReader)))
+		metrics := engine.Group("/metrics", monitor.RequireMetricsReader(common.HexToAddress(config.Monitor.MetricsReader), common.HexToAddress(contract.ProviderAddress)))
 		metrics.GET("", gin.WrapH(promhttp.Handler()))
-		metrics.GET("/:name", monitor.ExporterHandler(config.Monitor.Exporters))
+		metrics.GET("/:name", monitor.ExporterHandler(config.Monitor.Exporters, logger.Warnf))
 		if config.Monitor.GPUMetrics {
 			monitor.StartGPUMetrics(monitorCtx, 15*time.Second, logger)
 		}

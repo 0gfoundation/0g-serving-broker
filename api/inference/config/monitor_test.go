@@ -22,6 +22,9 @@ func TestValidateMonitor(t *testing.T) {
 		{"https", mk(true, ok, map[string]string{"engine": "https://sglang:8000/metrics"}, false), true},
 		{"credentials", mk(true, ok, map[string]string{"engine": "http://u:p@sglang:8000/metrics"}, false), true},
 		{"bad name", mk(true, ok, map[string]string{"../x": "http://sglang:8000/metrics"}, false), true},
+		{"engine API path", mk(true, ok, map[string]string{"engine": "http://sglang:8000/v1/models"}, false), true},
+		{"metrics with query", mk(true, ok, map[string]string{"engine": "http://sglang:8000/metrics?x=1"}, false), true},
+		{"broker itself", mk(true, ok, map[string]string{"self": "http://localhost:3080/v1/proxy/chat/completions"}, false), true},
 		{"exporters without enable", mk(false, ok, map[string]string{"engine": "http://sglang:8000/metrics"}, false), true},
 		{"gpu without enable", mk(false, ok, nil, true), true},
 	}

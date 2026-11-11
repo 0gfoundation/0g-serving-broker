@@ -101,7 +101,9 @@ func StartGPUMetrics(ctx context.Context, interval time.Duration, logger log.Log
 	tick := func() {
 		cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
-		out, err := exec.CommandContext(cctx, "python3", "-c", gpuSampleScript).Output()
+		// -I: isolated mode, so a json.py / pynvml.py in the working directory
+		// can never be imported in place of the real module.
+		out, err := exec.CommandContext(cctx, "python3", "-I", "-c", gpuSampleScript).Output()
 		var samples []gpuSample
 		if err == nil {
 			samples, err = parseGPUSamples(out)

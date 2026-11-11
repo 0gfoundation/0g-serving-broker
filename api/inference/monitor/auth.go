@@ -20,23 +20,24 @@ import (
 // transit is useless after this.
 const MaxMetricsTokenLifetime = 10 * time.Minute
 
-// MetricsTokenMessage is the text the scraper signs (EIP-191 personal_sign).
-func MetricsTokenMessage(expiry int64) string {
-	return fmt.Sprintf("0g-metrics:%d", expiry)
+// MetricsTokenMessage is the text the scraper signs (EIP-191 personal_sign):
+// the provider the token is for, and when it expires.
+//
+// The provider is in the message because the scraper sends every provider a
+// fresh token each minute. Without it, any one compromised CVM would keep
+// receiving tokens that open every OTHER provider's metrics, indefinitely.
+func MetricsTokenMessage(provider common.Address, expiry int64) string {
+	return fmt.Sprintf("0g-metrics:%s:%d", strings.ToLower(provider.Hex()), expiry)
 }
 
-// VerifyMetricsToken checks "Bearer <expiry>.<0x-signature>" against the one
-// address allowed to read metrics.
+// VerifyMetricsToken checks "Bearer <expiry>.<0x-signature>" for this provider
+// against the one address allowed to read metrics.
 //
 // Why a signature and not a shared secret: the broker holds only the
 // reader's ADDRESS, which is public, so a compromised CVM leaks nothing that
 // opens any other provider's metrics. The signing key stays with the scraper
 // (router-mainnet prom-agent).
-//
-// ponytail: the message does not name the provider, so a token one broker
-// receives could be replayed against another for up to MaxMetricsTokenLifetime.
-// It only reads metrics; bind the serving host into the message if that matters.
-func VerifyMetricsToken(header string, allowed common.Address, now time.Time) error {
+func VerifyMetricsToken(header string, allowed, provider common.Address, now time.Time) error {
 	if allowed == (common.Address{}) {
 		return fmt.Errorf("no metrics reader configured (monitor.metricsReader)")
 	}
@@ -63,7 +64,7 @@ func VerifyMetricsToken(header string, allowed common.Address, now time.Time) er
 	if err != nil {
 		return fmt.Errorf("malformed signature")
 	}
-	signer, err := util.RecoverSigner(accounts.TextHash([]byte(MetricsTokenMessage(expiry))), sig)
+	signer, err := util.RecoverSigner(accounts.TextHash([]byte(MetricsTokenMessage(provider, expiry))), sig)
 	if err != nil {
 		return fmt.Errorf("bad signature")
 	}
@@ -74,11 +75,11 @@ func VerifyMetricsToken(header string, allowed common.Address, now time.Time) er
 }
 
 // RequireMetricsReader rejects every request that does not carry a valid token
-// from reader. There is no "off": with no reader configured, metrics are
-// unreadable, which is the safe failure for a TEE broker.
-func RequireMetricsReader(reader common.Address) gin.HandlerFunc {
+// from reader for this provider. There is no "off": with no reader configured,
+// metrics are unreadable, which is the safe failure for a TEE broker.
+func RequireMetricsReader(reader, provider common.Address) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if err := VerifyMetricsToken(c.GetHeader("Authorization"), reader, time.Now()); err != nil {
+		if err := VerifyMetricsToken(c.GetHeader("Authorization"), reader, provider, time.Now()); err != nil {
 			c.Set("ignoreError", true)
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "metrics: " + err.Error()})
 			return

@@ -30,7 +30,7 @@ func TestExporterHandler(t *testing.T) {
 		"engine": engine.URL + "/metrics",
 		"bounce": engine.URL + "/redirect",
 		"gone":   engine.URL + "/nope",
-	}))
+	}, t.Logf))
 	get := func(path string) *httptest.ResponseRecorder {
 		w := httptest.NewRecorder()
 		r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
@@ -38,7 +38,7 @@ func TestExporterHandler(t *testing.T) {
 	}
 
 	if w := get("/metrics/engine"); w.Code != 200 || w.Body.String() != "sglang_num_running_reqs 3\n" ||
-		w.Header().Get("Content-Type") != "text/plain; version=0.0.4" || gotMethod != http.MethodGet {
+		w.Header().Get("Content-Type") != "text/plain; version=0.0.4; charset=utf-8" || gotMethod != http.MethodGet {
 		t.Fatalf("engine: %d %q %q method=%s", w.Code, w.Body.String(), w.Header().Get("Content-Type"), gotMethod)
 	}
 	if w := get("/metrics/unknown"); w.Code != 404 {
