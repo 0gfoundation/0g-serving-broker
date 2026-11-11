@@ -175,6 +175,10 @@ func (p *Proxy) guard(next http.Handler) http.Handler {
 			http.NotFound(w, r)
 			return
 		}
+		// The ingress's socket quotes only what an ingress may ask for (reportdata.go).
+		if !p.signing && r.URL.Path == pathGetQuote && !p.guardIngressQuote(w, r) {
+			return
+		}
 		next.ServeHTTP(w, r)
 	})
 }

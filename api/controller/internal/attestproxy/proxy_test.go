@@ -198,16 +198,15 @@ func TestReadOnlySocketForwardsButNeverSigns(t *testing.T) {
 	var reached []string
 	c := startWith(t, &reached, true)
 
-	for _, path := range []string{"/Info", "/GetQuote?report_data=" + strings.Repeat("ab", 64)} {
+	// An ingress-shaped report_data: any first half, zero second half (reportdata.go).
+	ingress := strings.Repeat("ab", 32) + strings.Repeat("00", 32)
+	for _, path := range []string{"/Info", "/GetQuote?report_data=" + ingress} {
 		if code, _ := post(t, c, http.MethodGet, path); code != http.StatusOK {
 			t.Errorf("read-only GET %s = %d, want 200", path, code)
 		}
 	}
-	if code, _ := post(t, c, http.MethodPost, "/GetQuote"); code != http.StatusOK {
-		t.Errorf("read-only POST /GetQuote = %d, want 200", code)
-	}
-	if len(reached) != 3 {
-		t.Errorf("dstack saw %v, want the three forwarded", reached)
+	if len(reached) != 2 {
+		t.Errorf("dstack saw %v, want the two forwarded", reached)
 	}
 
 	before := len(reached)
