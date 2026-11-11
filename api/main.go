@@ -8,6 +8,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/util/rand"
 
+	attestReadOnly "github.com/0glabs/0g-serving-broker/controller/cmd/attestro"
 	controllerServer "github.com/0glabs/0g-serving-broker/controller/cmd/server"
 	fineTuningServer "github.com/0glabs/0g-serving-broker/fine-tuning/cmd/server"
 	providerEvent "github.com/0glabs/0g-serving-broker/inference/cmd/event"
@@ -22,6 +23,7 @@ func main() {
 		"0g-inference-event":            providerEvent.Main,
 		"0g-fine-tuning-server":         fineTuningServer.Main,
 		"0g-controller":                 controllerServer.Main,
+		"0g-attest-ro":                  attestReadOnly.Main,
 		"0g-validate-config":            validateConfig.Main,
 		"0g-dashscope-video-translator": videoTranslatorServer.Main,
 		"0g-minimax-video-translator":   videoTranslatorServer.MiniMaxMain,
