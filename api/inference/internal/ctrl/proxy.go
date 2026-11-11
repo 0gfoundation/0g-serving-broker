@@ -930,10 +930,19 @@ func (c *Ctrl) handleServiceError(ctx *gin.Context, resp *http.Response) {
 	// error text against each model's configured quota. metricModel is the
 	// same bounded value TrackMetrics labels with, so a log line and its
 	// broker_request_failures_total series name the same model.
+	//
+	// Not for a sealed request: an upstream error body can quote the input (a 400 that
+	// echoes the offending field, a context-length error that repeats the prompt), and
+	// for a sealed request that input is what the client sealed so that nobody outside
+	// the enclave — the operator reading these logs included — could read it. Only its
+	// length and a hash reach the log, as on the sealed async path.
 	if !strings.Contains(ctx.Request.RequestURI, "/api/event_logging/batch") {
+		body := truncateForLog([]byte(c.redactUpstreamSecrets(decodedBody)), maxUpstreamErrorBodyLog)
+		if sealed, _ := ctx.Get(CtxKeyE2EESealed); sealed == true {
+			body = "sealed request, upstream error body " + bodyFingerprintForLog([]byte(decodedBody))
+		}
 		c.logger.Errorf("Service returned error response: model=%s, %s, Incoming request: method=%s, path=%s, RemoteAddr=%s,",
-			c.metricModel(ctx),
-			truncateForLog([]byte(c.redactUpstreamSecrets(decodedBody)), maxUpstreamErrorBodyLog),
+			c.metricModel(ctx), body,
 			ctx.Request.Method, ctx.Request.URL.Path, ctx.Request.RemoteAddr)
 	}
 
