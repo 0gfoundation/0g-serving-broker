@@ -182,6 +182,12 @@ type Ctrl struct {
 	// assayVerifierCutBps is the assay's cut in basis points of each newly
 	// settled amount (the on-chain cut cap independently bounds it).
 	assayVerifierCutBps int64
+	// assayPayees remembers the payout addresses already listed on-chain
+	// (allowAssayNode is permanent), so each costs one lookup per process.
+	assayPayees sync.Map
+	// ensureAssayNode lists a payee on-chain if missing; nil means the
+	// contract's own EnsureAssayNode. A field so tests can stand in for the chain.
+	ensureAssayNode func(ctx context.Context, node common.Address) (bool, error)
 
 	// Session validation cache
 	sessionCache *cache.Cache

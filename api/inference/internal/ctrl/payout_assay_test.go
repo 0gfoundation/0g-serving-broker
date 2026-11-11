@@ -1,10 +1,14 @@
 package ctrl
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"math/big"
 	"strings"
 	"testing"
+
+	"github.com/ethereum/go-ethereum/common"
 
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/internal/db"
@@ -276,5 +280,37 @@ func TestSplitFeeSumsToFee(t *testing.T) {
 		if new(big.Int).Add(node, cut).Int64() != tc.fee {
 			t.Fatalf("SplitFee(%d, %d) does not sum to the fee", tc.fee, tc.bps)
 		}
+	}
+}
+
+// A payee is listed once per address, never without a usable address, and a
+// failed listing is retried on the next invoice.
+func TestListAssayPayee(t *testing.T) {
+	const payee = "0x00000000000000000000000000000000000000aa"
+	var calls []common.Address
+	fail := true
+	c := &Ctrl{logger: testLogger()}
+	c.ensureAssayNode = func(_ context.Context, node common.Address) (bool, error) {
+		calls = append(calls, node)
+		if fail {
+			return false, errors.New("rpc down")
+		}
+		return true, nil
+	}
+	var ok invoiceResult
+	if err := json.Unmarshal([]byte(`{"node_id":"node_0","ok":true,"voucher":{"node":"`+payee+`","signature":"0x"}}`), &ok); err != nil {
+		t.Fatal(err)
+	}
+	var bad invoiceResult
+	_ = json.Unmarshal([]byte(`{"node_id":"node_1","ok":true,"voucher":{"node":"nope"}}`), &bad)
+
+	c.listAssayPayee(context.Background(), invoiceResult{NodeID: "node_2", OK: true}) // no voucher
+	c.listAssayPayee(context.Background(), bad)
+	c.listAssayPayee(context.Background(), ok) // fails
+	fail = false
+	c.listAssayPayee(context.Background(), ok) // retried
+	c.listAssayPayee(context.Background(), ok) // cached
+	if len(calls) != 2 || calls[0] != common.HexToAddress(payee) {
+		t.Fatalf("chain asked %v, want the payee twice (one failure, one success)", calls)
 	}
 }
