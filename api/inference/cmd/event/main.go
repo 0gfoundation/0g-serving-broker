@@ -68,6 +68,9 @@ func Main() {
 	}
 
 	ctx := controller.SetupSignalHandler()
+	// The event service reads the same overlay (settlement timing, gas); it restarts on a
+	// new one the same way the broker does.
+	config.WatchOverlay(10*time.Second, logger.Infof)
 	if err := teeService.SyncQuote(ctx, false); err != nil {
 		panic(err)
 	}
