@@ -3130,7 +3130,39 @@ func applyPrimaryEnvOverrides(cfg *Config) error {
 		// stale Provider left behind reads like a second answer.
 		cfg.Database.Provider = ""
 	}
+
+	applySecretEnv(cfg)
 	return nil
+}
+
+// Secrets read straight from the environment, so a deployment can put the whole config
+// file in the compose as a literal (measured by compose_hash) and keep only these two
+// values in the encrypted env.
+//
+// Before this the secrets reached the file by textual substitution: an init container
+// decoded BROKER_CONFIG and ran sed over ${PRIVATE_KEY} placeholders. The substituted
+// value is not measured, and a value carrying a newline (sed turns \n in the replacement
+// into one) can add any key to the file — a frozen targetUrl included. Assigned to one
+// field here, a value is only ever that field. New names, so a deployment that already
+// passes PRIVATE_KEY to the broker for some other reason is not silently changed.
+const (
+	providerPrivateKeyEnvVar = "ZG_PROVIDER_PRIVATE_KEY"
+	coinGeckoAPIKeyEnvVar    = "ZG_COINGECKO_API_KEY"
+)
+
+func applySecretEnv(cfg *Config) {
+	if v := strings.TrimSpace(os.Getenv(providerPrivateKeyEnvVar)); v != "" {
+		if len(cfg.Network.PrivateKeys) > 0 {
+			log.Printf("[CONFIG] %s takes precedence over network.privateKeys from the config file", providerPrivateKeyEnvVar)
+		}
+		cfg.Network.PrivateKeys = []string{v}
+	}
+	if v := strings.TrimSpace(os.Getenv(coinGeckoAPIKeyEnvVar)); v != "" {
+		if cfg.PriceFeed.CoinGeckoAPIKey != "" {
+			log.Printf("[CONFIG] %s takes precedence over priceFeed.coinGeckoApiKey from the config file", coinGeckoAPIKeyEnvVar)
+		}
+		cfg.PriceFeed.CoinGeckoAPIKey = v
+	}
 }
 
 // applyAndValidate is everything loadConfig does after the bytes are parsed: the
