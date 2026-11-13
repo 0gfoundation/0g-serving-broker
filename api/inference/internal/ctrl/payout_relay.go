@@ -154,11 +154,10 @@ func (c *Ctrl) RelayAssayVoucher(ctx context.Context, node common.Address) (*Ass
 	if err := c.signAssayFetch(req); err != nil {
 		return nil, fmt.Errorf("refusing to send an unsigned voucher fetch: %w", err)
 	}
-	// The shared client, NOT http.DefaultClient: it carries the verifier's TLS
-	// key pin. Same reasoning as postInvoice — through the default client this
-	// would fall back to CA validation, which no CA will ever satisfy for a
-	// KMS-derived self-signed cert.
-	resp, err := c.httpClient.Do(req)
+	// assayDo: the pinned client (a KMS-derived self-signed cert, no CA will
+	// ever validate it) with redirects refused — a 30x would otherwise
+	// forward the signed fetch headers to an unpinned host.
+	resp, err := c.assayDo(req)
 	if err != nil {
 		return nil, fmt.Errorf("assay unreachable: %w", err)
 	}

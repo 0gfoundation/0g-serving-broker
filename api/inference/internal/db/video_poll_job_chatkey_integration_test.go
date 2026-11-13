@@ -5,6 +5,7 @@ package db
 import (
 	"context"
 	"fmt"
+	"os"
 	"testing"
 	"time"
 
@@ -20,7 +21,11 @@ import (
 func setupVideoPollDB(t *testing.T) *DB {
 	t.Helper()
 	ctx := context.Background()
-	container, err := tcmysql.Run(ctx, "mysql:8.0",
+	image := os.Getenv("TEST_MYSQL_IMAGE") // see setupTestDB
+	if image == "" {
+		image = "mysql:8.0"
+	}
+	container, err := tcmysql.Run(ctx, image,
 		tcmysql.WithDatabase("testdb"),
 		tcmysql.WithUsername("test"),
 		tcmysql.WithPassword("test"),

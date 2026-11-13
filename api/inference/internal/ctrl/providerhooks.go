@@ -28,8 +28,10 @@ type providerHooks interface {
 	// filterSettlement may drop requests from a round, or hold them back for a later
 	// one, before they are batched for signing.
 	filterSettlement(ctx context.Context, reqs []model.Request) []model.Request
-	// afterSettlement sees a round's outcomes before the settled rows are deleted.
-	afterSettlement(ctx context.Context, outcomes []*SettlementOutcome)
+	// afterSettlement runs once at the end of every settlement round that was not
+	// blocked — including an empty one and one that failed part-way — after any settled
+	// rows are deleted (and, for spml, their payout accrued in the same transaction).
+	afterSettlement(ctx context.Context)
 }
 
 type noHooks struct{}
@@ -38,7 +40,7 @@ func (noHooks) upstreamTLS() *tls.Config                                        
 func (noHooks) beforeUpstream(*http.Request, []byte, model.Request) error             { return nil }
 func (noHooks) onChargedResponse(*http.Response, model.Request)                       {}
 func (noHooks) settlementBlocked() (bool, string)                                     { return false, "" }
-func (noHooks) afterSettlement(context.Context, []*SettlementOutcome)                 {}
+func (noHooks) afterSettlement(context.Context)                                       {}
 func (noHooks) filterSettlement(_ context.Context, r []model.Request) []model.Request { return r }
 
 // providerHooks returns the hooks NewCtrl chose, or noHooks for a Ctrl built without

@@ -21,13 +21,13 @@ it.
 > `spml-assay-payout` branch) and *does* change the GPU node. None of it is
 > described below.
 >
-> - **Specification**: the Assay repo's `docs/spml-design.en.md` — §4 the money
+> - **Specification**: the Assay repo's `docs/spml-design.md` — §4 the money
 >   path, §5 the three communication layers, §7 attestation gating.
 > - **Implementation here**: `internal/ctrl/{payout_assay,payout_relay,
 >   attestation_assay,tls_pin,assay_sign,settlement_assay}.go`,
 >   `internal/handler/payout.go`, `internal/db/assay_payout.go`,
 >   `model/assay_payout.go`.
-> - **Live rollout record**: the Assay repo's `docs/spml-testnet-run.md`.
+> - **Live rollout record**: the Assay repo's `docs/archive/spml-testnet-changelog.md` (current state: `docs/spml-deploy.md`).
 
 ---
 
@@ -371,7 +371,7 @@ available, else the header-recorded one:
 | `PASS`       | valid   | settled | settled | settled | settled |
 | `UNVERIFIED` | valid   | settled | settled (fail-open) | settled (fail-open) | settled (fail-open) |
 | `PENDING`    | —       | settled | parked, re-gated later | parked, re-gated later | parked, re-gated later |
-| `UNKNOWN` (check only) | — | settled | settled (fail-open) | settled (fail-open) | stays parked |
+| `UNKNOWN` (check only) | — | settled | settled as `UNVERIFIED_LOST` (fail-open, not paid out) | settled as `UNVERIFIED_LOST` (fail-open, not paid out) | stays parked |
 | *(absent)*   | —       | settled | settled (fail-open) | settled (fail-open) | **batch voided** (`INVALID_SIG`) |
 | `REJECT`     | valid   | settled | **batch voided** | **batch voided** | **batch voided** |
 | any final    | bad/missing | settled | *(trusted as-is)* | ignored → settled | **batch voided** (`INVALID_SIG`) |
@@ -418,8 +418,10 @@ Covers ([settlement_assay_test.go](../../api/inference/internal/ctrl/settlement_
 - `TestGateSettlementWithAssayAllPass` — enabled, no rejects ⇒ keep all, no DB access.
 - `TestResolveAssayVerdicts` — settlement-check merge rules: signed finals
   adopted, unsigned finals ignored (strict ⇒ `INVALID_SIG`), `PENDING`
-  adopted unsigned, `UNKNOWN` downgrades a stuck `PENDING` fail-open
-  (strict ⇒ stays parked), replayed signatures rejected.
+  adopted unsigned, `UNKNOWN` downgrades a stuck `PENDING` to
+  `UNVERIFIED_LOST` — settles fail-open but is not paid out, since the assay
+  cannot validate a hash it has no record of (strict ⇒ stays parked),
+  replayed signatures rejected.
 - `TestVerifyAssayVerdictSig` — signature payload/replay rules (shared with
   the header path).
 
@@ -498,10 +500,21 @@ curl -s http://VERIFIER_HOST:8200/v1/settlement/check \
   a voided batch are also uncharged (they got their answers free); the
   provider eats that loss. If per-user rather than per-batch granularity is
   ever wanted, change the decision rule in `gateSettlementWithAssay`.
-- **Verdict store is in-memory.** A verifier restart forgets PENDING audits;
-  the settlement check answers `UNKNOWN` and the broker fails open
-  (non-strict) for those requests. Persisting the verdict store is future
-  work if that window matters.
+- **Verdict store is bounded.** The verifier keeps the newest 20k verdicts
+  (durable across its restarts; only REJECTs are kept forever). A hash that
+  fell off answers `UNKNOWN` at the settlement check; the broker records it
+  as `UNVERIFIED_LOST`: the request settles fail-open (non-strict) but its
+  fee stays in the pool rather than accruing to the node, because the assay's
+  invoice validator refuses a hash it has no ledger entry for and would wedge
+  that node's payouts for good. A hash the assay reports as "not in my
+  ledger" at invoice time is likewise un-accrued (hash and fee dropped from
+  the node's pending set) instead of being re-sent forever.
+- **Payout accrual is transactional with the delete.** A settled row's fee is
+  folded into its node's cumulative in the same DB transaction that deletes
+  the row, on both delete paths (the broker's round and the event process's
+  on-chain reconciliation). A broker that dies between the receipt and the
+  accrual, or a failed write, therefore cannot lose a node's earnings: the
+  rows stay until they are accrued.
 - **Sampling.** With verifier sampling enabled, most requests return
   `UNVERIFIED` and settle under fail-open. This matches the paper's randomized
   auditing: detection probability depends on the cheating fraction, not on

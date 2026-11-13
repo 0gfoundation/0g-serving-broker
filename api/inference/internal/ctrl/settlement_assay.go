@@ -63,18 +63,7 @@ func (c *Ctrl) gateSettlementWithAssay(ctx context.Context, reqs []model.Request
 			c.logger.Warnf("Assay: settlement check against %s failed (falling back to recorded verdicts): %v",
 				c.assayVerifierURL, err)
 		} else {
-			// Backfill node attribution from the settlement check for rows
-			// whose ZG-Node response header was lost (payout needs it).
-			for i := range reqs {
-				if reqs[i].Node == "" {
-					if r, ok := results[reqs[i].RequestHash]; ok && r.NodeID != "" {
-						reqs[i].Node = r.NodeID
-						if err := c.db.UpdateRequestNode(reqs[i].RequestHash, r.NodeID); err != nil {
-							c.logger.Warnf("Assay: failed to backfill node %q for request %s: %v", r.NodeID, reqs[i].RequestHash, err)
-						}
-					}
-				}
-			}
+			reqs = backfillNodes(reqs, results, c.db.UpdateRequestNode, c.logger.Warnf)
 			changed := resolveAssayVerdicts(reqs, results, c.assayVerifierAddress, c.assayStrictVerdict)
 			for hash, verdict := range changed {
 				if err := c.db.UpdateRequestVerdict(hash, verdict); err != nil {
@@ -93,7 +82,7 @@ func (c *Ctrl) gateSettlementWithAssay(ctx context.Context, reqs []model.Request
 	// and all nodes, and the unsettled list is not even the settlement batch,
 	// so one REJECT could void an arbitrarily large backlog. That handed any
 	// single node a way to zero the provider's revenue indefinitely at no cost
-	// to itself: cheat once per cycle. spml-design.en.md §4 step 9 always
+	// to itself: cheat once per cycle. spml-design.md §4 step 9 always
 	// specified "non-cheat requests only".
 	void := append([]string{}, invalidSigHashes...)
 
@@ -138,6 +127,30 @@ func (c *Ctrl) gateSettlementWithAssay(ctx context.Context, reqs []model.Request
 	return settleable
 }
 
+// backfillNodes fills node attribution from the settlement check for rows
+// whose ZG-Node response header was lost (payout needs it), writing it
+// through. A row whose write fails is held back from this round: the accrual
+// re-reads the row from the DB when it deletes it, so settling it now would
+// drop its fee into the pool unattributed. Held-back rows are re-gated next
+// cycle. Pure apart from the two callbacks, so the rule is testable without a
+// database.
+func backfillNodes(reqs []model.Request, results map[string]assayVerdictResult, write func(hash, node string) error, warnf func(string, ...interface{})) []model.Request {
+	kept := make([]model.Request, 0, len(reqs))
+	for _, req := range reqs {
+		if req.Node == "" {
+			if r, ok := results[req.RequestHash]; ok && r.NodeID != "" {
+				if err := write(req.RequestHash, r.NodeID); err != nil {
+					warnf("Assay: failed to backfill node %q for request %s; holding it for the next round: %v", r.NodeID, req.RequestHash, err)
+					continue
+				}
+				req.Node = r.NodeID
+			}
+		}
+		kept = append(kept, req)
+	}
+	return kept
+}
+
 // fetchAssayVerdicts asks the verifier for the final verdicts of the given
 // request hashes, holding up to assayCheckWaitMs for in-flight audits.
 func (c *Ctrl) fetchAssayVerdicts(ctx context.Context, hashes []string) (map[string]assayVerdictResult, error) {
@@ -161,7 +174,7 @@ func (c *Ctrl) fetchAssayVerdicts(ctx context.Context, hashes []string) (map[str
 		return nil, fmt.Errorf("refusing to send an unsigned settlement check: %w", err)
 	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.assayDo(req)
 	if err != nil {
 		return nil, err
 	}
@@ -171,7 +184,7 @@ func (c *Ctrl) fetchAssayVerdicts(ctx context.Context, hashes []string) (map[str
 		return nil, fmt.Errorf("settlement check returned %d: %s", resp.StatusCode, snippet)
 	}
 	var parsed assayCheckResponse
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&parsed); err != nil {
 		return nil, err
 	}
 	return parsed.Results, nil
@@ -184,7 +197,8 @@ func (c *Ctrl) fetchAssayVerdicts(ctx context.Context, hashes []string) (map[str
 func isFinalAssayVerdict(v string) bool {
 	switch v {
 	case constant.AssayVerdictPass, constant.AssayVerdictReject,
-		constant.AssayVerdictUnverified, constant.AssayVerdictInvalidSig:
+		constant.AssayVerdictUnverified, constant.AssayVerdictInvalidSig,
+		constant.AssayVerdictUnverifiedLost:
 		return true
 	}
 	return false
@@ -200,9 +214,10 @@ func isFinalAssayVerdict(v string) bool {
 //   - PENDING: adopted as-is (non-final, only defers settlement — it never
 //     needs authentication because it can't decide who gets paid);
 //   - UNKNOWN (verifier has no record, e.g. restart): a request stuck in
-//     PENDING is downgraded to UNVERIFIED (the audit evidence is gone;
-//     fail-open like an unsampled request) — except in strict mode, where it
-//     stays PENDING and keeps being parked rather than settling unaudited;
+//     PENDING is downgraded to UNVERIFIED_LOST (the audit evidence is gone;
+//     settles like an unsampled request but is not paid out, since the assay
+//     cannot validate the hash) — except in strict mode, where it stays
+//     PENDING and keeps being parked rather than settling unaudited;
 //   - absent from results: left untouched.
 func resolveAssayVerdicts(reqs []model.Request, results map[string]assayVerdictResult, signer *common.Address, strict bool) map[string]string {
 	changed := make(map[string]string)
@@ -231,7 +246,9 @@ func resolveAssayVerdicts(reqs []model.Request, results map[string]assayVerdictR
 			if req.Verdict != constant.AssayVerdictPending || strict {
 				continue
 			}
-			verdict = constant.AssayVerdictUnverified
+			// Settles, but is not payable: the assay cannot validate a hash
+			// it has no record of (db.PayableFee).
+			verdict = constant.AssayVerdictUnverifiedLost
 		case constant.AssayVerdictPass, constant.AssayVerdictReject, constant.AssayVerdictUnverified:
 			if signer != nil && !verifyAssayVerdictSig(*signer, r.Verdict, req.RequestHash, r.Sig) {
 				if !strict {
