@@ -16,18 +16,18 @@ import (
 // delete site — so the attribution survives for a later retry.
 func TestSettledDeleteRollsBackWhenAccrualFails(t *testing.T) {
 	d := setupTestDB(t)
-	if err := d.db.AutoMigrate(&model.Request{}, &model.AssayPayout{}, &model.DailyStat{}, &model.HourlyUsageStat{}); err != nil {
+	if err := d.db.AutoMigrate(&model.Request{}, &model.SpmlPayout{}, &model.DailyStat{}, &model.HourlyUsageStat{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	now := time.Now()
 	rows := []*model.Request{
-		{Model: model.Model{CreatedAt: &now}, UserAddress: "0xU", Nonce: "1", RequestHash: "h1", Fee: "1000", Node: "node_0", Verdict: constant.AssayVerdictPass},
-		{Model: model.Model{CreatedAt: &now}, UserAddress: "0xU", Nonce: "2", RequestHash: "h2", Fee: "500", Node: "node_0", Verdict: constant.AssayVerdictPass},
+		{Model: model.Model{CreatedAt: &now}, UserAddress: "0xU", Nonce: "1", RequestHash: "h1", Fee: "1000", Node: "node_0", Verdict: constant.SpmlVerdictPass},
+		{Model: model.Model{CreatedAt: &now}, UserAddress: "0xU", Nonce: "2", RequestHash: "h2", Fee: "500", Node: "node_0", Verdict: constant.SpmlVerdictPass},
 	}
 	if err := d.db.Create(&rows).Error; err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	opt := &AssayPayoutOptions{CutBps: 1000}
+	opt := &SpmlPayoutOptions{CutBps: 1000}
 	countRequests := func() int64 {
 		var n int64
 		d.db.Model(&model.Request{}).Count(&n)
@@ -36,13 +36,13 @@ func TestSettledDeleteRollsBackWhenAccrualFails(t *testing.T) {
 
 	// Make the accrual write fail the way a schema problem / full disk / lost
 	// table would: the payout table is gone.
-	if err := d.db.Migrator().DropTable(&model.AssayPayout{}); err != nil {
+	if err := d.db.Migrator().DropTable(&model.SpmlPayout{}); err != nil {
 		t.Fatal(err)
 	}
 
 	// Layer 1 (broker round): stats + accrual + delete is one tx -> all rolled back.
-	err := d.AccumulateAndDeleteRequests(rows, AccumulateOptions{ServiceType: constant.ServiceTypeChatbot, AssayPayout: opt})
-	if err == nil || !strings.Contains(err.Error(), "accrue assay payout") {
+	err := d.AccumulateAndDeleteRequests(rows, AccumulateOptions{ServiceType: constant.ServiceTypeChatbot, SpmlPayout: opt})
+	if err == nil || !strings.Contains(err.Error(), "accrue spml payout") {
 		t.Fatalf("layer 1 with broken accrual: err = %v, want accrual error", err)
 	}
 	if n := countRequests(); n != 2 {
@@ -51,7 +51,7 @@ func TestSettledDeleteRollsBackWhenAccrualFails(t *testing.T) {
 
 	// Layer 2 (event process reconciliation): same invariant.
 	err = d.DeleteSettledRequestsByHashes([]string{"h1", "h2"}, opt)
-	if err == nil || !strings.Contains(err.Error(), "accrue assay payout") {
+	if err == nil || !strings.Contains(err.Error(), "accrue spml payout") {
 		t.Fatalf("layer 2 with broken accrual: err = %v, want accrual error", err)
 	}
 	if n := countRequests(); n != 2 {
@@ -59,7 +59,7 @@ func TestSettledDeleteRollsBackWhenAccrualFails(t *testing.T) {
 	}
 
 	// Storage is back -> the retry accrues and deletes, nothing was lost.
-	if err := d.db.AutoMigrate(&model.AssayPayout{}); err != nil {
+	if err := d.db.AutoMigrate(&model.SpmlPayout{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := d.DeleteSettledRequestsByHashes([]string{"h1", "h2"}, opt); err != nil {
@@ -68,7 +68,7 @@ func TestSettledDeleteRollsBackWhenAccrualFails(t *testing.T) {
 	if n := countRequests(); n != 0 {
 		t.Fatalf("%d rows left after the retry, want 0", n)
 	}
-	states, err := d.ListAssayPayouts()
+	states, err := d.ListSpmlPayouts()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +83,7 @@ func TestSettledDeleteRollsBackWhenAccrualFails(t *testing.T) {
 }
 
 // Review comment 5: pending_covered must hold far more than TEXT's 64 KiB,
-// through the real migration set (create-assay-payout + the LONGTEXT ALTER).
+// through the real migration set (create-spml-payout + the LONGTEXT ALTER).
 func TestPendingCoveredBeyondTextLimit(t *testing.T) {
 	d := setupTestDB(t)
 	// setupTestDB pre-creates the LoRA tables; the real migration set creates
@@ -95,7 +95,7 @@ func TestPendingCoveredBeyondTextLimit(t *testing.T) {
 		t.Fatalf("migrate: %v", err)
 	}
 	var dataType string
-	if err := d.db.Raw("SELECT DATA_TYPE FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'assay_payout' AND column_name = 'pending_covered'").Scan(&dataType).Error; err != nil {
+	if err := d.db.Raw("SELECT DATA_TYPE FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'spml_payout' AND column_name = 'pending_covered'").Scan(&dataType).Error; err != nil {
 		t.Fatal(err)
 	}
 	if dataType != "longtext" {
@@ -111,10 +111,10 @@ func TestPendingCoveredBeyondTextLimit(t *testing.T) {
 	if len(encoded) <= 65535 {
 		t.Fatalf("test payload is only %d bytes, does not exceed TEXT", len(encoded))
 	}
-	if err := d.UpsertAssayPayout(model.AssayPayout{Node: "node_0", Cumulative: "1", PendingCovered: encoded}); err != nil {
+	if err := d.UpsertSpmlPayout(model.SpmlPayout{Node: "node_0", Cumulative: "1", PendingCovered: encoded}); err != nil {
 		t.Fatalf("upsert %d bytes: %v", len(encoded), err)
 	}
-	states, err := d.ListAssayPayouts()
+	states, err := d.ListSpmlPayouts()
 	if err != nil {
 		t.Fatal(err)
 	}

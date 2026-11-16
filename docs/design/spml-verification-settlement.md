@@ -1,6 +1,6 @@
-# Assay (Immaculate/LDD) Verification — Settlement Integration
+# Spml (Immaculate/LDD) Verification — Settlement Integration
 
-This document describes how the broker integrates the **Assay verifiable-inference
+This document describes how the broker integrates the **Spml verifiable-inference
 verdict** into settlement, so that inferences which fail verification are not
 billed to the user. It covers the trust model, the request-time and
 settlement-time flows, the data model, configuration, behavior, and how to test
@@ -10,7 +10,7 @@ it.
 > only (landed 2026-08): the broker reads a per-request verdict the verifier
 > emits and excludes `REJECT`'d requests from the TEE-signed settlement batch.
 > *That step* needed no smart-contract change and no GPU-node change — the
-> broker only consumes the `ZG-Verdict` response header the Assay pipeline
+> broker only consumes the `ZG-Verdict` response header the Spml pipeline
 > already produces.
 >
 > **It is no longer the whole picture.** Since 2026-08-24 this same branch also
@@ -18,22 +18,22 @@ it.
 > vouchers, the voucher relay, attested TLS with public-key pinning, the
 > attestation gate, and signed invoice / settlement-check requests. That work
 > *does* change the contract (`api/libs/0g-serving-contract` tracks the
-> `spml-assay-payout` branch) and *does* change the GPU node. None of it is
+> `spml-spml-payout` branch) and *does* change the GPU node. None of it is
 > described below.
 >
-> - **Specification**: the Assay repo's `docs/spml-design.md` — §4 the money
+> - **Specification**: the Spml repo's `docs/spml-design.md` — §4 the money
 >   path, §5 the three communication layers, §7 attestation gating.
-> - **Implementation here**: `internal/ctrl/{payout_assay,payout_relay,
->   attestation_assay,tls_pin,assay_sign,settlement_assay}.go`,
->   `internal/handler/payout.go`, `internal/db/assay_payout.go`,
->   `model/assay_payout.go`.
-> - **Live rollout record**: the Assay repo's `docs/archive/spml-testnet-changelog.md` (current state: `docs/spml-deploy.md`).
+> - **Implementation here**: `internal/ctrl/{payout_spml,payout_relay,
+>   attestation_spml,tls_pin,spml_sign,settlement_spml}.go`,
+>   `internal/handler/payout.go`, `internal/db/spml_payout.go`,
+>   `model/spml_payout.go`.
+> - **Live rollout record**: the Spml repo's `docs/archive/spml-testnet-changelog.md` (current state: `docs/spml-deploy.md`).
 
 ---
 
 ## 1. Background
 
-The Assay pipeline (based on the *Immaculate* paper) audits an untrusted GPU
+The Spml pipeline (based on the *Immaculate* paper) audits an untrusted GPU
 provider by recomputing a sampled subset of inferences in FP32 and measuring the
 **Logit-Distance-Distribution (LDD)** between the provider's committed logits and
 the reference model. A request is judged `PASS` or `REJECT` by a tail-probability
@@ -51,7 +51,7 @@ integration makes the broker **act on that verdict at settlement time**.
 ```mermaid
 flowchart LR
     User[User / SDK] -->|chat request + signed headers| Broker
-    Broker -->|proxy to targetUrl| Verifier[Assay Verifier CPU-B in TDX]
+    Broker -->|proxy to targetUrl| Verifier[Spml Verifier CPU-B in TDX]
     Verifier -->|generate + commitment| GPU[GPU node vLLM, untrusted]
     GPU -->|text + top-K commitment| Verifier
     Verifier -->|FP32 LDD recompute, sets ZG-Verdict| Verifier
@@ -119,13 +119,13 @@ sequenceDiagram
     V-->>B: 200 OK + headers ZG-Verdict (PENDING/UNVERIFIED), ZG-Verdict-Sig
     Note over V: sampled requests audit in the background (non-blocking)
     Note over B: handleChargingResponse / handleChargingStreamResponse
-    B->>B: verify Ed25519 sig over "assay-verdict-v1|verdict|hash"
-    B->>DB: recordAssayVerdict → UpdateRequestVerdict(hash, verdict)
+    B->>B: verify Ed25519 sig over "spml-verdict-v1|verdict|hash"
+    B->>DB: recordSpmlVerdict → UpdateRequestVerdict(hash, verdict)
     B->>DB: bill: UpdateRequestWithAccurateTokens(hash, fees…)
     B-->>U: sanitized response
 ```
 
-`recordAssayVerdict` is a no-op when the integration is disabled, for whitelisted
+`recordSpmlVerdict` is a no-op when the integration is disabled, for whitelisted
 (unbilled) traffic, or when no `ZG-Verdict` header is present (**fail-open**).
 
 **Non-blocking verdicts.** The verifier answers immediately: a sampled request
@@ -142,11 +142,11 @@ verifies inline.
 The verdict decides settlement, so it must not remain an unauthenticated
 plaintext header — otherwise whatever sits at `targetUrl` (a misconfigured
 upstream, an interposed proxy, a non-TDX process posing as the verifier)
-controls who gets paid. When `assay.verifierPubkey` is configured, the broker
+controls who gets paid. When `spml.verifierPubkey` is configured, the broker
 only acts on a verdict whose `ZG-Verdict-Sig` (Ed25519, base64) verifies over
 
 ```
-"assay-verdict-v1" + "|" + verdict + "|" + RequestHash
+"spml-verdict-v1" + "|" + verdict + "|" + RequestHash
 ```
 
 The broker sends `RequestHash` upstream as `ZG-Request-Hash` and the verifier
@@ -154,9 +154,9 @@ folds it into the signed payload, making every signature **single-use**: a
 `PASS` captured from one response cannot be replayed onto another request, and
 a `REJECT` cannot be rewritten to `PASS` without breaking the signature. The
 domain prefix separates verdict signatures from the GPU node's commitment
-signatures (`assay-commitment-v1`).
+signatures (`spml-commitment-v1`).
 
-Two failure modes, chosen by `assay.strictVerdict`:
+Two failure modes, chosen by `spml.strictVerdict`:
 
 - **strict off (default)**: an unauthenticated verdict is *ignored* (logged;
   the request settles under fail-open). Protects revenue, but a
@@ -166,10 +166,10 @@ Two failure modes, chosen by `assay.strictVerdict`:
   and the request is **excluded from settlement** like a REJECT. Stripping the
   header now costs the request's revenue instead of laundering it.
 
-Relevant code: [`recordAssayVerdict` / `verifyAssayVerdictSig`](../../api/inference/internal/ctrl/chatbot.go),
+Relevant code: [`recordSpmlVerdict` / `verifySpmlVerdictSig`](../../api/inference/internal/ctrl/chatbot.go),
 [`UpdateRequestVerdict`](../../api/inference/internal/db/request.go); verifier-side
 signer: `_sign_verdict` in `pipeline/verifier_node/serve_verifier.py` (0g-assay
-repo; key via `--verdict-key` / `$ASSAY_VERDICT_KEY`, pubkey surfaced on the
+repo; key via `--verdict-key` / `$SPML_VERDICT_KEY`, pubkey surfaced on the
 verifier's `/health` as `verdict_pubkey`).
 
 ---
@@ -212,14 +212,14 @@ flowchart TD
 
 ### Sampling strategies
 
-Controlled by two verifier settings, `ASSAY_VERIFY_SAMPLE_RATE` (0..1) and
-`ASSAY_SAMPLE_STRATEGY`:
+Controlled by two verifier settings, `SPML_VERIFY_SAMPLE_RATE` (0..1) and
+`SPML_SAMPLE_STRATEGY`:
 
 | `rate`        | behavior                                              |
 |---------------|------------------------------------------------------|
 | `>= 1.0`      | verify every request (default in the demo config)    |
 | `<= 0.0`      | verify nothing                                        |
-| `0 < rate < 1`| sample per `ASSAY_SAMPLE_STRATEGY` below              |
+| `0 < rate < 1`| sample per `SPML_SAMPLE_STRATEGY` below              |
 
 | Strategy        | Rule                                              | Use |
 |-----------------|---------------------------------------------------|-----|
@@ -269,9 +269,9 @@ decides whether the batch settles at all.
 ```mermaid
 flowchart TD
     A[SettleFeesWithTEE] --> B[db.ListRequest: unprocessed, not settling]
-    B --> C{assay.enabled?}
+    B --> C{spml.enabled?}
     C -- no --> E[group by user]
-    C -- yes --> D[gateSettlementWithAssay]
+    C -- yes --> D[gateSettlementWithSpml]
     D --> D0[POST verifier /v1/settlement/check with batch hashes]
     D0 --> D1[authenticate + merge verdicts, persist changes]
     D1 --> X{any REJECT / INVALID_SIG?}
@@ -291,20 +291,20 @@ Decision rule (per settlement batch):
   nothing is charged this cycle. The verifier retains the per-request /
   per-node audit records; the broker logs the flagged hashes as evidence.
 - **audits still pending** → those requests are parked with a short
-  `skip_until` (`AssayPendingRetryDelay`, 5 min) and re-gated on a later
+  `skip_until` (`SpmlPendingRetryDelay`, 5 min) and re-gated on a later
   cycle; the rest of the batch settles normally.
 - **otherwise** (`PASS` / `UNVERIFIED` / no verdict) → settle normally
   (fail-open).
 
 The settlement-check results are authenticated exactly like the header path:
 each final verdict carries an Ed25519 signature over
-`"assay-verdict-v1|verdict|hash"` and is only acted on if it verifies against
-`assay.verifierPubkey`. `PENDING`/`UNKNOWN` are transient, arrive unsigned,
+`"spml-verdict-v1|verdict|hash"` and is only acted on if it verifies against
+`spml.verifierPubkey`. `PENDING`/`UNKNOWN` are transient, arrive unsigned,
 and can only defer — never decide — payment. If the verifier is unreachable
 the gate falls back to the header-recorded verdicts.
 
 Relevant code:
-[`gateSettlementWithAssay` / `resolveAssayVerdicts` / `partitionAssayRequests`](../../api/inference/internal/ctrl/settlement_assay.go);
+[`gateSettlementWithSpml` / `resolveSpmlVerdicts` / `partitionSpmlRequests`](../../api/inference/internal/ctrl/settlement_spml.go);
 verifier-side: `settlement_check` in `pipeline/verifier_node/serve_verifier.py`
 (0g-assay repo).
 
@@ -330,7 +330,7 @@ The feature is **off by default**. Enable it in the inference broker config:
 
 ```yaml
 # config.yaml
-assay:
+spml:
   enabled: true          # record ZG-Verdict and gate settlement on the verdicts
   # Verifier base URL for the pre-settlement verdict check
   # (POST {verifierUrl}/v1/settlement/check). Required to resolve PENDING
@@ -350,13 +350,13 @@ assay:
   strictVerdict: false
 ```
 
-Wiring: `cfg.Assay.*` → `Ctrl.assayVerdictFilter` / `assayVerifierPubkey` /
-`assayStrictVerdict` ([config.go](../../api/inference/config/config.go),
+Wiring: `cfg.Spml.*` → `Ctrl.spmlVerdictFilter` / `spmlVerifierPubkey` /
+`spmlStrictVerdict` ([config.go](../../api/inference/config/config.go),
 [ctrl.go](../../api/inference/internal/ctrl/ctrl.go)). A malformed pubkey — or
 `strictVerdict` without a pubkey — panics at boot rather than silently
 downgrading to trusting unauthenticated verdicts.
 
-Prerequisite: the broker's service `targetUrl` must point at the Assay verifier
+Prerequisite: the broker's service `targetUrl` must point at the Spml verifier
 (which emits `ZG-Verdict` and, when signing is available, `ZG-Verdict-Sig`).
 Pin the verifier's key with `--verdict-key` on the verifier so the pubkey
 survives restarts.
@@ -397,7 +397,7 @@ economic teeth behind sampling only a fraction of requests.
   `--verdict-key`. An older verifier without signing still works in the
   no-pubkey / non-strict configurations, and `--sync-verify` restores the
   fully synchronous header-only flow.
-- **Existing settlement paths** — inert when `assay.enabled=false`.
+- **Existing settlement paths** — inert when `spml.enabled=false`.
 
 ---
 
@@ -407,27 +407,27 @@ economic teeth behind sampling only a fraction of requests.
 
 ```bash
 cd api
-go test ./inference/internal/ctrl/ -run 'Assay|Rejected|Verdict' -v
+go test ./inference/internal/ctrl/ -run 'Spml|Rejected|Verdict' -v
 ```
 
-Covers ([settlement_assay_test.go](../../api/inference/internal/ctrl/settlement_assay_test.go)):
+Covers ([settlement_spml_test.go](../../api/inference/internal/ctrl/settlement_spml_test.go)):
 
-- `TestPartitionAssayRequests` — `REJECT`/`INVALID_SIG` ⇒ cheat, `PENDING` ⇒
+- `TestPartitionSpmlRequests` — `REJECT`/`INVALID_SIG` ⇒ cheat, `PENDING` ⇒
   pending, `PASS`/`UNVERIFIED`/empty ⇒ settleable, order preserved.
-- `TestGateSettlementWithAssayDisabled` — disabled ⇒ passthrough, no DB/HTTP access.
-- `TestGateSettlementWithAssayAllPass` — enabled, no rejects ⇒ keep all, no DB access.
-- `TestResolveAssayVerdicts` — settlement-check merge rules: signed finals
+- `TestGateSettlementWithSpmlDisabled` — disabled ⇒ passthrough, no DB/HTTP access.
+- `TestGateSettlementWithSpmlAllPass` — enabled, no rejects ⇒ keep all, no DB access.
+- `TestResolveSpmlVerdicts` — settlement-check merge rules: signed finals
   adopted, unsigned finals ignored (strict ⇒ `INVALID_SIG`), `PENDING`
   adopted unsigned, `UNKNOWN` downgrades a stuck `PENDING` to
-  `UNVERIFIED_LOST` — settles fail-open but is not paid out, since the assay
+  `UNVERIFIED_LOST` — settles fail-open but is not paid out, since the spml
   cannot validate a hash it has no record of (strict ⇒ stays parked),
   replayed signatures rejected.
-- `TestVerifyAssayVerdictSig` — signature payload/replay rules (shared with
+- `TestVerifySpmlVerdictSig` — signature payload/replay rules (shared with
   the header path).
 
 ### 9.2 Manual end-to-end (broker + verifier + GPU)
 
-1. Start the Assay GPU node and verifier (Assay pipeline repo):
+1. Start the Spml GPU node and verifier (Spml pipeline repo):
    ```bash
    # GPU node (vLLM commitment server)
    python pipeline/gpu_node/serve_gpu.py --model Qwen/Qwen3-0.6B --port 8100
@@ -435,7 +435,7 @@ Covers ([settlement_assay_test.go](../../api/inference/internal/ctrl/settlement_
    python pipeline/verifier_node/serve_verifier.py \
        --model Qwen/Qwen3-0.6B --gpu-url http://GPU_HOST:8100 --port 8200
    ```
-2. Configure the broker with `assay.enabled: true` and the service
+2. Configure the broker with `spml.enabled: true` and the service
    `targetUrl: http://VERIFIER_HOST:8200/v1`. Start the broker.
 3. Confirm verdict capture: send a normal chat request through the broker, then
    inspect the DB row:
@@ -453,7 +453,7 @@ Covers ([settlement_assay_test.go](../../api/inference/internal/ctrl/settlement_
      `REJECT`.
 5. Send a request that yields `REJECT`, then trigger settlement (wait for the
    settlement interval or hit the settle endpoint). Verify:
-   - the settlement log shows `Assay: CHEAT DETECTED … voiding the entire
+   - the settlement log shows `Spml: CHEAT DETECTED … voiding the entire
      settlement batch`;
    - **no** settlement tx is executed for the cycle and **all** of the batch's
      rows are deleted unsettled (nothing charged);
@@ -499,14 +499,14 @@ curl -s http://VERIFIER_HOST:8200/v1/settlement/check \
 - **Voiding punishes the batch, not the request.** Honest users' requests in
   a voided batch are also uncharged (they got their answers free); the
   provider eats that loss. If per-user rather than per-batch granularity is
-  ever wanted, change the decision rule in `gateSettlementWithAssay`.
+  ever wanted, change the decision rule in `gateSettlementWithSpml`.
 - **Verdict store is bounded.** The verifier keeps the newest 20k verdicts
   (durable across its restarts; only REJECTs are kept forever). A hash that
   fell off answers `UNKNOWN` at the settlement check; the broker records it
   as `UNVERIFIED_LOST`: the request settles fail-open (non-strict) but its
-  fee stays in the pool rather than accruing to the node, because the assay's
+  fee stays in the pool rather than accruing to the node, because the spml's
   invoice validator refuses a hash it has no ledger entry for and would wedge
-  that node's payouts for good. A hash the assay reports as "not in my
+  that node's payouts for good. A hash the spml reports as "not in my
   ledger" at invoice time is likewise un-accrued (hash and fee dropped from
   the node's pending set) instead of being re-sent forever.
 - **Payout accrual is transactional with the delete.** A settled row's fee is

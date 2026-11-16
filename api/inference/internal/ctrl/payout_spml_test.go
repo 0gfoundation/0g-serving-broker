@@ -42,14 +42,14 @@ func TestEncodeDecodeCovered(t *testing.T) {
 		t.Fatalf("DecodeCovered empty = %v, %v; want nil, nil", got, err)
 	}
 	// A corrupt row is an error, not an empty set: the caller must not accrue
-	// onto it or invoice it (review comment on PR #547, assay_payout.go:258).
+	// onto it or invoice it (review comment on PR #547, spml_payout.go:258).
 	if got, err := db.DecodeCovered("not json"); err == nil || got != nil {
 		t.Fatalf("DecodeCovered garbage = %v, %v; want error", got, err)
 	}
 }
 
 func TestInvoiceRequestShape(t *testing.T) {
-	// The wire shape the assay's POST /v1/payout/invoice expects
+	// The wire shape the spml's POST /v1/payout/invoice expects
 	// (pipeline/verifier_node/serve_verifier.py InvoiceRequest).
 	cut := "42"
 	req := invoiceRequest{
@@ -84,7 +84,7 @@ func TestInvoiceRequestShape(t *testing.T) {
 		}
 	}
 	// covered stays a plain hash array on the wire; the node share of each
-	// hash travels in the parallel fees list (decimal strings) so the assay
+	// hash travels in the parallel fees list (decimal strings) so the spml
 	// can check the amount per hash.
 	if c := inv["covered"].([]interface{}); len(c) != 2 || c[0] != "0xh1" {
 		t.Fatalf("covered = %v, want bare hashes", c)
@@ -92,13 +92,13 @@ func TestInvoiceRequestShape(t *testing.T) {
 	if f := inv["fees"].([]interface{}); len(f) != 2 || f[0] != "500" || f[1] != "600" {
 		t.Fatalf("fees = %v, want [500 600]", f)
 	}
-	// a pre-fee row in the set: no fees at all (whole-node check on the assay)
+	// a pre-fee row in the set: no fees at all (whole-node check on the spml)
 	if f := coveredFees([]db.CoveredEntry{{Hash: "0xh1", Fee: "500"}, {Hash: "0xh2"}}); f != nil {
 		t.Fatalf("fees with a fee-less entry = %v, want nil", f)
 	}
 }
 
-// The assay's refusal carries its own reconciliation data: it names every
+// The spml's refusal carries its own reconciliation data: it names every
 // hash it has already issued a voucher for, and every hash it has no record
 // of. Without acting on those a node's payouts deadlock forever — each later
 // cycle appends new hashes to the same pending set and is refused for the old
@@ -131,7 +131,7 @@ func TestReconcileRefusal(t *testing.T) {
 	pending := db.EncodeCovered([]db.CoveredEntry{
 		{Hash: "h1", Fee: "100", Cut: "10"}, {Hash: "h2", Fee: "200", Cut: "20"}, {Hash: "h3", Fee: "300", Cut: "30"}, {Hash: "h4", Fee: "400", Cut: "40"},
 	})
-	st := model.AssayPayout{Node: "node_0", Cumulative: "1000", PendingCovered: pending}
+	st := model.SpmlPayout{Node: "node_0", Cumulative: "1000", PendingCovered: pending}
 
 	t.Run("un-accrued hashes return their cut too; landed ones do not", func(t *testing.T) {
 		got, cutDrop, note := reconcileRefusal(st, []string{
@@ -164,7 +164,7 @@ func TestReconcileRefusal(t *testing.T) {
 		}
 	})
 
-	t.Run("REJECT or misattributed on the assay's side: un-accrue like lost", func(t *testing.T) {
+	t.Run("REJECT or misattributed on the spml's side: un-accrue like lost", func(t *testing.T) {
 		got, _, note := reconcileRefusal(st, []string{
 			"h1: verdict REJECT is not payable",
 			"h2: attributed to node_1, not node_0",
@@ -200,7 +200,7 @@ func TestReconcileRefusal(t *testing.T) {
 		}
 	})
 
-	t.Run("lost by the assay: drop hash AND un-accrue its fee", func(t *testing.T) {
+	t.Run("lost by the spml: drop hash AND un-accrue its fee", func(t *testing.T) {
 		got, _, note := reconcileRefusal(st, []string{"h3: not in my ledger (never verified here)"})
 		if note == "" || got.Cumulative != "700" || got.Invoiced {
 			t.Fatalf("got %+v note %q, want cumulative 700", got, note)
@@ -223,7 +223,7 @@ func TestReconcileRefusal(t *testing.T) {
 	})
 
 	t.Run("lost hash stored without a fee is kept for an operator", func(t *testing.T) {
-		old := model.AssayPayout{Node: "node_0", Cumulative: "1000", PendingCovered: `["h1","h2"]`}
+		old := model.SpmlPayout{Node: "node_0", Cumulative: "1000", PendingCovered: `["h1","h2"]`}
 		got, _, note := reconcileRefusal(old, []string{"h1: not in my ledger"})
 		if got.Cumulative != "1000" || len(decodeCovered(got.PendingCovered)) != 2 || !strings.Contains(note, "operator") {
 			t.Fatalf("got %+v note %q", got, note)
@@ -232,7 +232,7 @@ func TestReconcileRefusal(t *testing.T) {
 }
 
 // A REJECT'd or audit-lost request settles but must not be invoiced: the
-// assay refuses the hash and the whole invoice with it, wedging the node.
+// spml refuses the hash and the whole invoice with it, wedging the node.
 func TestPayableFeeSkipsRejectLostAndUnattributed(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -240,12 +240,12 @@ func TestPayableFeeSkipsRejectLostAndUnattributed(t *testing.T) {
 		payable bool
 		reason  string
 	}{
-		{"pass", model.Request{Fee: "4600", Node: "node_0", Verdict: constant.AssayVerdictPass}, true, ""},
+		{"pass", model.Request{Fee: "4600", Node: "node_0", Verdict: constant.SpmlVerdictPass}, true, ""},
 		{"unverified", model.Request{Fee: "4600", Node: "node_0", Verdict: "UNVERIFIED"}, true, ""},
 		{"no verdict", model.Request{Fee: "4600", Node: "node_0"}, true, ""},
-		{"reject", model.Request{Fee: "6000", Node: "node_0", Verdict: constant.AssayVerdictReject}, false, "REJECT"},
-		{"lost", model.Request{Fee: "6000", Node: "node_0", Verdict: constant.AssayVerdictUnverifiedLost}, false, "lost"},
-		{"no node", model.Request{Fee: "4600", Verdict: constant.AssayVerdictPass}, false, "no node attribution"},
+		{"reject", model.Request{Fee: "6000", Node: "node_0", Verdict: constant.SpmlVerdictReject}, false, "REJECT"},
+		{"lost", model.Request{Fee: "6000", Node: "node_0", Verdict: constant.SpmlVerdictUnverifiedLost}, false, "lost"},
+		{"no node", model.Request{Fee: "4600", Verdict: constant.SpmlVerdictPass}, false, "no node attribution"},
 		{"bad fee", model.Request{Fee: "x", Node: "node_0"}, false, "unparseable"},
 	}
 	for _, tc := range cases {
@@ -285,12 +285,12 @@ func TestSplitFeeSumsToFee(t *testing.T) {
 
 // A payee is listed once per address, never without a usable address, and a
 // failed listing is retried on the next invoice.
-func TestListAssayPayee(t *testing.T) {
+func TestListSpmlPayee(t *testing.T) {
 	const payee = "0x00000000000000000000000000000000000000aa"
 	var calls []common.Address
 	fail := true
 	c := &Ctrl{logger: testLogger()}
-	c.ensureAssayNode = func(_ context.Context, node common.Address) (bool, error) {
+	c.ensureSpmlNode = func(_ context.Context, node common.Address) (bool, error) {
 		calls = append(calls, node)
 		if fail {
 			return false, errors.New("rpc down")
@@ -304,12 +304,12 @@ func TestListAssayPayee(t *testing.T) {
 	var bad invoiceResult
 	_ = json.Unmarshal([]byte(`{"node_id":"node_1","ok":true,"voucher":{"node":"nope"}}`), &bad)
 
-	c.listAssayPayee(context.Background(), invoiceResult{NodeID: "node_2", OK: true}) // no voucher
-	c.listAssayPayee(context.Background(), bad)
-	c.listAssayPayee(context.Background(), ok) // fails
+	c.listSpmlPayee(context.Background(), invoiceResult{NodeID: "node_2", OK: true}) // no voucher
+	c.listSpmlPayee(context.Background(), bad)
+	c.listSpmlPayee(context.Background(), ok) // fails
 	fail = false
-	c.listAssayPayee(context.Background(), ok) // retried
-	c.listAssayPayee(context.Background(), ok) // cached
+	c.listSpmlPayee(context.Background(), ok) // retried
+	c.listSpmlPayee(context.Background(), ok) // cached
 	if len(calls) != 2 || calls[0] != common.HexToAddress(payee) {
 		t.Fatalf("chain asked %v, want the payee twice (one failure, one success)", calls)
 	}

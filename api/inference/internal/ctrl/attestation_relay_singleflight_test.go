@@ -12,9 +12,9 @@ import (
 
 // When the cached document expires, every caller that notices must not each
 // fetch it: one fetches, the rest reuse its answer. Without the single-flight
-// the relay is an amplifier pointed at the assay on exactly the moment the
+// the relay is an amplifier pointed at the spml on exactly the moment the
 // cache stops protecting it.
-func TestAssayRelaySingleFlight(t *testing.T) {
+func TestSpmlRelaySingleFlight(t *testing.T) {
 	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		hits.Add(1)
@@ -24,9 +24,9 @@ func TestAssayRelaySingleFlight(t *testing.T) {
 	defer srv.Close()
 
 	c := &Ctrl{
-		assayVerifierURL: srv.URL,
+		spmlVerifierURL: srv.URL,
 		httpClient:       srv.Client(),
-		assayAttCache:    &assayAttestationCache{ttl: time.Minute},
+		spmlAttCache:    &spmlAttestationCache{ttl: time.Minute},
 	}
 	burst := func() {
 		var wg sync.WaitGroup
@@ -34,7 +34,7 @@ func TestAssayRelaySingleFlight(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				body, _, err := c.AssayAttestation(context.Background(), false)
+				body, _, err := c.SpmlAttestation(context.Background(), false)
 				if err != nil || string(body) != `{"doc":1}` {
 					t.Errorf("body=%s err=%v", body, err)
 				}
@@ -49,9 +49,9 @@ func TestAssayRelaySingleFlight(t *testing.T) {
 	}
 
 	// Expire it and go again: exactly one more fetch, not one per caller.
-	c.assayAttCache.mu.Lock()
-	c.assayAttCache.fetchedAt = time.Now().Add(-2 * time.Minute)
-	c.assayAttCache.mu.Unlock()
+	c.spmlAttCache.mu.Lock()
+	c.spmlAttCache.fetchedAt = time.Now().Add(-2 * time.Minute)
+	c.spmlAttCache.mu.Unlock()
 	burst()
 	if n := hits.Load(); n != 2 {
 		t.Fatalf("expired cache: %d fetches total, want 2", n)

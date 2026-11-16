@@ -4290,7 +4290,7 @@ func loadSPML(t *testing.T, extra string) error {
 
 func TestSPML_Valid(t *testing.T) {
 	err := loadSPML(t, `
-assay:
+spml:
   verifierUrl: "http://verifier:8200"
   verifierAddress: "0x1111111111111111111111111111111111111111"
 `)
@@ -4299,15 +4299,15 @@ assay:
 	}
 }
 
-// There is no assay.enabled any more: the provider type is the switch. A config
+// There is no spml.enabled any more: the provider type is the switch. A config
 // still carrying the old key must fail loudly rather than be ignored, which is
 // what UnmarshalStrict gives us for free.
-// assay.enabled was removed: providerType: spml is the switch. Unknown keys are
+// spml.enabled was removed: providerType: spml is the switch. Unknown keys are
 // ignored and reported rather than refused (see IgnoredConfigKeys), so the stale key
 // must at least show up in that report. Ignoring it cannot silently turn spml off:
 // spml still refuses to load without its verifier settings (RequiresVerifierURL).
 func TestSPML_ReportsStaleEnabledKey(t *testing.T) {
-	ignored, err := IgnoredConfigKeys([]byte(spmlConfig(t, "assay:\n  enabled: true\n")))
+	ignored, err := IgnoredConfigKeys([]byte(spmlConfig(t, "spml:\n  enabled: true\n")))
 	if err != nil {
 		t.Fatalf("IgnoredConfigKeys: %v", err)
 	}
@@ -4316,13 +4316,13 @@ func TestSPML_ReportsStaleEnabledKey(t *testing.T) {
 			return
 		}
 	}
-	t.Errorf("the removed assay.enabled key must be reported as ignored, got: %v", ignored)
+	t.Errorf("the removed spml.enabled key must be reported as ignored, got: %v", ignored)
 }
 
 func TestSPML_VerifierCutBpsRange(t *testing.T) {
 	for _, bps := range []string{"10001", "-1"} {
 		err := loadSPML(t, `
-assay:
+spml:
   verifierUrl: "http://verifier:8200"
   verifierAddress: "0x1111111111111111111111111111111111111111"
   payout:
@@ -4337,20 +4337,20 @@ assay:
 
 func TestSPML_RequiresVerifierURL(t *testing.T) {
 	err := loadSPML(t, `
-assay:
+spml:
   verifierAddress: "0x1111111111111111111111111111111111111111"
 `)
-	if err == nil || !strings.Contains(err.Error(), "requires assay.verifierUrl") {
+	if err == nil || !strings.Contains(err.Error(), "requires spml.verifierUrl") {
 		t.Errorf("spml without a verifier url must be refused, got: %v", err)
 	}
 }
 
 func TestSPML_RequiresVerifierAddress(t *testing.T) {
 	err := loadSPML(t, `
-assay:
+spml:
   verifierUrl: "http://verifier:8200"
 `)
-	if err == nil || !strings.Contains(err.Error(), "requires assay.verifierAddress") {
+	if err == nil || !strings.Contains(err.Error(), "requires spml.verifierAddress") {
 		t.Errorf("spml without a verifier address must be refused, got: %v", err)
 	}
 }
@@ -4359,7 +4359,7 @@ assay:
 // to an anonymous peer — worse than plaintext, because it looks authenticated.
 func TestSPML_HTTPSRequiresPinOrAttestation(t *testing.T) {
 	err := loadSPML(t, `
-assay:
+spml:
   verifierUrl: "https://verifier:8200"
   verifierAddress: "0x1111111111111111111111111111111111111111"
 `)
@@ -4368,7 +4368,7 @@ assay:
 	}
 
 	if err := loadSPML(t, `
-assay:
+spml:
   verifierUrl: "https://verifier:8200"
   verifierAddress: "0x1111111111111111111111111111111111111111"
   verifierKeyPin: "0xaa"
@@ -4383,7 +4383,7 @@ assay:
 // running something they are not.
 func TestSPML_AttestationRejectsTappCliSource(t *testing.T) {
 	err := loadSPML(t, `
-assay:
+spml:
   verifierUrl: "http://verifier:8200"
   verifierAddress: "0x1111111111111111111111111111111111111111"
   attestation:
@@ -4396,16 +4396,16 @@ assay:
 }
 
 // expected.image is what the measured boot chain is held against. Without it
-// the check would pass on any image the assay happened to boot.
+// the check would pass on any image the spml happened to boot.
 func TestSPML_AttestationRequiresExpectedImage(t *testing.T) {
 	err := loadSPML(t, `
-assay:
+spml:
   verifierUrl: "http://verifier:8200"
   verifierAddress: "0x1111111111111111111111111111111111111111"
   attestation:
     enabled: true
     source: "tappscan"
-    appId: "assay-verifier"
+    appId: "spml-verifier"
     registry: "0x2222222222222222222222222222222222222222"
     rpcUrl: "https://rpc.example"
     tappscan:
@@ -4419,9 +4419,9 @@ assay:
 
 // You cannot FP32-recompute someone else's API. With the flag gone that
 // combination is not rejected — it is unrepresentable: a centralized provider
-// simply is not spml, so the integration never runs, and leftover assay
+// simply is not spml, so the integration never runs, and leftover spml
 // settings are inert configuration for a path that is off.
-func TestAssayInertOnForwarder(t *testing.T) {
+func TestSpmlInertOnForwarder(t *testing.T) {
 	t.Setenv("CONFIG_FILE", writeTestConfig(t, `
 service:
   servingUrl: "http://example.com"
@@ -4430,7 +4430,7 @@ service:
   verifiability: "TeeML"
   providerType: "centralized"
   providerIdentity: "openai"
-assay:
+spml:
   verifierUrl: "http://verifier:8200"
 `))
 	cfg := &Config{}

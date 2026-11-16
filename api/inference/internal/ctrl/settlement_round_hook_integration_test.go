@@ -24,7 +24,7 @@ func (h *countingHooks) afterSettlement(context.Context)   { h.after++ }
 // not run on a blocked round, which is meant to leave everything untouched.
 func TestSettlementRoundRunsAfterSettlementEvenWhenEmpty(t *testing.T) {
 	c := setupReconcileCtrl(t)
-	if err := c.db.Migrate(); err != nil { // the real migration set: request, user, video tables, assay_payout
+	if err := c.db.Migrate(); err != nil { // the real migration set: request, user, video tables, spml_payout
 		t.Fatal(err)
 	}
 	logger, err := log.GetLogger(&config.LoggerConfig{Format: log.TextLogFormat, Level: "error"})

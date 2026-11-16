@@ -12,11 +12,11 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
 )
 
-// The assay routes exist only on a spml broker: a teeml broker must serve exactly the
+// The spml routes exist only on a spml broker: a teeml broker must serve exactly the
 // routes it served before spml was merged.
-func TestAssayRoutesOnlyForSPML(t *testing.T) {
+func TestSpmlRoutesOnlyForSPML(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	assay := []string{"/v1/attestation/assay", "/v1/attestation/assay/scan", "/v1/payout/voucher"}
+	spml := []string{"/v1/attestation/spml", "/v1/attestation/spml/scan", "/v1/payout/voucher"}
 	for _, tc := range []struct {
 		providerType string
 		want         bool
@@ -34,7 +34,7 @@ func TestAssayRoutesOnlyForSPML(t *testing.T) {
 		for _, rt := range r.Routes() {
 			have[rt.Path] = true
 		}
-		for _, p := range assay {
+		for _, p := range spml {
 			if have[p] != tc.want {
 				t.Errorf("providerType %q: route %s registered = %v, want %v", tc.providerType, p, have[p], tc.want)
 			}

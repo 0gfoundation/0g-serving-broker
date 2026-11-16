@@ -23,10 +23,10 @@ import (
 )
 
 // Review comments 3 and 4 on PR #547, end to end through the real invoice
-// path against a fake assay:
-//   - the assay is down: nothing changes in assay_payout (state was persisted
+// path against a fake spml:
+//   - the spml is down: nothing changes in spml_payout (state was persisted
 //     before the POST), and the next round re-sends the identical invoice;
-//   - the assay answers: an OK node is marked invoiced with its pending set
+//   - the spml answers: an OK node is marked invoiced with its pending set
 //     cleared; a "not in my ledger" refusal un-accrues exactly that fee and
 //     clears the hash so the node is not wedged; the verifier cut is marked;
 //   - with nothing left to invoice, no request is sent.
@@ -42,8 +42,8 @@ func TestInvoiceFailureKeepsStateAndRetryResendsSameInvoice(t *testing.T) {
 	c.logger = testLogger()
 	c.teeService = &tee.TeeService{ProviderSigner: priv}
 	c.contract = &providercontract.ProviderContract{ProviderAddress: "0xprovider"}
-	c.assayPayoutEnabled = true
-	c.assayVerifierCutBps = 1000
+	c.spmlPayoutEnabled = true
+	c.spmlVerifierCutBps = 1000
 
 	var (
 		mu     sync.Mutex
@@ -67,7 +67,7 @@ func TestInvoiceFailureKeepsStateAndRetryResendsSameInvoice(t *testing.T) {
 			return
 		}
 		if isDown {
-			http.Error(w, "assay unavailable", http.StatusInternalServerError)
+			http.Error(w, "spml unavailable", http.StatusInternalServerError)
 			return
 		}
 		resp := invoiceResponse{OK: true, Epoch: req.Epoch, Cut: &invoiceResult{NodeID: model.VerifierCutNode, OK: true}}
@@ -83,15 +83,15 @@ func TestInvoiceFailureKeepsStateAndRetryResendsSameInvoice(t *testing.T) {
 	}))
 	defer srv.Close()
 	c.httpClient = srv.Client()
-	c.assayVerifierURL = srv.URL
+	c.spmlVerifierURL = srv.URL
 
-	seed := []model.AssayPayout{
+	seed := []model.SpmlPayout{
 		{Node: "node_0", Cumulative: "1350", Epoch: 7, PendingCovered: db.EncodeCovered([]db.CoveredEntry{{Hash: "h1", Fee: "900"}, {Hash: "h2", Fee: "450"}})},
 		{Node: "node_1", Cumulative: "270", Epoch: 7, PendingCovered: db.EncodeCovered([]db.CoveredEntry{{Hash: "h5", Fee: "270"}})},
 		{Node: model.VerifierCutNode, Cumulative: "180", Epoch: 7, PendingCovered: db.EncodeCovered(nil)},
 	}
 	for _, st := range seed {
-		if err := c.db.UpsertAssayPayout(st); err != nil {
+		if err := c.db.UpsertSpmlPayout(st); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -102,8 +102,8 @@ func TestInvoiceFailureKeepsStateAndRetryResendsSameInvoice(t *testing.T) {
 		return len(bodies)
 	}
 
-	// 1. Assay down: a failed POST changes nothing.
-	c.settleAssayPayout(ctx)
+	// 1. Spml down: a failed POST changes nothing.
+	c.settleSpmlPayout(ctx)
 	if requests() != 1 {
 		t.Fatalf("expected 1 invoice attempt, got %d", requests())
 	}
@@ -118,11 +118,11 @@ func TestInvoiceFailureKeepsStateAndRetryResendsSameInvoice(t *testing.T) {
 		}
 	}
 
-	// 2. Assay back: the retry is the identical invoice, then the answer is applied.
+	// 2. Spml back: the retry is the identical invoice, then the answer is applied.
 	mu.Lock()
 	down = false
 	mu.Unlock()
-	c.settleAssayPayout(ctx)
+	c.settleSpmlPayout(ctx)
 	if requests() != 2 {
 		t.Fatalf("expected 2 invoice attempts, got %d", requests())
 	}
@@ -150,18 +150,18 @@ func TestInvoiceFailureKeepsStateAndRetryResendsSameInvoice(t *testing.T) {
 	}
 
 	// 3. Everything acknowledged: no request goes out.
-	c.settleAssayPayout(ctx)
+	c.settleSpmlPayout(ctx)
 	if requests() != 2 {
 		t.Fatalf("invoice sent with nothing pending (%d attempts)", requests())
 	}
 }
 
-// The invoice path loads the payout rows, talks to the assay, then records the
+// The invoice path loads the payout rows, talks to the spml, then records the
 // answer. The event process's reconciliation can accrue into the same row in
 // between (it is the recovery path for a broker that died after the receipt).
 // The answer must not overwrite that accrual: the row keeps the higher
 // cumulative and the new pending hash, stays un-invoiced, and the next
-// invoice carries the new hash while the assay reports the old ones as
+// invoice carries the new hash while the spml reports the old ones as
 // already covered.
 func TestInvoiceAnswerDoesNotOverwriteConcurrentAccrual(t *testing.T) {
 	c := setupReconcileCtrl(t)
@@ -175,8 +175,8 @@ func TestInvoiceAnswerDoesNotOverwriteConcurrentAccrual(t *testing.T) {
 	c.logger = testLogger()
 	c.teeService = &tee.TeeService{ProviderSigner: priv}
 	c.contract = &providercontract.ProviderContract{ProviderAddress: "0xprovider"}
-	c.assayPayoutEnabled = true
-	c.assayVerifierCutBps = 1000
+	c.spmlPayoutEnabled = true
+	c.spmlVerifierCutBps = 1000
 
 	var (
 		mu     sync.Mutex
@@ -196,7 +196,7 @@ func TestInvoiceAnswerDoesNotOverwriteConcurrentAccrual(t *testing.T) {
 		mu.Unlock()
 		if doRace {
 			// Layer 2 lands while the POST is in flight: +900 for h9.
-			if err := c.db.UpsertAssayPayout(model.AssayPayout{Node: "node_0", Cumulative: "2250", Epoch: 8,
+			if err := c.db.UpsertSpmlPayout(model.SpmlPayout{Node: "node_0", Cumulative: "2250", Epoch: 8,
 				PendingCovered: db.EncodeCovered([]db.CoveredEntry{{Hash: "h1", Fee: "900"}, {Hash: "h2", Fee: "450"}, {Hash: "h9", Fee: "900"}})}); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
@@ -220,16 +220,16 @@ func TestInvoiceAnswerDoesNotOverwriteConcurrentAccrual(t *testing.T) {
 	}))
 	defer srv.Close()
 	c.httpClient = srv.Client()
-	c.assayVerifierURL = srv.URL
+	c.spmlVerifierURL = srv.URL
 
-	if err := c.db.UpsertAssayPayout(model.AssayPayout{Node: "node_0", Cumulative: "1350", Epoch: 7,
+	if err := c.db.UpsertSpmlPayout(model.SpmlPayout{Node: "node_0", Cumulative: "1350", Epoch: 7,
 		PendingCovered: db.EncodeCovered([]db.CoveredEntry{{Hash: "h1", Fee: "900"}, {Hash: "h2", Fee: "450"}})}); err != nil {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
 
 	// 1. OK answer for 1350/{h1,h2} arrives after the row moved to 2250/{h1,h2,h9}.
-	c.settleAssayPayout(ctx)
+	c.settleSpmlPayout(ctx)
 	states, err := c.loadPayoutStates()
 	if err != nil {
 		t.Fatal(err)
@@ -238,11 +238,11 @@ func TestInvoiceAnswerDoesNotOverwriteConcurrentAccrual(t *testing.T) {
 		t.Fatalf("concurrent accrual overwritten by the invoice answer: %+v", st)
 	}
 
-	// 2. Next round re-invoices 2250/{h1,h2,h9}; the assay says h1,h2 already covered -> they are dropped, cumulative kept.
+	// 2. Next round re-invoices 2250/{h1,h2,h9}; the spml says h1,h2 already covered -> they are dropped, cumulative kept.
 	mu.Lock()
 	race = false
 	mu.Unlock()
-	c.settleAssayPayout(ctx)
+	c.settleSpmlPayout(ctx)
 	mu.Lock()
 	second := bodies[1]
 	mu.Unlock()
@@ -255,7 +255,7 @@ func TestInvoiceAnswerDoesNotOverwriteConcurrentAccrual(t *testing.T) {
 	}
 
 	// 3. Third round: only h9 is sent and accepted.
-	c.settleAssayPayout(ctx)
+	c.settleSpmlPayout(ctx)
 	states, _ = c.loadPayoutStates()
 	if st := states["node_0"]; !st.Invoiced || st.Cumulative != "2250" || len(decodeCovered(st.PendingCovered)) != 0 {
 		t.Fatalf("after third round: %+v", st)
@@ -269,7 +269,7 @@ func TestInvoiceAnswerDoesNotOverwriteConcurrentAccrual(t *testing.T) {
 }
 
 // Review comment 4489874452 on PR #547, end to end through the invoice loop:
-// a hash the assay refuses for good is un-accrued from its node AND its cut
+// a hash the spml refuses for good is un-accrued from its node AND its cut
 // comes off the verifier-cut row, after the cut mark; a cut already vouched
 // nets against future cuts — the cut invoice is refused until new cuts exceed
 // the gap, then accepted — and node invoices are never affected.
@@ -285,12 +285,12 @@ func TestInvoiceUnaccruesCutOfRefusedHash(t *testing.T) {
 	c.logger = testLogger()
 	c.teeService = &tee.TeeService{ProviderSigner: priv}
 	c.contract = &providercontract.ProviderContract{ProviderAddress: "0xprovider"}
-	c.assayPayoutEnabled = true
-	c.assayVerifierCutBps = 1000
+	c.spmlPayoutEnabled = true
+	c.spmlVerifierCutBps = 1000
 
 	var (
 		mu        sync.Mutex
-		issuedCut = "0" // the assay's own monotonic cut ledger
+		issuedCut = "0" // the spml's own monotonic cut ledger
 		cutOKs    []bool
 	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -330,12 +330,12 @@ func TestInvoiceUnaccruesCutOfRefusedHash(t *testing.T) {
 	}))
 	defer srv.Close()
 	c.httpClient = srv.Client()
-	c.assayVerifierURL = srv.URL
+	c.spmlVerifierURL = srv.URL
 	ctx := context.Background()
 
 	// h1 (900+100) and h2 (450+50) accrued; cut row holds both cuts, not yet vouched.
 	seedNode := func() {
-		if err := c.db.UpsertAssayPayout(model.AssayPayout{Node: "node_0", Cumulative: "1350", Epoch: 7,
+		if err := c.db.UpsertSpmlPayout(model.SpmlPayout{Node: "node_0", Cumulative: "1350", Epoch: 7,
 			PendingCovered: db.EncodeCovered([]db.CoveredEntry{{Hash: "h1", Fee: "900", Cut: "100"}, {Hash: "h2", Fee: "450", Cut: "50"}})}); err != nil {
 			t.Fatal(err)
 		}
@@ -345,10 +345,10 @@ func TestInvoiceUnaccruesCutOfRefusedHash(t *testing.T) {
 	// 0. Atomicity: a cut row that cannot absorb h2's cut (hand-edited to 20)
 	//    fails the node's write as a whole — node_0 keeps 1350 with both hashes
 	//    pending instead of losing h2's share while the verifier keeps its cut.
-	if err := c.db.UpsertAssayPayout(model.AssayPayout{Node: model.VerifierCutNode, Cumulative: "20", Epoch: 7, PendingCovered: "[]"}); err != nil {
+	if err := c.db.UpsertSpmlPayout(model.SpmlPayout{Node: model.VerifierCutNode, Cumulative: "20", Epoch: 7, PendingCovered: "[]"}); err != nil {
 		t.Fatal(err)
 	}
-	c.settleAssayPayout(ctx)
+	c.settleSpmlPayout(ctx)
 	states, _ := c.loadPayoutStates()
 	if st := states["node_0"]; st.Invoiced || st.Cumulative != "1350" || !reflect.DeepEqual(coveredHashes(decodeCovered(st.PendingCovered)), []string{"h1", "h2"}) {
 		t.Fatalf("node after a failed cut un-accrue: %+v (want untouched: 1350, h1+h2 pending)", st)
@@ -357,14 +357,14 @@ func TestInvoiceUnaccruesCutOfRefusedHash(t *testing.T) {
 		t.Fatalf("cut row after a failed un-accrue: %+v (want untouched 20)", st)
 	}
 
-	if err := c.db.UpsertAssayPayout(model.AssayPayout{Node: model.VerifierCutNode, Cumulative: "150", Epoch: 7, PendingCovered: "[]"}); err != nil {
+	if err := c.db.UpsertSpmlPayout(model.SpmlPayout{Node: model.VerifierCutNode, Cumulative: "150", Epoch: 7, PendingCovered: "[]"}); err != nil {
 		t.Fatal(err)
 	}
 
 	// 1. h2 refused for good, cut 150 vouched in the same answer: node loses
 	//    h2's share (1350→900, h1 still pending), cut row marked invoiced and
 	//    then lowered by h2's cut (150→100).
-	c.settleAssayPayout(ctx)
+	c.settleSpmlPayout(ctx)
 	states, _ = c.loadPayoutStates()
 	if st := states["node_0"]; st.Invoiced || st.Cumulative != "900" || !reflect.DeepEqual(coveredHashes(decodeCovered(st.PendingCovered)), []string{"h1"}) {
 		t.Fatalf("node after refusal: %+v (want 900, only h1 pending)", st)
@@ -374,7 +374,7 @@ func TestInvoiceUnaccruesCutOfRefusedHash(t *testing.T) {
 	}
 
 	// 2. Node invoice 900/{h1} accepted; the cut row is invoiced so no cut is sent.
-	c.settleAssayPayout(ctx)
+	c.settleSpmlPayout(ctx)
 	states, _ = c.loadPayoutStates()
 	if st := states["node_0"]; !st.Invoiced || st.Cumulative != "900" || len(decodeCovered(st.PendingCovered)) != 0 {
 		t.Fatalf("node second round: %+v", st)
@@ -387,20 +387,20 @@ func TestInvoiceUnaccruesCutOfRefusedHash(t *testing.T) {
 	}
 
 	// 3. New cut accrues: 100+20=120, below the vouched 150 → refused, row stays un-invoiced.
-	if err := c.db.UpsertAssayPayout(model.AssayPayout{Node: model.VerifierCutNode, Cumulative: "120", Epoch: 8, PendingCovered: "[]"}); err != nil {
+	if err := c.db.UpsertSpmlPayout(model.SpmlPayout{Node: model.VerifierCutNode, Cumulative: "120", Epoch: 8, PendingCovered: "[]"}); err != nil {
 		t.Fatal(err)
 	}
-	c.settleAssayPayout(ctx)
+	c.settleSpmlPayout(ctx)
 	states, _ = c.loadPayoutStates()
 	if st := states[model.VerifierCutNode]; st.Invoiced || st.Cumulative != "120" {
 		t.Fatalf("cut row while netting: %+v (want 120, un-invoiced)", st)
 	}
 
 	// 4. More cut accrues: 160 > 150 → accepted; the 50 was netted against new cuts.
-	if err := c.db.UpsertAssayPayout(model.AssayPayout{Node: model.VerifierCutNode, Cumulative: "160", Epoch: 9, PendingCovered: "[]"}); err != nil {
+	if err := c.db.UpsertSpmlPayout(model.SpmlPayout{Node: model.VerifierCutNode, Cumulative: "160", Epoch: 9, PendingCovered: "[]"}); err != nil {
 		t.Fatal(err)
 	}
-	c.settleAssayPayout(ctx)
+	c.settleSpmlPayout(ctx)
 	states, _ = c.loadPayoutStates()
 	if st := states[model.VerifierCutNode]; !st.Invoiced || st.Cumulative != "160" {
 		t.Fatalf("cut row after netting: %+v (want 160, invoiced)", st)
