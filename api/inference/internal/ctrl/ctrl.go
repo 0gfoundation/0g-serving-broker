@@ -153,50 +153,50 @@ type Ctrl struct {
 	// providerHooks(), never directly.
 	hooks providerHooks
 
-	// assayVerdictFilter, when true, records the Assay verifier's ZG-Verdict
+	// spmlVerdictFilter, when true, records the Spml verifier's ZG-Verdict
 	// per request and excludes REJECT'd requests from settlement. Set from
 	// providerType "spml"; inert for every other provider type.
-	assayVerdictFilter bool
-	// assayAttestor is the Phase-2 verify-app loop (nil = attestation off);
+	spmlVerdictFilter bool
+	// spmlAttestor is the Phase-2 verify-app loop (nil = attestation off);
 	// it supplies the live TLS pin and the settlement/invoice gate.
-	assayAttestor *assayAttestor
-	// assayAttCache memoises the relayed assay attestation (see attestation_relay.go).
-	assayAttCache *assayAttestationCache
-	// assayVerifierAddress, when non-nil, is the verifier's secp256k1 signing
-	// address (cfg.Assay.VerifierAddress). A verdict is then only recorded if
+	spmlAttestor *spmlAttestor
+	// spmlAttCache memoises the relayed spml attestation (see attestation_relay.go).
+	spmlAttCache *spmlAttestationCache
+	// spmlVerifierAddress, when non-nil, is the verifier's secp256k1 signing
+	// address (cfg.Spml.VerifierAddress). A verdict is then only recorded if
 	// ZG-Verdict-Sig recovers to this address over the verdict + request hash —
 	// the verdict decides settlement, so it must be authenticated. nil = legacy
 	// trust-the-header mode.
-	assayVerifierAddress *common.Address
-	// assayStrictVerdict records INVALID_SIG (settlement-excluded) for
+	spmlVerifierAddress *common.Address
+	// spmlStrictVerdict records INVALID_SIG (settlement-excluded) for
 	// responses whose verdict is missing/unverifiable, so header stripping
-	// can't launder a REJECT. Only meaningful with assayVerifierAddress set.
-	assayStrictVerdict bool
-	// assayRejectGates decides whether a REJECT withholds settlement or is
-	// only recorded (see config.Assay.RejectGatesSettlement — off while the
+	// can't launder a REJECT. Only meaningful with spmlVerifierAddress set.
+	spmlStrictVerdict bool
+	// spmlRejectGates decides whether a REJECT withholds settlement or is
+	// only recorded (see config.Spml.RejectGatesSettlement — off while the
 	// LDD thresholds are uncalibrated). INVALID_SIG withholds either way.
-	assayRejectGates bool
-	// assayVerifierURL, when non-empty, is where settlement fetches the
+	spmlRejectGates bool
+	// spmlVerifierURL, when non-empty, is where settlement fetches the
 	// batch's final verdicts (POST {url}/v1/settlement/check) before
 	// deciding to settle — required to resolve PENDING verdicts from the
 	// verifier's non-blocking mode. Empty = decide on recorded verdicts only.
-	assayVerifierURL string
-	// assayCheckWaitMs is forwarded as wait_ms on the settlement check: how
+	spmlVerifierURL string
+	// spmlCheckWaitMs is forwarded as wait_ms on the settlement check: how
 	// long the verifier may hold the request waiting for in-flight audits.
-	assayCheckWaitMs int
-	// assayPayoutEnabled drives the SPML voucher flow: after settlement the
+	spmlCheckWaitMs int
+	// spmlPayoutEnabled drives the SPML voucher flow: after settlement the
 	// broker accumulates each settled request's fee onto its node's
 	// cumulative and invoices the verifier for signed PayoutVouchers.
-	assayPayoutEnabled bool
-	// assayVerifierCutBps is the assay's cut in basis points of each newly
+	spmlPayoutEnabled bool
+	// spmlVerifierCutBps is the spml's cut in basis points of each newly
 	// settled amount (the on-chain cut cap independently bounds it).
-	assayVerifierCutBps int64
-	// assayPayees remembers the payout addresses already listed on-chain
-	// (allowAssayNode is permanent), so each costs one lookup per process.
-	assayPayees sync.Map
-	// ensureAssayNode lists a payee on-chain if missing; nil means the
-	// contract's own EnsureAssayNode. A field so tests can stand in for the chain.
-	ensureAssayNode func(ctx context.Context, node common.Address) (bool, error)
+	spmlVerifierCutBps int64
+	// spmlPayees remembers the payout addresses already listed on-chain
+	// (allowSpmlNode is permanent), so each costs one lookup per process.
+	spmlPayees sync.Map
+	// ensureSpmlNode lists a payee on-chain if missing; nil means the
+	// contract's own EnsureSpmlNode. A field so tests can stand in for the chain.
+	ensureSpmlNode func(ctx context.Context, node common.Address) (bool, error)
 
 	// Session validation cache
 	sessionCache *cache.Cache
@@ -361,7 +361,7 @@ func New(
 		}
 	}
 
-	// teeml adds nothing to the shared path; spml adds the assay's.
+	// teeml adds nothing to the shared path; spml adds the spml's.
 	var hooks providerHooks = noHooks{}
 	var spml *spmlSetup
 	if cfg.Service.IsSPML() {
@@ -390,7 +390,7 @@ func New(
 		svcCache:             svcCache,
 		teeService:           teeService,
 		hooks:                hooks,
-		assayAttCache:        &assayAttestationCache{ttl: constant.AssayAttestationRelayTTL},
+		spmlAttCache:        &spmlAttestationCache{ttl: constant.SpmlAttestationRelayTTL},
 		chatCacheExpiration:  cfg.ChatCacheExpiration,
 		logger:               logger,
 		// Initialize session cache with 5 minute expiration and cleanup every 10 minutes

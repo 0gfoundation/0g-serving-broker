@@ -18,7 +18,7 @@ import (
 // broker -> verifier -> GPU chain.
 //
 // Unlike the other chatbot integration tests, the upstream here is NOT a mock:
-// the broker's Service.TargetURL points at the live Assay verifier (CPU-B),
+// the broker's Service.TargetURL points at the live Spml verifier (CPU-B),
 // which in turn calls the live GPU node (GPU-A). The broker still uses the
 // stubbed on-chain contract + seeded caches from setupTestEnv, so no wallet,
 // RPC, or TEE is required — only the MySQL test container and a reachable
@@ -27,7 +27,7 @@ import (
 // Run from api/:
 //
 //	VERIFIER_TARGET_URL=http://localhost:8200/v1 \
-//	ASSAY_MODEL=Qwen/Qwen3-0.6B \
+//	SPML_MODEL=Qwen/Qwen3-0.6B \
 //	go test -tags integration -run TestBrokerToVerifierToGPU \
 //	    -v -timeout 600s ./inference/integration_test/...
 //
@@ -39,13 +39,13 @@ func TestBrokerToVerifierToGPU(t *testing.T) {
 	// with VERIFIER_TARGET_URL set (e.g. http://localhost:8200/v1).
 	target := os.Getenv("VERIFIER_TARGET_URL")
 	if target == "" {
-		t.Skip("VERIFIER_TARGET_URL not set: this test needs a live assay verifier")
+		t.Skip("VERIFIER_TARGET_URL not set: this test needs a live spml verifier")
 	}
-	modelName := os.Getenv("ASSAY_MODEL")
+	modelName := os.Getenv("SPML_MODEL")
 	if modelName == "" {
 		modelName = "Qwen/Qwen3-0.6B"
 	}
-	prompt := os.Getenv("ASSAY_PROMPT")
+	prompt := os.Getenv("SPML_PROMPT")
 	if prompt == "" {
 		prompt = "What is 2+2?"
 	}
@@ -93,15 +93,15 @@ func TestBrokerToVerifierToGPU(t *testing.T) {
 		t.Fatalf("expected non-empty assistant content, body: %s", w.Body.String())
 	}
 
-	// 2. The Assay verdict block survived the broker's sanitizer — proof the
+	// 2. The Spml verdict block survived the broker's sanitizer — proof the
 	//    response really traversed the verifier and not some bare OpenAI server.
-	xAssay, ok := resp["x_assay"].(map[string]interface{})
+	xSpml, ok := resp["x_spml"].(map[string]interface{})
 	if !ok {
-		t.Fatalf("expected x_assay block in proxied response (verifier annotation), body: %s", w.Body.String())
+		t.Fatalf("expected x_spml block in proxied response (verifier annotation), body: %s", w.Body.String())
 	}
-	verdict, _ := xAssay["verdict"].(string)
+	verdict, _ := xSpml["verdict"].(string)
 	if verdict == "" {
-		t.Fatalf("expected x_assay.verdict, got: %v", xAssay)
+		t.Fatalf("expected x_spml.verdict, got: %v", xSpml)
 	}
 
 	// 3. The broker rewrote the upstream id (#184) and recorded billing.

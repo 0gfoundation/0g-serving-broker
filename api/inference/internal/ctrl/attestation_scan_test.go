@@ -15,7 +15,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/config"
 )
 
-// The fixture is the REAL tappscan record for assay-verifier captured on
+// The fixture is the REAL tappscan record for spml-verifier captured on
 // 2026-09-09 (signer 0xe4bb…2470, image gcp/uki/v0.7.0/dev.json, tls key
 // 0xb914…7aea). Every negative case below mutates one thing and expects
 // exactly that check to fail.
@@ -29,7 +29,7 @@ const (
 
 func loadScanFixture(t *testing.T) ([]byte, map[string]any) {
 	t.Helper()
-	raw, err := os.ReadFile("testdata/tappscan_assay_verifier.json")
+	raw, err := os.ReadFile("testdata/tappscan_spml_verifier.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,8 +222,8 @@ func TestScanStatementSignsAndRecovers(t *testing.T) {
 	raw, m := loadScanFixture(t)
 	key, _ := crypto.GenerateKey()
 	sign := func(hash []byte) ([]byte, error) { return crypto.Sign(accounts.TextHash(hash), key) }
-	var cfg config.AssayAttestation
-	cfg.AppID = "assay-verifier"
+	var cfg config.SpmlAttestation
+	cfg.AppID = "spml-verifier"
 	cfg.OnFail = "block-settlement"
 	cfg.MaxAgeSeconds = 3600
 	cfg.Tappscan.URL = "https://35.253.66.70"

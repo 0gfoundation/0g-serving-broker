@@ -37,7 +37,7 @@ func TestIsEventStream(t *testing.T) {
 	}
 }
 
-// settlement_assay.go:72 — a row whose node backfill could not be written is
+// settlement_spml.go:72 — a row whose node backfill could not be written is
 // held back from the round (the accrual re-reads the row from the DB), not
 // settled unattributed.
 func TestBackfillNodesHoldsBackFailedWrites(t *testing.T) {
@@ -45,9 +45,9 @@ func TestBackfillNodesHoldsBackFailedWrites(t *testing.T) {
 		{RequestHash: "a"},                 // backfilled, write ok
 		{RequestHash: "b"},                 // backfilled, write FAILS -> held back
 		{RequestHash: "c", Node: "node_9"}, // already attributed, untouched
-		{RequestHash: "d"},                 // assay knows no node -> settles unattributed as before
+		{RequestHash: "d"},                 // spml knows no node -> settles unattributed as before
 	}
-	results := map[string]assayVerdictResult{
+	results := map[string]spmlVerdictResult{
 		"a": {NodeID: "node_0"}, "b": {NodeID: "node_1"}, "c": {NodeID: "node_X"}, "d": {},
 	}
 	var warned int
@@ -69,7 +69,7 @@ func TestBackfillNodesHoldsBackFailedWrites(t *testing.T) {
 	}
 }
 
-// payout_assay.go:379 — an oversize invoice answer is reported as such, not as
+// payout_spml.go:379 — an oversize invoice answer is reported as such, not as
 // a JSON parse error on a truncated body (which would be retried forever).
 func TestPostInvoiceReportsOversizeResponse(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -79,7 +79,7 @@ func TestPostInvoiceReportsOversizeResponse(t *testing.T) {
 	}))
 	defer srv.Close()
 	priv, _ := crypto.GenerateKey()
-	c := &Ctrl{httpClient: srv.Client(), assayVerifierURL: srv.URL, teeService: &tee.TeeService{ProviderSigner: priv}}
+	c := &Ctrl{httpClient: srv.Client(), spmlVerifierURL: srv.URL, teeService: &tee.TeeService{ProviderSigner: priv}}
 	_, err := c.postInvoice(context.Background(), invoiceRequest{})
 	if err == nil || !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("err = %v, want an explicit size error", err)

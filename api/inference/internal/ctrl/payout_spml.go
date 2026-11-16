@@ -20,7 +20,7 @@ import (
 // SPML payout (docs/spml-design §4 steps 9-10): the broker owns the money —
 // each successful on-chain settlement folds every settled request's fee into
 // its serving node's cumulative, and the broker then sends the amounts to the
-// assay (POST /v1/payout/invoice). The assay validates each covered request
+// spml (POST /v1/payout/invoice). The spml validates each covered request
 // against ITS OWN ledger and answers with signed PayoutVouchers, which it also
 // pushes to the GPUs; the broker only needs the ok/fail per node.
 //
@@ -29,7 +29,7 @@ import (
 // broker's own round and the event process's on-chain reconciliation. So a
 // crash between the receipt and the accrual, or a failed write, can never lose
 // a fee: the rows survive until they are accrued. The invoice is sent after;
-// a failed invoice is retried on the next settlement cycle (the assay's
+// a failed invoice is retried on the next settlement cycle (the spml's
 // invoice endpoint is idempotent per epoch).
 
 type invoiceItem struct {
@@ -37,7 +37,7 @@ type invoiceItem struct {
 	Cumulative string   `json:"cumulative"`
 	Covered    []string `json:"covered"`
 	// Fees: the node's share of each covered hash, parallel to Covered, so
-	// the assay can check the amount per hash (and refuse per hash) instead
+	// the spml can check the amount per hash (and refuse per hash) instead
 	// of refusing the whole invoice on one price drift.
 	Fees []string `json:"fees"`
 }
@@ -48,8 +48,8 @@ type invoiceRequest struct {
 	Invoices []invoiceItem `json:"invoices"`
 	Cut      *string       `json:"cut,omitempty"`
 	// CutBps is the rate the node shares above were computed with, so the
-	// assay can recompute each share from its own token counts. It is
-	// bounded by the on-chain cut cap on the assay's side.
+	// spml can recompute each share from its own token counts. It is
+	// bounded by the on-chain cut cap on the spml's side.
 	CutBps int64 `json:"cut_bps"`
 }
 
@@ -58,7 +58,7 @@ type invoiceResult struct {
 	OK       bool     `json:"ok"`
 	Failures []string `json:"failures"`
 	// Voucher: only the payee is read here (to list it on-chain); the voucher
-	// itself reaches the node from the assay or through the relay.
+	// itself reaches the node from the spml or through the relay.
 	Voucher *struct {
 		Node string `json:"node"`
 	} `json:"voucher,omitempty"`
@@ -71,12 +71,12 @@ type invoiceResponse struct {
 	Cut     *invoiceResult  `json:"cut"`
 }
 
-// settleAssayPayout runs after a round's settled rows were deleted (and their
-// fees accrued): it invoices the assay for whatever is not yet acknowledged.
+// settleSpmlPayout runs after a round's settled rows were deleted (and their
+// fees accrued): it invoices the spml for whatever is not yet acknowledged.
 // Never fails the settlement — invoice problems are logged and retried next
 // cycle.
-func (c *Ctrl) settleAssayPayout(ctx context.Context) {
-	if !c.assayPayoutEnabled {
+func (c *Ctrl) settleSpmlPayout(ctx context.Context) {
+	if !c.spmlPayoutEnabled {
 		return
 	}
 	states, err := c.loadPayoutStates()
@@ -84,28 +84,28 @@ func (c *Ctrl) settleAssayPayout(ctx context.Context) {
 		c.logger.Errorf("Payout: cannot load payout state, skipping this cycle's invoice: %v", err)
 		return
 	}
-	c.invoiceAssay(ctx, states)
+	c.invoiceSpml(ctx, states)
 }
 
-// invoiceAssay sends every un-acknowledged cumulative to the verifier and
+// invoiceSpml sends every un-acknowledged cumulative to the verifier and
 // marks the acknowledged ones. Also called standalone to retry.
-func (c *Ctrl) invoiceAssay(ctx context.Context, states map[string]model.AssayPayout) {
-	if c.assayVerifierURL == "" {
-		c.logger.Warnf("Payout: assay.verifierUrl not set; vouchers cannot be requested")
+func (c *Ctrl) invoiceSpml(ctx context.Context, states map[string]model.SpmlPayout) {
+	if c.spmlVerifierURL == "" {
+		c.logger.Warnf("Payout: spml.verifierUrl not set; vouchers cannot be requested")
 		return
 	}
-	// Phase-2 gate 2: an unattested assay gets no cumulative disclosure and
+	// Phase-2 gate 2: an unattested spml gets no cumulative disclosure and
 	// no basis to issue vouchers. State is already persisted (fault model
 	// above) — the invoice retries next cycle.
-	if c.assayAttestor != nil {
-		if blocked, why := c.assayAttestor.blockSettlement(); blocked {
+	if c.spmlAttestor != nil {
+		if blocked, why := c.spmlAttestor.blockSettlement(); blocked {
 			c.logger.Errorf("Payout: invoice SKIPPED: %s", why)
 			return
 		}
 	}
 
-	req := invoiceRequest{Provider: c.ProviderAddress(), CutBps: c.assayVerifierCutBps}
-	var cutState model.AssayPayout
+	req := invoiceRequest{Provider: c.ProviderAddress(), CutBps: c.spmlVerifierCutBps}
+	var cutState model.SpmlPayout
 	for node, st := range states {
 		if st.Invoiced {
 			continue
@@ -140,7 +140,7 @@ func (c *Ctrl) invoiceAssay(ctx context.Context, states map[string]model.AssayPa
 
 	resp, err := c.postInvoice(ctx, req)
 	if err != nil {
-		c.logger.Warnf("Payout: invoice to %s failed (will retry next settlement): %v", c.assayVerifierURL, err)
+		c.logger.Warnf("Payout: invoice to %s failed (will retry next settlement): %v", c.spmlVerifierURL, err)
 		return
 	}
 
@@ -153,7 +153,7 @@ func (c *Ctrl) invoiceAssay(ctx context.Context, states map[string]model.AssayPa
 			next.Invoiced = true
 			c.markPayout(cutState.Node, cutState, next, nil)
 		} else {
-			c.logger.Warnf("Payout: assay refused the verifier cut invoice (cumulative=%s): %v", cutState.Cumulative, resp.Cut.Failures)
+			c.logger.Warnf("Payout: spml refused the verifier cut invoice (cumulative=%s): %v", cutState.Cumulative, resp.Cut.Failures)
 		}
 	}
 	for _, r := range resp.Results {
@@ -162,7 +162,7 @@ func (c *Ctrl) invoiceAssay(ctx context.Context, states map[string]model.AssayPa
 			continue
 		}
 		if r.OK {
-			c.listAssayPayee(ctx, r)
+			c.listSpmlPayee(ctx, r)
 			next := st
 			next.PendingCovered = db.EncodeCovered(nil)
 			next.Invoiced = true
@@ -176,25 +176,25 @@ func (c *Ctrl) invoiceAssay(ctx context.Context, states map[string]model.AssayPa
 		if note == "" {
 			// A disagreement we cannot explain: leave everything pending so
 			// nothing is lost, and let an operator look.
-			c.logger.Errorf("Payout: assay REFUSED invoice for node %s: %v", r.NodeID, r.Failures)
+			c.logger.Errorf("Payout: spml REFUSED invoice for node %s: %v", r.NodeID, r.Failures)
 			continue
 		}
 		c.logger.Warnf("Payout: node %s: %s (cut %s off the verifier row)", r.NodeID, note, cutDrop)
 		// The cut of every un-accrued hash comes off the cut row in the same
 		// transaction, so the whole fee stays in the pool rather than the
-		// assay keeping a cut of a request it refused for good.
+		// spml keeping a cut of a request it refused for good.
 		c.markPayout(r.NodeID, st, next, cutDrop)
 	}
 }
 
-// listAssayPayee puts the address a voucher pays on the provider's on-chain
-// payee list the first time the assay names it: claim() pays only listed
-// addresses. The broker takes the address from the assay as is, so the list is
+// listSpmlPayee puts the address a voucher pays on the provider's on-chain
+// payee list the first time the spml names it: claim() pays only listed
+// addresses. The broker takes the address from the spml as is, so the list is
 // a record of who this provider was asked to pay, not a second check on the
-// assay; what guards the pool is the voucher signature. Never fails the round:
+// spml; what guards the pool is the voucher signature. Never fails the round:
 // a node whose listing failed cannot claim until a later invoice retries it
 // (or the operator lists it by hand), and the error says so.
-func (c *Ctrl) listAssayPayee(ctx context.Context, r invoiceResult) {
+func (c *Ctrl) listSpmlPayee(ctx context.Context, r invoiceResult) {
 	if r.Voucher == nil {
 		return
 	}
@@ -203,35 +203,35 @@ func (c *Ctrl) listAssayPayee(ctx context.Context, r invoiceResult) {
 		return
 	}
 	node := common.HexToAddress(r.Voucher.Node)
-	if _, done := c.assayPayees.Load(node); done {
+	if _, done := c.spmlPayees.Load(node); done {
 		return
 	}
-	ensure := c.ensureAssayNode
+	ensure := c.ensureSpmlNode
 	if ensure == nil {
 		if c.contract == nil || c.contract.Contract == nil {
 			return
 		}
-		ensure = c.contract.EnsureAssayNode
+		ensure = c.contract.EnsureSpmlNode
 	}
 	sent, err := ensure(ctx, node)
 	if err != nil {
 		c.logger.Errorf("Payout: node %s: payee %s NOT listed on-chain, its claims revert until it is (retried on its next invoice): %v", r.NodeID, node.Hex(), err)
 		return
 	}
-	c.assayPayees.Store(node, struct{}{})
+	c.spmlPayees.Store(node, struct{}{})
 	if sent {
-		c.logger.Infof("Payout: node %s: payee %s listed on-chain (allowAssayNode)", r.NodeID, node.Hex())
+		c.logger.Infof("Payout: node %s: payee %s listed on-chain (allowSpmlNode)", r.NodeID, node.Hex())
 	}
 }
 
-// markPayout writes the assay's answer back only if the row still reads as
+// markPayout writes the spml's answer back only if the row still reads as
 // the snapshot the invoice was built from. A row that moved meanwhile (the
 // event process accrued into it during the POST) is left alone and
 // re-invoiced next round; overwriting it would drop that accrual.
-func (c *Ctrl) markPayout(node string, prev, next model.AssayPayout, cutDrop *big.Int) bool {
-	ok, err := c.db.UpdateAssayPayoutIfUnchanged(prev, next, cutDrop)
+func (c *Ctrl) markPayout(node string, prev, next model.SpmlPayout, cutDrop *big.Int) bool {
+	ok, err := c.db.UpdateSpmlPayoutIfUnchanged(prev, next, cutDrop)
 	if err != nil {
-		c.logger.Errorf("Payout: failed to record assay answer for node %s (cut to un-accrue %s): %v", node, cutDrop, err)
+		c.logger.Errorf("Payout: failed to record spml answer for node %s (cut to un-accrue %s): %v", node, cutDrop, err)
 		return false
 	}
 	if !ok {
@@ -240,7 +240,7 @@ func (c *Ctrl) markPayout(node string, prev, next model.AssayPayout, cutDrop *bi
 	return ok
 }
 
-// reconcileRefusal acts on the two refusals the assay's per-hash failures
+// reconcileRefusal acts on the two refusals the spml's per-hash failures
 // explain by themselves; anything else returns an empty note and the state
 // untouched. Pure, so the money rules are testable without a database.
 //
@@ -249,22 +249,22 @@ func (c *Ctrl) markPayout(node string, prev, next model.AssayPayout, cutDrop *bi
 //     cumulative — it is what landed. Re-sending them forever would deadlock
 //     the node: every later cycle appends new hashes to the same pending set
 //     and is refused for the old ones.
-//   - "not in my ledger": the assay has no record of the request (its bounded
+//   - "not in my ledger": the spml has no record of the request (its bounded
 //     verdict store evicted it, or it was UNKNOWN at settlement and recorded
 //     before UNVERIFIED_LOST existed). It can never validate that hash, so the
 //     node would be wedged forever. Un-accrue it: drop the hash AND subtract
 //     its node share from the cumulative; the fee stays in the pool, the
 //     design's loss ceiling. An entry stored without its fee (pre-fee rows)
 //     cannot be un-accrued exactly and is left for an operator.
-//   - "verdict REJECT is not payable" / "attributed to X, not Y": the assay's
+//   - "verdict REJECT is not payable" / "attributed to X, not Y": the spml's
 //     record disagrees with what the broker settled (a dropped verdict header
 //     plus a settlement check that fell back to recorded verdicts). Same
-//     answer as above — the assay will never vouch for that hash for this
+//     answer as above — the spml will never vouch for that hash for this
 //     node, so un-accrue it rather than wedge the node; the fee stays in the
-//     pool. The assay's cut of the same hash is returned alongside so the
+//     pool. The spml's cut of the same hash is returned alongside so the
 //     caller takes it off the cut row as well — a REJECT'd or lost request
 //     earns nobody anything.
-//   - "amount mismatch (got X, expected Y)": the assay recomputed this hash's
+//   - "amount mismatch (got X, expected Y)": the spml recomputed this hash's
 //     share from its own token counts and the price in effect and disagrees
 //     with ours. It will never agree on that hash, so un-accrue it the same
 //     way (the fee stays in the pool) instead of wedging every other hash
@@ -272,7 +272,7 @@ func (c *Ctrl) markPayout(node string, prev, next model.AssayPayout, cutDrop *bi
 //
 // With nothing left pending the cumulative is fully acknowledged, so the
 // node is marked invoiced and asks for nothing until new work accrues.
-func reconcileRefusal(st model.AssayPayout, failures []string) (next model.AssayPayout, cutDrop *big.Int, note string) {
+func reconcileRefusal(st model.SpmlPayout, failures []string) (next model.SpmlPayout, cutDrop *big.Int, note string) {
 	cutDrop = big.NewInt(0)
 	landed := failedHashes(failures, "already covered")
 	var lost []string
@@ -305,7 +305,7 @@ func reconcileRefusal(st model.AssayPayout, failures []string) (next model.Assay
 			continue
 		}
 		if !contains(lost, e.Hash) {
-			continue // landed: money already counted on the assay's side
+			continue // landed: money already counted on the spml's side
 		}
 		fee, ok := new(big.Int).SetString(e.Fee, 10)
 		if !ok || e.Fee == "" {
@@ -324,7 +324,7 @@ func reconcileRefusal(st model.AssayPayout, failures []string) (next model.Assay
 	if len(remaining) == 0 {
 		st.Invoiced = true
 	}
-	note = fmt.Sprintf("%d hash(es) already covered by an earlier voucher (lost response), %d un-accrued as lost by the assay, %d left pending",
+	note = fmt.Sprintf("%d hash(es) already covered by an earlier voucher (lost response), %d un-accrued as lost by the spml, %d left pending",
 		len(landed), unaccrued, len(remaining))
 	if unknownFee > 0 {
 		note += fmt.Sprintf(" (%d lost hash(es) stored without a fee cannot be un-accrued — operator action needed)", unknownFee)
@@ -332,20 +332,20 @@ func reconcileRefusal(st model.AssayPayout, failures []string) (next model.Assay
 	return st, cutDrop, note
 }
 
-// assayDo sends a request to the assay with the shared client but never
+// spmlDo sends a request to the spml with the shared client but never
 // follows a redirect: the verifier's answers decide which hashes get paid or
 // un-accrued, and a 30x could hand that conversation to an unpinned host
 // (same guard as the tappscan client).
-func (c *Ctrl) assayDo(req *http.Request) (*http.Response, error) {
+func (c *Ctrl) spmlDo(req *http.Request) (*http.Response, error) {
 	cl := *c.httpClient
 	cl.CheckRedirect = refuseRedirects
 	return cl.Do(req)
 }
 
-// invoiceResponseLimit bounds the assay's invoice answer (see postInvoice).
+// invoiceResponseLimit bounds the spml's invoice answer (see postInvoice).
 const invoiceResponseLimit = 16 << 20
 
-// refuseRedirects is the CheckRedirect policy of the assay calls (assayDo).
+// refuseRedirects is the CheckRedirect policy of the spml calls (spmlDo).
 // Go's client otherwise follows up to ten redirects, keeps custom headers
 // (our ZG-* signatures) across hosts, follows https→http, and turns a POST
 // into a GET on a 303. The shared upstream client keeps the default: its
@@ -357,7 +357,7 @@ func refuseRedirects(*http.Request, []*http.Request) error {
 }
 
 // failedHashes picks out the request hashes whose failure text starts with
-// prefix. The assay's failures are formatted "<hash>: <reason>" (payout.py
+// prefix. The spml's failures are formatted "<hash>: <reason>" (payout.py
 // validate), so the refusal itself carries the reconciliation data — no second
 // round trip. Splitting on the FIRST ": " is safe because the hash is never
 // client-chosen: it is the broker's own uuid4 nonce (proxy.go, async.go), so
@@ -383,7 +383,7 @@ func contains(list []string, s string) bool {
 }
 
 // coveredFees is the node share per covered hash, or nil when any entry
-// predates fee tracking: the assay then falls back to its whole-node check
+// predates fee tracking: the spml then falls back to its whole-node check
 // rather than choking on an empty amount.
 func coveredFees(entries []db.CoveredEntry) []string {
 	out := make([]string, len(entries))
@@ -404,26 +404,26 @@ func coveredHashes(entries []db.CoveredEntry) []string {
 	return out
 }
 
-// RetryAssayInvoices re-sends any cumulative the assay has not acknowledged
+// RetrySpmlInvoices re-sends any cumulative the spml has not acknowledged
 // (exposed for ops/testing; settlement calls the same path automatically).
-func (c *Ctrl) RetryAssayInvoices(ctx context.Context) error {
-	if !c.assayPayoutEnabled {
-		return fmt.Errorf("assay payout disabled")
+func (c *Ctrl) RetrySpmlInvoices(ctx context.Context) error {
+	if !c.spmlPayoutEnabled {
+		return fmt.Errorf("spml payout disabled")
 	}
 	states, err := c.loadPayoutStates()
 	if err != nil {
 		return err
 	}
-	c.invoiceAssay(ctx, states)
+	c.invoiceSpml(ctx, states)
 	return nil
 }
 
-func (c *Ctrl) loadPayoutStates() (map[string]model.AssayPayout, error) {
-	rows, err := c.db.ListAssayPayouts()
+func (c *Ctrl) loadPayoutStates() (map[string]model.SpmlPayout, error) {
+	rows, err := c.db.ListSpmlPayouts()
 	if err != nil {
 		return nil, err
 	}
-	states := make(map[string]model.AssayPayout, len(rows))
+	states := make(map[string]model.SpmlPayout, len(rows))
 	for _, row := range rows {
 		states[row.Node] = row
 	}
@@ -435,29 +435,29 @@ func (c *Ctrl) postInvoice(ctx context.Context, req invoiceRequest) (*invoiceRes
 	if err != nil {
 		return nil, err
 	}
-	url := c.assayVerifierURL + constant.AssayInvoicePath
+	url := c.spmlVerifierURL + constant.SpmlInvoicePath
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	// Fail closed: an unsigned invoice is either refused by the assay (a
+	// Fail closed: an unsigned invoice is either refused by the spml (a
 	// wasted round trip) or — if its enforcement flag is ever off — accepted
 	// unauthenticated, which is the thing signing exists to prevent. The
 	// cumulative stays pending and the next settlement cycle retries.
-	if err := c.signAssayBody(httpReq, body); err != nil {
+	if err := c.signSpmlBody(httpReq, body); err != nil {
 		return nil, fmt.Errorf("refusing to send an unsigned invoice: %w", err)
 	}
 	// The shared client, NOT http.DefaultClient: it carries the verifier's
 	// TLS key pin — through the default client the invoice would bypass the
 	// pin check entirely (settlement would work but invoicing would not).
-	httpResp, err := c.assayDo(httpReq)
+	httpResp, err := c.spmlDo(httpReq)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = httpResp.Body.Close() }()
 	// The answer carries one failure line per refused hash, and the pending
-	// set grows across every cycle the assay is down, so the bound has to be
+	// set grows across every cycle the spml is down, so the bound has to be
 	// generous: a truncated answer fails to parse and the same invoice is
 	// re-sent — and re-truncated — forever. ~130 bytes per line gives ~130k
 	// hashes under 16 MiB. Hitting it is reported as such, not as a JSON

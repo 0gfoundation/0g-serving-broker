@@ -10,21 +10,21 @@ import (
 	"github.com/pkg/errors"
 )
 
-// The two payee-list calls of the assay payout section, declared here because
+// The two payee-list calls of the spml payout section, declared here because
 // the generated binding predates them.
-const assayNodeABIJSON = `[
- {"name":"isAssayNode","type":"function","stateMutability":"view",
+const spmlNodeABIJSON = `[
+ {"name":"isSpmlNode","type":"function","stateMutability":"view",
   "inputs":[{"name":"provider","type":"address"},{"name":"node","type":"address"}],
   "outputs":[{"name":"","type":"bool"}]},
- {"name":"allowAssayNode","type":"function","stateMutability":"nonpayable",
+ {"name":"allowSpmlNode","type":"function","stateMutability":"nonpayable",
   "inputs":[{"name":"node","type":"address"}],"outputs":[]}]`
 
-// EnsureAssayNode lists node as a payee of this provider's assay pool unless
+// EnsureSpmlNode lists node as a payee of this provider's spml pool unless
 // it already is one. claim() pays only listed addresses, and listing is
 // permanent, so this runs once per payout address. It reports whether a
 // transaction was sent.
-func (c *ProviderContract) EnsureAssayNode(ctx context.Context, node common.Address) (bool, error) {
-	parsed, err := abi.JSON(strings.NewReader(assayNodeABIJSON))
+func (c *ProviderContract) EnsureSpmlNode(ctx context.Context, node common.Address) (bool, error) {
+	parsed, err := abi.JSON(strings.NewReader(spmlNodeABIJSON))
 	if err != nil {
 		return false, err
 	}
@@ -32,8 +32,8 @@ func (c *ProviderContract) EnsureAssayNode(ctx context.Context, node common.Addr
 	bound := bind.NewBoundContract(common.HexToAddress(c.ContractAddress), parsed, cl, cl, cl)
 
 	var out []interface{}
-	if err := bound.Call(&bind.CallOpts{Context: ctx}, &out, "isAssayNode", common.HexToAddress(c.ProviderAddress), node); err != nil {
-		return false, errors.Wrap(WrapContractError(err), "call isAssayNode")
+	if err := bound.Call(&bind.CallOpts{Context: ctx}, &out, "isSpmlNode", common.HexToAddress(c.ProviderAddress), node); err != nil {
+		return false, errors.Wrap(WrapContractError(err), "call isSpmlNode")
 	}
 	if listed, _ := out[0].(bool); listed {
 		return false, nil
@@ -45,13 +45,13 @@ func (c *ProviderContract) EnsureAssayNode(ctx context.Context, node common.Addr
 	}
 	opts.Context = ctx
 	opts.GasLimit = 0 // estimate, as ServingContract.Transact does
-	tx, err := bound.Transact(opts, "allowAssayNode", node)
+	tx, err := bound.Transact(opts, "allowSpmlNode", node)
 	if err != nil {
-		return false, errors.Wrap(WrapContractError(err), "call allowAssayNode")
+		return false, errors.Wrap(WrapContractError(err), "call allowSpmlNode")
 	}
 	receipt, err := c.Contract.WaitForReceipt(ctx, tx.Hash())
 	if err != nil {
-		return true, errors.Wrapf(err, "wait for allowAssayNode receipt (txHash=%s)", tx.Hash().Hex())
+		return true, errors.Wrapf(err, "wait for allowSpmlNode receipt (txHash=%s)", tx.Hash().Hex())
 	}
 	return true, receiptError(receipt)
 }

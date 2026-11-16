@@ -194,7 +194,7 @@ func (d *DB) UpdateRequestWithAccurateTokens(requestHash, inputFee, outputFee, t
 		}).Error
 }
 
-// UpdateRequestVerdict records the Assay/LDD audit verdict (from the verifier's
+// UpdateRequestVerdict records the Spml/LDD audit verdict (from the verifier's
 // ZG-Verdict response header) on a request. Used by settlement to exclude
 // REJECT'd requests from the TEE-signed batch.
 func (d *DB) UpdateRequestNode(requestHash, node string) error {

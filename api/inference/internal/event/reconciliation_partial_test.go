@@ -49,7 +49,7 @@ func setupReconcileDB(t *testing.T) *db.DB {
 
 func node0Cumulative(t *testing.T, d *db.DB) string {
 	t.Helper()
-	states, err := d.ListAssayPayouts()
+	states, err := d.ListSpmlPayouts()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,14 +67,14 @@ func node0Cumulative(t *testing.T, d *db.DB) string {
 // h2 into the same settledAmount and accrue it too.
 func TestPartialSettlementAccruesOnce(t *testing.T) {
 	d := setupReconcileDB(t)
-	opt := &db.AssayPayoutOptions{CutBps: 1000}
-	r := &ReconciliationProcessor{db: d, logger: nopLogger{}, assayPayout: opt}
+	opt := &db.SpmlPayoutOptions{CutBps: 1000}
+	r := &ReconciliationProcessor{db: d, logger: nopLogger{}, spmlPayout: opt}
 	user := common.HexToAddress("0x1234").Hex()
 	tx1, tx2 := common.HexToHash("0x01"), common.HexToHash("0x02")
 	now := time.Now()
 	for i, fee := range []string{"600", "400"} {
 		if err := d.CreateRequest(model.Request{Model: model.Model{CreatedAt: &now}, UserAddress: user, Nonce: fmt.Sprint(i),
-			RequestHash: fmt.Sprintf("h%d", i+1), Fee: fee, Node: "node_0", Verdict: constant.AssayVerdictPass, Settling: true}); err != nil {
+			RequestHash: fmt.Sprintf("h%d", i+1), Fee: fee, Node: "node_0", Verdict: constant.SpmlVerdictPass, Settling: true}); err != nil {
 			t.Fatal(err)
 		}
 	}

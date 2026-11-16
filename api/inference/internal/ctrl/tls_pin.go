@@ -11,7 +11,7 @@ import (
 
 // pinnedTLSConfig returns a tls.Config that authenticates the peer by
 // comparing sha256(leaf SubjectPublicKeyInfo) against pin, REPLACING CA and
-// hostname validation — the assay verifier's TLS key is attested through the
+// hostname validation — the spml verifier's TLS key is attested through the
 // tapp KMS derivation (docs/spml-design.md §5), so no CA will ever
 // vouch for it. The pin applies to every TLS connection the transport makes;
 // in this deployment the shared provider client only ever dials the verifier.
@@ -31,18 +31,18 @@ func pinnedTLSConfig(getPin func() []byte) *tls.Config {
 		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 			want := getPin()
 			if len(want) == 0 {
-				return errors.New("assay TLS: no pin available (attestation not yet verified and no static fallback) — failing closed")
+				return errors.New("spml TLS: no pin available (attestation not yet verified and no static fallback) — failing closed")
 			}
 			if len(rawCerts) == 0 {
-				return errors.New("assay TLS: peer presented no certificate")
+				return errors.New("spml TLS: peer presented no certificate")
 			}
 			leaf, err := x509.ParseCertificate(rawCerts[0])
 			if err != nil {
-				return fmt.Errorf("assay TLS: cannot parse peer certificate: %w", err)
+				return fmt.Errorf("spml TLS: cannot parse peer certificate: %w", err)
 			}
 			sum := sha256.Sum256(leaf.RawSubjectPublicKeyInfo)
 			if !bytes.Equal(sum[:], want) {
-				return fmt.Errorf("assay TLS key pin mismatch: peer SPKI sha256 %x, pinned %x", sum, want)
+				return fmt.Errorf("spml TLS key pin mismatch: peer SPKI sha256 %x, pinned %x", sum, want)
 			}
 			return nil
 		},

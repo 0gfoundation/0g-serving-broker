@@ -16,7 +16,7 @@ import (
 // SPML payout accrual (docs/spml-design §4 step 9).
 //
 // Invariant: a settled request row is deleted in the same transaction that
-// folds its fee into its node's assay_payout cumulative. The row is the only
+// folds its fee into its node's spml_payout cumulative. The row is the only
 // durable record of "node X earned fee Y for hash H" — the on-chain settlement
 // is final and says nothing about nodes — so accrual and deletion must stand or
 // fall together. Both delete sites go through deleteSettledTx: the broker's own
@@ -24,9 +24,9 @@ import (
 // on-chain reconciliation (DeleteSettledRequestsByHashes), which is what cleans
 // up after a broker that died between the receipt and the accrual.
 
-// CoveredEntry is one settled request awaiting the assay's acknowledgement:
-// its hash, the node's share of its fee and the assay's cut of it. Both parts
-// are kept so an entry the assay says it will never vouch for can be
+// CoveredEntry is one settled request awaiting the spml's acknowledgement:
+// its hash, the node's share of its fee and the spml's cut of it. Both parts
+// are kept so an entry the spml says it will never vouch for can be
 // un-accrued exactly — from the node's row and from the cut row — and the
 // whole fee stays in the pool.
 type CoveredEntry struct {
@@ -35,7 +35,7 @@ type CoveredEntry struct {
 	Cut  string `json:"c,omitempty"`
 }
 
-// EncodeCovered serialises pending covered entries for AssayPayout.PendingCovered.
+// EncodeCovered serialises pending covered entries for SpmlPayout.PendingCovered.
 func EncodeCovered(entries []CoveredEntry) string {
 	if len(entries) == 0 {
 		return "[]"
@@ -78,9 +78,9 @@ func DecodeCovered(s string) ([]CoveredEntry, error) {
 //   - no node attribution (header lost + settlement check didn't fill it):
 //     nobody can be invoiced for it;
 //   - verdict REJECT: settled (REJECT is advisory until the LDD thresholds
-//     are calibrated) but NOT payable — the assay's ledger refuses a REJECT
+//     are calibrated) but NOT payable — the spml's ledger refuses a REJECT
 //     hash, and refuses the whole invoice with it (seen live 2026-09-10);
-//   - verdict UNVERIFIED_LOST: the assay has no record of the request, so its
+//   - verdict UNVERIFIED_LOST: the spml has no record of the request, so its
 //     ledger would refuse the hash the same way.
 //
 // In every case the money reaches the pool and stays there — the design's
@@ -94,16 +94,16 @@ func PayableFee(req *model.Request) (*big.Int, string) {
 		return nil, fmt.Sprintf("no node attribution; fee %s stays unattributed in the pool", req.Fee)
 	}
 	switch req.Verdict {
-	case constant.AssayVerdictReject:
-		return nil, fmt.Sprintf("REJECT'd by the assay on node %s; fee %s stays in the pool", req.Node, req.Fee)
-	case constant.AssayVerdictUnverifiedLost:
-		return nil, fmt.Sprintf("audit record lost by the assay for node %s; fee %s stays in the pool", req.Node, req.Fee)
+	case constant.SpmlVerdictReject:
+		return nil, fmt.Sprintf("REJECT'd by the spml on node %s; fee %s stays in the pool", req.Node, req.Fee)
+	case constant.SpmlVerdictUnverifiedLost:
+		return nil, fmt.Sprintf("audit record lost by the spml for node %s; fee %s stays in the pool", req.Node, req.Fee)
 	}
 	return fee, ""
 }
 
-// SplitFee divides one settled fee between the serving node and the assay's
-// cut, in integer basis points, so the assay can recompute the node's share
+// SplitFee divides one settled fee between the serving node and the spml's
+// cut, in integer basis points, so the spml can recompute the node's share
 // exactly from its own token counts and the on-chain price. The two parts
 // always sum to the fee: the pool holds exactly the fee, so a cut added on top
 // of a full node share could never be funded (seen live 2026-09-11).
@@ -114,36 +114,36 @@ func SplitFee(fee *big.Int, cutBps int64) (node, cut *big.Int) {
 	return node, cut
 }
 
-// AssayPayoutOptions turns accrual on for a settled-row deletion. nil = the
+// SpmlPayoutOptions turns accrual on for a settled-row deletion. nil = the
 // provider has no SPML payout (teeml), rows are simply deleted.
-type AssayPayoutOptions struct {
-	// CutBps is the assay's cut of each settled fee (config assay.payout.verifierCutBps).
+type SpmlPayoutOptions struct {
+	// CutBps is the spml's cut of each settled fee (config spml.payout.verifierCutBps).
 	CutBps int64
 	// Logf, when set, receives one line per settled request that is not
 	// invoiced and why (Warnf-style).
 	Logf func(format string, args ...any)
 }
 
-func (o *AssayPayoutOptions) logf(format string, args ...any) {
+func (o *SpmlPayoutOptions) logf(format string, args ...any) {
 	if o != nil && o.Logf != nil {
 		o.Logf(format, args...)
 	}
 }
 
-// ListAssayPayouts returns every node's payout state.
-func (d *DB) ListAssayPayouts() ([]model.AssayPayout, error) {
-	var rows []model.AssayPayout
-	err := d.db.Model(&model.AssayPayout{}).Find(&rows).Error
+// ListSpmlPayouts returns every node's payout state.
+func (d *DB) ListSpmlPayouts() ([]model.SpmlPayout, error) {
+	var rows []model.SpmlPayout
+	err := d.db.Model(&model.SpmlPayout{}).Find(&rows).Error
 	return rows, err
 }
 
-// UpsertAssayPayout writes a node's full payout state (cumulative, epoch,
+// UpsertSpmlPayout writes a node's full payout state (cumulative, epoch,
 // pending covered entries, invoiced flag).
-func (d *DB) UpsertAssayPayout(row model.AssayPayout) error {
-	return upsertAssayPayoutTx(d.db, row)
+func (d *DB) UpsertSpmlPayout(row model.SpmlPayout) error {
+	return upsertSpmlPayoutTx(d.db, row)
 }
 
-func upsertAssayPayoutTx(tx *gorm.DB, row model.AssayPayout) error {
+func upsertSpmlPayoutTx(tx *gorm.DB, row model.SpmlPayout) error {
 	now := time.Now()
 	row.UpdatedAt = &now
 	return tx.Clauses(clause.OnConflict{
@@ -152,27 +152,27 @@ func upsertAssayPayoutTx(tx *gorm.DB, row model.AssayPayout) error {
 	}).Create(&row).Error
 }
 
-// UpdateAssayPayoutIfUnchanged writes next over the row only if it still
+// UpdateSpmlPayoutIfUnchanged writes next over the row only if it still
 // reads as prev (cumulative, epoch, pending set). The invoice path loads the
-// state, talks to the assay, then writes the answer back; the event process's
+// state, talks to the spml, then writes the answer back; the event process's
 // reconciliation can accrue into the same row in between, and a plain upsert
 // of the stale snapshot would silently drop that accrual (cumulative back
 // down, new pending hashes gone, request rows already deleted). Returns false
 // when the row moved: the caller leaves it and re-invoices next round — the
-// assay answers "already covered" for what it has vouched and the broker
+// spml answers "already covered" for what it has vouched and the broker
 // reconciles.
 //
-// cutDrop is the assay's cut of the hashes next no longer carries (the ones
-// the assay refused for good): it comes off the verifier-cut row in the same
+// cutDrop is the spml's cut of the hashes next no longer carries (the ones
+// the spml refused for good): it comes off the verifier-cut row in the same
 // transaction, so a refused hash's node share and cut are taken back together
 // or not at all. Both rows are locked by one `node IN (...)` statement, the
-// same shape accrueAssayPayoutTx uses, so the two never acquire them in
+// same shape accrueSpmlPayoutTx uses, so the two never acquire them in
 // opposite orders (the event process does not retry a reconcile that lost a
 // deadlock: its cursor moves on and the pending row expires). A cut row that
 // cannot absorb the drop (only reachable by a hand edit: accrual writes the
 // entry's cut and the cut row in one tx) fails the whole write, so the hash
 // stays pending and the next invoice repeats the refusal with an Error.
-func (d *DB) UpdateAssayPayoutIfUnchanged(prev, next model.AssayPayout, cutDrop *big.Int) (bool, error) {
+func (d *DB) UpdateSpmlPayoutIfUnchanged(prev, next model.SpmlPayout, cutDrop *big.Int) (bool, error) {
 	drop := cutDrop != nil && cutDrop.Sign() > 0
 	nodes := []string{prev.Node}
 	if drop {
@@ -181,11 +181,11 @@ func (d *DB) UpdateAssayPayoutIfUnchanged(prev, next model.AssayPayout, cutDrop 
 	now := time.Now()
 	var ok bool
 	err := d.db.Transaction(func(tx *gorm.DB) error {
-		var locked []model.AssayPayout
+		var locked []model.SpmlPayout
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("node IN ?", nodes).Find(&locked).Error; err != nil {
 			return err
 		}
-		res := tx.Model(&model.AssayPayout{}).
+		res := tx.Model(&model.SpmlPayout{}).
 			Where("node = ? AND cumulative = ? AND epoch = ? AND pending_covered = ?", prev.Node, prev.Cumulative, prev.Epoch, prev.PendingCovered).
 			Updates(map[string]interface{}{"cumulative": next.Cumulative, "epoch": next.Epoch, "pending_covered": next.PendingCovered, "invoiced": next.Invoiced, "updated_at": &now})
 		if res.Error != nil {
@@ -195,7 +195,7 @@ func (d *DB) UpdateAssayPayoutIfUnchanged(prev, next model.AssayPayout, cutDrop 
 		if !ok || !drop {
 			return nil
 		}
-		var cut *model.AssayPayout
+		var cut *model.SpmlPayout
 		for i := range locked {
 			if locked[i].Node == model.VerifierCutNode {
 				cut = &locked[i]
@@ -211,7 +211,7 @@ func (d *DB) UpdateAssayPayoutIfUnchanged(prev, next model.AssayPayout, cutDrop 
 		if cum.Cmp(cutDrop) < 0 {
 			return fmt.Errorf("verifier cut cumulative %s is below the %s to un-accrue", cut.Cumulative, cutDrop)
 		}
-		return tx.Model(&model.AssayPayout{}).Where("node = ?", model.VerifierCutNode).
+		return tx.Model(&model.SpmlPayout{}).Where("node = ?", model.VerifierCutNode).
 			Updates(map[string]interface{}{"cumulative": cum.Sub(cum, cutDrop).String(), "updated_at": &now}).Error
 	})
 	return ok && err == nil, err
@@ -220,7 +220,7 @@ func (d *DB) UpdateAssayPayoutIfUnchanged(prev, next model.AssayPayout, cutDrop 
 // DeleteSettledRequestsByHashes deletes settled request rows by hash, accruing
 // their fees first when opt is set. Idempotent: rows already deleted (by the
 // other delete site) are neither found nor accrued again.
-func (d *DB) DeleteSettledRequestsByHashes(requestHashes []string, opt *AssayPayoutOptions) error {
+func (d *DB) DeleteSettledRequestsByHashes(requestHashes []string, opt *SpmlPayoutOptions) error {
 	if len(requestHashes) == 0 {
 		return nil
 	}
@@ -230,17 +230,17 @@ func (d *DB) DeleteSettledRequestsByHashes(requestHashes []string, opt *AssayPay
 }
 
 // deleteSettledTx is the one place settled rows leave the request table. With
-// opt set it locks the rows, folds their fees into assay_payout, then deletes
+// opt set it locks the rows, folds their fees into spml_payout, then deletes
 // them — all inside the caller's transaction, so a failure anywhere keeps the
 // rows for the next attempt.
-func deleteSettledTx(tx *gorm.DB, hashes []string, opt *AssayPayoutOptions) error {
+func deleteSettledTx(tx *gorm.DB, hashes []string, opt *SpmlPayoutOptions) error {
 	if opt != nil {
 		var rows []model.Request
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("request_hash IN ?", hashes).Find(&rows).Error; err != nil {
 			return fmt.Errorf("lock settled requests: %w", err)
 		}
-		if err := accrueAssayPayoutTx(tx, rows, opt); err != nil {
-			return fmt.Errorf("accrue assay payout: %w", err)
+		if err := accrueSpmlPayoutTx(tx, rows, opt); err != nil {
+			return fmt.Errorf("accrue spml payout: %w", err)
 		}
 	}
 	if err := tx.Where("request_hash IN ?", hashes).Delete(&model.Request{}).Error; err != nil {
@@ -249,10 +249,10 @@ func deleteSettledTx(tx *gorm.DB, hashes []string, opt *AssayPayoutOptions) erro
 	return nil
 }
 
-// accrueAssayPayoutTx folds each payable row's fee into its node's cumulative
-// (net of the assay's cut, which accrues under model.VerifierCutNode) and
+// accrueSpmlPayoutTx folds each payable row's fee into its node's cumulative
+// (net of the spml's cut, which accrues under model.VerifierCutNode) and
 // appends the hash to the node's pending covered entries.
-func accrueAssayPayoutTx(tx *gorm.DB, rows []model.Request, opt *AssayPayoutOptions) error {
+func accrueSpmlPayoutTx(tx *gorm.DB, rows []model.Request, opt *SpmlPayoutOptions) error {
 	sums := map[string]*big.Int{}
 	covered := map[string][]CoveredEntry{}
 	cutTotal := big.NewInt(0)
@@ -289,11 +289,11 @@ func accrueAssayPayoutTx(tx *gorm.DB, rows []model.Request, opt *AssayPayoutOpti
 	for node := range sums {
 		nodes = append(nodes, node)
 	}
-	var existing []model.AssayPayout
+	var existing []model.SpmlPayout
 	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("node IN ?", nodes).Find(&existing).Error; err != nil {
 		return err
 	}
-	states := make(map[string]model.AssayPayout, len(existing))
+	states := make(map[string]model.SpmlPayout, len(existing))
 	for _, st := range existing {
 		states[st.Node] = st
 	}
@@ -316,7 +316,7 @@ func accrueAssayPayoutTx(tx *gorm.DB, rows []model.Request, opt *AssayPayoutOpti
 			// delete that kept failing would let the pending settlement expire
 			// and the same rows be settled on chain again. The column is left
 			// as it is so the invoice path keeps skipping just this node (an
-			// overwritten set would decode, and the assay would then refuse
+			// overwritten set would decode, and the spml would then refuse
 			// the WHOLE invoice for delta ≠ sum of fees); the entries that are
 			// not recorded go to the log for the operator to rebuild the set.
 			opt.logf("Payout: node %s: pending set unreadable (%v); accrued %s but NOT recorded %s — rebuild pending_covered by hand (raw: %q)",
@@ -325,7 +325,7 @@ func accrueAssayPayoutTx(tx *gorm.DB, rows []model.Request, opt *AssayPayoutOpti
 			st.PendingCovered = EncodeCovered(append(prev, covered[node]...))
 		}
 		st.Invoiced = false
-		if err := upsertAssayPayoutTx(tx, st); err != nil {
+		if err := upsertSpmlPayoutTx(tx, st); err != nil {
 			return fmt.Errorf("persist cumulative for node %s: %w", node, err)
 		}
 	}

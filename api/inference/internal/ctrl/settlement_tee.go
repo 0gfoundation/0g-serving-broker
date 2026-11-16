@@ -886,9 +886,9 @@ func (c *Ctrl) deleteRequests(requests []*model.Request, settled bool) error {
 	if len(requests) == 0 {
 		return nil
 	}
-	var payout *db.AssayPayoutOptions
+	var payout *db.SpmlPayoutOptions
 	if settled {
-		payout = c.assayPayoutOptions()
+		payout = c.spmlPayoutOptions()
 	}
 
 	// Atomically accumulate stats and delete requests in a single transaction
@@ -906,7 +906,7 @@ func (c *Ctrl) deleteRequests(requests []*model.Request, settled bool) error {
 		ServiceType:     c.Service.Type,
 		RecordPerWallet: c.userUsageStats.Enabled,
 		FallbackModel:   c.Service.ModelType,
-		AssayPayout:     payout,
+		SpmlPayout:     payout,
 	}); err != nil {
 		c.logger.Errorf("CRITICAL: failed to accumulate stats and delete settled requests: %v", err)
 		return err

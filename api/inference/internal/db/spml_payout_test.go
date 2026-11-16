@@ -23,24 +23,24 @@ func decodeCovered(s string) []CoveredEntry {
 // accrual, on both delete paths, and never twice.
 func TestSettledDeleteAccruesPayoutOnce(t *testing.T) {
 	d := setupTestDB(t)
-	if err := d.db.AutoMigrate(&model.Request{}, &model.AssayPayout{}, &model.DailyStat{}, &model.HourlyUsageStat{}); err != nil {
+	if err := d.db.AutoMigrate(&model.Request{}, &model.SpmlPayout{}, &model.DailyStat{}, &model.HourlyUsageStat{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	now := time.Now()
 	rows := []*model.Request{
-		{Model: model.Model{CreatedAt: &now}, UserAddress: "0xU", Nonce: "1", RequestHash: "h1", Fee: "1000", Node: "node_0", Verdict: constant.AssayVerdictPass},
-		{Model: model.Model{CreatedAt: &now}, UserAddress: "0xU", Nonce: "2", RequestHash: "h2", Fee: "500", Node: "node_0", Verdict: constant.AssayVerdictUnverified},
-		{Model: model.Model{CreatedAt: &now}, UserAddress: "0xU", Nonce: "3", RequestHash: "h3", Fee: "700", Node: "node_1", Verdict: constant.AssayVerdictReject},         // settles, not payable
-		{Model: model.Model{CreatedAt: &now}, UserAddress: "0xU", Nonce: "4", RequestHash: "h4", Fee: "900", Node: "node_1", Verdict: constant.AssayVerdictUnverifiedLost}, // settles, not payable
+		{Model: model.Model{CreatedAt: &now}, UserAddress: "0xU", Nonce: "1", RequestHash: "h1", Fee: "1000", Node: "node_0", Verdict: constant.SpmlVerdictPass},
+		{Model: model.Model{CreatedAt: &now}, UserAddress: "0xU", Nonce: "2", RequestHash: "h2", Fee: "500", Node: "node_0", Verdict: constant.SpmlVerdictUnverified},
+		{Model: model.Model{CreatedAt: &now}, UserAddress: "0xU", Nonce: "3", RequestHash: "h3", Fee: "700", Node: "node_1", Verdict: constant.SpmlVerdictReject},         // settles, not payable
+		{Model: model.Model{CreatedAt: &now}, UserAddress: "0xU", Nonce: "4", RequestHash: "h4", Fee: "900", Node: "node_1", Verdict: constant.SpmlVerdictUnverifiedLost}, // settles, not payable
 		{Model: model.Model{CreatedAt: &now}, UserAddress: "0xU", Nonce: "5", RequestHash: "h5", Fee: "300", Node: "node_1"},
 	}
 	if err := d.db.Create(&rows).Error; err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	opt := &AssayPayoutOptions{CutBps: 1000}
+	opt := &SpmlPayoutOptions{CutBps: 1000}
 
 	// Layer 1: the broker's own round (stats + delete + accrual, one tx).
-	if err := d.AccumulateAndDeleteRequests(rows[:2], AccumulateOptions{ServiceType: constant.ServiceTypeChatbot, AssayPayout: opt}); err != nil {
+	if err := d.AccumulateAndDeleteRequests(rows[:2], AccumulateOptions{ServiceType: constant.ServiceTypeChatbot, SpmlPayout: opt}); err != nil {
 		t.Fatalf("layer 1: %v", err)
 	}
 	// Layer 2: the event process confirming the same tx later, plus the rest.
@@ -54,11 +54,11 @@ func TestSettledDeleteAccruesPayoutOnce(t *testing.T) {
 	if left != 0 {
 		t.Fatalf("%d request rows left, want 0", left)
 	}
-	states, err := d.ListAssayPayouts()
+	states, err := d.ListSpmlPayouts()
 	if err != nil {
 		t.Fatal(err)
 	}
-	byNode := map[string]model.AssayPayout{}
+	byNode := map[string]model.SpmlPayout{}
 	for _, st := range states {
 		byNode[st.Node] = st
 	}
@@ -85,7 +85,7 @@ func TestSettledDeleteAccruesPayoutOnce(t *testing.T) {
 	if err := d.DeleteSettledRequestsByHashes([]string{"h6"}, nil); err != nil {
 		t.Fatal(err)
 	}
-	after, _ := d.ListAssayPayouts()
+	after, _ := d.ListSpmlPayouts()
 	for _, st := range after {
 		if st.Node == "node_0" && st.Cumulative != "1350" {
 			t.Errorf("plain delete accrued: %+v", st)

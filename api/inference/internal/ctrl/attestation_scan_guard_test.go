@@ -22,8 +22,8 @@ func TestScanSourceRequiresHTTPSAndRefusesRedirects(t *testing.T) {
 	defer srv.Close()
 	pin := sha256.Sum256(srv.Certificate().RawSubjectPublicKeyInfo)
 
-	var cfg config.AssayAttestation
-	cfg.AppID = "assay-verifier"
+	var cfg config.SpmlAttestation
+	cfg.AppID = "spml-verifier"
 	cfg.Tappscan.PubkeyPin = "0x" + hex.EncodeToString(pin[:])
 
 	cfg.Tappscan.URL = "http://" + strings.TrimPrefix(srv.URL, "https://")

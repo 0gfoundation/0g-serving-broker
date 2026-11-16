@@ -11,9 +11,9 @@ import (
 )
 
 // §7 of docs/spml-design.md: instead of trusting a pin frozen
-// in the config, the broker periodically re-attests the assay verifier by
+// in the config, the broker periodically re-attests the spml verifier by
 // reading tappscan's record for the app, cross-checking the signer against the
-// TappRegistry and the TLS key against the assay's live port (attestation_scan.go).
+// TappRegistry and the TLS key against the spml's live port (attestation_scan.go).
 //
 // This used to exec `tapp-cli verify-app` and parse its output instead. That
 // path is gone: its boot-chain answer came from a policy on a shared
@@ -27,51 +27,51 @@ import (
 //     through a fully-verified snapshot — redeploy-as-MITM is dead)
 //   - the settlement gate (SettleFeesWithTEE entry: no verdict authority, no
 //     money movement)
-//   - the invoice gate (settleAssayPayout: no cumulative disclosure)
+//   - the invoice gate (settleSpmlPayout: no cumulative disclosure)
 
-type attestedAssay struct {
+type attestedSpml struct {
 	pin       []byte // sha256 of the verifier's TLS SPKI, from "tls key"
 	checkedAt time.Time
 	ok        bool
 	detail    string // one-line reason, for logs and /health-style surfaces
 }
 
-type assayAttestor struct {
-	cfg    config.AssayAttestation
+type spmlAttestor struct {
+	cfg    config.SpmlAttestation
 	logger log.Logger
-	snap   atomic.Value // attestedAssay
+	snap   atomic.Value // attestedSpml
 	// scan is the evidence source. Never nil once the loop is running.
 	scan *scanSource
 }
 
-func newAssayAttestor(cfg config.AssayAttestation, logger log.Logger) *assayAttestor {
-	a := &assayAttestor{cfg: cfg, logger: logger}
-	a.snap.Store(attestedAssay{detail: "not yet verified"})
+func newSpmlAttestor(cfg config.SpmlAttestation, logger log.Logger) *spmlAttestor {
+	a := &spmlAttestor{cfg: cfg, logger: logger}
+	a.snap.Store(attestedSpml{detail: "not yet verified"})
 	return a
 }
 
 // current returns the latest snapshot, expired snapshots included — callers
 // decide staleness with fresh().
-func (a *assayAttestor) current() attestedAssay {
-	return a.snap.Load().(attestedAssay)
+func (a *spmlAttestor) current() attestedSpml {
+	return a.snap.Load().(attestedSpml)
 }
 
 // fresh is true when the last successful verification is within MaxAge.
-func (a *assayAttestor) fresh() bool {
+func (a *spmlAttestor) fresh() bool {
 	s := a.current()
 	return s.ok && time.Since(s.checkedAt) <= a.cfg.MaxAge()
 }
 
 // pin returns the attested pin when fresh, else nil (callers fall back to the
 // configured static pin — the pre-Phase-2 trust level, never less).
-func (a *assayAttestor) pinOrNil() []byte {
+func (a *spmlAttestor) pinOrNil() []byte {
 	if s := a.current(); s.ok && len(s.pin) > 0 {
 		return s.pin
 	}
 	return nil
 }
 
-// AssayAttestationSnapshot is what this broker got the last time it ran the
+// SpmlAttestationSnapshot is what this broker got the last time it ran the
 // verification itself, for surfacing next to the command we hand a client.
 //
 // Read the asymmetry before trusting it. A PASS here is worth little: we are
@@ -82,7 +82,7 @@ func (a *assayAttestor) pinOrNil() []byte {
 //
 // So: treat ok=false as a real signal, and ok=true as a hint that running the
 // command yourself is likely to be uneventful — never as a substitute for it.
-type AssayAttestationSnapshot struct {
+type SpmlAttestationSnapshot struct {
 	OK         bool      `json:"ok"`
 	CheckedAt  time.Time `json:"checked_at"`
 	Detail     string    `json:"detail"`
@@ -90,26 +90,26 @@ type AssayAttestationSnapshot struct {
 	GatesMoney bool      `json:"gates_settlement"`
 }
 
-// AssayAttestationStatus reports our own last verification, or nil when the
+// SpmlAttestationStatus reports our own last verification, or nil when the
 // attestation loop is not configured (in which case we verify nothing and have
 // nothing to report — which is itself worth saying out loud).
-func (c *Ctrl) AssayAttestationStatus() *AssayAttestationSnapshot {
-	if c.assayAttestor == nil {
+func (c *Ctrl) SpmlAttestationStatus() *SpmlAttestationSnapshot {
+	if c.spmlAttestor == nil {
 		return nil
 	}
-	s := c.assayAttestor.current()
-	blocked, _ := c.assayAttestor.blockSettlement()
-	return &AssayAttestationSnapshot{
+	s := c.spmlAttestor.current()
+	blocked, _ := c.spmlAttestor.blockSettlement()
+	return &SpmlAttestationSnapshot{
 		OK:         s.ok,
 		CheckedAt:  s.checkedAt,
 		Detail:     s.detail,
-		Fresh:      c.assayAttestor.fresh(),
+		Fresh:      c.spmlAttestor.fresh(),
 		GatesMoney: blocked,
 	}
 }
 
 // blockSettlement is the gate consulted by settlement and invoicing.
-func (a *assayAttestor) blockSettlement() (bool, string) {
+func (a *spmlAttestor) blockSettlement() (bool, string) {
 	if a.cfg.OnFail == "warn-only" {
 		return false, ""
 	}
@@ -117,7 +117,7 @@ func (a *assayAttestor) blockSettlement() (bool, string) {
 		return false, ""
 	}
 	s := a.current()
-	return true, fmt.Sprintf("assay attestation not current (ok=%v checkedAt=%s detail=%q)",
+	return true, fmt.Sprintf("spml attestation not current (ok=%v checkedAt=%s detail=%q)",
 		s.ok, s.checkedAt.Format(time.RFC3339), s.detail)
 }
 
@@ -126,7 +126,7 @@ func (a *assayAttestor) blockSettlement() (bool, string) {
 // (sidecar still booting, transient RPC/AS hiccup) clear in seconds, and a
 // gate that stays engaged a full interval longer than necessary skips
 // settlement rounds for nothing.
-func (a *assayAttestor) run(ctx context.Context) {
+func (a *spmlAttestor) run(ctx context.Context) {
 	for {
 		a.verifyOnce(ctx)
 		next := a.cfg.IntervalOrDefault()
@@ -141,7 +141,7 @@ func (a *assayAttestor) run(ctx context.Context) {
 	}
 }
 
-func (a *assayAttestor) verifyOnce(ctx context.Context) {
+func (a *spmlAttestor) verifyOnce(ctx context.Context) {
 	prev := a.current()
 	next := a.executeAndParse(ctx)
 	a.snap.Store(next)
@@ -149,14 +149,14 @@ func (a *assayAttestor) verifyOnce(ctx context.Context) {
 	// signal (design §14).
 	if prev.ok != next.ok {
 		if next.ok {
-			a.logger.Infof("Assay attestation OK: pin=%x (%s)", next.pin, next.detail)
+			a.logger.Infof("Spml attestation OK: pin=%x (%s)", next.pin, next.detail)
 		} else {
-			a.logger.Errorf("Assay attestation FAILED — %s gates engage per onFail=%s: %s",
+			a.logger.Errorf("Spml attestation FAILED — %s gates engage per onFail=%s: %s",
 				a.cfg.AppID, a.cfg.OnFail, next.detail)
 		}
 	}
 }
 
-func (a *assayAttestor) executeAndParse(ctx context.Context) attestedAssay {
+func (a *spmlAttestor) executeAndParse(ctx context.Context) attestedSpml {
 	return a.scan.verifyOnce(ctx)
 }
