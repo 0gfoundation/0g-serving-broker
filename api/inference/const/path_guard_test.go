@@ -60,3 +60,29 @@ func TestMatchesPrefix(t *testing.T) {
 		}
 	}
 }
+
+// 2026-11-16 probe: free-prefix subpaths that pass UnsafeMatchPath (/attestation/x,
+// /signature/audio/transcriptions, bare /attestation) were still forwarded to the
+// upstream unauthenticated. Only the two shapes clients call may be forwarded.
+func TestIsAllowedFreePath(t *testing.T) {
+	cases := map[string]bool{
+		"/attestation/report":               true,
+		"/Attestation/Report":               true,
+		"/signature/chatcmpl-abc123":        true,
+		"/signature/3f1c2e9a-0b1d-4c2e":     true,
+		"/attestation":                      false,
+		"/attestation/x":                    false,
+		"/attestation/report/x":             false,
+		"/attestation/audio/transcriptions": false,
+		"/signature":                        false,
+		"/signature/":                       false,
+		"/signature/audio/transcriptions":   false,
+		"/signature/a/b":                    false,
+	}
+	for uri, want := range cases {
+		_, matchPath := SplitTargetRoute("/v1/proxy" + uri)
+		if got := IsAllowedFreePath(matchPath); got != want {
+			t.Errorf("IsAllowedFreePath(%q from %q) = %v, want %v", matchPath, uri, got, want)
+		}
+	}
+}

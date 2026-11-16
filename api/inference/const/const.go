@@ -365,6 +365,22 @@ func UnsafeMatchPath(matchPath string) bool {
 	return path.Clean(matchPath) != matchPath || strings.ContainsAny(matchPath, ";%\\")
 }
 
+// IsAllowedFreePath reports whether a free-prefix matchPath (as returned by
+// SplitTargetRoute: no query, no trailing slash) has one of the two shapes
+// clients actually call: /attestation/report and /signature/{chatID}. Anything
+// else under FreePrefixes is refused locally instead of being forwarded,
+// unauthenticated and unbilled, to the upstream — a free prefix in front of an
+// upstream that routes by suffix was a free-inference bypass once already
+// (docs/design/e2ee-speech.md, /signature/audio/transcriptions).
+func IsAllowedFreePath(matchPath string) bool {
+	lower := strings.ToLower(matchPath)
+	if lower == "/attestation/report" {
+		return true
+	}
+	chatID, ok := strings.CutPrefix(lower, "/signature/")
+	return ok && chatID != "" && !strings.Contains(chatID, "/")
+}
+
 // MatchesPrefix reports whether matchPath is prefix itself or below it, so
 // "/signature" covers "/signature/{id}" but not "/signaturefoo".
 func MatchesPrefix(matchPath, prefix string) bool {
