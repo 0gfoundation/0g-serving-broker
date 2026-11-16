@@ -561,6 +561,14 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 				return
 			}
 
+			if !constant.IsAllowedFreePath(targetPath) {
+				p.logger.Warnf("Blocked free-prefix path outside allowlist: path=%s, method=%s, remote=%s, user_agent=%s",
+					targetPath, ctx.Request.Method, ctx.Request.RemoteAddr, ctx.Request.UserAgent())
+				ctx.Set("ignoreError", true)
+				ctx.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+				return
+			}
+
 			// Log free endpoint access for audit purposes
 			p.logger.Infof("Free endpoint access: path=%s, method=%s, remote=%s, user_agent=%s",
 				targetPath, ctx.Request.Method, ctx.Request.RemoteAddr, ctx.Request.UserAgent())
