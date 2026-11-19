@@ -17,7 +17,7 @@ func TestGuardEngineControls_StripsControlFields(t *testing.T) {
 	in := `{"model":"m","messages":[{"role":"user","content":"hi"}],` +
 		`"chat_template":"{{x}}","custom_logit_processor":"gASV","lora_path":"/etc","lora_adapter_name":"a","return_hidden_states":true,` +
 		`"chat_template_kwargs":{"chat_template":"{{ raise_exception('HELLO_XYZ') }}","tools":[],"enable_thinking":false,"reasoning_effort":"high"}}`
-	out, err := guardEngineControls([]byte(in))
+	out, err := guardEngineControls([]byte(in), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,11 +47,11 @@ func TestGuardEngineControls_StripsControlFields(t *testing.T) {
 
 func TestGuardEngineControls_CleanBodyUnchanged(t *testing.T) {
 	in := `{"model":"m","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://example.com/a.png"}}]}],"chat_template_kwargs":{"enable_thinking":true}}`
-	out, err := guardEngineControls([]byte(in))
+	out, err := guardEngineControls([]byte(in), true)
 	if err != nil || string(out) != in {
 		t.Fatalf("clean body changed: err=%v out=%s", err, out)
 	}
-	if out, err := guardEngineControls([]byte("not json")); err != nil || string(out) != "not json" {
+	if out, err := guardEngineControls([]byte("not json"), true); err != nil || string(out) != "not json" {
 		t.Fatalf("non-JSON body: err=%v out=%s", err, out)
 	}
 }
@@ -72,29 +72,29 @@ func TestGuardEngineControls_MediaLinks(t *testing.T) {
 	for _, link := range refused {
 		for _, key := range []string{"image_url", "video_url"} {
 			body := `{"messages":[{"role":"user","content":[{"type":"` + key + `","` + key + `":{"url":"` + link + `"}}]}]}`
-			if _, err := guardEngineControls([]byte(body)); err == nil {
+			if _, err := guardEngineControls([]byte(body), true); err == nil {
 				t.Errorf("%s %q accepted", key, link)
 			}
 		}
 	}
 	// Responses API shape: string image_url inside input.
-	if _, err := guardEngineControls([]byte(`{"input":[{"role":"user","content":[{"type":"input_image","image_url":"file:///etc/passwd"}]}]}`)); err == nil {
+	if _, err := guardEngineControls([]byte(`{"input":[{"role":"user","content":[{"type":"input_image","image_url":"file:///etc/passwd"}]}]}`), true); err == nil {
 		t.Error("responses input_image file:// accepted")
 	}
 
 	allowed := []string{"https://example.com/a.png", "http://cdn.example.org:8080/v.mp4", "data:image/png;base64,iVBORw0KGgo=", "https://8.8.8.8/x.png"}
 	for _, link := range allowed {
 		body := `{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"` + link + `"}}]}]}`
-		if _, err := guardEngineControls([]byte(body)); err != nil {
+		if _, err := guardEngineControls([]byte(body), true); err != nil {
 			t.Errorf("%q refused: %v", link, err)
 		}
 	}
 	// A link-shaped string inside tool-call arguments is data, not a fetch.
 	body := `{"messages":[{"role":"assistant","tool_calls":[{"function":{"name":"f","arguments":"{\"image_url\":\"file:///etc/passwd\"}"}}]}]}`
-	if _, err := guardEngineControls([]byte(body)); err != nil {
+	if _, err := guardEngineControls([]byte(body), true); err != nil {
 		t.Errorf("tool arguments refused: %v", err)
 	}
-	_, err := guardEngineControls([]byte(`{"messages":[{"content":[{"image_url":{"url":"file:///etc/passwd"}}]}]}`))
+	_, err := guardEngineControls([]byte(`{"messages":[{"content":[{"image_url":{"url":"file:///etc/passwd"}}]}]}`), true)
 	if err == nil || !strings.Contains(err.Error(), "image_url") {
 		t.Errorf("error should name the field: %v", err)
 	}
@@ -123,5 +123,95 @@ func TestPrepareHTTPRequest_GuardsEngineControls(t *testing.T) {
 	}
 	if _, err := prepare(`{"model":"m","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"file:///etc/passwd"}}]}]}`); err == nil {
 		t.Fatal("file:// image_url forwarded")
+	}
+}
+
+func TestGuardEngineControls_TemplateKwargsAllowlist(t *testing.T) {
+	in := `{"messages":[],"chat_template_kwargs":{"enable_thinking":true,"thinking_budget":64,"add_generation_prompt":false,"documents":[],"bos_token":"x","custom_tools":"y"}}`
+	for _, selfHosted := range []bool{true, false} {
+		out, err := guardEngineControls([]byte(in), selfHosted)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got struct {
+			KW map[string]any `json:"chat_template_kwargs"`
+		}
+		if err := json.Unmarshal(out, &got); err != nil {
+			t.Fatal(err)
+		}
+		if len(got.KW) != 2 || got.KW["enable_thinking"] != true || got.KW["thinking_budget"] != float64(64) {
+			t.Errorf("selfHosted=%v: kwargs = %v, want only enable_thinking + thinking_budget", selfHosted, got.KW)
+		}
+	}
+}
+
+func TestGuardEngineControls_TopLevelFields(t *testing.T) {
+	in := `{"model":"m","messages":[],"temperature":0.2,"tools":[],"ebnf":"root ::= x","enable_search":true,"chat_template":"{{x}}","system":"s","input":[]}`
+	keys := func(selfHosted bool) map[string]bool {
+		out, err := guardEngineControls([]byte(in), selfHosted)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(out, &m); err != nil {
+			t.Fatal(err)
+		}
+		k := map[string]bool{}
+		for f := range m {
+			k[f] = true
+		}
+		return k
+	}
+	self := keys(true)
+	for _, f := range []string{"model", "messages", "temperature", "tools", "system", "input"} {
+		if !self[f] {
+			t.Errorf("self-hosted dropped allowed field %s", f)
+		}
+	}
+	for _, f := range []string{"ebnf", "enable_search", "chat_template"} {
+		if self[f] {
+			t.Errorf("self-hosted forwarded unknown field %s", f)
+		}
+	}
+	fwd := keys(false)
+	if !fwd["enable_search"] || !fwd["ebnf"] {
+		t.Errorf("forwarder dropped an upstream extension: %v", fwd)
+	}
+	if fwd["chat_template"] {
+		t.Error("forwarder kept chat_template")
+	}
+}
+
+// Bypass shapes found in router review round 3 (0g-router#1589).
+func TestGuardEngineControls_MediaShapes(t *testing.T) {
+	refused := []string{
+		`{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"type":"x","url":"file:///proc/self/environ"}}]}]}`,
+		`{"messages":[{"role":"user","content":[{"type":"image","source":{"type":"file","url":"http://127.0.0.1:8000/get_server_info"}}]}]}`,
+		`{"messages":[{"role":"user","content":[{"type":"tool_result","content":[{"type":"image","source":{"type":"url","url":"http://169.254.169.254/"}}]}]}]}`,
+		`{"messages":[{"role":"user","content":[{"image_url":"http://127.0.0.1:8000/metrics"}]}]}`,
+		`{"messages":[{"role":"user","content":[{"type":null,"video_url":{"url":"file:///etc/passwd"}}]}]}`,
+		`{"messages":[{"role":"user","content":[{"\u0069mage_url":{"url":"file:///etc/passwd"}}]}]}`,
+		`{"messages":[{"role":"user","content":[{"type":"file","file":{"file_data":"/etc/passwd"}}]}]}`,
+		`{"messages":[{"role":"user","content":[{"type":"image","image":"http://10.0.0.1/a.png"}]}]}`,
+		`{"messages":[{"role":"user","content":[{"type":"video","video":["data:image/png;base64,AA==","file:///etc/passwd"]}]}]}`,
+		`{"messages":[{"role":"user","content":[{"type":"video_url","video_url":{"url":"proc/self/environ"}}]}]}`,
+		`{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"x.png"}}]}]}`,
+	}
+	for _, b := range refused {
+		if _, err := guardEngineControls([]byte(b), true); err == nil {
+			t.Errorf("accepted: %s", b)
+		}
+	}
+	allowed := []string{
+		`{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB"}}]}]}`,
+		`{"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo="}}]}]}`,
+		`{"messages":[{"role":"user","content":[{"type":"image","source":{"type":"url","url":"https://example.com/a.png"}}]}]}`,
+		`{"messages":[{"role":"user","content":[{"type":"search_result","source":"doc.pdf","title":"t","content":[]}]}]}`,
+		`{"messages":[{"role":"user","content":[{"type":"file","file":{"file_data":"JVBERi0xLjQK"}}]}]}`,
+	}
+	for _, b := range allowed {
+		if _, err := guardEngineControls([]byte(b), true); err != nil {
+			t.Errorf("refused %s: %v", b, err)
+		}
 	}
 }
