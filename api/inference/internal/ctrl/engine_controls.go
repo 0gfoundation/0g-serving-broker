@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"slices"
 	"strings"
 )
 
@@ -33,34 +34,64 @@ var engineControlFields = []string{
 	"chat_template", "custom_logit_processor", "lora_path", "lora_adapter_name", "return_hidden_states",
 }
 
-// templateCallParams are apply_chat_template's own named parameters. A key in
-// chat_template_kwargs with one of these names is not a template variable: it
-// reconfigures the call (chat_template swaps the whole template). Template
-// variables such as enable_thinking / thinking / reasoning_effort pass through.
-// ponytail: denylist of the call's parameters, not an allowlist of variables,
-// so models whose templates read other flags keep working; switch to an
-// allowlist if a template is found that treats a variable as code.
-var templateCallParams = map[string]bool{
-	"chat_template": true, "conversation": true, "tools": true, "documents": true,
-	"tokenize": true, "add_generation_prompt": true, "continue_final_message": true,
-	"return_tensors": true, "return_dict": true, "return_assistant_tokens_mask": true,
-	"tokenizer_kwargs": true, "padding": true, "truncation": true, "max_length": true,
+// templateKwargsAllowed are the chat_template_kwargs keys clients may set:
+// the thinking toggles our templates read. Everything else is dropped. A
+// denylist of apply_chat_template's own parameters is not enough: engines
+// merge these kwargs into their own with dict.update (vLLM CVE-2025-61620 /
+// CVE-2025-62426), so any key the engine passes itself can be overridden.
+// Same list as the router (0g-router#1589).
+var templateKwargsAllowed = map[string]bool{
+	"enable_thinking": true, "thinking": true, "clear_thinking": true,
+	"preserve_thinking": true, "thinking_budget": true, "reasoning_effort": true,
 }
 
-// mediaLinkKeys name the content parts whose link an engine fetches itself.
-var mediaLinkKeys = map[string]bool{"image_url": true, "video_url": true, "audio_url": true, "file_url": true}
+// selfHostedFieldsAllowed are the top-level fields forwarded to an engine that
+// runs beside the broker (sglang / vLLM): the OpenAI chat, Anthropic messages
+// and Responses request fields plus common sampling extras. Anything else
+// (engine-specific switches such as return_hidden_states, custom_logit_processor,
+// lora_path, chat_template, ebnf, ...) is dropped rather than refused, so a
+// client sending an unknown optional field still gets an answer. Forwarders
+// (hosted APIs) keep their own extensions and only lose engineControlFields.
+var selfHostedFieldsAllowed = map[string]bool{
+	// shared
+	"model": true, "stream": true, "stream_options": true, "temperature": true, "top_p": true,
+	"top_k": true, "min_p": true, "max_tokens": true, "max_completion_tokens": true, "n": true,
+	"stop": true, "seed": true, "presence_penalty": true, "frequency_penalty": true,
+	"repetition_penalty": true, "logprobs": true, "top_logprobs": true, "logit_bias": true,
+	"response_format": true, "tools": true, "tool_choice": true, "parallel_tool_calls": true,
+	"user": true, "metadata": true, "reasoning_effort": true, "reasoning": true, "thinking": true,
+	"chat_template_kwargs": true, "separate_reasoning": true, "include_reasoning": true,
+	"functions": true, "function_call": true,
+	// chat completions / anthropic messages
+	"messages": true, "system": true, "stop_sequences": true,
+	// responses
+	"input": true, "instructions": true, "max_output_tokens": true, "text": true,
+	"previous_response_id": true, "store": true, "include": true, "truncation": true,
+}
+
+// mediaContainers are the keys whose value an engine may load as media: a link
+// string, or an object carrying it under url / file_url / file_data. They are
+// read by key wherever they appear, with any "type" or none: engines' pydantic
+// models ignore extra keys and vLLM reads typed-less parts by key. "source" is
+// the Anthropic image/document source, whose url sglang fetches for every
+// source.type except base64. "image" / "video" are the Qwen-style fields.
+var mediaContainers = map[string]bool{
+	"image_url": true, "video_url": true, "audio_url": true, "file_url": true, "file_data": true,
+	"source": true, "image": true, "video": true,
+}
 
 // guardEngineControls strips engine-control fields and refuses media links an
-// engine would fetch from its own network. The error is a client fault (400).
-// A body that is not a JSON object is returned unchanged for later stages.
-func guardEngineControls(body []byte) ([]byte, error) {
+// engine would fetch from its own network. selfHosted narrows the top-level
+// fields to selfHostedFieldsAllowed. The error is a client fault (400). A body
+// that is not a JSON object is returned unchanged for later stages.
+func guardEngineControls(body []byte, selfHosted bool) ([]byte, error) {
 	var top map[string]json.RawMessage
 	if json.Unmarshal(body, &top) != nil {
 		return body, nil
 	}
 	changed := false
-	for _, f := range engineControlFields {
-		if _, ok := top[f]; ok {
+	for f := range top {
+		if (selfHosted && !selfHostedFieldsAllowed[f]) || slices.Contains(engineControlFields, f) {
 			delete(top, f)
 			changed = true
 		}
@@ -70,7 +101,7 @@ func guardEngineControls(body []byte) ([]byte, error) {
 		if json.Unmarshal(raw, &kw) == nil {
 			stripped := false
 			for k := range kw {
-				if templateCallParams[k] {
+				if !templateKwargsAllowed[k] {
 					delete(kw, k)
 					stripped = true
 				}
@@ -102,8 +133,8 @@ func guardEngineControls(body []byte) ([]byte, error) {
 }
 
 // checkMediaLinks walks a decoded messages/input value and validates every
-// image_url / video_url / audio_url / file_url link, as a string or {"url": …}.
-// Tool-call arguments are JSON strings, so they are never walked into.
+// media link it finds (see mediaContainers). Tool-call arguments are JSON
+// strings, so they are never walked into.
 func checkMediaLinks(v any) error {
 	switch t := v.(type) {
 	case []any:
@@ -114,17 +145,10 @@ func checkMediaLinks(v any) error {
 		}
 	case map[string]any:
 		for k, e := range t {
-			if mediaLinkKeys[k] {
-				link, _ := e.(string)
-				if m, ok := e.(map[string]any); ok {
-					link, _ = m["url"].(string)
+			if mediaContainers[k] {
+				if err := checkMediaValue(k, e); err != nil {
+					return fmt.Errorf("invalid %s: %w", k, err)
 				}
-				if link != "" {
-					if err := validateMediaLink(link); err != nil {
-						return fmt.Errorf("invalid %s: %w", k, err)
-					}
-				}
-				continue
 			}
 			if err := checkMediaLinks(e); err != nil {
 				return err
@@ -134,14 +158,51 @@ func checkMediaLinks(v any) error {
 	return nil
 }
 
-// validateMediaLink accepts data: URIs and http(s) links to a public host. It
+// checkMediaValue validates a media container's value: a string, a list of
+// strings (video frames), or an object with url / file_url / file_data.
+func checkMediaValue(key string, v any) error {
+	video := key == "video_url" || key == "video"
+	if _, isObj := v.(map[string]any); key == "source" && !isObj {
+		return nil // a citation's "source" text, not a fetch
+	}
+	switch t := v.(type) {
+	case string:
+		return validateMediaLink(t, video)
+	case []any:
+		for _, e := range t {
+			if s, ok := e.(string); ok {
+				if err := validateMediaLink(s, video); err != nil {
+					return err
+				}
+			}
+		}
+	case map[string]any:
+		for _, f := range []string{"url", "file_url", "file_data"} {
+			if s, ok := t[f].(string); ok {
+				if err := validateMediaLink(s, video); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// validateMediaLink accepts data: URIs, bare base64 images, and http(s) links to a public host. It
 // refuses file://, bare paths and other schemes, and hosts that only make sense
 // inside the engine's network: localhost, single-label names, internal suffixes,
 // and literal loopback / private / link-local / CGNAT / unspecified IPs.
 // ponytail: no DNS lookup and no redirect check; a public name that resolves or
 // redirects inside is the engine's egress to close (sglang follows redirects).
-func validateMediaLink(link string) error {
-	if strings.HasPrefix(link, "data:") {
+func validateMediaLink(link string, video bool) error {
+	if link == "" || strings.HasPrefix(link, "data:") {
+		return nil
+	}
+	// sglang decodes a bare string as base64 image data, except one that starts
+	// with "/" (opened as a path) or ends in an image extension (opened as a
+	// file). Videos are checked with os.path.isfile first, so a bare string is
+	// never safe there: require data: or http(s).
+	if !video && !strings.Contains(link, ":") && !strings.HasPrefix(link, "/") && !strings.Contains(link, ".") {
 		return nil
 	}
 	u, err := url.Parse(link)

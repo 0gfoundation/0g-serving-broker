@@ -41,7 +41,7 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 
 		// Strip engine-control fields and refuse internal media links before any
 		// broker rewrite below sets fields of its own (see engine_controls.go).
-		reqBody, err = guardEngineControls(reqBody)
+		reqBody, err = guardEngineControls(reqBody, c.Service.IsSelfHosted())
 		if err != nil {
 			ctx.Set("ignoreError", true)
 			return nil, err
