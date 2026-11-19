@@ -39,6 +39,14 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 		}
 		reqBody = developerAsSystem(modifiedBody)
 
+		// Strip engine-control fields and refuse internal media links before any
+		// broker rewrite below sets fields of its own (see engine_controls.go).
+		reqBody, err = guardEngineControls(reqBody)
+		if err != nil {
+			ctx.Set("ignoreError", true)
+			return nil, err
+		}
+
 		// LoRA request rewriting: rewrite ft-* model to base model + lora_adapter_name.
 		// This must happen BEFORE EnforceConfiguredModel so the model field matches the base model.
 		if c.loraManager != nil {
