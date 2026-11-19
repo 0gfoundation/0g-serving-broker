@@ -120,7 +120,7 @@ func guardEngineControls(body []byte, selfHosted bool) ([]byte, error) {
 		if raw, ok := top[field]; ok {
 			var v any
 			if json.Unmarshal(raw, &v) == nil {
-				if err := checkMediaLinks(v); err != nil {
+				if err := checkMediaLinks(v, selfHosted); err != nil {
 					return nil, err
 				}
 			}
@@ -135,22 +135,22 @@ func guardEngineControls(body []byte, selfHosted bool) ([]byte, error) {
 // checkMediaLinks walks a decoded messages/input value and validates every
 // media link it finds (see mediaContainers). Tool-call arguments are JSON
 // strings, so they are never walked into.
-func checkMediaLinks(v any) error {
+func checkMediaLinks(v any, inlineOnly bool) error {
 	switch t := v.(type) {
 	case []any:
 		for _, e := range t {
-			if err := checkMediaLinks(e); err != nil {
+			if err := checkMediaLinks(e, inlineOnly); err != nil {
 				return err
 			}
 		}
 	case map[string]any:
 		for k, e := range t {
 			if mediaContainers[k] {
-				if err := checkMediaValue(k, e); err != nil {
+				if err := checkMediaValue(k, e, inlineOnly); err != nil {
 					return fmt.Errorf("invalid %s: %w", k, err)
 				}
 			}
-			if err := checkMediaLinks(e); err != nil {
+			if err := checkMediaLinks(e, inlineOnly); err != nil {
 				return err
 			}
 		}
@@ -160,18 +160,18 @@ func checkMediaLinks(v any) error {
 
 // checkMediaValue validates a media container's value: a string, a list of
 // strings (video frames), or an object with url / file_url / file_data.
-func checkMediaValue(key string, v any) error {
+func checkMediaValue(key string, v any, inlineOnly bool) error {
 	video := key == "video_url" || key == "video"
 	if _, isObj := v.(map[string]any); key == "source" && !isObj {
 		return nil // a citation's "source" text, not a fetch
 	}
 	switch t := v.(type) {
 	case string:
-		return validateMediaLink(t, video)
+		return validateMediaLink(t, video, inlineOnly)
 	case []any:
 		for _, e := range t {
 			if s, ok := e.(string); ok {
-				if err := validateMediaLink(s, video); err != nil {
+				if err := validateMediaLink(s, video, inlineOnly); err != nil {
 					return err
 				}
 			}
@@ -179,7 +179,7 @@ func checkMediaValue(key string, v any) error {
 	case map[string]any:
 		for _, f := range []string{"url", "file_url", "file_data"} {
 			if s, ok := t[f].(string); ok {
-				if err := validateMediaLink(s, video); err != nil {
+				if err := validateMediaLink(s, video, inlineOnly); err != nil {
 					return err
 				}
 			}
@@ -188,13 +188,14 @@ func checkMediaValue(key string, v any) error {
 	return nil
 }
 
-// validateMediaLink accepts data: URIs, bare base64 images, and http(s) links to a public host. It
+// validateMediaLink accepts data: URIs, bare base64 images, and (except when
+// inlineOnly, i.e. self-hosted engines) http(s) links to a public host. It
 // refuses file://, bare paths and other schemes, and hosts that only make sense
 // inside the engine's network: localhost, single-label names, internal suffixes,
 // and literal loopback / private / link-local / CGNAT / unspecified IPs.
 // ponytail: no DNS lookup and no redirect check; a public name that resolves or
 // redirects inside is the engine's egress to close (sglang follows redirects).
-func validateMediaLink(link string, video bool) error {
+func validateMediaLink(link string, video, inlineOnly bool) error {
 	if link == "" || strings.HasPrefix(link, "data:") {
 		return nil
 	}
@@ -204,6 +205,14 @@ func validateMediaLink(link string, video bool) error {
 	// never safe there: require data: or http(s).
 	if !video && !strings.Contains(link, ":") && !strings.HasPrefix(link, "/") && !strings.Contains(link, ".") {
 		return nil
+	}
+	// A self-hosted engine fetches links from inside the CVM, following redirects,
+	// so a public URL that 302s to 127.0.0.1 or a metadata address cannot be
+	// checked here. The router already asks clients to inline media for these
+	// models (features.media_input_routing); a pinned or sealed request that still
+	// carries a link is refused rather than fetched.
+	if inlineOnly {
+		return fmt.Errorf("this model accepts media inline only: send it as a data: URI or base64")
 	}
 	u, err := url.Parse(link)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {

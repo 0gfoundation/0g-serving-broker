@@ -47,9 +47,13 @@ func TestGuardEngineControls_StripsControlFields(t *testing.T) {
 
 func TestGuardEngineControls_CleanBodyUnchanged(t *testing.T) {
 	in := `{"model":"m","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://example.com/a.png"}}]}],"chat_template_kwargs":{"enable_thinking":true}}`
-	out, err := guardEngineControls([]byte(in), true)
+	out, err := guardEngineControls([]byte(in), false)
 	if err != nil || string(out) != in {
 		t.Fatalf("clean body changed: err=%v out=%s", err, out)
+	}
+	inline := `{"model":"m","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgo="}}]}],"chat_template_kwargs":{"enable_thinking":true}}`
+	if out, err := guardEngineControls([]byte(inline), true); err != nil || string(out) != inline {
+		t.Fatalf("self-hosted clean body changed: err=%v out=%s", err, out)
 	}
 	if out, err := guardEngineControls([]byte("not json"), true); err != nil || string(out) != "not json" {
 		t.Fatalf("non-JSON body: err=%v out=%s", err, out)
@@ -72,29 +76,29 @@ func TestGuardEngineControls_MediaLinks(t *testing.T) {
 	for _, link := range refused {
 		for _, key := range []string{"image_url", "video_url"} {
 			body := `{"messages":[{"role":"user","content":[{"type":"` + key + `","` + key + `":{"url":"` + link + `"}}]}]}`
-			if _, err := guardEngineControls([]byte(body), true); err == nil {
+			if _, err := guardEngineControls([]byte(body), false); err == nil {
 				t.Errorf("%s %q accepted", key, link)
 			}
 		}
 	}
 	// Responses API shape: string image_url inside input.
-	if _, err := guardEngineControls([]byte(`{"input":[{"role":"user","content":[{"type":"input_image","image_url":"file:///etc/passwd"}]}]}`), true); err == nil {
+	if _, err := guardEngineControls([]byte(`{"input":[{"role":"user","content":[{"type":"input_image","image_url":"file:///etc/passwd"}]}]}`), false); err == nil {
 		t.Error("responses input_image file:// accepted")
 	}
 
 	allowed := []string{"https://example.com/a.png", "http://cdn.example.org:8080/v.mp4", "data:image/png;base64,iVBORw0KGgo=", "https://8.8.8.8/x.png"}
 	for _, link := range allowed {
 		body := `{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"` + link + `"}}]}]}`
-		if _, err := guardEngineControls([]byte(body), true); err != nil {
+		if _, err := guardEngineControls([]byte(body), false); err != nil {
 			t.Errorf("%q refused: %v", link, err)
 		}
 	}
 	// A link-shaped string inside tool-call arguments is data, not a fetch.
 	body := `{"messages":[{"role":"assistant","tool_calls":[{"function":{"name":"f","arguments":"{\"image_url\":\"file:///etc/passwd\"}"}}]}]}`
-	if _, err := guardEngineControls([]byte(body), true); err != nil {
+	if _, err := guardEngineControls([]byte(body), false); err != nil {
 		t.Errorf("tool arguments refused: %v", err)
 	}
-	_, err := guardEngineControls([]byte(`{"messages":[{"content":[{"image_url":{"url":"file:///etc/passwd"}}]}]}`), true)
+	_, err := guardEngineControls([]byte(`{"messages":[{"content":[{"image_url":{"url":"file:///etc/passwd"}}]}]}`), false)
 	if err == nil || !strings.Contains(err.Error(), "image_url") {
 		t.Errorf("error should name the field: %v", err)
 	}
@@ -198,7 +202,7 @@ func TestGuardEngineControls_MediaShapes(t *testing.T) {
 		`{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"x.png"}}]}]}`,
 	}
 	for _, b := range refused {
-		if _, err := guardEngineControls([]byte(b), true); err == nil {
+		if _, err := guardEngineControls([]byte(b), false); err == nil {
 			t.Errorf("accepted: %s", b)
 		}
 	}
@@ -210,8 +214,27 @@ func TestGuardEngineControls_MediaShapes(t *testing.T) {
 		`{"messages":[{"role":"user","content":[{"type":"file","file":{"file_data":"JVBERi0xLjQK"}}]}]}`,
 	}
 	for _, b := range allowed {
-		if _, err := guardEngineControls([]byte(b), true); err != nil {
+		if _, err := guardEngineControls([]byte(b), false); err != nil {
 			t.Errorf("refused %s: %v", b, err)
+		}
+	}
+}
+
+// Self-hosted engines get media inline only: a public link may redirect inside the CVM.
+func TestGuardEngineControls_SelfHostedInlineOnly(t *testing.T) {
+	link := `{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://example.com/a.png"}}]}]}`
+	if _, err := guardEngineControls([]byte(link), true); err == nil || !strings.Contains(err.Error(), "inline") {
+		t.Errorf("self-hosted accepted a public link: %v", err)
+	}
+	if _, err := guardEngineControls([]byte(link), false); err != nil {
+		t.Errorf("forwarder refused a public link: %v", err)
+	}
+	for _, ok := range []string{
+		`{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgo="}}]}]}`,
+		`{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB"}}]}]}`,
+	} {
+		if _, err := guardEngineControls([]byte(ok), true); err != nil {
+			t.Errorf("self-hosted refused inline media %s: %v", ok, err)
 		}
 	}
 }
