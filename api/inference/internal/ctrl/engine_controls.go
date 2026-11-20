@@ -2,12 +2,15 @@ package ctrl
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net"
 	"net/url"
 	"slices"
 	"strings"
+
+	"github.com/0glabs/0g-serving-broker/inference/config"
 )
 
 // Engine-control guard.
@@ -78,7 +81,7 @@ var selfHostedFieldsAllowed = map[string]bool{
 // source.type except base64. "image" / "video" are the Qwen-style fields.
 var mediaContainers = map[string]bool{
 	"image_url": true, "video_url": true, "audio_url": true, "file_url": true, "file_data": true,
-	"source": true, "image": true, "video": true,
+	"source": true, "image": true, "video": true, "input_audio": true,
 }
 
 // guardEngineControls strips engine-control fields and refuses media links an
@@ -89,6 +92,13 @@ var mediaContainers = map[string]bool{
 // parse with Python's json.loads, which accepts NaN/Infinity, a UTF-8 BOM and
 // UTF-16 that Go rejects, so an unparsed body would reach them unchecked.
 func guardEngineControls(body []byte, selfHosted bool) ([]byte, error) {
+	return guardEngineControlsMedia(body, selfHosted, nil)
+}
+
+// guardEngineControlsMedia is guardEngineControls with the media kinds the model
+// declares (inputModalities: image / video / audio). nil means image only. It only
+// matters for self-hosted engines, which decode inline media themselves.
+func guardEngineControlsMedia(body []byte, selfHosted bool, declared map[string]bool) ([]byte, error) {
 	if len(bytes.TrimSpace(body)) == 0 {
 		return body, nil
 	}
@@ -134,7 +144,7 @@ func guardEngineControls(body []byte, selfHosted bool) ([]byte, error) {
 		if raw, ok := top[field]; ok {
 			var v any
 			if json.Unmarshal(raw, &v) == nil {
-				if err := checkMediaLinks(v, selfHosted); err != nil {
+				if err := checkMediaLinks(v, &mediaPolicy{inlineOnly: selfHosted, declared: declared}); err != nil {
 					return nil, err
 				}
 			}
@@ -149,11 +159,25 @@ func guardEngineControls(body []byte, selfHosted bool) ([]byte, error) {
 // checkMediaLinks walks a decoded messages/input value and validates every
 // media link it finds (see mediaContainers). Tool-call arguments are JSON
 // strings, so they are never walked into.
-func checkMediaLinks(v any, inlineOnly bool) error {
+// mediaPolicy is what checkMediaLinks enforces: inlineOnly (self-hosted engines)
+// and, for those, the media kinds the model declares.
+type mediaPolicy struct {
+	inlineOnly bool
+	declared   map[string]bool // nil: image only
+}
+
+func (p *mediaPolicy) allows(kind string) bool {
+	if p.declared == nil {
+		return kind == "image"
+	}
+	return p.declared[kind]
+}
+
+func checkMediaLinks(v any, pol *mediaPolicy) error {
 	switch t := v.(type) {
 	case []any:
 		for _, e := range t {
-			if err := checkMediaLinks(e, inlineOnly); err != nil {
+			if err := checkMediaLinks(e, pol); err != nil {
 				return err
 			}
 		}
@@ -163,11 +187,11 @@ func checkMediaLinks(v any, inlineOnly bool) error {
 				return fmt.Errorf("%s is not accepted", k) // vLLM decodes these with torch.load
 			}
 			if mediaContainers[k] {
-				if err := checkMediaValue(k, e, inlineOnly); err != nil {
+				if err := checkMediaValue(k, e, pol); err != nil {
 					return fmt.Errorf("invalid %s: %w", k, err)
 				}
 			}
-			if err := checkMediaLinks(e, inlineOnly); err != nil {
+			if err := checkMediaLinks(e, pol); err != nil {
 				return err
 			}
 		}
@@ -177,26 +201,49 @@ func checkMediaLinks(v any, inlineOnly bool) error {
 
 // checkMediaValue validates a media container's value: a string, a list of
 // strings (video frames), or an object with url / file_url / file_data.
-func checkMediaValue(key string, v any, inlineOnly bool) error {
+func checkMediaValue(key string, v any, pol *mediaPolicy) error {
+	inlineOnly := pol.inlineOnly
+	kind := mediaKind(key)
+	if inlineOnly && kind != "" && !pol.allows(kind) {
+		if _, isObj := v.(map[string]any); key != "source" || isObj {
+			return fmt.Errorf("this model does not accept %s input", kind)
+		}
+	}
 	video := key == "video_url" || key == "video"
 	if _, isObj := v.(map[string]any); key == "source" && !isObj {
 		return nil // a citation's "source" text, not a fetch
 	}
 	switch t := v.(type) {
 	case string:
-		return validateMediaLink(t, video, inlineOnly)
+		if err := validateMediaLink(t, video, inlineOnly); err != nil {
+			return err
+		}
+		return checkInline(t, kind, inlineOnly)
 	case []any:
 		for _, e := range t {
 			if s, ok := e.(string); ok {
 				if err := validateMediaLink(s, video, inlineOnly); err != nil {
 					return err
 				}
+				if err := checkInline(s, frameKind(kind), inlineOnly); err != nil {
+					return err
+				}
 			}
 		}
 	case map[string]any:
+		// base64 payloads the engine wraps into a data: URI itself (input_audio.data,
+		// an Anthropic source of type base64): signature check only, never a path.
+		if d, ok := t["data"].(string); ok && (key == "input_audio" || key == "source") {
+			if err := checkInline(d, kind, inlineOnly); err != nil {
+				return err
+			}
+		}
 		for _, f := range []string{"url", "file_url", "file_data"} {
 			if s, ok := t[f].(string); ok {
 				if err := validateMediaLink(s, video, inlineOnly); err != nil {
+					return err
+				}
+				if err := checkInline(s, kind, inlineOnly); err != nil {
 					return err
 				}
 			}
@@ -306,4 +353,96 @@ func scalarArgs(raw json.RawMessage) bool {
 		}
 	}
 	return true
+}
+
+// mediaKind maps a media container key to the modality it carries.
+func mediaKind(key string) string {
+	switch key {
+	case "video_url", "video":
+		return "video"
+	case "audio_url", "input_audio":
+		return "audio"
+	case "image_url", "image", "source", "file_url", "file_data":
+		return "image"
+	}
+	return ""
+}
+
+// frameKind: a Qwen-style "video" list carries image frames.
+func frameKind(kind string) string {
+	if kind == "video" {
+		return "video-frame"
+	}
+	return kind
+}
+
+// checkInline refuses inline media whose decoded bytes do not start with a real
+// container signature of the declared kind. On 2026-11-19 an attacker sent
+// data:video/mp4;base64 payloads that decoded to an FFmpeg ffconcat script
+// ("ffconcat version 1.0\nfile '../../etc/passwd'") and HLS playlists (#EXTM3U),
+// and a data:image/svg+xml: inline, so "media inline only" let them through, and
+// only the decoder failing stopped them. Text-like payloads match no signature.
+func checkInline(link, kind string, inlineOnly bool) error {
+	if !inlineOnly || link == "" {
+		return nil
+	}
+	b64 := link
+	if strings.HasPrefix(link, "data:") {
+		i := strings.IndexByte(link, ',')
+		if i < 0 || !strings.HasSuffix(strings.ToLower(link[:i]), ";base64") {
+			return fmt.Errorf("inline media must be base64 encoded")
+		}
+		b64 = link[i+1:]
+	}
+	head := b64
+	if len(head) > 64 {
+		head = head[:64]
+	}
+	raw, err := base64.StdEncoding.DecodeString(head[:len(head)/4*4])
+	if err != nil || len(raw) < 12 {
+		return fmt.Errorf("inline media is not valid base64")
+	}
+	ok := false
+	switch kind {
+	case "image", "video-frame":
+		ok = isImage(raw)
+	case "video":
+		ok = isVideo(raw)
+	case "audio":
+		ok = isAudio(raw)
+	}
+	if !ok {
+		return fmt.Errorf("inline %s data is not a recognised %s format", kind, kind)
+	}
+	return nil
+}
+
+func isImage(b []byte) bool {
+	return bytes.HasPrefix(b, []byte("\x89PNG\r\n\x1a\n")) || bytes.HasPrefix(b, []byte{0xFF, 0xD8, 0xFF}) ||
+		bytes.HasPrefix(b, []byte("GIF87a")) || bytes.HasPrefix(b, []byte("GIF89a")) ||
+		(bytes.HasPrefix(b, []byte("RIFF")) && string(b[8:12]) == "WEBP") || bytes.HasPrefix(b, []byte("BM"))
+}
+
+func isVideo(b []byte) bool {
+	return string(b[4:8]) == "ftyp" || bytes.HasPrefix(b, []byte{0x1A, 0x45, 0xDF, 0xA3}) ||
+		(bytes.HasPrefix(b, []byte("RIFF")) && string(b[8:12]) == "AVI ")
+}
+
+func isAudio(b []byte) bool {
+	return (bytes.HasPrefix(b, []byte("RIFF")) && string(b[8:12]) == "WAVE") || bytes.HasPrefix(b, []byte("ID3")) ||
+		(b[0] == 0xFF && b[1]&0xE0 == 0xE0) || bytes.HasPrefix(b, []byte("fLaC")) ||
+		bytes.HasPrefix(b, []byte("OggS")) || string(b[4:8]) == "ftyp"
+}
+
+// declaredMedia is the set of media modalities a model declares, or nil (image
+// only) when the service has no single resolvable model info.
+func declaredMedia(mi *config.ModelInfo) map[string]bool {
+	if mi == nil || mi.Architecture == nil {
+		return nil
+	}
+	m := map[string]bool{}
+	for _, x := range mi.Architecture.InputModalities {
+		m[strings.ToLower(x)] = true
+	}
+	return m
 }

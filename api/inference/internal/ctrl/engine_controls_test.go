@@ -51,7 +51,7 @@ func TestGuardEngineControls_CleanBodyUnchanged(t *testing.T) {
 	if err != nil || string(out) != in {
 		t.Fatalf("clean body changed: err=%v out=%s", err, out)
 	}
-	inline := `{"model":"m","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgo="}}]}],"chat_template_kwargs":{"enable_thinking":true}}`
+	inline := `{"model":"m","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB"}}]}],"chat_template_kwargs":{"enable_thinking":true}}`
 	if out, err := guardEngineControls([]byte(inline), true); err != nil || string(out) != inline {
 		t.Fatalf("self-hosted clean body changed: err=%v out=%s", err, out)
 	}
@@ -86,7 +86,7 @@ func TestGuardEngineControls_MediaLinks(t *testing.T) {
 		t.Error("responses input_image file:// accepted")
 	}
 
-	allowed := []string{"https://example.com/a.png", "http://cdn.example.org:8080/v.mp4", "data:image/png;base64,iVBORw0KGgo=", "https://8.8.8.8/x.png"}
+	allowed := []string{"https://example.com/a.png", "http://cdn.example.org:8080/v.mp4", "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB", "https://8.8.8.8/x.png"}
 	for _, link := range allowed {
 		body := `{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"` + link + `"}}]}]}`
 		if _, err := guardEngineControls([]byte(body), false); err != nil {
@@ -230,7 +230,7 @@ func TestGuardEngineControls_SelfHostedInlineOnly(t *testing.T) {
 		t.Errorf("forwarder refused a public link: %v", err)
 	}
 	for _, ok := range []string{
-		`{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgo="}}]}]}`,
+		`{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB"}}]}]}`,
 		`{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB"}}]}]}`,
 	} {
 		if _, err := guardEngineControls([]byte(ok), true); err != nil {
@@ -300,6 +300,48 @@ func TestGuardEngineControls_OCRArgs(t *testing.T) {
 		}
 		if strings.Contains(string(out), "vllm_xargs") {
 			t.Errorf("non-scalar vllm_xargs kept: %s", out)
+		}
+	}
+}
+
+// 2026-11-19 0xc8e0 payloads: inline data that is not a real media container.
+func TestGuardEngineControls_InlineSignatures(t *testing.T) {
+	part := func(kind, url string) string {
+		return `{"messages":[{"role":"user","content":[{"type":"` + kind + `","` + kind + `":{"url":"` + url + `"}}]}]}`
+	}
+	img := map[string]bool{"text": true, "image": true}
+	vid := map[string]bool{"text": true, "image": true, "video": true}
+	refused := map[string]struct {
+		body string
+		decl map[string]bool
+	}{
+		"ffconcat as mp4":     {part("video_url", "data:video/mp4;base64,ZmZjb25jYXQgdmVyc2lvbiAxLjAKZmlsZSAnLi4vLi4vZXRjL3Bhc3N3ZCcK"), vid},
+		"hls as mp4":          {part("video_url", "data:video/mp4;base64,I0VYVE0zVQojRVhULVgtVkVSU0lPTjozCmh0dHA6Ly8xNjkuMjU0LjE2OS4yNTQveC50cwo="), vid},
+		"svg image":           {part("image_url", "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciPjxpbWFnZSBocmVmPSJmaWxlOi8vL2V0Yy9wYXNzd2QiLz48L3N2Zz4="), img},
+		"video not declared":  {part("video_url", "data:video/mp4;base64,AAAAGGZ0eXBtcDQyAAAAAG1wNDJpc29t"), img},
+		"audio not declared":  {`{"messages":[{"role":"user","content":[{"type":"input_audio","input_audio":{"data":"UklGRiQAAABXQVZFZm10IBAAAAA=","format":"wav"}}]}]}`, img},
+		"non-base64 data uri": {part("image_url", "data:image/png,hello"), img},
+		"ffconcat bare b64":   {part("image_url", "ZmZjb25jYXQgdmVyc2lvbiAxLjAKZmlsZSAnLi4vLi4vZXRjL3Bhc3N3ZCcK"), img},
+		"image list default":  {part("video_url", "data:video/mp4;base64,AAAAGGZ0eXBtcDQyAAAAAG1wNDJpc29t"), nil},
+	}
+	for name, c := range refused {
+		if _, err := guardEngineControlsMedia([]byte(c.body), true, c.decl); err == nil {
+			t.Errorf("%s accepted", name)
+		}
+	}
+	allowed := map[string]struct {
+		body string
+		decl map[string]bool
+	}{
+		"png":            {part("image_url", "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB"), img},
+		"jpeg":           {part("image_url", "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQ=="), img},
+		"mp4 declared":   {part("video_url", "data:video/mp4;base64,AAAAGGZ0eXBtcDQyAAAAAG1wNDJpc29t"), vid},
+		"anthropic jpeg": {`{"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"/9j/4AAQSkZJRgABAQAAAQ=="}}]}]}`, img},
+		"default image":  {part("image_url", "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB"), nil},
+	}
+	for name, c := range allowed {
+		if _, err := guardEngineControlsMedia([]byte(c.body), true, c.decl); err != nil {
+			t.Errorf("%s refused: %v", name, err)
 		}
 	}
 }
