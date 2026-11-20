@@ -55,8 +55,8 @@ func TestGuardEngineControls_CleanBodyUnchanged(t *testing.T) {
 	if out, err := guardEngineControls([]byte(inline), true); err != nil || string(out) != inline {
 		t.Fatalf("self-hosted clean body changed: err=%v out=%s", err, out)
 	}
-	if out, err := guardEngineControls([]byte("not json"), true); err != nil || string(out) != "not json" {
-		t.Fatalf("non-JSON body: err=%v out=%s", err, out)
+	if out, err := guardEngineControls(nil, true); err != nil || out != nil {
+		t.Fatalf("empty body: err=%v out=%s", err, out)
 	}
 }
 
@@ -235,6 +235,38 @@ func TestGuardEngineControls_SelfHostedInlineOnly(t *testing.T) {
 	} {
 		if _, err := guardEngineControls([]byte(ok), true); err != nil {
 			t.Errorf("self-hosted refused inline media %s: %v", ok, err)
+		}
+	}
+}
+
+// Bodies Python's json.loads accepts but Go's does not must not pass unchecked.
+func TestGuardEngineControls_UnparseableBodyRefused(t *testing.T) {
+	payload := `"chat_template_kwargs":{"chat_template":"{{ raise_exception(messages) }}"},"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"file:///etc/passwd"}}]}]}`
+	for name, b := range map[string]string{
+		"NaN":      `{"x":NaN,` + payload,
+		"Infinity": `{"x":Infinity,` + payload,
+		"BOM":      "\xEF\xBB\xBF{" + payload,
+		"array":    `[1,2]`,
+		"null":     `null`,
+		"text":     `not json`,
+	} {
+		for _, selfHosted := range []bool{true, false} {
+			if _, err := guardEngineControls([]byte(b), selfHosted); err == nil {
+				t.Errorf("%s (selfHosted=%v) passed unchecked", name, selfHosted)
+			}
+		}
+	}
+}
+
+func TestGuardEngineControls_EmbedsAndSuffixPaths(t *testing.T) {
+	for _, b := range []string{
+		`{"messages":[{"role":"user","content":[{"type":"image_embeds","image_embeds":"gASV"}]}]}`,
+		`{"messages":[{"role":"user","content":[{"type":"audio_embeds","audio_embeds":"gASV"}]}]}`,
+		`{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"etcpng"}}]}]}`,
+		`{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"some/dirJPEG"}}]}]}`,
+	} {
+		if _, err := guardEngineControls([]byte(b), true); err == nil {
+			t.Errorf("accepted: %s", b)
 		}
 	}
 }

@@ -1,6 +1,7 @@
 package ctrl
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -82,12 +83,18 @@ var mediaContainers = map[string]bool{
 
 // guardEngineControls strips engine-control fields and refuses media links an
 // engine would fetch from its own network. selfHosted narrows the top-level
-// fields to selfHostedFieldsAllowed. The error is a client fault (400). A body
-// that is not a JSON object is returned unchanged for later stages.
+// fields to selfHostedFieldsAllowed. The error is a client fault (400).
+//
+// A body that is not a JSON object is refused, not passed through: the engines
+// parse with Python's json.loads, which accepts NaN/Infinity, a UTF-8 BOM and
+// UTF-16 that Go rejects, so an unparsed body would reach them unchecked.
 func guardEngineControls(body []byte, selfHosted bool) ([]byte, error) {
-	var top map[string]json.RawMessage
-	if json.Unmarshal(body, &top) != nil {
+	if len(bytes.TrimSpace(body)) == 0 {
 		return body, nil
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(body, &top); err != nil || top == nil {
+		return nil, fmt.Errorf("request body must be a JSON object")
 	}
 	changed := false
 	for f := range top {
@@ -145,6 +152,9 @@ func checkMediaLinks(v any, inlineOnly bool) error {
 		}
 	case map[string]any:
 		for k, e := range t {
+			if k == "image_embeds" || k == "audio_embeds" {
+				return fmt.Errorf("%s is not accepted", k) // vLLM decodes these with torch.load
+			}
 			if mediaContainers[k] {
 				if err := checkMediaValue(k, e, inlineOnly); err != nil {
 					return fmt.Errorf("invalid %s: %w", k, err)
@@ -203,7 +213,8 @@ func validateMediaLink(link string, video, inlineOnly bool) error {
 	// with "/" (opened as a path) or ends in an image extension (opened as a
 	// file). Videos are checked with os.path.isfile first, so a bare string is
 	// never safe there: require data: or http(s).
-	if !video && !strings.Contains(link, ":") && !strings.HasPrefix(link, "/") && !strings.Contains(link, ".") {
+	if !video && !strings.Contains(link, ":") && !strings.HasPrefix(link, "/") && !strings.Contains(link, ".") &&
+		!hasImageSuffix(link) {
 		return nil
 	}
 	// A self-hosted engine fetches links from inside the CVM, following redirects,
@@ -250,4 +261,16 @@ var cgnat = &net.IPNet{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)}
 func publicIP(ip net.IP) bool {
 	return !(ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
 		ip.IsUnspecified() || ip.IsMulticast() || ip.IsInterfaceLocalMulticast() || cgnat.Contains(ip))
+}
+
+// hasImageSuffix mirrors sglang's load_image check (lower().endswith(("png", "jpg",
+// "jpeg", "webp", "gif")), no dot required), which opens such a string as a path.
+func hasImageSuffix(s string) bool {
+	l := strings.ToLower(s)
+	for _, x := range []string{"png", "jpg", "jpeg", "webp", "gif"} {
+		if strings.HasSuffix(l, x) {
+			return true
+		}
+	}
+	return false
 }
