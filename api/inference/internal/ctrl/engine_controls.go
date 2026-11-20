@@ -62,7 +62,7 @@ var selfHostedFieldsAllowed = map[string]bool{
 	"response_format": true, "tools": true, "tool_choice": true, "parallel_tool_calls": true,
 	"user": true, "metadata": true, "reasoning_effort": true, "reasoning": true, "thinking": true,
 	"chat_template_kwargs": true, "separate_reasoning": true, "include_reasoning": true,
-	"functions": true, "function_call": true,
+	"functions": true, "function_call": true, "skip_special_tokens": true,
 	// chat completions / anthropic messages
 	"messages": true, "system": true, "stop_sequences": true,
 	// responses
@@ -98,6 +98,13 @@ func guardEngineControls(body []byte, selfHosted bool) ([]byte, error) {
 	}
 	changed := false
 	for f := range top {
+		if selfHosted && f == "vllm_xargs" {
+			if !scalarArgs(top[f]) {
+				delete(top, f)
+				changed = true
+			}
+			continue
+		}
 		if (selfHosted && !selfHostedFieldsAllowed[f]) || slices.Contains(engineControlFields, f) {
 			delete(top, f)
 			changed = true
@@ -273,4 +280,30 @@ func hasImageSuffix(s string) bool {
 		}
 	}
 	return false
+}
+
+// scalarArgs reports whether raw is an object whose values are all numbers,
+// strings, booleans or lists of numbers: the shape vLLM's vllm_xargs takes and
+// hands to per-request logits processors (Unlimited-OCR's NGramPerReqLogitsProcessor
+// reads ngram_size / window_size / whitelist_token_ids from it, as the router's
+// model docs tell clients to send). Anything nested deeper is dropped.
+func scalarArgs(raw json.RawMessage) bool {
+	var m map[string]any
+	if json.Unmarshal(raw, &m) != nil {
+		return false
+	}
+	for _, v := range m {
+		switch x := v.(type) {
+		case float64, string, bool:
+		case []any:
+			for _, e := range x {
+				if _, ok := e.(float64); !ok {
+					return false
+				}
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }

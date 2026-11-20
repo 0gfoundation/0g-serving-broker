@@ -270,3 +270,36 @@ func TestGuardEngineControls_EmbedsAndSuffixPaths(t *testing.T) {
 		}
 	}
 }
+
+// Unlimited-OCR's documented request shape survives the self-hosted allowlist.
+func TestGuardEngineControls_OCRArgs(t *testing.T) {
+	in := `{"model":"Unlimited-OCR","messages":[],"skip_special_tokens":false,"vllm_xargs":{"ngram_size":35,"window_size":128,"whitelist_token_ids":[1,2]}}`
+	out, err := guardEngineControls([]byte(in), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["skip_special_tokens"] != false {
+		t.Errorf("skip_special_tokens dropped: %v", got)
+	}
+	xa, _ := got["vllm_xargs"].(map[string]any)
+	if xa["ngram_size"] != float64(35) || xa["window_size"] != float64(128) {
+		t.Errorf("vllm_xargs lost: %v", got)
+	}
+	for _, bad := range []string{
+		`{"messages":[],"vllm_xargs":{"x":{"nested":1}}}`,
+		`{"messages":[],"vllm_xargs":{"x":["a"]}}`,
+		`{"messages":[],"vllm_xargs":"str"}`,
+	} {
+		out, err := guardEngineControls([]byte(bad), true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(out), "vllm_xargs") {
+			t.Errorf("non-scalar vllm_xargs kept: %s", out)
+		}
+	}
+}
