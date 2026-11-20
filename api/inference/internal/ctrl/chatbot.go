@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"mime"
 	"net/http"
 	"strings"
 
@@ -213,11 +214,37 @@ func (c *Ctrl) handleChatbotResponse(ctx *gin.Context, resp *http.Response, acco
 		c.handleBrokerError(ctx, err, "check if stream")
 		return err
 	}
+	// The stream branch is chosen by the CLIENT's `stream: true`, but only the
+	// upstream decides whether it actually answers with SSE. An upstream that
+	// ignores the flag replies with one `application/json` body, and running
+	// that through sanitizeStreamLine drops every line (nothing matches
+	// "data: {...}") — the client got 200 and zero bytes while the raw body was
+	// still read and BILLED. Fall back to the non-stream path so the user gets
+	// what they paid for; it is not SSE, but it is the answer.
+	if isStream && !isEventStream(resp.Header.Get("Content-Type")) {
+		c.logger.Warnf("request %s asked for stream but upstream replied Content-Type %q; forwarding non-streamed",
+			reqModel.RequestHash, resp.Header.Get("Content-Type"))
+		isStream = false
+	}
+
 	if !isStream {
 		return c.handleChargingResponse(ctx, resp, account, outputPrice, reqBody, reqModel)
 	} else {
 		return c.handleChargingStreamResponse(ctx, resp, account, outputPrice, reqBody, reqModel)
 	}
+}
+
+// isEventStream reports whether a Content-Type names SSE. Media types are
+// case-insensitive (RFC 2045 §5.1) and may carry parameters, so a plain prefix
+// match would send a `Text/Event-Stream` body down the JSON path.
+func isEventStream(contentType string) bool {
+	mt, _, err := mime.ParseMediaType(contentType)
+	// A malformed parameter list ("text/event-stream; charset") still names
+	// the type; the old prefix match accepted it, so keep doing so.
+	if err != nil && err != mime.ErrInvalidMediaParameter { // returned unwrapped by ParseMediaType
+		return false
+	}
+	return mt == "text/event-stream"
 }
 
 // responseIDRewrite is the id the client-facing chat body gets in place of the

@@ -29,12 +29,13 @@ func TestPartitionAssayRequests(t *testing.T) {
 		{RequestHash: "c", Verdict: constant.AssayVerdictUnverified},
 		{RequestHash: "d", Verdict: ""}, // no verdict recorded -> fail-open, settleable
 		{RequestHash: "e", Verdict: constant.AssayVerdictPending},
-		{RequestHash: "f", Verdict: constant.AssayVerdictInvalidSig}, // strict-mode sig failure -> cheat
+		{RequestHash: "f", Verdict: constant.AssayVerdictInvalidSig},     // strict-mode sig failure -> cheat
+		{RequestHash: "g", Verdict: constant.AssayVerdictUnverifiedLost}, // audit lost -> settles, just not paid out
 	}
 
 	settleable, rejected, pending, invalidSig := partitionAssayRequests(reqs)
 
-	wantSettleable := []string{"a", "c", "d"}
+	wantSettleable := []string{"a", "c", "d", "g"}
 	if len(settleable) != len(wantSettleable) {
 		t.Fatalf("settleable = %d requests, want %d", len(settleable), len(wantSettleable))
 	}
@@ -183,11 +184,11 @@ func TestResolveAssayVerdicts(t *testing.T) {
 			wantChanged: true,
 		},
 		{
-			name:        "UNKNOWN downgrades stuck PENDING to UNVERIFIED",
+			name:        "UNKNOWN downgrades stuck PENDING to UNVERIFIED_LOST (settles, not payable)",
 			req:         model.Request{RequestHash: "h8", Verdict: constant.AssayVerdictPending},
 			result:      &assayVerdictResult{Verdict: "UNKNOWN"},
 			signer:      &addr,
-			wantVerdict: constant.AssayVerdictUnverified,
+			wantVerdict: constant.AssayVerdictUnverifiedLost,
 			wantChanged: true,
 		},
 		{

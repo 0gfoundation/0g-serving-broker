@@ -11,10 +11,14 @@ type AssayPayout struct {
 	Node       string `gorm:"type:varchar(64);primaryKey" json:"node"`
 	Cumulative string `gorm:"type:varchar(255);not null;default:'0'" json:"cumulative"`
 	Epoch      int64  `gorm:"type:bigint;not null;default:0" json:"epoch"`
-	// PendingCovered is a JSON array of request hashes settled but not yet
-	// acknowledged by the assay (invoice failed / not attempted). Retried on
-	// the next settlement cycle; the assay's invoice endpoint is idempotent.
-	PendingCovered string     `gorm:"type:text;not null" json:"pendingCovered"`
+	// PendingCovered is a JSON array of settled requests not yet acknowledged
+	// by the assay (invoice failed / not attempted): {"h": hash, "f": node
+	// share} entries (db.CoveredEntry; older rows hold bare hash strings).
+	// Retried on the next settlement cycle; the assay's invoice endpoint is
+	// idempotent. LONGTEXT: it grows one entry per settled request for as long
+	// as the assay is unreachable, and TEXT's 64 KB (~950 hashes) was one busy
+	// hour.
+	PendingCovered string     `gorm:"type:longtext;not null" json:"pendingCovered"`
 	Invoiced       bool       `gorm:"type:tinyint(1);not null;default:0" json:"invoiced"`
 	UpdatedAt      *time.Time `gorm:"type:datetime" json:"updatedAt"`
 }

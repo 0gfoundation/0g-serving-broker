@@ -18,7 +18,7 @@ const scanSignatureHeader = "ZG-Scan-Signature"
 //
 //	@Description  The broker's own tappscan-backed check of the assay, signed by
 //	@Description  the TEE key so it can be carried away and verified against the
-//	@Description  chain (docs/spml-attestation-relay.md).
+//	@Description  chain (assay repo docs/spml-design.md §7.7).
 //	@ID			getAssayScan
 //	@Tags		attestation
 //	@Router		/attestation/assay/scan [get]

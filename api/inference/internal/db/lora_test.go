@@ -5,6 +5,7 @@ package db
 import (
 	"context"
 	"fmt"
+	"os"
 	"testing"
 	"time"
 
@@ -21,7 +22,13 @@ func setupTestDB(t *testing.T) *DB {
 	t.Helper()
 	ctx := context.Background()
 
-	container, err := tcmysql.Run(ctx, "mysql:8.0",
+	// TEST_MYSQL_IMAGE lets a developer whose local daemon cannot run the
+	// default image (a broken layer, an arm64 host) point at another tag.
+	image := os.Getenv("TEST_MYSQL_IMAGE")
+	if image == "" {
+		image = "mysql:8.0"
+	}
+	container, err := tcmysql.Run(ctx, image,
 		tcmysql.WithDatabase("testdb"),
 		tcmysql.WithUsername("test"),
 		tcmysql.WithPassword("test"),

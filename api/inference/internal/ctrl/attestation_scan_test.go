@@ -90,6 +90,34 @@ func TestScanFixturePasses(t *testing.T) {
 	}
 }
 
+// v0.8.0 puts the image's UKI first in the measured list, v0.7.0 put it last;
+// the boot stub's entry sits in both. Any-entry matching is what tappscan does.
+func TestScanUkiMatchesAnyMeasuredEntry(t *testing.T) {
+	raw, m := loadScanFixture(t)
+	in := goodInputs(m)
+	other := "a07f5f6e82a4c121bb6a326ac4b9ea3d03f78958abcdba162de701674482919b577ae7729e77f5377037b30418382a33"
+	in.expectedUki = other // the first entry of the fixture's two
+	ev := evaluateScanRecord(raw, in)
+	if !ev.ok || !ev.checks.Uki || ev.uki != other {
+		t.Fatalf("first-entry uki must match: ok=%v uki=%q detail=%q", ev.ok, ev.uki, ev.detail)
+	}
+}
+
+// The live GCP fleet: tcb_status=OutOfDate carrying three listed advisories.
+func TestScanAllowedAdvisoriesPass(t *testing.T) {
+	_, m := loadScanFixture(t)
+	a := currentStatus(m)["attested"].(map[string]any)
+	a["tcb_status"] = "OutOfDate"
+	a["advisories"] = []any{"INTEL-DOC-10003", "INTEL-SA-01439", "INTEL-SA-01442"}
+	in := goodInputs(m)
+	in.requireTcb = []string{"UpToDate", "OutOfDate"}
+	in.allowAdvisories = []string{"INTEL-DOC-10003", "INTEL-SA-01439", "INTEL-SA-01442"}
+	ev := evaluateScanRecord(remarshal(t, m), in)
+	if !ev.ok {
+		t.Fatalf("expected pass, got %s", ev.detail)
+	}
+}
+
 func TestScanUkiOptional(t *testing.T) {
 	raw, m := loadScanFixture(t)
 	in := goodInputs(m)
@@ -125,6 +153,17 @@ func TestScanEachCheckFails(t *testing.T) {
 		}, "replay"},
 		{"note", func(in *scanInputs, m map[string]any) {
 			currentStatus(m)["attested"].(map[string]any)["note"] = "freshness unproven"
+		}, "clean"},
+		{"advisory_unlisted", func(in *scanInputs, m map[string]any) {
+			currentStatus(m)["attested"].(map[string]any)["advisories"] = []any{"INTEL-SA-01439"}
+		}, "clean"},
+		{"advisory_partly_listed", func(in *scanInputs, m map[string]any) {
+			in.allowAdvisories = []string{"INTEL-SA-01439"}
+			currentStatus(m)["attested"].(map[string]any)["advisories"] = []any{"INTEL-SA-01439", "INTEL-SA-01442"}
+		}, "clean"},
+		{"advisory_non_string", func(in *scanInputs, m map[string]any) {
+			in.allowAdvisories = []string{"INTEL-SA-01439"}
+			currentStatus(m)["attested"].(map[string]any)["advisories"] = []any{map[string]any{"id": "INTEL-SA-01439"}}
 		}, "clean"},
 	}
 	for _, tc := range cases {
