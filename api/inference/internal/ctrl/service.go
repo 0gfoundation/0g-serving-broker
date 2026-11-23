@@ -162,7 +162,7 @@ func (c *Ctrl) SyncServiceWithPrices(ctx context.Context, inputWei, outputWei *b
 	overlaid.OutputPrice = outputWei.String()
 
 	// Attempt the pure-rate-drift skip before spending a transaction.
-	nonPriceMatches, onChain, cmpErr := c.contract.CompareServiceExceptPrice(ctx, overlaid, c.tieredPricing, c.cacheTokenBilling, c.modalityPricing)
+	nonPriceMatches, onChain, cmpErr := c.contract.CompareServiceExceptPrice(ctx, overlaid)
 	notFound := cmpErr != nil && errors.Is(cmpErr, providercontract.ErrServiceNotFound)
 	if cmpErr != nil && !notFound {
 		c.logger.Warnf("SyncServiceWithPrices: non-price comparison failed, proceeding with full sync: %v", cmpErr)
@@ -216,7 +216,7 @@ func (c *Ctrl) syncServiceOnceLocked(ctx context.Context, svc config.Service) er
 		return nil
 	}
 
-	if err := c.contract.SyncService(ctx, svc, c.tieredPricing, c.cacheTokenBilling, c.modalityPricing); err != nil {
+	if err := c.contract.SyncService(ctx, svc); err != nil {
 		// Reset the flag if sync failed so it can be retried
 		c.serviceSynced.Store(false)
 		return errors.Wrap(err, "sync services")
@@ -319,7 +319,7 @@ func (c *Ctrl) SyncServicePrices(ctx context.Context, inputWei, outputWei *big.I
 	updated.InputPrice = inputWei.String()
 	updated.OutputPrice = outputWei.String()
 
-	if err := c.contract.SyncService(ctx, updated, c.tieredPricing, c.cacheTokenBilling, c.modalityPricing); err != nil {
+	if err := c.contract.SyncService(ctx, updated); err != nil {
 		return nil, nil, errors.Wrap(err, "sync service prices on chain")
 	}
 
