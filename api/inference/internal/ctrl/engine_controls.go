@@ -7,8 +7,9 @@ import (
 	"fmt"
 	"net"
 	"net/url"
-	"slices"
 	"strings"
+
+	paramnorm "github.com/0gfoundation/0g-param-normalization"
 
 	"github.com/0glabs/0g-serving-broker/inference/config"
 )
@@ -29,25 +30,20 @@ import (
 // broker-side rewrite (reasoning translation, LoRA, injectBodyFields) adds the
 // fields it legitimately sets.
 
-// engineControlFields are top-level request fields that change what the engine
-// runs rather than what it answers: a per-request template (vLLM), a pickled
-// logit processor (sglang dill.loads), a client-chosen adapter path, or
-// internal hidden states. No advertised model takes them from clients; the
-// LoRA rewrite sets lora_adapter_name itself after this guard runs.
-var engineControlFields = []string{
-	"chat_template", "custom_logit_processor", "lora_path", "lora_adapter_name", "return_hidden_states",
-}
-
-// templateKwargsAllowed are the chat_template_kwargs keys clients may set:
-// the thinking toggles our templates read. Everything else is dropped. A
-// denylist of apply_chat_template's own parameters is not enough: engines
-// merge these kwargs into their own with dict.update (vLLM CVE-2025-61620 /
-// CVE-2025-62426), so any key the engine passes itself can be overridden.
-// Same list as the router (0g-router#1589).
-var templateKwargsAllowed = map[string]bool{
-	"enable_thinking": true, "thinking": true, "clear_thinking": true,
-	"preserve_thinking": true, "thinking_budget": true, "reasoning_effort": true,
-}
+// The part shared with the router lives in paramnorm.Sanitize
+// (github.com/0gfoundation/0g-param-normalization):
+//   - top-level fields that change what the engine runs rather than what it
+//     answers are dropped: a per-request template (vLLM), a pickled logit
+//     processor (sglang dill.loads), a client-chosen adapter path or name, or
+//     internal hidden states. No advertised model takes them from clients; the
+//     LoRA rewrite sets lora_adapter_name itself after this guard runs;
+//   - chat_template_kwargs keeps only the thinking toggles our templates read.
+//     A denylist of apply_chat_template's own parameters is not enough: engines
+//     merge these kwargs into their own with dict.update (vLLM CVE-2025-61620 /
+//     CVE-2025-62426), so any key the engine passes itself can be overridden.
+//
+// What stays here needs the broker's own service config: the self-hosted field
+// allowlist, the vllm_xargs shape check and the media checks.
 
 // selfHostedFieldsAllowed are the top-level fields forwarded to an engine that
 // runs beside the broker (sglang / vLLM): the OpenAI chat, Anthropic messages
@@ -55,7 +51,8 @@ var templateKwargsAllowed = map[string]bool{
 // (engine-specific switches such as return_hidden_states, custom_logit_processor,
 // lora_path, chat_template, ebnf, ...) is dropped rather than refused, so a
 // client sending an unknown optional field still gets an answer. Forwarders
-// (hosted APIs) keep their own extensions and only lose engineControlFields.
+// (hosted APIs) keep their own extensions and only lose the engine-control
+// fields paramnorm.Sanitize drops.
 var selfHostedFieldsAllowed = map[string]bool{
 	// shared
 	"model": true, "stream": true, "stream_options": true, "temperature": true, "top_p": true,
@@ -102,40 +99,28 @@ func guardEngineControlsMedia(body []byte, selfHosted bool, declared map[string]
 	if len(bytes.TrimSpace(body)) == 0 {
 		return body, nil
 	}
+	// Engine-control fields and chat_template_kwargs keys outside the thinking
+	// toggles. A body that is not a JSON object comes back as an error.
+	body, err := paramnorm.Sanitize(body, paramnorm.SanitizeOptions{})
+	if err != nil {
+		return nil, err
+	}
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(body, &top); err != nil || top == nil {
 		return nil, fmt.Errorf("request body must be a JSON object")
 	}
 	changed := false
-	for f := range top {
-		if selfHosted && f == "vllm_xargs" {
-			if !scalarArgs(top[f]) {
+	if selfHosted {
+		for f := range top {
+			if f == "vllm_xargs" {
+				if !scalarArgs(top[f]) {
+					delete(top, f)
+					changed = true
+				}
+				continue
+			}
+			if !selfHostedFieldsAllowed[f] {
 				delete(top, f)
-				changed = true
-			}
-			continue
-		}
-		if (selfHosted && !selfHostedFieldsAllowed[f]) || slices.Contains(engineControlFields, f) {
-			delete(top, f)
-			changed = true
-		}
-	}
-	if raw, ok := top["chat_template_kwargs"]; ok {
-		var kw map[string]json.RawMessage
-		if json.Unmarshal(raw, &kw) == nil {
-			stripped := false
-			for k := range kw {
-				if !templateKwargsAllowed[k] {
-					delete(kw, k)
-					stripped = true
-				}
-			}
-			if stripped {
-				b, err := json.Marshal(kw)
-				if err != nil {
-					return nil, err
-				}
-				top["chat_template_kwargs"] = b
 				changed = true
 			}
 		}

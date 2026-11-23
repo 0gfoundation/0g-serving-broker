@@ -17,6 +17,8 @@ import (
 	"sync"
 	"time"
 
+	paramnorm "github.com/0gfoundation/0g-param-normalization"
+
 	"github.com/0glabs/0g-serving-broker/common/attest"
 	"github.com/0glabs/0g-serving-broker/common/config"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
@@ -308,30 +310,35 @@ func (a *ModelArchitecture) Validate() error {
 // shape. The request path enforces these against the resolved model (see
 // ctrl.enforceRequestFormat) so a client can't hit a surface whose usage the
 // upstream doesn't report (which would silently misbill).
+//
+// These names, and the reasoning vocabulary below, are defined once in the
+// shared parameter library (github.com/0gfoundation/0g-param-normalization),
+// which does the request-path translation; config validation keys off the
+// same values.
 const (
-	APIFormatOpenAI    = "openai"
-	APIFormatAnthropic = "anthropic"
+	APIFormatOpenAI    = paramnorm.APIFormatOpenAI
+	APIFormatAnthropic = paramnorm.APIFormatAnthropic
 )
 
 // ParamChatTemplateKwargs is the supportedParameters entry naming the container
 // vLLM/SGLang models accept for chat-template variables. Both the request-path
-// translation (ctrl.nativeParamChatTemplateKwargs) and ModelInfo.Validate key off
+// translation (the shared library) and ModelInfo.Validate key off
 // it, so it lives here as the single source of truth.
-const ParamChatTemplateKwargs = "chat_template_kwargs"
+const ParamChatTemplateKwargs = paramnorm.ParamChatTemplateKwargs
 
 // ParamThinking is the supportedParameters entry naming the OpenAI-surface
 // `thinking` object (MiniMax, Zhipu GLM): {"type": <ThinkingType…>}. Like
 // ParamChatTemplateKwargs it is shared by the request-path translation
-// (ctrl.nativeParamThinking) and ModelInfo.Validate.
-const ParamThinking = "thinking"
+// (the shared library) and ModelInfo.Validate.
+const ParamThinking = paramnorm.ParamThinking
 
 // The values a `thinking` object's "type" may take on the OpenAI surface. Which
 // of them an upstream accepts differs per model, even within one vendor — see
 // ModelInfo.ThinkingTypes.
 const (
-	ThinkingTypeEnabled  = "enabled"
-	ThinkingTypeAdaptive = "adaptive"
-	ThinkingTypeDisabled = "disabled"
+	ThinkingTypeEnabled  = paramnorm.ThinkingTypeEnabled
+	ThinkingTypeAdaptive = paramnorm.ThinkingTypeAdaptive
+	ThinkingTypeDisabled = paramnorm.ThinkingTypeDisabled
 )
 
 // thinkingTypeValues lists the ThinkingType constants, for validation messages.
@@ -342,8 +349,7 @@ var thinkingTypeValues = []string{ThinkingTypeEnabled, ThinkingTypeAdaptive, Thi
 // path writes the canonical spelling, so a "Adaptive" in config still reaches
 // the upstream as "adaptive".
 func NormalizeThinkingType(t string) (string, bool) {
-	n := strings.ToLower(strings.TrimSpace(t))
-	return n, slices.Contains(thinkingTypeValues, n)
+	return paramnorm.NormalizeThinkingType(t)
 }
 
 // ReasoningEffortLadder is the reasoning_effort ladder in increasing depth, as
@@ -353,27 +359,20 @@ func NormalizeThinkingType(t string) (string, bool) {
 // level. Order is significant — ReasoningEffortRank returns an index into it, and
 // the request path resolves a client's request to the deepest declared level that
 // does not exceed it.
-var ReasoningEffortLadder = []string{"minimal", "low", "medium", "high", "xhigh", "max"}
+var ReasoningEffortLadder = paramnorm.ReasoningEffortLadder
 
 // ReasoningEffortRank returns level's position in ReasoningEffortLadder, and
 // whether it is a known level. Matching is case-insensitive and
 // whitespace-trimmed, mirroring how the request path normalizes an inbound
 // reasoning_effort.
 func ReasoningEffortRank(level string) (int, bool) {
-	normalized := strings.ToLower(strings.TrimSpace(level))
-	for i, l := range ReasoningEffortLadder {
-		if l == normalized {
-			return i, true
-		}
-	}
-	return 0, false
+	return paramnorm.ReasoningEffortRank(level)
 }
 
 // IsReasoningEffortLevel reports whether level names a depth on the
 // reasoning_effort ladder.
 func IsReasoningEffortLevel(level string) bool {
-	_, ok := ReasoningEffortRank(level)
-	return ok
+	return paramnorm.IsReasoningEffortLevel(level)
 }
 
 // ModelInfo holds optional metadata for the /v1/models endpoint.
@@ -427,7 +426,7 @@ type ModelInfo struct {
 	//
 	// It is read only when "thinking" is the model's translation target, i.e. the
 	// first native thinking control listed in supportedParameters (see
-	// ctrl.nativeReasoningParamFor). On a model served by several upstreams, set
+	// ctrl.paramRow). On a model served by several upstreams, set
 	// it on each entry's modelInfo: a per-model modelInfo replaces the
 	// service-level one wholesale. See docs/design/reasoning-translation.md.
 	ThinkingTypes []string `yaml:"thinkingTypes"`
@@ -871,7 +870,7 @@ type Service struct {
 
 	// RequestProfile names the upstream engine whose request schema chat requests
 	// are normalized against before forwarding (only "sglang" today; see
-	// ctrl/request_profile.go for the rules). A newer client — Claude Code sending
+	// request_profile.go in the shared library for the rules). A newer client — Claude Code sending
 	// thinking.display "updates", say — can carry a value the engine's schema
 	// does not list yet, and the engine then 400s the whole request. The profile
 	// drops such a field when the upstream's default is a valid reading of the
@@ -2341,7 +2340,7 @@ func normalizeInjectBodyFields(fieldPath string, fields map[string]interface{}) 
 }
 
 // RequestProfileSGLang selects the SGLang request profile (see Service.RequestProfile).
-const RequestProfileSGLang = "sglang"
+const RequestProfileSGLang = paramnorm.RequestProfileSGLang
 
 func validateRequestProfile(fieldPath, profile, serviceType string) error {
 	if serviceType != constant.ServiceTypeChatbot {
@@ -3533,7 +3532,7 @@ func applyAndValidateWith(cfg *Config, raw map[string]interface{}, overrides fun
 	}
 
 	// The output-token clamp runs on the chatbot forward path only (see
-	// ctrl.CapMaxOutputTokens), so setting it on another modality would silently
+	// ctrl.normalizeParams), so setting it on another modality would silently
 	// do nothing. Reject it at load for the same reason the two above are
 	// rejected.
 	if cfg.Service.EnforceMaxCompletionTokens {

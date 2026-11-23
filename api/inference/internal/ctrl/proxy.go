@@ -91,7 +91,7 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 		// resolvedModel is the public/canonical id stamped by the model-handling
 		// branches above (ValidateModelAllowlist for multi-model, the single-model
 		// rewrite path otherwise). It keys per-model config lookups. Read it here so
-		// it is available to TranslateMaxTokens as well as Strip/InjectBodyFields —
+		// it is available to normalizeParams as well as Strip/InjectBodyFields —
 		// the body's "model" field may have been rewritten to the UPSTREAM id by
 		// ValidateModelAllowlist, so per-model lookups must use this, not the body.
 		// Empty for a single-model provider with no rewrite trigger (resolved to the
@@ -109,54 +109,32 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 			return nil, err
 		}
 
-		// Clamp the output-token cap to the model's advertised maxCompletionTokens
-		// before the rename below, so a request that carried no cap gets one under
-		// max_tokens and the rename then puts it under whichever name this upstream
-		// accepts. Take-the-minimum: a client asking for less than the cap keeps its
-		// own value. No-op unless the service sets enforceMaxCompletionTokens.
-		modifiedBody, err = c.CapMaxOutputTokens(reqBody, resolvedModelStr, resolvedIdentity(ctx))
+		// Parameter handling for the resolved entry, in the shared library's fixed
+		// order (see normalizeParams):
+		//  1. clamp the output-token cap to the model's advertised
+		//     maxCompletionTokens, take-the-minimum, injecting one when the request
+		//     carried none. No-op unless the service sets enforceMaxCompletionTokens;
+		//  2. translate the cap to the field name the target model accepts
+		//     (max_tokens vs max_completion_tokens), detected from its advertised
+		//     supportedParameters — the DeepSeek-on-vLLM case rejects the newer
+		//     max_completion_tokens an OpenAI-compatible client sends. The two
+		//     fields are semantically identical, so billing is unaffected;
+		//  3. re-express the client's portable reasoning_effort as the
+		//     upstream-native thinking control the target model advertises (e.g.
+		//     chat_template_kwargs.enable_thinking);
+		//  4. request profile: drop an optional field whose value the upstream
+		//     engine's schema does not list (e.g. Claude Code's thinking.display
+		//     "updates" on SGLang), so a newer client does not 400 the whole
+		//     request. No-op unless requestProfile is configured; log-only unless
+		//     requestProfileEnforce.
+		// Keyed on resolvedModelStr (the canonical id), NOT the body's "model" —
+		// ValidateModelAllowlist may have rewritten the body to the upstream id,
+		// but per-model supportedParameters are keyed by canonical id.
+		modifiedBody, err = c.normalizeParams(reqBody, resolvedModelStr, resolvedIdentity(ctx), apiFormatForPath(ctx.Request.URL.Path))
 		if err != nil {
-			return nil, errors.Wrap(err, "cap max output tokens")
+			return nil, err
 		}
 		reqBody = modifiedBody
-
-		// Translate the output-token cap to the field name the target model accepts
-		// (max_tokens vs max_completion_tokens), detected from its advertised
-		// supportedParameters — the DeepSeek-on-vLLM case rejects the newer
-		// max_completion_tokens an OpenAI-compatible client sends. No-op unless the
-		// model advertises exactly one of the two and the client sent the other. The
-		// two fields are semantically identical, so billing is unaffected.
-		modifiedBody, err = c.TranslateMaxTokensFor(reqBody, resolvedModelStr, resolvedIdentity(ctx))
-		if err != nil {
-			return nil, errors.Wrap(err, "translate max tokens")
-		}
-		reqBody = modifiedBody
-
-		// Reasoning translation: re-express the client's portable reasoning_effort
-		// as the upstream-native thinking control the target model advertises (e.g.
-		// chat_template_kwargs.enable_thinking). No-op unless the model advertises a
-		// native reasoning param. Keyed on resolvedModelStr (the canonical id), NOT
-		// the body's "model" — ValidateModelAllowlist may have rewritten the body to
-		// the upstream id, but per-model supportedParameters are keyed by canonical
-		// id. See docs/design/reasoning-translation.md.
-		modifiedBody, err = c.TranslateReasoningFor(reqBody, resolvedModelStr, resolvedIdentity(ctx))
-		if err != nil {
-			return nil, errors.Wrap(err, "translate reasoning")
-		}
-		reqBody = modifiedBody
-
-		// Request profile: drop an optional field whose value the upstream engine's
-		// schema does not list (e.g. Claude Code's thinking.display "updates" on
-		// SGLang), so a newer client does not 400 the whole request. Runs after the
-		// reasoning translation so it sees what is actually forwarded. No-op unless
-		// requestProfile is configured; log-only unless requestProfileEnforce.
-		if profile := c.Service.RequestProfileFor(resolvedModelStr, resolvedIdentity(ctx)); profile != "" {
-			modifiedBody, err = c.ApplyRequestProfile(reqBody, profile, apiFormatForPath(ctx.Request.URL.Path), resolvedModelStr, c.Service.RequestProfileEnforce)
-			if err != nil {
-				return nil, errors.Wrap(err, "apply request profile")
-			}
-			reqBody = modifiedBody
-		}
 
 		// Strip operator-denylisted client params (e.g. logprobs/top_logprobs the
 		// routed upstream rejects) BEFORE injecting server fields, so a stripped

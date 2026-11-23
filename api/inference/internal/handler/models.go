@@ -9,11 +9,11 @@ import (
 	"strconv"
 	"time"
 
+	paramnorm "github.com/0gfoundation/0g-param-normalization"
 	"github.com/gin-gonic/gin"
 
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
-	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
 	"github.com/0glabs/0g-serving-broker/inference/internal/modalprice"
 	"github.com/0glabs/0g-serving-broker/inference/internal/pricefeed"
 )
@@ -694,7 +694,7 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 				obj.ContextLength = mi.ContextLength
 				obj.MaxCompletionTokens = mi.MaxCompletionTokens
 				obj.Architecture = mi.Architecture
-				obj.SupportedParameters = ctrl.AdvertisedSupportedParameters(mi.SupportedParameters, mi.SupportedFormats)
+				obj.SupportedParameters = paramnorm.AdvertisedSupportedParameters(mi.SupportedParameters, mi.SupportedFormats)
 				obj.SupportedFormats = mi.SupportedFormats
 				obj.DefaultParameters = mi.DefaultParameters
 				obj.ExpirationDate = mi.ExpirationDate
@@ -828,7 +828,7 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 		obj.ContextLength = cfg.ModelInfo.ContextLength
 		obj.MaxCompletionTokens = cfg.ModelInfo.MaxCompletionTokens
 		obj.Architecture = cfg.ModelInfo.Architecture
-		obj.SupportedParameters = ctrl.AdvertisedSupportedParameters(cfg.ModelInfo.SupportedParameters, cfg.ModelInfo.SupportedFormats)
+		obj.SupportedParameters = paramnorm.AdvertisedSupportedParameters(cfg.ModelInfo.SupportedParameters, cfg.ModelInfo.SupportedFormats)
 		obj.SupportedFormats = cfg.ModelInfo.SupportedFormats
 		obj.DefaultParameters = cfg.ModelInfo.DefaultParameters
 		obj.TeeType = cfg.ModelInfo.TeeType

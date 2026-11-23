@@ -85,7 +85,7 @@ import (
 // Behavior is derived entirely from the request the broker forwards (stream /
 // tools / anything else), never from an out-of-band scenario flag, so it
 // naturally exercises whatever the request-body translation pipeline
-// (TranslateMaxTokens, TranslateReasoning, ...) actually produced.
+// (the max_tokens rename, the reasoning translation, ...) actually produced.
 //
 // The default (non-stream, no tools) response echoes the exact body it
 // received back to the client under "_debug_received_body". The broker's
@@ -587,7 +587,7 @@ func TestOpenAISDK_ToolCalling(t *testing.T) {
 func TestOpenAISDK_ModelsList(t *testing.T) {
 	baseURL, authHeader := setupContractEnv(t, func(cfg *config.Config) {
 		// A native reasoning toggle causes the router to advertise the
-		// portable reasoning_effort too (see AdvertisedSupportedParameters) —
+		// portable reasoning_effort too (see paramnorm.AdvertisedSupportedParameters) —
 		// checked below as a models-endpoint proof that the design doc's
 		// documented behavior is what a real client sees.
 		cfg.Service.ModelInfo = chatContractModelInfo("chat_template_kwargs", "max_tokens")
@@ -711,7 +711,7 @@ func TestOpenAISDK_MaxTokensTranslation(t *testing.T) {
 	baseURL, authHeader := setupContractEnv(t, func(cfg *config.Config) {
 		// Advertises max_tokens but not max_completion_tokens: a client's
 		// max_completion_tokens must be renamed to max_tokens before it
-		// reaches the upstream (see ctrl.TranslateMaxTokens).
+		// reaches the upstream (see ctrl.normalizeParams).
 		cfg.Service.ModelInfo = chatContractModelInfo("max_tokens")
 	})
 
