@@ -106,10 +106,12 @@ The contract keeps `teeSignerAcknowledged` across a change of `inputPrice`, `out
 not routed until the owner acks it again. `additionalInfo` holds only the signer's identity
 (image, verifier, TEE target, provider type). The price shapes — `tieredPricing`,
 `cacheTokenBilling`, `modalityPricing` — are served by `GET /v1/models`
-(`pricing.tiered_pricing`, `pricing.cache_token_billing`, `pricing.modality_pricing`), so no
-overlay change resets the acknowledgement. The router reads them from there (through
-compute-status, refreshed about every 15 minutes), so a new cache or tier price reaches it
-within that window.
+(`pricing.tiered_pricing`, `pricing.cache_token_billing`, `pricing.modality_pricing`), so a price
+change made through the overlay keeps the acknowledgement. One overlay key still reaches
+`additionalInfo`: `service.priceDenomination` on a multi-model provider, where it is published
+with the `MultiModel` flag; switching it between NATIVE and USD resets the acknowledgement. The
+router reads the price shapes from `/v1/models` (through compute-status, refreshed about every 15
+minutes), so a new cache or tier price reaches it within that window.
 
 Brokers before this change published the three shapes in `additionalInfo`: on those, an
 overlay that changes any of them resets the acknowledgement and needs a re-ack. The first start

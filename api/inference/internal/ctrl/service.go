@@ -124,14 +124,14 @@ func (c *Ctrl) SyncService(ctx context.Context) error {
 // SyncServiceWithPrices is the USD-mode startup equivalent of SyncService.
 // It overlays the supplied wei prices onto a Service copy and runs the full
 // identicalService comparison so non-price config changes (TEE signer,
-// tieredPricing, additionalInfo, etc.) propagate on chain — something
+// additionalInfo, etc.) propagate on chain — something
 // SyncServicePrices does not check.
 //
 // To avoid paying gas on every restart where only the rate has drifted, the
 // startup path runs a two-step equality check:
 //
 //  1. If the on-chain service matches every non-price field (URL, model,
-//     TEE signer, tieredPricing, cacheTokenBilling, additionalInfo), then
+//     TEE signer, additionalInfo), then
 //  2. Compare price drift against MinOnChainUpdateBps; skip the on-chain
 //     write if within threshold and adopt the on-chain prices as our
 //     local baseline.
