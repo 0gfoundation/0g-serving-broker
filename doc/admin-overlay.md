@@ -99,6 +99,28 @@ unauthorized` to the caller, with the reason in the broker log.
    requests 30 seconds — a stream longer than that is cut. The engine keeps running.
 4. On start the broker publishes the new prices on-chain as it does on every start.
 
+### The TEE acknowledgement
+
+The contract keeps `teeSignerAcknowledged` across a change of `inputPrice`, `outputPrice` or
+`url`, and resets it when `additionalInfo` changes; a TEE provider that is not acknowledged is
+not routed until the owner acks it again. `additionalInfo` holds only the signer's identity
+(image, verifier, TEE target, provider type). The price shapes — `tieredPricing`,
+`cacheTokenBilling`, `modalityPricing` — are served by `GET /v1/models`
+(`pricing.tiered_pricing`, `pricing.cache_token_billing`, `pricing.modality_pricing`), so a price
+change made through the overlay keeps the acknowledgement. One overlay key still reaches
+`additionalInfo`: `service.priceDenomination` on a multi-model provider, where it is published
+with the `MultiModel` flag; switching it between NATIVE and USD resets the acknowledgement. The
+router reads the price shapes from `/v1/models` (through compute-status, refreshed about every 15
+minutes), so a new cache or tier price reaches it within that window.
+
+Brokers before this change published the three shapes in `additionalInfo`: on those, an
+overlay that changes any of them resets the acknowledgement and needs a re-ack. The first start
+on this version drops them from `additionalInfo`, which also resets it once — upgrade the image
+first (an image upgrade needs a re-ack anyway), then use the overlay. On a controller-managed
+deployment the controller may publish the new image before the inference server drops the
+keys, which resets the acknowledgement twice: re-ack after the inference server's own start-up
+write. Rolling back to an older image puts the keys back and resets it again.
+
 ## Things to know
 
 - The overlay volume outlives the CVM's restarts and redeploys. A redeploy with a new main

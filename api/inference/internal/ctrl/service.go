@@ -124,14 +124,14 @@ func (c *Ctrl) SyncService(ctx context.Context) error {
 // SyncServiceWithPrices is the USD-mode startup equivalent of SyncService.
 // It overlays the supplied wei prices onto a Service copy and runs the full
 // identicalService comparison so non-price config changes (TEE signer,
-// tieredPricing, additionalInfo, etc.) propagate on chain — something
+// additionalInfo, etc.) propagate on chain — something
 // SyncServicePrices does not check.
 //
 // To avoid paying gas on every restart where only the rate has drifted, the
 // startup path runs a two-step equality check:
 //
 //  1. If the on-chain service matches every non-price field (URL, model,
-//     TEE signer, tieredPricing, cacheTokenBilling, additionalInfo), then
+//     TEE signer, additionalInfo), then
 //  2. Compare price drift against MinOnChainUpdateBps; skip the on-chain
 //     write if within threshold and adopt the on-chain prices as our
 //     local baseline.
@@ -162,7 +162,7 @@ func (c *Ctrl) SyncServiceWithPrices(ctx context.Context, inputWei, outputWei *b
 	overlaid.OutputPrice = outputWei.String()
 
 	// Attempt the pure-rate-drift skip before spending a transaction.
-	nonPriceMatches, onChain, cmpErr := c.contract.CompareServiceExceptPrice(ctx, overlaid, c.tieredPricing, c.cacheTokenBilling, c.modalityPricing)
+	nonPriceMatches, onChain, cmpErr := c.contract.CompareServiceExceptPrice(ctx, overlaid)
 	notFound := cmpErr != nil && errors.Is(cmpErr, providercontract.ErrServiceNotFound)
 	if cmpErr != nil && !notFound {
 		c.logger.Warnf("SyncServiceWithPrices: non-price comparison failed, proceeding with full sync: %v", cmpErr)
@@ -216,7 +216,7 @@ func (c *Ctrl) syncServiceOnceLocked(ctx context.Context, svc config.Service) er
 		return nil
 	}
 
-	if err := c.contract.SyncService(ctx, svc, c.tieredPricing, c.cacheTokenBilling, c.modalityPricing); err != nil {
+	if err := c.contract.SyncService(ctx, svc); err != nil {
 		// Reset the flag if sync failed so it can be retried
 		c.serviceSynced.Store(false)
 		return errors.Wrap(err, "sync services")
@@ -319,7 +319,7 @@ func (c *Ctrl) SyncServicePrices(ctx context.Context, inputWei, outputWei *big.I
 	updated.InputPrice = inputWei.String()
 	updated.OutputPrice = outputWei.String()
 
-	if err := c.contract.SyncService(ctx, updated, c.tieredPricing, c.cacheTokenBilling, c.modalityPricing); err != nil {
+	if err := c.contract.SyncService(ctx, updated); err != nil {
 		return nil, nil, errors.Wrap(err, "sync service prices on chain")
 	}
 

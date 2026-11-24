@@ -194,7 +194,7 @@ func startInstance(ctx context.Context, name string, config *cfg.Config, teeServ
 	// identicalService comparison as NATIVE's SyncService, but with the
 	// bootstrapped wei prices overlaid on the config so price fields
 	// participate in the equality check alongside URL, model type, TEE
-	// signer, tieredPricing, and additionalInfo.  The drift gate only
+	// signer, and additionalInfo.  The drift gate only
 	// applies to subsequent PriceUpdateProcessor ticks via
 	// SyncServicePrices.
 	//

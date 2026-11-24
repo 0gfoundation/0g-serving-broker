@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/0glabs/0g-serving-broker/inference/config"
-	"github.com/0glabs/0g-serving-broker/inference/internal/modalprice"
 )
 
 // TestBuildAdditionalInfo_ProviderTypeGating verifies the on-chain additionalInfo
@@ -44,7 +43,7 @@ func TestBuildAdditionalInfo_ProviderTypeGating(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			raw, err := buildAdditionalInfo(tc.service, "", "", config.TieredPricingConfig{}, config.CacheTokenBillingConfig{}, nil)
+			raw, err := buildAdditionalInfo(tc.service, "", "")
 			if err != nil {
 				t.Fatalf("buildAdditionalInfo: %v", err)
 			}
@@ -111,24 +110,42 @@ func TestIsServiceNotFoundMessage(t *testing.T) {
 	}
 }
 
-// The service-level modality shape is published like tiers / cache; without
-// one (or with a flat {}), additionalInfo is unchanged.
-func TestBuildAdditionalInfo_ModalityPricing(t *testing.T) {
-	svc := config.Service{ProviderType: "decentralized"}
-	flat, err := buildAdditionalInfo(svc, "", "", config.TieredPricingConfig{}, config.CacheTokenBillingConfig{}, nil)
-	if err != nil {
-		t.Fatal(err)
+// additionalInfo carries only what a verifier needs to trust the signer. The
+// contract resets the TEE acknowledgement whenever it changes, so a price shape
+// in it would take a TEE provider out of routing on every price change made
+// through the admin overlay. Prices are served by GET /v1/models instead.
+func TestBuildAdditionalInfo_NoPriceShapes(t *testing.T) {
+	identity := map[string]bool{
+		"VerifierURL": true, "TEEVerifier": true, "TargetSeparated": true, "TargetTeeAddress": true,
+		"ImageName": true, "ImageDigest": true, "ProviderType": true, "ProviderIdentity": true,
+		"MultiModel": true, "priceDenomination": true,
 	}
-	empty, err := buildAdditionalInfo(svc, "", "", config.TieredPricingConfig{}, config.CacheTokenBillingConfig{}, &modalprice.Published{})
-	if err != nil || empty != flat {
-		t.Fatalf("flat shape changed additionalInfo: %s vs %s (%v)", empty, flat, err)
+	for _, svc := range []config.Service{
+		{ProviderType: "decentralized", InputPrice: "1", OutputPrice: "2"},
+		{ProviderType: "centralized", ProviderIdentity: "openai", InputPrice: "3", OutputPrice: "4"},
+	} {
+		raw, err := buildAdditionalInfo(svc, "img", "sha256:00")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var info map[string]interface{}
+		if err := json.Unmarshal([]byte(raw), &info); err != nil {
+			t.Fatal(err)
+		}
+		for k := range info {
+			if !identity[k] {
+				t.Errorf("additionalInfo key %q is not an identity field: %s", k, raw)
+			}
+		}
+		for _, k := range []string{"tieredPricing", "cacheTokenBilling", "modalityPricing"} {
+			if strings.Contains(raw, k) {
+				t.Errorf("additionalInfo carries %s: %s", k, raw)
+			}
+		}
 	}
-	shaped, err := buildAdditionalInfo(svc, "", "", config.TieredPricingConfig{}, config.CacheTokenBillingConfig{},
-		&modalprice.Published{Input: map[string]string{"audio": "79/9"}, Output: map[string]string{"audio": "626/127"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := `"modalityPricing":{"input":{"audio":"79/9"},"output":{"audio":"626/127"}}`; !strings.Contains(shaped, want) {
-		t.Fatalf("want %s in %s", want, shaped)
+	a, _ := buildAdditionalInfo(config.Service{ProviderType: "decentralized", InputPrice: "1", OutputPrice: "2"}, "img", "sha256:00")
+	b, _ := buildAdditionalInfo(config.Service{ProviderType: "decentralized", InputPrice: "5", OutputPrice: "9"}, "img", "sha256:00")
+	if a != b {
+		t.Errorf("a price change changed additionalInfo: %s vs %s", a, b)
 	}
 }
