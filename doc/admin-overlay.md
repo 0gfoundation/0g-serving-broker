@@ -116,7 +116,10 @@ minutes), so a new cache or tier price reaches it within that window.
 Brokers before this change published the three shapes in `additionalInfo`: on those, an
 overlay that changes any of them resets the acknowledgement and needs a re-ack. The first start
 on this version drops them from `additionalInfo`, which also resets it once — upgrade the image
-first (an image upgrade needs a re-ack anyway), then use the overlay.
+first (an image upgrade needs a re-ack anyway), then use the overlay. On a controller-managed
+deployment the controller may publish the new image before the inference server drops the
+keys, which resets the acknowledgement twice: re-ack after the inference server's own start-up
+write. Rolling back to an older image puts the keys back and resets it again.
 
 ## Things to know
 
