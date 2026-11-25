@@ -2121,7 +2121,7 @@ stated here rather than hidden:**
 
 | Line | Level | What it carries |
 |---|---|---|
-| a request profile dropping a parameter the upstream engine rejects (`api/inference/internal/ctrl/request_profile.go`) | **Info** | the **value the client chose** for that field (e.g. `reasoning_effort`, `thinking.display`), truncated to 64 bytes, with its path and the model |
+| a request profile dropping a parameter the upstream engine rejects (`api/inference/internal/ctrl/param_normalize.go`) | **Info** | the **value the client chose** for that field (e.g. `reasoning_effort`, `thinking.display`), truncated to 64 bytes, with its path and the model |
 | an upstream error response (`api/inference/internal/ctrl/proxy.go`, `logsafe.go`) | **Error**, printed by default | the upstream's **error body**, up to 512 bytes, with only this deployment's configured secrets redacted — and some vendors echo the request in it |
 | a video job whose billing proof is skipped (`api/inference/internal/ctrl/video.go`, `video_reserve.go`, via `logProofSkip`) | **Error**, throttled | the request's free-text **`size`** value, truncated to 80 bytes |
 

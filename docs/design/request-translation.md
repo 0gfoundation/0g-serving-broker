@@ -10,9 +10,16 @@ model's advertised `supportedParameters`, not a per-model table: the broker only
 translates a field when the resolved model advertises the corresponding upstream
 parameter. If it advertises nothing translatable, the body passes through untouched.
 
+The rules live in the shared library `github.com/0gfoundation/0g-param-normalization`
+(`paramnorm.Normalize`), which the router also uses, so they are defined once. The
+broker's part (`inference/internal/ctrl/param_normalize.go`) is resolving which
+model entry a request targets and mapping the service's switches
+(`enforceMaxCompletionTokens`, `requestProfile`, `requestProfileEnforce`) onto the
+library's.
+
 ## Supported translations
 
-### 1. Output token cap — `TranslateMaxTokens`
+### 1. Output token cap
 
 Same value, different field name. `max_tokens` (original) and `max_completion_tokens`
 (its replacement) mean the same thing, but some upstreams accept only one.
@@ -22,9 +29,9 @@ Same value, different field name. `max_tokens` (original) and `max_completion_to
 | `"max_completion_tokens": 256` | `"max_tokens": 256` | `max_tokens` only (e.g. DeepSeek-on-vLLM) |
 | `"max_tokens": 256` | `"max_completion_tokens": 256` | `max_completion_tokens` only |
 
-Details: `inference/internal/ctrl/max_tokens.go`.
+Details: `max_tokens.go` in the shared library.
 
-### 2. Reasoning / thinking control — `TranslateReasoning`
+### 2. Reasoning / thinking control
 
 The OpenAI input is `reasoning_effort`. It is normalized to a binary on/off intent:
 `none` / `minimal` → **off**; any other non-empty value (`low` / `medium` / `high`)
@@ -57,7 +64,7 @@ compute, unlike the type-only `thinking` above — see
 
 Full design: [reasoning-translation.md](reasoning-translation.md).
 
-### 3. Values the engine does not list yet — `ApplyRequestProfile`
+### 3. Values the engine does not list yet — request profiles
 
 Clients move faster than self-hosted engines. Claude Code started sending
 `thinking.display: "updates"` / `"highlights"`; SGLang v0.5.18's Anthropic schema
@@ -66,7 +73,7 @@ logs on `display`. Unknown field *names* are not the problem — SGLang's reques
 ignore extra keys — closed enums are.
 
 `service.requestProfile` (or a model entry's `requestProfile`, which overrides it) names
-the engine, and `inference/internal/ctrl/request_profile.go` holds that engine's
+the engine, and `request_profile.go` in the shared library holds that engine's
 accepted values per API surface. A field with a rule is dropped when its value is a
 string outside the accepted set, so the upstream's default applies — the per-engine
 half of OpenRouter's "providers ignore unknown parameters". Only fields whose absence
@@ -114,7 +121,8 @@ All translations above follow the same contract:
 Because the broker *accepts* `reasoning_effort` via translation, it should also
 *advertise* it — otherwise an OpenAI-schema client can't discover the portable knob and
 is pushed toward the leaky upstream-native field. This is automatic:
-`AdvertisedSupportedParameters(params, formats)` (in `reasoning.go`) augments the
+`paramnorm.AdvertisedSupportedParameters(params, formats)` (the shared library's
+`reasoning.go`) augments the
 `supported_parameters` served by `GET /v1/models` — when a model advertises a native
 thinking toggle (`chat_template_kwargs` / `enable_thinking` / `thinking` / `reasoning`)
 but not `reasoning_effort`, the handler appends `reasoning_effort`.
@@ -136,8 +144,9 @@ model id, and before the operator strip/inject steps. Full chatbot rewrite order
 
 ```
 EnsureStreamOptions → RewriteLoRARequest → ValidateModelAllowlist / EnforceConfiguredModel
-  → enforceRequestFormat → TranslateMaxTokens → TranslateReasoning
-  → ApplyRequestProfile → StripBodyFields → InjectBodyFields → forward upstream
+  → enforceRequestFormat
+  → normalizeParams (output cap → max_tokens rename → reasoning → request profile)
+  → StripBodyFields → InjectBodyFields → forward upstream
 ```
 
 ## Adding a new translation

@@ -43,8 +43,8 @@ less than the request's `max_tokens`) and the broker has no basis to compute it.
 Writing `{"type": "enabled"}` without it would be rejected by the upstream. The
 broker distinguishes the two dialects by the model's `supportedFormats`: a
 `thinking` advertisement is only treated as a target when `supportedFormats`
-does not declare the Anthropic surface (`requiresAnthropicBudgetTokens` in
-`reasoning.go`). Affected models (e.g. `claude-opus-4-8`, `claude-sonnet-5`)
+does not declare the Anthropic surface (`requiresAnthropicBudgetTokens` in the
+shared library's `reasoning.go`). Affected models (e.g. `claude-opus-4-8`, `claude-sonnet-5`)
 neither get `reasoning_effort` translated nor advertised — a client on the
 Anthropic surface sets `thinking` (with `budget_tokens`) directly, as normal.
 
@@ -67,12 +67,13 @@ Two edge cases in that check are deliberate, not oversights:
   `AdvertisedSupportedParameters` genuinely can't be surface-scoped (it feeds
   one static list into `GET /v1/models` regardless of surface), but
   *translation* runs at request time, where the actual surface is already
-  known (`apiFormatForPath` in `proxy.go`, computed one call before
-  `TranslateReasoning` runs) — a surface-aware fix is possible without touching
+  known (`apiFormatForPath` in `proxy.go`, passed to the shared library as
+  `Request.Format`) — a surface-aware fix is possible without touching
   advertisement. It was deliberately not built: no shipped config combines
   `thinking` with a dual-surface declaration today, and the fix would mean
-  threading the surface through `TranslateReasoning` → `nativeReasoningParam`
-  and updating every call site (including most of `reasoning_test.go`) to
+  threading the surface through the library's `translateReasoning` →
+  `nativeReasoningParam` and updating every call site (including most of its
+  `reasoning_test.go`) to
   guard against a case nothing currently exercises. Revisit if a real
   dual-surface + `thinking` config is ever needed.
 

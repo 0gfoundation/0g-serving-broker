@@ -25,7 +25,7 @@ func TestGuardEngineControls_StripsControlFields(t *testing.T) {
 	if err := json.Unmarshal(out, &got); err != nil {
 		t.Fatal(err)
 	}
-	for _, f := range engineControlFields {
+	for _, f := range []string{"chat_template", "custom_logit_processor", "lora_path", "lora_adapter_name", "return_hidden_states"} {
 		if _, ok := got[f]; ok {
 			t.Errorf("%s not stripped", f)
 		}
