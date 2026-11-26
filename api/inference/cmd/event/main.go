@@ -134,7 +134,11 @@ func addInstance(mgr manager.Manager, name string, conf *config.Config, teeServi
 
 	// Add reconciliation processor for event-based settlement verification
 	if conf.Interval.ReconciliationProcessor > 0 {
-		reconciliationProcessor := event.NewReconciliationProcessor(db, contract, conf.Interval.ReconciliationProcessor, logger)
+		var spmlPayout *database.SpmlPayoutOptions
+		if conf.Service.IsSPML() && conf.Spml.Payout.Enabled {
+			spmlPayout = &database.SpmlPayoutOptions{CutBps: conf.Spml.Payout.VerifierCutBps, Logf: logger.Warnf}
+		}
+		reconciliationProcessor := event.NewReconciliationProcessor(db, contract, conf.Interval.ReconciliationProcessor, spmlPayout, logger)
 		if err := mgr.Add(reconciliationProcessor); err != nil {
 			panic(err)
 		}

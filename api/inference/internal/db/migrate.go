@@ -452,9 +452,9 @@ func (d *DB) Migrate() error {
 			},
 		},
 		{
-			ID: "create-assay-payout",
+			ID: "create-spml-payout",
 			Migrate: func(tx *gorm.DB) error {
-				type AssayPayout struct {
+				type SpmlPayout struct {
 					Node           string     `gorm:"type:varchar(64);primaryKey"`
 					Cumulative     string     `gorm:"type:varchar(255);not null;default:'0'"`
 					Epoch          int64      `gorm:"type:bigint;not null;default:0"`
@@ -462,7 +462,7 @@ func (d *DB) Migrate() error {
 					Invoiced       bool       `gorm:"type:tinyint(1);not null;default:0"`
 					UpdatedAt      *time.Time `gorm:"type:datetime"`
 				}
-				return tx.AutoMigrate(&AssayPayout{})
+				return tx.AutoMigrate(&SpmlPayout{})
 			},
 		},
 		{
@@ -479,6 +479,15 @@ func (d *DB) Migrate() error {
 					SealedResult []byte `gorm:"type:longblob"`
 				}
 				return tx.AutoMigrate(&AsyncJob{})
+			},
+		},
+		{
+			// pending_covered grows one entry per settled request while the
+			// spml is unreachable; TEXT (64 KB, ~950 hashes) overflowed in a
+			// busy hour and the failed upsert then lost that round's accrual.
+			ID: "spml-payout-pending-covered-longtext",
+			Migrate: func(tx *gorm.DB) error {
+				return tx.Exec("ALTER TABLE spml_payout MODIFY pending_covered LONGTEXT NOT NULL").Error
 			},
 		},
 	})

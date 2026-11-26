@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -26,20 +27,20 @@ import (
 )
 
 // scanSource is the tappscan-backed attestation source
-// (docs/spml-attestation-relay.md, chosen 2026-09-09). Instead of exec'ing
+// (spml repo docs/spml-design.md §7.3, chosen 2026-09-09). Instead of exec'ing
 // tapp-cli against the shared attestation service's policy library — a piece
 // of runtime state that was overwritten under us — the broker reads tappscan's
-// record for the assay app, checks it against two things tappscan cannot fake
-// (the signer the TappRegistry lists, and the TLS key the assay actually serves
+// record for the spml app, checks it against two things tappscan cannot fake
+// (the signer the TappRegistry lists, and the TLS key the spml actually serves
 // on its public port), and signs the whole statement with the TEE key so a
 // client can carry it away and verify it against getService(provider).teeSigner.
 //
-// It produces the same attestedAssay snapshot the gates already consume, so
+// It produces the same attestedSpml snapshot the gates already consume, so
 // settlement and invoicing do not know which source is behind them.
 type scanSource struct {
-	cfg          config.AssayAttestation
+	cfg          config.SpmlAttestation
 	provider     string // our provider address, echoed into the statement
-	verifierHost string // host:port of the assay's https endpoint (live SPKI probe)
+	verifierHost string // host:port of the spml's https endpoint (live SPKI probe)
 	scanPin      []byte
 	client       *http.Client
 	sign         func(hash []byte) ([]byte, error) // personal_sign by the TEE key; nil = unsigned
@@ -57,11 +58,11 @@ type scanChecks struct {
 	ChainSigner bool `json:"chain_signer"` // record signer == TappRegistry.getNodeList(app)
 	SignerBound bool `json:"signer_bound"` // quote attests that same signer
 	Image       bool `json:"image"`        // matched reference file == expected.image
-	Uki         bool `json:"uki"`          // measured uki == expected.uki (true when not configured)
+	Uki         bool `json:"uki"`          // expected.uki is among the measured uki entries (true when not configured)
 	Replay      bool `json:"replay"`       // eventlog replay reproduces the RTMRs
 	Tcb         bool `json:"tcb"`          // tcb_status in requireTcb
-	Clean       bool `json:"clean"`        // no note, no advisories
-	TlsKey      bool `json:"tls_key"`      // attested tls key == what the assay serves right now
+	Clean       bool `json:"clean"`        // no note, every advisory in allowAdvisories
+	TlsKey      bool `json:"tls_key"`      // attested tls key == what the spml serves right now
 	Fresh       bool `json:"fresh"`        // record's checked_at within tappscan.maxAgeSeconds
 }
 
@@ -92,16 +93,17 @@ type scanEval struct {
 // scanInputs is everything evaluateScanRecord needs besides the record, so the
 // evaluation is a pure function and the fixtures can drive it.
 type scanInputs struct {
-	now           time.Time
-	pinOK         bool // the fetch completed through the pinned transport
-	chainSigner   string
-	chainErr      error
-	liveTLS       string
-	liveErr       error
-	expectedImage string
-	expectedUki   string
-	requireTcb    []string
-	maxRecordAge  time.Duration
+	now             time.Time
+	pinOK           bool // the fetch completed through the pinned transport
+	chainSigner     string
+	chainErr        error
+	liveTLS         string
+	liveErr         error
+	expectedImage   string
+	expectedUki     string
+	requireTcb      []string
+	allowAdvisories []string
+	maxRecordAge    time.Duration
 }
 
 // scanRecord is the subset of tappscan's /api/apps/<id> we read. Unknown
@@ -131,14 +133,19 @@ type scanRecord struct {
 	} `json:"signers"`
 }
 
-func newScanSource(cfg config.AssayAttestation, verifierURL string, sign func([]byte) ([]byte, error), logger log.Logger) (*scanSource, error) {
+func newScanSource(cfg config.SpmlAttestation, verifierURL string, sign func([]byte) ([]byte, error), logger log.Logger) (*scanSource, error) {
 	pin, err := hex.DecodeString(strings.TrimPrefix(cfg.Tappscan.PubkeyPin, "0x"))
 	if err != nil || len(pin) != sha256.Size {
-		return nil, fmt.Errorf("assay.attestation.tappscan.pubkeyPin must be 32 bytes of hex (sha256 of tappscan's SPKI), got %q", cfg.Tappscan.PubkeyPin)
+		return nil, fmt.Errorf("spml.attestation.tappscan.pubkeyPin must be 32 bytes of hex (sha256 of tappscan's SPKI), got %q", cfg.Tappscan.PubkeyPin)
 	}
 	u, err := url.Parse(verifierURL)
 	if err != nil || u.Host == "" {
-		return nil, fmt.Errorf("assay.verifierUrl %q: cannot take a host for the live TLS probe", verifierURL)
+		return nil, fmt.Errorf("spml.verifierUrl %q: cannot take a host for the live TLS probe", verifierURL)
+	}
+	// The pin only guards a TLS handshake: a plain http:// URL would fetch the record
+	// unpinned and every check below would run on whatever answered.
+	if su, err := url.Parse(cfg.Tappscan.URL); err != nil || su.Scheme != "https" || su.Host == "" {
+		return nil, fmt.Errorf("spml.attestation.tappscan.url %q must be an https URL", cfg.Tappscan.URL)
 	}
 	host := u.Host
 	if u.Port() == "" {
@@ -148,6 +155,11 @@ func newScanSource(cfg config.AssayAttestation, verifierURL string, sign func([]
 	s.client = &http.Client{
 		Timeout:   20 * time.Second,
 		Transport: &http.Transport{TLSClientConfig: pinnedTLSConfig(func() []byte { return s.scanPin })},
+		// A redirect could leave the pinned host (or the https scheme); the record
+		// lives at one URL, so there is nothing legitimate to follow.
+		CheckRedirect: func(req *http.Request, _ []*http.Request) error {
+			return fmt.Errorf("tappscan redirected to %s; refusing to follow", req.URL)
+		},
 	}
 	return s, nil
 }
@@ -217,7 +229,7 @@ func (s *scanSource) chainSigner(ctx context.Context) (string, error) {
 	return strings.ToLower(nodes[0].Hex()), nil
 }
 
-// liveSPKI opens a TLS connection to the assay's public port and returns
+// liveSPKI opens a TLS connection to the spml's public port and returns
 // sha256 of the leaf SubjectPublicKeyInfo. No verification here on purpose:
 // this observes what is served; the comparison happens in the evaluation.
 func liveSPKI(ctx context.Context, host string) (string, error) {
@@ -296,8 +308,21 @@ func evaluateScanRecord(raw []byte, in scanInputs) scanEval {
 	ev.checkedAt = st.CheckedAt
 	ev.tlsKey = strings.ToLower(a.TlsPublicKey)
 	ev.image = a.Image
-	if u := a.Measured["uki"]; len(u) > 0 {
-		ev.uki = strings.ToLower(u[len(u)-1])
+	// The event log measures more than one "uki"-typed component (the boot
+	// stub is one of them and is identical across image versions), and where
+	// the image's own UKI lands in that list moved between v0.7.0 (last) and
+	// v0.8.0 (first). tappscan matches the reference against any entry; so do
+	// we. ev.uki is the entry that matched, or the whole list when none did.
+	measuredUki := a.Measured["uki"]
+	ukiMatched := false
+	for _, u := range measuredUki {
+		if in.expectedUki != "" && eqHex(u, in.expectedUki) {
+			ev.uki, ukiMatched = strings.ToLower(u), true
+			break
+		}
+	}
+	if !ukiMatched {
+		ev.uki = strings.ToLower(strings.Join(measuredUki, ","))
 	}
 
 	errNull := len(st.Error) == 0 || string(st.Error) == "null"
@@ -317,7 +342,7 @@ func evaluateScanRecord(raw []byte, in scanInputs) scanEval {
 	if !ev.checks.Image {
 		fail("image", fmt.Sprintf("record %q vs expected %q", a.Image, in.expectedImage))
 	}
-	ev.checks.Uki = in.expectedUki == "" || eqHex(ev.uki, in.expectedUki)
+	ev.checks.Uki = in.expectedUki == "" || ukiMatched
 	if !ev.checks.Uki {
 		fail("uki", fmt.Sprintf("measured %s vs expected %s", ev.uki, in.expectedUki))
 	}
@@ -333,9 +358,17 @@ func evaluateScanRecord(raw []byte, in scanInputs) scanEval {
 	if !ev.checks.Tcb {
 		fail("tcb", fmt.Sprintf("tcb_status=%s not in %v", a.TcbStatus, in.requireTcb))
 	}
-	ev.checks.Clean = a.Note == "" && len(a.Advisories) == 0
+	var unlisted []string
+	for _, raw := range a.Advisories {
+		id := string(raw) // a non-string entry stays raw JSON and never matches
+		_ = json.Unmarshal(raw, &id)
+		if !slices.Contains(in.allowAdvisories, id) {
+			unlisted = append(unlisted, id)
+		}
+	}
+	ev.checks.Clean = a.Note == "" && len(unlisted) == 0
 	if !ev.checks.Clean {
-		fail("clean", fmt.Sprintf("note=%q advisories=%d", a.Note, len(a.Advisories)))
+		fail("clean", fmt.Sprintf("note=%q unlisted advisories=%v", a.Note, unlisted))
 	}
 	ev.checks.TlsKey = in.liveErr == nil && eqHex(a.TlsPublicKey, in.liveTLS)
 	if !ev.checks.TlsKey {
@@ -356,12 +389,12 @@ func evaluateScanRecord(raw []byte, in scanInputs) scanEval {
 }
 
 // verifyOnce is the loop body: fetch, observe, evaluate, remember.
-func (s *scanSource) verifyOnce(ctx context.Context) attestedAssay {
+func (s *scanSource) verifyOnce(ctx context.Context) attestedSpml {
 	now := time.Now()
 	raw, ferr := s.fetch(ctx)
 	in := scanInputs{now: now, pinOK: ferr == nil,
 		expectedImage: s.cfg.Expected.Image, expectedUki: s.cfg.Expected.Uki,
-		requireTcb: s.cfg.RequireTcb, maxRecordAge: s.cfg.TappscanMaxAge()}
+		requireTcb: s.cfg.RequireTcb, allowAdvisories: s.cfg.AllowAdvisories, maxRecordAge: s.cfg.TappscanMaxAge()}
 	in.chainSigner, in.chainErr = s.chainSigner(ctx)
 	in.liveTLS, in.liveErr = liveSPKI(ctx, s.verifierHost)
 	ev := evaluateScanRecord(raw, in)
@@ -375,10 +408,10 @@ func (s *scanSource) verifyOnce(ctx context.Context) attestedAssay {
 	if ev.ok {
 		pin, _ = hex.DecodeString(strings.TrimPrefix(ev.tlsKey, "0x"))
 	}
-	return attestedAssay{pin: pin, checkedAt: now, ok: ev.ok, detail: ev.detail}
+	return attestedSpml{pin: pin, checkedAt: now, ok: ev.ok, detail: ev.detail}
 }
 
-// scanStatement is the signed document served by /v1/attestation/assay/scan.
+// scanStatement is the signed document served by /v1/attestation/spml/scan.
 // Field order is the wire order; the signature covers the marshalled bytes.
 type scanStatement struct {
 	V          int    `json:"v"`
@@ -451,22 +484,22 @@ func (s *scanSource) statement(nonce string, gatesSettlement bool) ([]byte, []by
 	return body, sig, nil
 }
 
-// AssayScanStatement serves /v1/attestation/assay/scan: the broker's own
+// SpmlScanStatement serves /v1/attestation/spml/scan: the broker's own
 // tappscan-backed check, signed by the TEE key. ErrScanNotReady before the
 // first loop run; an error wrapping errNoScanSource when the source is not
 // configured.
-func (c *Ctrl) AssayScanStatement(nonce string) ([]byte, []byte, error) {
-	if c.assayAttestor == nil || c.assayAttestor.scan == nil {
+func (c *Ctrl) SpmlScanStatement(nonce string) ([]byte, []byte, error) {
+	if c.spmlAttestor == nil || c.spmlAttestor.scan == nil {
 		return nil, nil, errNoScanSource
 	}
-	blocked, _ := c.assayAttestor.blockSettlement()
-	return c.assayAttestor.scan.statement(nonce, blocked)
+	blocked, _ := c.spmlAttestor.blockSettlement()
+	return c.spmlAttestor.scan.statement(nonce, blocked)
 }
 
-// AssayScanEnabled reports whether the tappscan source is the active one, so
+// SpmlScanEnabled reports whether the tappscan source is the active one, so
 // the relay endpoint can point at /scan.
-func (c *Ctrl) AssayScanEnabled() bool {
-	return c.assayAttestor != nil && c.assayAttestor.scan != nil
+func (c *Ctrl) SpmlScanEnabled() bool {
+	return c.spmlAttestor != nil && c.spmlAttestor.scan != nil
 }
 
 var errNoScanSource = errors.New("attestation source is not tappscan")

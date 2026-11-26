@@ -14,9 +14,9 @@ func TestScanLive(t *testing.T) {
 	if os.Getenv("SCAN_LIVE") != "1" {
 		t.Skip("SCAN_LIVE=1 to run against the network")
 	}
-	var cfg config.AssayAttestation
+	var cfg config.SpmlAttestation
 	cfg.Source = "tappscan"
-	cfg.AppID = "assay-verifier"
+	cfg.AppID = "spml-verifier"
 	cfg.Registry = "0x2Ce80374318B1d7Fb3345724457a182E0ad165c9"
 	cfg.RpcURL = "https://evmrpc-testnet.0g.ai"
 	cfg.RequireTcb = []string{"UpToDate"}

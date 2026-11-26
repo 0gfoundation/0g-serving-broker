@@ -1322,9 +1322,9 @@ type LoRAConfig struct {
 	EciesPrivateKey        string `yaml:"-"`                      // Override ECIES private key for adapter decryption (2-CVM setup). Set via env var LORA_ECIES_PRIVATE_KEY.
 }
 
-// AssayAttestation configures the Phase-2 verify-app loop. See the Assay
+// SpmlAttestation configures the Phase-2 verify-app loop. See the Spml
 // struct's Attestation field for semantics.
-type AssayAttestation struct {
+type SpmlAttestation struct {
 	Enabled bool `yaml:"enabled"`
 	// AppID / Registry / RpcURL locate the app on the TappRegistry.
 	AppID    string `yaml:"appId"`
@@ -1333,6 +1333,11 @@ type AssayAttestation struct {
 	// RequireTcb is the allowed tcb_status set (e.g. ["UpToDate"]). Widen it
 	// deliberately, listing each accepted advisory state.
 	RequireTcb []string `yaml:"requireTcb"`
+	// AllowAdvisories lists the Intel advisory IDs (e.g. INTEL-SA-01439) an
+	// attested record may carry and still pass the clean gate. Empty means
+	// none: any advisory blocks. Pair with a widened RequireTcb — OutOfDate
+	// always comes with advisories.
+	AllowAdvisories []string `yaml:"allowAdvisories"`
 	// MaxAgeSeconds: how long the last successful verification stays valid
 	// (default 3600). Interval: re-check period (default 10m).
 	MaxAgeSeconds int           `yaml:"maxAgeSeconds"`
@@ -1355,7 +1360,7 @@ type AssayAttestation struct {
 		PubkeyPin     string `yaml:"pubkeyPin"`
 		MaxAgeSeconds int    `yaml:"maxAgeSeconds"`
 	} `yaml:"tappscan"`
-	// Expected is what the record must say about the assay's boot chain:
+	// Expected is what the record must say about the spml's boot chain:
 	// Image is the reference-values path tappscan reports as matched (e.g.
 	// gcp/uki/v0.7.0/dev.json); Uki optionally pins the measurement itself.
 	Expected struct {
@@ -1365,21 +1370,21 @@ type AssayAttestation struct {
 }
 
 // MaxAge of the tappscan record's own checked_at (default 6h).
-func (a AssayAttestation) TappscanMaxAge() time.Duration {
+func (a SpmlAttestation) TappscanMaxAge() time.Duration {
 	if a.Tappscan.MaxAgeSeconds <= 0 {
 		return 6 * time.Hour
 	}
 	return time.Duration(a.Tappscan.MaxAgeSeconds) * time.Second
 }
 
-func (a AssayAttestation) MaxAge() time.Duration {
+func (a SpmlAttestation) MaxAge() time.Duration {
 	if a.MaxAgeSeconds <= 0 {
 		return time.Hour
 	}
 	return time.Duration(a.MaxAgeSeconds) * time.Second
 }
 
-func (a AssayAttestation) IntervalOrDefault() time.Duration {
+func (a SpmlAttestation) IntervalOrDefault() time.Duration {
 	if a.Interval <= 0 {
 		return 10 * time.Minute
 	}
@@ -1427,7 +1432,7 @@ type Config struct {
 		// Set to "0" to disable per-user filtering.
 		MinSettlementFee string `yaml:"minSettlementFee"`
 	} `yaml:"settlement"`
-	// Assay configures the Immaculate/LDD verifiable-inference integration,
+	// Spml configures the Immaculate/LDD verifiable-inference integration,
 	// which runs when providerType is "spml". The broker records the
 	// verifier's ZG-Verdict per request and
 	// gates settlement on the verdicts: any REJECT in a settlement batch voids
@@ -1440,8 +1445,8 @@ type Config struct {
 	// merely rejected. Configs carrying the old key fail to load —
 	// UnmarshalStrict refuses unknown fields — which is the intended way to
 	// find them.
-	Assay struct {
-		// VerifierURL is the Assay verifier's base URL (e.g.
+	Spml struct {
+		// VerifierURL is the Spml verifier's base URL (e.g.
 		// "http://verifier:8200"). When set, settlement first asks the
 		// verifier (POST /v1/settlement/check) for the batch's final
 		// verdicts — the response headers only carry PENDING/UNVERIFIED in
@@ -1484,7 +1489,7 @@ type Config struct {
 		// threshold judgement, so it withholds settlement regardless.
 		RejectGatesSettlement bool `yaml:"rejectGatesSettlement"`
 		// VerifierKeyPin authenticates the TLS connection to the verifier
-		// (docs/spml-broker-assay-tls.md Phase 1): 0x-hex sha256 of the
+		// (docs/spml-design.md §5 (TLS layer)): 0x-hex sha256 of the
 		// verifier endpoint's SubjectPublicKeyInfo, whose authoritative
 		// source is `tapp-cli verify-app`. When set, every TLS connection
 		// the shared provider client makes checks the presented leaf
@@ -1499,18 +1504,18 @@ type Config struct {
 		// ledger and signs PayoutVouchers the GPUs redeem on-chain.
 		Payout struct {
 			Enabled bool `yaml:"enabled"`
-			// VerifierCutBps is the assay's cut in basis points of each
+			// VerifierCutBps is the spml's cut in basis points of each
 			// settled amount (also enforced on-chain via the cut cap).
 			VerifierCutBps int64 `yaml:"verifierCutBps"`
 		} `yaml:"payout"`
-		// Attestation (docs/spml-broker-assay-tls.md Phase 2): periodically
+		// Attestation (docs/spml-design.md §7 (attestation gate)): periodically
 		// re-attest the verifier by exec'ing `tapp-cli verify-app` and
 		// PARSING ITS OUTPUT (its exit code lies). While the latest verified
 		// snapshot is fresh, its attested "tls key" replaces VerifierKeyPin
 		// as the TLS pin; when it is not, settlement and invoicing are gated
 		// per OnFail. Requires the tapp-cli binary in the broker image.
-		Attestation AssayAttestation `yaml:"attestation"`
-	} `yaml:"assay"`
+		Attestation SpmlAttestation `yaml:"attestation"`
+	} `yaml:"spml"`
 	RevenueTransfer struct {
 		TargetAddress string        `yaml:"targetAddress"`
 		ReserveAmount string        `yaml:"reserveAmount"`
@@ -2091,7 +2096,7 @@ var IngressAllowedEnvKeys = []string{
 // mean what it claims.
 //
 // These preconditions exist today too — they just live in a runbook as
-// deployment-order folklore ("bring the signing broker up FIRST or the assay
+// deployment-order folklore ("bring the signing broker up FIRST or the spml
 // 401s you"), and getting one wrong surfaces at 3am as a 502 rather than at
 // startup as a sentence. Two of them do worse than fail: they silently answer a
 // weaker question than the operator believes they asked. Those are the reason
@@ -2100,7 +2105,7 @@ var IngressAllowedEnvKeys = []string{
 // Nothing here is new policy. Every rule is a comment already written somewhere
 // in this file, promoted to something the process refuses to start without.
 //
-// One rule is absent on purpose: there is no check that assay is "enabled",
+// One rule is absent on purpose: there is no check that spml is "enabled",
 // because there is no such flag. The provider type is the switch, so
 // "verification on, against an upstream we cannot recompute" is not a
 // configuration you can express and then have rejected — it is one you cannot
@@ -2119,38 +2124,41 @@ func validateSPMLService(cfg *Config) error {
 	if cfg.Service.ModelType == "" {
 		return fmt.Errorf("invalid config: providerType 'spml' requires service.model — the verifier loads exactly one FP32 reference model and a mismatch silently changes every verdict")
 	}
-	if cfg.Assay.VerifierURL == "" {
-		return fmt.Errorf("invalid config: providerType 'spml' requires assay.verifierUrl — without it settlement decides on header-recorded verdicts alone and never resolves the asynchronous audits")
+	if cfg.Spml.VerifierURL == "" {
+		return fmt.Errorf("invalid config: providerType 'spml' requires spml.verifierUrl — without it settlement decides on header-recorded verdicts alone and never resolves the asynchronous audits")
 	}
-	if cfg.Assay.VerifierAddress == "" {
-		return fmt.Errorf("invalid config: providerType 'spml' requires assay.verifierAddress — a verdict is a settlement input, so it has to be authenticated rather than read off a plaintext header")
+	if cfg.Spml.VerifierAddress == "" {
+		return fmt.Errorf("invalid config: providerType 'spml' requires spml.verifierAddress — a verdict is a settlement input, so it has to be authenticated rather than read off a plaintext header")
 	}
 
 	// The verifier's certificate is KMS-derived and self-signed, so CA
 	// validation can never succeed on it. Over https the choice is a pin or
 	// nothing; "nothing" is an encrypted channel to an unauthenticated peer.
-	if strings.HasPrefix(strings.ToLower(cfg.Assay.VerifierURL), "https://") &&
-		cfg.Assay.VerifierKeyPin == "" && !cfg.Assay.Attestation.Enabled {
-		return fmt.Errorf("invalid config: providerType 'spml' with an https assay.verifierUrl requires assay.verifierKeyPin, or assay.attestation.enabled to supply the pin — the verifier's cert is KMS-derived and self-signed, so CA validation cannot authenticate it and an unpinned connection is encrypted but anonymous")
+	if strings.HasPrefix(strings.ToLower(cfg.Spml.VerifierURL), "https://") &&
+		cfg.Spml.VerifierKeyPin == "" && !cfg.Spml.Attestation.Enabled {
+		return fmt.Errorf("invalid config: providerType 'spml' with an https spml.verifierUrl requires spml.verifierKeyPin, or spml.attestation.enabled to supply the pin — the verifier's cert is KMS-derived and self-signed, so CA validation cannot authenticate it and an unpinned connection is encrypted but anonymous")
 	}
 
-	at := cfg.Assay.Attestation
+	at := cfg.Spml.Attestation
 	if at.Enabled && at.Source != "" && at.Source != "tappscan" {
-		return fmt.Errorf("invalid config: assay.attestation.source must be 'tappscan' (the tapp-cli source is gone: its boot-chain answer came from a policy on a shared attestation service that anyone can overwrite, and one was, after which it failed a healthy CVM), got %q", at.Source)
+		return fmt.Errorf("invalid config: spml.attestation.source must be 'tappscan' (the tapp-cli source is gone: its boot-chain answer came from a policy on a shared attestation service that anyone can overwrite, and one was, after which it failed a healthy CVM), got %q", at.Source)
 	}
 	if at.Enabled {
 		// The tappscan source has its own two anchors (chain signer, live
 		// TLS key); what it cannot do without is knowing where tappscan is,
-		// which key it serves, and which reference file the assay must match.
+		// which key it serves, and which reference file the spml must match.
 		if at.AppID == "" || at.Registry == "" || at.RpcURL == "" {
-			return fmt.Errorf("invalid config: assay.attestation.source=tappscan needs appId, registry and rpcUrl — the record's signer is checked against TappRegistry.getNodeList, which is the check tappscan cannot fake")
+			return fmt.Errorf("invalid config: spml.attestation.source=tappscan needs appId, registry and rpcUrl — the record's signer is checked against TappRegistry.getNodeList, which is the check tappscan cannot fake")
 		}
 		if at.Tappscan.URL == "" || at.Tappscan.PubkeyPin == "" {
-			return fmt.Errorf("invalid config: assay.attestation.source=tappscan needs tappscan.url and tappscan.pubkeyPin — unpinned, anyone on the path can hand back a passing record")
+			return fmt.Errorf("invalid config: spml.attestation.source=tappscan needs tappscan.url and tappscan.pubkeyPin — unpinned, anyone on the path can hand back a passing record")
 		}
 		if at.Expected.Image == "" {
-			return fmt.Errorf("invalid config: assay.attestation.source=tappscan needs expected.image (the reference-values path the assay's boot chain must match, e.g. gcp/uki/v0.7.0/dev.json)")
+			return fmt.Errorf("invalid config: spml.attestation.source=tappscan needs expected.image (the reference-values path the spml's boot chain must match, e.g. gcp/uki/v0.7.0/dev.json)")
 		}
+	}
+	if bps := cfg.Spml.Payout.VerifierCutBps; bps < 0 || bps > 10000 {
+		return fmt.Errorf("invalid config: spml.payout.verifierCutBps=%d must be within 0..10000 — above that the node share goes negative and the spml refuses every invoice", bps)
 	}
 	// SPML serves one model against one FP32 reference; per-model pricing
 	// describes a multi-model upstream, which this is not.

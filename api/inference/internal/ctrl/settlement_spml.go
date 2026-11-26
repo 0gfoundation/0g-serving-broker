@@ -14,28 +14,28 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/model"
 )
 
-// assayVerdictResult is one request's entry in the verifier's settlement-check
-// response (POST {assay.verifierUrl}/v1/settlement/check).
-type assayVerdictResult struct {
+// spmlVerdictResult is one request's entry in the verifier's settlement-check
+// response (POST {spml.verifierUrl}/v1/settlement/check).
+type spmlVerdictResult struct {
 	Verdict string `json:"verdict"`
 	NodeID  string `json:"node_id"`
 	// Sig is the verifier's secp256k1 EIP-191 signature over
-	// "assay-verdict-v1|<verdict>|<requestHash>" (0x hex). Only final
+	// "spml-verdict-v1|<verdict>|<requestHash>" (0x hex). Only final
 	// verdicts (PASS/REJECT/UNVERIFIED) are signed; PENDING/UNKNOWN are
 	// transient and arrive unsigned.
 	Sig string `json:"sig"`
 }
 
-// assayCheckResponse is the verifier's settlement-check payload. Summary and
+// spmlCheckResponse is the verifier's settlement-check payload. Summary and
 // the advisory settle/cheat flags are informational — the broker re-derives
 // the decision from the (authenticated) per-request verdicts.
-type assayCheckResponse struct {
-	Results       map[string]assayVerdictResult `json:"results"`
+type spmlCheckResponse struct {
+	Results       map[string]spmlVerdictResult `json:"results"`
 	CheatDetected bool                          `json:"cheat_detected"`
 	Settle        bool                          `json:"settle"`
 }
 
-// gateSettlementWithAssay is the pre-settlement Assay gate. The verifier
+// gateSettlementWithSpml is the pre-settlement Spml gate. The verifier
 // answers requests non-blockingly (ZG-Verdict: PENDING) and audits in the
 // background, so right before settling the broker asks it once for the
 // batch's final verdicts and then decides:
@@ -48,43 +48,32 @@ type assayCheckResponse struct {
 //   - otherwise (PASS / UNVERIFIED / no verdict) → settle normally.
 //
 // Verdicts fetched from the verifier are authenticated with
-// assay.verifierAddress when configured, exactly like the response-header
+// spml.verifierAddress when configured, exactly like the response-header
 // path. If the verifier is unreachable the gate falls back to the verdicts
 // recorded from response headers (fail-open for requests without one).
-// No-op when the Assay integration is disabled.
-func (c *Ctrl) gateSettlementWithAssay(ctx context.Context, reqs []model.Request) []model.Request {
-	if !c.assayVerdictFilter || len(reqs) == 0 {
+// No-op when the Spml integration is disabled.
+func (c *Ctrl) gateSettlementWithSpml(ctx context.Context, reqs []model.Request) []model.Request {
+	if !c.spmlVerdictFilter || len(reqs) == 0 {
 		return reqs
 	}
 
-	if c.assayVerifierURL != "" {
-		results, err := c.fetchAssayVerdicts(ctx, requestHashes(reqs))
+	if c.spmlVerifierURL != "" {
+		results, err := c.fetchSpmlVerdicts(ctx, requestHashes(reqs))
 		if err != nil {
-			c.logger.Warnf("Assay: settlement check against %s failed (falling back to recorded verdicts): %v",
-				c.assayVerifierURL, err)
+			c.logger.Warnf("Spml: settlement check against %s failed (falling back to recorded verdicts): %v",
+				c.spmlVerifierURL, err)
 		} else {
-			// Backfill node attribution from the settlement check for rows
-			// whose ZG-Node response header was lost (payout needs it).
-			for i := range reqs {
-				if reqs[i].Node == "" {
-					if r, ok := results[reqs[i].RequestHash]; ok && r.NodeID != "" {
-						reqs[i].Node = r.NodeID
-						if err := c.db.UpdateRequestNode(reqs[i].RequestHash, r.NodeID); err != nil {
-							c.logger.Warnf("Assay: failed to backfill node %q for request %s: %v", r.NodeID, reqs[i].RequestHash, err)
-						}
-					}
-				}
-			}
-			changed := resolveAssayVerdicts(reqs, results, c.assayVerifierAddress, c.assayStrictVerdict)
+			reqs = backfillNodes(reqs, results, c.db.UpdateRequestNode, c.logger.Warnf)
+			changed := resolveSpmlVerdicts(reqs, results, c.spmlVerifierAddress, c.spmlStrictVerdict)
 			for hash, verdict := range changed {
 				if err := c.db.UpdateRequestVerdict(hash, verdict); err != nil {
-					c.logger.Warnf("Assay: failed to record verdict %q for request %s: %v", verdict, hash, err)
+					c.logger.Warnf("Spml: failed to record verdict %q for request %s: %v", verdict, hash, err)
 				}
 			}
 		}
 	}
 
-	settleable, rejected, pendingHashes, invalidSigHashes := partitionAssayRequests(reqs)
+	settleable, rejected, pendingHashes, invalidSigHashes := partitionSpmlRequests(reqs)
 	rejectHashes := requestHashes(rejected)
 
 	// Void exactly the implicated requests, not the batch they arrived in.
@@ -93,29 +82,29 @@ func (c *Ctrl) gateSettlementWithAssay(ctx context.Context, reqs []model.Request
 	// and all nodes, and the unsettled list is not even the settlement batch,
 	// so one REJECT could void an arbitrarily large backlog. That handed any
 	// single node a way to zero the provider's revenue indefinitely at no cost
-	// to itself: cheat once per cycle. spml-design.en.md §4 step 9 always
+	// to itself: cheat once per cycle. spml-design.md §4 step 9 always
 	// specified "non-cheat requests only".
 	void := append([]string{}, invalidSigHashes...)
 
 	// A REJECT is a threshold judgement and the thresholds are uncalibrated,
 	// so by default it is recorded and surfaced but does not withhold money
-	// (config assay.rejectGatesSettlement). INVALID_SIG is a signature
+	// (config spml.rejectGatesSettlement). INVALID_SIG is a signature
 	// failure — no calibration involved — and always withholds.
 	if len(rejectHashes) > 0 {
-		if c.assayRejectGates {
+		if c.spmlRejectGates {
 			void = append(void, rejectHashes...)
-			c.logger.Warnf("Assay: CHEAT — voiding %d REJECT'd request(s) %v (the remaining %d in this batch still settle)",
+			c.logger.Warnf("Spml: CHEAT — voiding %d REJECT'd request(s) %v (the remaining %d in this batch still settle)",
 				len(rejectHashes), rejectHashes, len(reqs)-len(rejectHashes))
 		} else {
 			// Advisory: they settle like any other request. Leaving them out
 			// of both `void` and `settleable` would park them forever.
 			settleable = append(settleable, rejected...)
-			c.logger.Warnf("Assay: %d REJECT'd request(s) %v — ADVISORY ONLY, still settling: the LDD thresholds are uncalibrated (set assay.rejectGatesSettlement once the calibration ceremony has been run)",
+			c.logger.Warnf("Spml: %d REJECT'd request(s) %v — ADVISORY ONLY, still settling: the LDD thresholds are uncalibrated (set spml.rejectGatesSettlement once the calibration ceremony has been run)",
 				len(rejectHashes), rejectHashes)
 		}
 	}
 	if len(invalidSigHashes) > 0 {
-		c.logger.Warnf("Assay: %d request(s) with missing/bad verdict signature %v; voiding those",
+		c.logger.Warnf("Spml: %d request(s) with missing/bad verdict signature %v; voiding those",
 			len(invalidSigHashes), invalidSigHashes)
 	}
 
@@ -124,44 +113,68 @@ func (c *Ctrl) gateSettlementWithAssay(ctx context.Context, reqs []model.Request
 			// Deletion failed: the rows survive and are re-gated next cycle.
 			// They are not in `settleable` either way, so nothing is charged
 			// for them now.
-			c.logger.Errorf("Assay: failed to void %d request(s): %v", len(void), err)
+			c.logger.Errorf("Spml: failed to void %d request(s): %v", len(void), err)
 		}
 	}
 
 	if len(pendingHashes) > 0 {
-		c.logger.Infof("Assay: %d request(s) with audits still pending; parking them for %v and settling the remaining %d",
-			len(pendingHashes), constant.AssayPendingRetryDelay, len(settleable))
-		if err := c.markRequestsWithSkipUntil(pendingHashes, constant.AssayPendingRetryDelay); err != nil {
-			c.logger.Warnf("Assay: failed to park pending requests: %v", err)
+		c.logger.Infof("Spml: %d request(s) with audits still pending; parking them for %v and settling the remaining %d",
+			len(pendingHashes), constant.SpmlPendingRetryDelay, len(settleable))
+		if err := c.markRequestsWithSkipUntil(pendingHashes, constant.SpmlPendingRetryDelay); err != nil {
+			c.logger.Warnf("Spml: failed to park pending requests: %v", err)
 		}
 	}
 	return settleable
 }
 
-// fetchAssayVerdicts asks the verifier for the final verdicts of the given
-// request hashes, holding up to assayCheckWaitMs for in-flight audits.
-func (c *Ctrl) fetchAssayVerdicts(ctx context.Context, hashes []string) (map[string]assayVerdictResult, error) {
+// backfillNodes fills node attribution from the settlement check for rows
+// whose ZG-Node response header was lost (payout needs it), writing it
+// through. A row whose write fails is held back from this round: the accrual
+// re-reads the row from the DB when it deletes it, so settling it now would
+// drop its fee into the pool unattributed. Held-back rows are re-gated next
+// cycle. Pure apart from the two callbacks, so the rule is testable without a
+// database.
+func backfillNodes(reqs []model.Request, results map[string]spmlVerdictResult, write func(hash, node string) error, warnf func(string, ...interface{})) []model.Request {
+	kept := make([]model.Request, 0, len(reqs))
+	for _, req := range reqs {
+		if req.Node == "" {
+			if r, ok := results[req.RequestHash]; ok && r.NodeID != "" {
+				if err := write(req.RequestHash, r.NodeID); err != nil {
+					warnf("Spml: failed to backfill node %q for request %s; holding it for the next round: %v", r.NodeID, req.RequestHash, err)
+					continue
+				}
+				req.Node = r.NodeID
+			}
+		}
+		kept = append(kept, req)
+	}
+	return kept
+}
+
+// fetchSpmlVerdicts asks the verifier for the final verdicts of the given
+// request hashes, holding up to spmlCheckWaitMs for in-flight audits.
+func (c *Ctrl) fetchSpmlVerdicts(ctx context.Context, hashes []string) (map[string]spmlVerdictResult, error) {
 	body, err := json.Marshal(map[string]interface{}{
 		"request_hashes": hashes,
-		"wait_ms":        c.assayCheckWaitMs,
+		"wait_ms":        c.spmlCheckWaitMs,
 	})
 	if err != nil {
 		return nil, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		c.assayVerifierURL+"/v1/settlement/check", bytes.NewReader(body))
+		c.spmlVerifierURL+"/v1/settlement/check", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	// Fail closed, same reasoning as the invoice path. The caller falls back
 	// to the verdicts already recorded on each request, which is strictly
-	// safer than asking the assay a question we cannot authenticate.
-	if err := c.signAssayBody(req, body); err != nil {
+	// safer than asking the spml a question we cannot authenticate.
+	if err := c.signSpmlBody(req, body); err != nil {
 		return nil, fmt.Errorf("refusing to send an unsigned settlement check: %w", err)
 	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.spmlDo(req)
 	if err != nil {
 		return nil, err
 	}
@@ -170,27 +183,28 @@ func (c *Ctrl) fetchAssayVerdicts(ctx context.Context, hashes []string) (map[str
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return nil, fmt.Errorf("settlement check returned %d: %s", resp.StatusCode, snippet)
 	}
-	var parsed assayCheckResponse
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+	var parsed spmlCheckResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&parsed); err != nil {
 		return nil, err
 	}
 	return parsed.Results, nil
 }
 
-// isFinalAssayVerdict reports whether a verdict is a decision rather than a
+// isFinalSpmlVerdict reports whether a verdict is a decision rather than a
 // placeholder. PENDING (audit still running) and UNKNOWN (verifier has no
 // record) are placeholders; INVALID_SIG is final, recorded locally when strict
 // mode rejects a response's verdict.
-func isFinalAssayVerdict(v string) bool {
+func isFinalSpmlVerdict(v string) bool {
 	switch v {
-	case constant.AssayVerdictPass, constant.AssayVerdictReject,
-		constant.AssayVerdictUnverified, constant.AssayVerdictInvalidSig:
+	case constant.SpmlVerdictPass, constant.SpmlVerdictReject,
+		constant.SpmlVerdictUnverified, constant.SpmlVerdictInvalidSig,
+		constant.SpmlVerdictUnverifiedLost:
 		return true
 	}
 	return false
 }
 
-// resolveAssayVerdicts merges the verifier's settlement-check results into the
+// resolveSpmlVerdicts merges the verifier's settlement-check results into the
 // requests' verdicts (in place) and returns the {hash: verdict} changes to
 // persist. Pure over its inputs so the merge rules are unit-testable:
 //
@@ -200,11 +214,12 @@ func isFinalAssayVerdict(v string) bool {
 //   - PENDING: adopted as-is (non-final, only defers settlement — it never
 //     needs authentication because it can't decide who gets paid);
 //   - UNKNOWN (verifier has no record, e.g. restart): a request stuck in
-//     PENDING is downgraded to UNVERIFIED (the audit evidence is gone;
-//     fail-open like an unsampled request) — except in strict mode, where it
-//     stays PENDING and keeps being parked rather than settling unaudited;
+//     PENDING is downgraded to UNVERIFIED_LOST (the audit evidence is gone;
+//     settles like an unsampled request but is not paid out, since the spml
+//     cannot validate the hash) — except in strict mode, where it stays
+//     PENDING and keeps being parked rather than settling unaudited;
 //   - absent from results: left untouched.
-func resolveAssayVerdicts(reqs []model.Request, results map[string]assayVerdictResult, signer *common.Address, strict bool) map[string]string {
+func resolveSpmlVerdicts(reqs []model.Request, results map[string]spmlVerdictResult, signer *common.Address, strict bool) map[string]string {
 	changed := make(map[string]string)
 	for i := range reqs {
 		req := &reqs[i]
@@ -219,25 +234,27 @@ func resolveAssayVerdicts(reqs []model.Request, results map[string]assayVerdictR
 		// payable request: REJECT -> PENDING (parked, unsigned, unauthenticated)
 		// -> on a later cycle the verifier answers UNKNOWN (restart, or its
 		// in-memory store evicted the entry) -> UNVERIFIED -> settles.
-		if isFinalAssayVerdict(req.Verdict) && !isFinalAssayVerdict(r.Verdict) {
+		if isFinalSpmlVerdict(req.Verdict) && !isFinalSpmlVerdict(r.Verdict) {
 			continue
 		}
 
 		var verdict string
 		switch r.Verdict {
-		case constant.AssayVerdictPending:
-			verdict = constant.AssayVerdictPending
-		case constant.AssayVerdictUnknown:
-			if req.Verdict != constant.AssayVerdictPending || strict {
+		case constant.SpmlVerdictPending:
+			verdict = constant.SpmlVerdictPending
+		case constant.SpmlVerdictUnknown:
+			if req.Verdict != constant.SpmlVerdictPending || strict {
 				continue
 			}
-			verdict = constant.AssayVerdictUnverified
-		case constant.AssayVerdictPass, constant.AssayVerdictReject, constant.AssayVerdictUnverified:
-			if signer != nil && !verifyAssayVerdictSig(*signer, r.Verdict, req.RequestHash, r.Sig) {
+			// Settles, but is not payable: the spml cannot validate a hash
+			// it has no record of (db.PayableFee).
+			verdict = constant.SpmlVerdictUnverifiedLost
+		case constant.SpmlVerdictPass, constant.SpmlVerdictReject, constant.SpmlVerdictUnverified:
+			if signer != nil && !verifySpmlVerdictSig(*signer, r.Verdict, req.RequestHash, r.Sig) {
 				if !strict {
 					continue
 				}
-				verdict = constant.AssayVerdictInvalidSig
+				verdict = constant.SpmlVerdictInvalidSig
 			} else {
 				verdict = r.Verdict
 			}
@@ -262,20 +279,20 @@ func requestHashes(reqs []model.Request) []string {
 	return hashes
 }
 
-// partitionAssayRequests splits reqs by their effective verdict, preserving
+// partitionSpmlRequests splits reqs by their effective verdict, preserving
 // order: settleable (PASS, UNVERIFIED, or no verdict), pending (audit still
 // running), rejected (the LDD threshold verdict), and invalid-sig (strict-mode
 // signature failures). The last two are kept apart because only one of them is
-// a calibration judgement — see gateSettlementWithAssay. Pure (no DB); the
-// side effects live in gateSettlementWithAssay.
-func partitionAssayRequests(reqs []model.Request) (settleable, rejected []model.Request, pendingHashes, invalidSigHashes []string) {
+// a calibration judgement — see gateSettlementWithSpml. Pure (no DB); the
+// side effects live in gateSettlementWithSpml.
+func partitionSpmlRequests(reqs []model.Request) (settleable, rejected []model.Request, pendingHashes, invalidSigHashes []string) {
 	for _, req := range reqs {
 		switch req.Verdict {
-		case constant.AssayVerdictReject:
+		case constant.SpmlVerdictReject:
 			rejected = append(rejected, req)
-		case constant.AssayVerdictInvalidSig:
+		case constant.SpmlVerdictInvalidSig:
 			invalidSigHashes = append(invalidSigHashes, req.RequestHash)
-		case constant.AssayVerdictPending:
+		case constant.SpmlVerdictPending:
 			pendingHashes = append(pendingHashes, req.RequestHash)
 		default:
 			settleable = append(settleable, req)

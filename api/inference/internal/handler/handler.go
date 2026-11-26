@@ -106,18 +106,18 @@ func (h *Handler) Register(r *gin.Engine) {
 	// group.GET("/request", corsMiddleware(), h.ListRequest)
 
 	group.GET("/quote", corsMiddleware(), middleware.RateLimitMiddleware(h.rateLimiter), h.GetQuote)
-	// spml only (see docs/design/assay-verification-settlement.md); a teeml broker
+	// spml only (see docs/design/spml-verification-settlement.md); a teeml broker
 	// serves exactly the routes it did before spml existed.
 	if h.ctrl.Service.IsSPML() {
-		// The assay's identity document, relayed. Public and unauthenticated by
+		// The spml's identity document, relayed. Public and unauthenticated by
 		// design: it exists to be read by auditors, and every field in it is
 		// checkable against the chain rather than against this broker.
-		group.GET("/attestation/assay", corsMiddleware(), middleware.RateLimitMiddleware(h.rateLimiter), h.GetAssayAttestation)
-		group.GET("/attestation/assay/scan", corsMiddleware(), middleware.RateLimitMiddleware(h.rateLimiter), h.GetAssayScan)
+		group.GET("/attestation/spml", corsMiddleware(), middleware.RateLimitMiddleware(h.rateLimiter), h.GetSpmlAttestation)
+		group.GET("/attestation/spml/scan", corsMiddleware(), middleware.RateLimitMiddleware(h.rateLimiter), h.GetSpmlScan)
 		// SPML payout: a GPU node fetches its own voucher here (authenticated by
-		// its payout key). The assay publishes no interface a node can reach, so
+		// its payout key). The spml publishes no interface a node can reach, so
 		// this relay is the node's only route to it — the broker forwards the
-		// assay's signed voucher, it does not issue one. The node still submits
+		// spml's signed voucher, it does not issue one. The node still submits
 		// the claim() transaction to the contract itself.
 		group.GET("/payout/voucher", corsMiddleware(), middleware.RateLimitMiddleware(h.rateLimiter), h.GetPayoutVoucher)
 	}

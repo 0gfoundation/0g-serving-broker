@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -45,13 +46,13 @@ func signFetch(t *testing.T, keyHex, provider string, ts int64) string {
 	return "0x" + hex.EncodeToString(sig)
 }
 
-func relayTestCtrl(assayURL string) *Ctrl {
+func relayTestCtrl(spmlURL string) *Ctrl {
 	c := &Ctrl{
 		logger:             &testAsyncLoggerImpl{},
 		contract:           &providercontract.ProviderContract{ProviderAddress: testProvider},
 		httpClient:         &http.Client{Timeout: 5 * time.Second},
-		assayVerifierURL:   assayURL,
-		assayPayoutEnabled: true,
+		spmlVerifierURL:   spmlURL,
+		spmlPayoutEnabled: true,
 	}
 	key, err := crypto.HexToECDSA(testTeeKey)
 	if err != nil {
@@ -61,7 +62,7 @@ func relayTestCtrl(assayURL string) *Ctrl {
 	return c
 }
 
-// teeSignerAddress is who the assay must recover from a signed fetch.
+// teeSignerAddress is who the spml must recover from a signed fetch.
 func teeSignerAddress(t *testing.T) common.Address {
 	t.Helper()
 	key, err := crypto.HexToECDSA(testTeeKey)
@@ -71,22 +72,22 @@ func teeSignerAddress(t *testing.T) common.Address {
 	return crypto.PubkeyToAddress(key.PublicKey)
 }
 
-// checkFetchAuth mirrors the assay's _verify_body_sig for the bodyless GET:
-// personal_sign over keccak256("assay-vouchers-v1|<ts>"), recovered against
+// checkFetchAuth mirrors the spml's _verify_body_sig for the bodyless GET:
+// personal_sign over keccak256("spml-vouchers-v1|<ts>"), recovered against
 // the on-chain teeSigner. Returns the recovered address.
 func checkFetchAuth(t *testing.T, r *http.Request) common.Address {
 	t.Helper()
 	tsHdr := r.Header.Get("ZG-Body-Ts")
 	sigHdr := r.Header.Get("ZG-Body-Sig")
 	if tsHdr == "" || sigHdr == "" {
-		t.Fatalf("voucher fetch reached the assay unsigned (ts=%q sig=%q)", tsHdr, sigHdr)
+		t.Fatalf("voucher fetch reached the spml unsigned (ts=%q sig=%q)", tsHdr, sigHdr)
 	}
 	ts, err := strconv.ParseInt(tsHdr, 10, 64)
 	if err != nil {
 		t.Fatalf("bad ZG-Body-Ts %q: %v", tsHdr, err)
 	}
 	if skew := time.Since(time.Unix(ts, 0)); skew > time.Minute || skew < -time.Minute {
-		t.Fatalf("ZG-Body-Ts is %s off; the assay would reject it", skew)
+		t.Fatalf("ZG-Body-Ts is %s off; the spml would reject it", skew)
 	}
 	sig, err := hexutil.Decode(sigHdr)
 	if err != nil || len(sig) != 65 {
@@ -95,7 +96,7 @@ func checkFetchAuth(t *testing.T, r *http.Request) common.Address {
 	if sig[64] >= 27 {
 		sig[64] -= 27
 	}
-	payload := []byte("assay-vouchers-v1|" + tsHdr)
+	payload := []byte("spml-vouchers-v1|" + tsHdr)
 	pub, err := crypto.SigToPub(accounts.TextHash(crypto.Keccak256(payload)), sig)
 	if err != nil {
 		t.Fatalf("cannot recover fetch signature: %v", err)
@@ -112,7 +113,7 @@ func TestAuthenticateVoucherFetch(t *testing.T) {
 		t.Fatalf("bad test key: %v", err)
 	}
 	want := crypto.PubkeyToAddress(key.PublicKey)
-	c := relayTestCtrl("https://assay.invalid")
+	c := relayTestCtrl("https://spml.invalid")
 	now := time.Now().Unix()
 
 	got, err := c.AuthenticateVoucherFetch(strconv.FormatInt(now, 10),
@@ -166,7 +167,7 @@ func TestAuthenticateVoucherFetch(t *testing.T) {
 // The relay returns the row whose voucher PAYS the caller — matched on the
 // address inside the signed voucher, never on a node id. Getting this wrong
 // would mail one node's earnings to another.
-func TestRelayAssayVoucher(t *testing.T) {
+func TestRelaySpmlVoucher(t *testing.T) {
 	const (
 		mine   = "0xa3DB4ecaefb8448CFeADaF1Cd76e133c96a439E6"
 		theirs = "0x85573D99f73BA49964c658bfa4Bf0E744a683790"
@@ -192,7 +193,7 @@ func TestRelayAssayVoucher(t *testing.T) {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		// The assay refuses an unsigned fetch (it is an earnings report); a
+		// The spml refuses an unsigned fetch (it is an earnings report); a
 		// relay that forgot to sign would fail there, far from here.
 		if got := checkFetchAuth(t, r); got != teeSignerAddress(t) {
 			t.Fatalf("fetch signed by %s, want the teeSigner %s", got.Hex(), teeSignerAddress(t).Hex())
@@ -203,7 +204,7 @@ func TestRelayAssayVoucher(t *testing.T) {
 	defer srv.Close()
 	c := relayTestCtrl(srv.URL)
 
-	entry, err := c.RelayAssayVoucher(context.Background(), addr(mine))
+	entry, err := c.RelaySpmlVoucher(context.Background(), addr(mine))
 	if err != nil {
 		t.Fatalf("relay failed: %v", err)
 	}
@@ -225,28 +226,28 @@ func TestRelayAssayVoucher(t *testing.T) {
 	}
 
 	// A node with no voucher yet is the ordinary case, not a failure.
-	if _, err := c.RelayAssayVoucher(context.Background(),
+	if _, err := c.RelaySpmlVoucher(context.Background(),
 		addr("0x000000000000000000000000000000000000dEaD")); !errors.Is(err, ErrNoVoucher) {
 		t.Fatalf("want ErrNoVoucher for an unknown payee, got %v", err)
 	}
 
 	// node_2's row exists but holds a null voucher; it must not crash the scan.
-	if _, err := c.RelayAssayVoucher(context.Background(), addr(theirs)); err != nil {
+	if _, err := c.RelaySpmlVoucher(context.Background(), addr(theirs)); err != nil {
 		t.Fatalf("node_0 has a voucher and should be relayable: %v", err)
 	}
 }
 
-func TestRelayAssayVoucherDisabled(t *testing.T) {
+func TestRelaySpmlVoucherDisabled(t *testing.T) {
 	c := relayTestCtrl("")
-	if c.AssayPayoutEnabled() {
+	if c.SpmlPayoutEnabled() {
 		t.Fatal("no verifier URL must read as disabled")
 	}
-	if _, err := c.RelayAssayVoucher(context.Background(), addr(testProvider)); err == nil {
+	if _, err := c.RelaySpmlVoucher(context.Background(), addr(testProvider)); err == nil {
 		t.Fatal("relay must refuse when payout is not configured")
 	}
 }
 
-func TestRelayAssayVoucherUpstreamError(t *testing.T) {
+func TestRelaySpmlVoucherUpstreamError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte("boom"))
@@ -255,7 +256,7 @@ func TestRelayAssayVoucherUpstreamError(t *testing.T) {
 	c := relayTestCtrl(srv.URL)
 	// An upstream failure reported as "no voucher" would tell a node to stop
 	// polling exactly when it should keep trying.
-	if _, err := c.RelayAssayVoucher(context.Background(), addr(testProvider)); err == nil || errors.Is(err, ErrNoVoucher) {
+	if _, err := c.RelaySpmlVoucher(context.Background(), addr(testProvider)); err == nil || errors.Is(err, ErrNoVoucher) {
 		t.Fatalf("upstream 500 must surface as a relay error, got %v", err)
 	}
 }
@@ -270,14 +271,14 @@ func TestRelayAssayVoucherUpstreamError(t *testing.T) {
 //	from eth_account import Account
 //	from eth_account.messages import encode_defunct
 //	Account.sign_message(encode_defunct(text=
-//	    "assay-voucher-fetch-v1|<provider lowercase>|<ts>"), key)
+//	    "spml-voucher-fetch-v1|<provider lowercase>|<ts>"), key)
 func TestAuthenticateVoucherFetchPythonSignature(t *testing.T) {
 	const (
 		ts       = 1756700000
-		fromPy   = "0xa3202088509a46f85de63bed27df99ed67c8ea8aa1459657e0518cafd90edc912a155f17052c7eea4c787c807900806d9e705e860faf7fa4dfdc97f078b7ce9e1b"
+		fromPy   = "0x4b3c73dbc46541934ffcdce0efeb06598b80b0464835655eb453867a170200f26faeaafe1a2da52ab6995faca67d7d6cf0a6d909bd8c880c5148fab34b3145ba1c"
 		signerPy = "0x2c7536E3605D9C16a7a3D7b1898e529396a65c23"
 	)
-	c := relayTestCtrl("https://assay.invalid")
+	c := relayTestCtrl("https://spml.invalid")
 
 	// The fixture's timestamp is fixed, so the skew check would reject it on
 	// any day but one. Verify the payload+recovery directly instead.
@@ -316,9 +317,9 @@ func recoverFetchSigner(t *testing.T, payload, sigHex string) (common.Address, e
 	return crypto.PubkeyToAddress(*pub), nil
 }
 
-// No TEE key means no signature, and an unsigned fetch is refused by the assay
+// No TEE key means no signature, and an unsigned fetch is refused by the spml
 // anyway — sending it would trade a clear local error for a remote 401.
-func TestRelayAssayVoucherRefusesUnsigned(t *testing.T) {
+func TestRelaySpmlVoucherRefusesUnsigned(t *testing.T) {
 	reached := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		reached = true
@@ -327,10 +328,27 @@ func TestRelayAssayVoucherRefusesUnsigned(t *testing.T) {
 	defer srv.Close()
 	c := relayTestCtrl(srv.URL)
 	c.teeService = nil
-	if _, err := c.RelayAssayVoucher(context.Background(), addr(testProvider)); err == nil {
+	if _, err := c.RelaySpmlVoucher(context.Background(), addr(testProvider)); err == nil {
 		t.Fatal("relay sent a fetch it could not sign")
 	}
 	if reached {
 		t.Fatal("an unsignable fetch must not leave the broker")
+	}
+}
+
+// R1-3: the voucher relay carries a 5-minute-valid signed fetch; a 30x from
+// the spml must not forward it (and the pinned conversation) to another host.
+func TestRelaySpmlVoucherRefusesRedirects(t *testing.T) {
+	leak := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		t.Errorf("redirect target was contacted with sig=%q", r.Header.Get("ZG-Body-Sig"))
+	}))
+	defer leak.Close()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, leak.URL+"/v1/payout/vouchers", http.StatusTemporaryRedirect)
+	}))
+	defer srv.Close()
+	c := relayTestCtrl(srv.URL)
+	if _, err := c.RelaySpmlVoucher(context.Background(), addr(testProvider)); err == nil || !strings.Contains(err.Error(), "redirects are not followed") {
+		t.Fatalf("redirect must be refused, got %v", err)
 	}
 }

@@ -51,13 +51,13 @@ type Request struct {
 	// For single-model providers, this is the configured ModelType.
 	ModelName string `gorm:"type:varchar(255);not null;default:''" json:"modelName"`
 	// Node is the GPU backend that served this request, from the verifier's
-	// ZG-Node response header (the assay's node registry id). Payout
+	// ZG-Node response header (the spml's node registry id). Payout
 	// attribution: each settled request's fee accrues to this node's
 	// cumulative (docs/spml-design §4 step 9).
 	Node string `gorm:"type:varchar(64);not null;default:''" json:"node"`
-	// Verdict is the Assay/LDD audit result reported by the verifier via the
+	// Verdict is the Spml/LDD audit result reported by the verifier via the
 	// ZG-Verdict response header (PASS / REJECT / UNVERIFIED). Empty when the
-	// Assay integration is disabled or the upstream set no header. Settlement
+	// Spml integration is disabled or the upstream set no header. Settlement
 	// excludes REJECT'd requests from the TEE-signed batch (filterRejectedRequests).
 	Verdict string `gorm:"type:varchar(16);not null;default:''" json:"verdict"`
 	// IsWhitelisted indicates if this request is from a whitelisted user.

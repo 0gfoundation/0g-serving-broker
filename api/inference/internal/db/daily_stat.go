@@ -30,6 +30,10 @@ type AccumulateOptions struct {
 	// RecordPerWallet enables the per-wallet, per-model upsert into
 	// user_daily_stat (in the same transaction, before request deletion).
 	RecordPerWallet bool
+	// SpmlPayout, when set, accrues each settled row's fee onto its node's
+	// SPML payout cumulative in the same transaction as the delete. Only for
+	// rows that were settled on-chain — never for a permanent-failure purge.
+	SpmlPayout *SpmlPayoutOptions
 	// FallbackModel labels per-wallet rows whose request ModelName is empty
 	// (rows predating the model_name column). When it is itself empty, such
 	// rows fall back to the unknownModelLabel sentinel.
@@ -227,11 +231,9 @@ func (d *DB) AccumulateAndDeleteRequests(requests []*model.Request, opts Accumul
 			}
 		}
 
-		if err := tx.Where("request_hash IN ?", hashes).Delete(&model.Request{}).Error; err != nil {
-			return fmt.Errorf("failed to delete requests: %w", err)
-		}
-
-		return nil
+		// Settled rows leave the table only together with their payout
+		// accrual (spml_payout.go); nil SpmlPayout = plain delete.
+		return deleteSettledTx(tx, hashes, opts.SpmlPayout)
 	})
 }
 
