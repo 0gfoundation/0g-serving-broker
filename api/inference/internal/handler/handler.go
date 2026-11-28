@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -149,7 +150,9 @@ func (h *Handler) Register(r *gin.Engine) {
 
 	// Runtime changes to prices, limits and the whitelist, when the deployment opts in
 	// (admin_overlay.go). Off unless ZG_ADMIN_ADDRESSES and CONFIG_OVERLAY_FILE are set.
-	h.registerAdminOverlay(group)
+	if os.Getenv(AdminOverlaySocketEnvVar) == "" {
+		h.RegisterAdminOverlay(group)
+	}
 
 	// Async job endpoints (OpenAI-style paths)
 	asyncGroup := group.Group("/async")

@@ -58,7 +58,7 @@ func (i *instance) shutdown() {
 // the primary (CONFIG_FILE) instance and the extra instance's name otherwise.
 // It panics on any startup failure, as the broker always has: a provider that
 // cannot sync its service or accounts must not serve.
-func startInstance(ctx context.Context, name string, config *cfg.Config, teeService *tee.TeeService, logger log.Logger) *instance {
+func startInstance(ctx context.Context, name string, config *cfg.Config, teeService *tee.TeeService, logger log.Logger, adminRouter *gin.Engine) *instance {
 	inst := &instance{config: config}
 
 	if name != "" {
@@ -388,6 +388,9 @@ func startInstance(ctx context.Context, name string, config *cfg.Config, teeServ
 
 	h := handler.New(ctrl, proxy, logger)
 	h.Register(engine)
+	if adminRouter != nil {
+		h.RegisterAdminOverlay(adminRouter.Group("/v1"))
+	}
 
 	inst.stops = []func(){
 		// Shutdown monitor background goroutines

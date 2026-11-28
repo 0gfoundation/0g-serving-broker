@@ -2,18 +2,22 @@ package server
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/0gfoundation/0g-pc-e2ee/protocol/wire"
+	"github.com/gin-gonic/gin"
 
 	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/common/tee"
 
 	cfg "github.com/0glabs/0g-serving-broker/inference/config"
+	"github.com/0glabs/0g-serving-broker/inference/internal/handler"
 )
 
 //go:generate swag fmt
@@ -63,7 +67,24 @@ func Main() {
 		panic(err)
 	}
 
-	instances, router := startInstances(ctx, config, extras, teeService, logger)
+	var adminRouter *gin.Engine
+	var adminServer *http.Server
+	var adminListener net.Listener
+	socket := os.Getenv(handler.AdminOverlaySocketEnvVar)
+	if socket != "" {
+		adminListener, err = listenAdminOverlay(socket)
+		if err != nil {
+			panic(err)
+		}
+		defer adminListener.Close()
+		adminRouter = gin.New()
+		adminServer = &http.Server{
+			Handler:      adminRouter,
+			ReadTimeout:  5 * time.Second,
+			WriteTimeout: 15 * time.Second,
+		}
+	}
+	instances, router := startInstances(ctx, config, extras, teeService, logger, adminRouter)
 
 	// Listen and Serve with graceful shutdown
 	port := os.Getenv("PORT")
@@ -81,12 +102,19 @@ func Main() {
 	// A new config overlay (PUT /v1/admin/overlay) is applied by restarting.
 	cfg.WatchOverlay(10*time.Second, logger.Infof)
 
-	go func() {
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	serve := func(run func() error) {
+		if err := run(); err != nil && err != http.ErrServerClosed {
 			logger.Errorf("Server error: %v", err)
-			quit <- syscall.SIGTERM
+			select {
+			case quit <- syscall.SIGTERM:
+			default:
+			}
 		}
-	}()
+	}
+	go serve(srv.ListenAndServe)
+	if adminServer != nil {
+		go serve(func() error { return adminServer.Serve(adminListener) })
+	}
 
 	<-quit
 	logger.Info("Shutting down server...")
@@ -94,9 +122,18 @@ func Main() {
 	// Shutdown HTTP server with a timeout
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
+	var shutdown sync.WaitGroup
+	if adminServer != nil {
+		shutdown.Go(func() {
+			if err := adminServer.Shutdown(shutdownCtx); err != nil {
+				logger.Errorf("Admin overlay server forced to shutdown: %v", err)
+			}
+		})
+	}
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		logger.Errorf("Server forced to shutdown: %v", err)
 	}
+	shutdown.Wait()
 
 	for _, inst := range instances {
 		inst.shutdown()
@@ -108,12 +145,12 @@ func Main() {
 // startInstances starts the primary instance and every extra one, and returns
 // them, primary first, with the router that sends each request to its instance
 // by host. It panics on any startup failure, as startInstance does.
-func startInstances(ctx context.Context, config *cfg.Config, extras []cfg.Instance, teeService *tee.TeeService, logger log.Logger) ([]*instance, http.Handler) {
-	primary := startInstance(ctx, "", config, teeService, logger)
+func startInstances(ctx context.Context, config *cfg.Config, extras []cfg.Instance, teeService *tee.TeeService, logger log.Logger, adminRouter *gin.Engine) ([]*instance, http.Handler) {
+	primary := startInstance(ctx, "", config, teeService, logger, adminRouter)
 	instances := []*instance{primary}
 	router := &hostRouter{byHost: map[string]http.Handler{}, primary: primary.engine}
 	for _, extra := range extras {
-		inst := startInstance(ctx, extra.Name, extra.Config, teeService, logger)
+		inst := startInstance(ctx, extra.Name, extra.Config, teeService, logger, nil)
 		instances = append(instances, inst)
 		host, err := cfg.ServingHost(extra.Config.Service.ServingURL)
 		if err != nil {

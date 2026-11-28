@@ -62,9 +62,37 @@ volumes:
   broker-overlay:
 ```
 
-The endpoint exists only when both `CONFIG_OVERLAY_FILE` and `ZG_ADMIN_ADDRESSES` are set on
-the broker; otherwise `/v1/admin/overlay` is 404. It is served on the broker's port, behind
-the ingress — no extra port is published.
+The endpoint exists only when both `CONFIG_OVERLAY_FILE` and `ZG_ADMIN_ADDRESSES` are set.
+On an internet-facing deployment, set `ZG_ADMIN_OVERLAY_SOCKET` on the broker to move the
+primary instance's overlay routes to a local Unix socket. The public HTTP listener then
+returns 404 for both methods, regardless of the supplied credentials. The socket uses the
+same request path and signature checks. Leaving the variable unset preserves the existing
+HTTP transport for deployments that still rely on it.
+
+Use a broker-owned ephemeral directory with mode `0700`, mounted only in the broker and
+available to authorized CVM operators. For example, in Compose:
+
+```yaml
+    environment:
+      - ZG_ADMIN_OVERLAY_SOCKET=/run/broker-admin/overlay.sock
+    tmpfs:
+      - /run/broker-admin:mode=0700
+```
+
+For a non-root broker, set the tmpfs ownership to the broker's UID and GID. The socket path
+must be absolute. The broker refuses to start if it cannot bind the configured socket. Use
+the ephemeral mount so a stale socket from an interrupted process is cleared when the
+container restarts. Keep the socket and its directory out of ingress and public sidecars.
+
+Before enabling socket mode, migrate any automation that uses the serving URL. An authorized
+operator with root access on the CVM can find the broker container's host PID with
+`docker inspect --format '{{.State.Pid}}' <broker-container>` and use the host's HTTP
+client with Unix socket support at `/proc/<pid>/root/run/broker-admin/overlay.sock`.
+The PID changes after a container restart. Keep signing keys with the existing signer,
+and transfer signed requests only over the authorized channel. In a candidate deployment, verify signed
+GET and PUT through the private path, unsigned GET returning 401 through the same socket,
+both public methods returning 404, and successful inference and quote requests. Enable the
+setting for each internet-facing CVM after its operator path is verified.
 
 Use admin keys that are not the contract owner key and not a provider key.
 

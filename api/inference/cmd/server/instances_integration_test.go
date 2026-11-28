@@ -20,6 +20,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/gin-gonic/gin"
 	"github.com/go-sql-driver/mysql"
 
 	commonconfig "github.com/0glabs/0g-serving-broker/common/config"
@@ -29,6 +30,7 @@ import (
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
 	database "github.com/0glabs/0g-serving-broker/inference/internal/db"
+	"github.com/0glabs/0g-serving-broker/inference/internal/handler"
 	"github.com/0glabs/0g-serving-broker/inference/internal/instancetest"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 )
@@ -132,6 +134,9 @@ func TestInstancesBillIntoTheirOwnDatabase(t *testing.T) {
 	t.Setenv("CONFIG_FILE", primaryPath)
 	t.Setenv(cfg.InstancesDirEnvVar, instancesDir)
 	t.Setenv("DATABASE_DSN", sharedDSN)
+	t.Setenv(cfg.OverlayFileEnvVar, filepath.Join(dir, "overlay.yaml"))
+	t.Setenv(handler.AdminAddressesEnvVar, chatAddr.Hex())
+	t.Setenv(handler.AdminOverlaySocketEnvVar, filepath.Join(dir, "overlay.sock"))
 
 	// Loaded the way Main loads them.
 	config := cfg.GetConfig()
@@ -160,12 +165,27 @@ func TestInstancesBillIntoTheirOwnDatabase(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	instances, router := startInstances(context.Background(), config, extras, teeService, logger)
+	adminRouter := gin.New()
+	instances, router := startInstances(context.Background(), config, extras, teeService, logger, adminRouter)
 	t.Cleanup(func() {
 		for _, inst := range instances {
 			inst.shutdown()
 		}
 	})
+
+	for _, host := range []string{"chat.provider.test", "image.provider.test"} {
+		req := httptest.NewRequest(http.MethodGet, "http://"+host+"/v1/admin/overlay", nil)
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		if w.Code != http.StatusNotFound {
+			t.Errorf("public overlay status for %s = %d, want 404", host, w.Code)
+		}
+	}
+	w := httptest.NewRecorder()
+	adminRouter.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/v1/admin/overlay", nil))
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("unsigned private overlay status = %d, want 401", w.Code)
+	}
 
 	// Each wallet registered its own service.
 	for addr, want := range map[common.Address]string{chatAddr: "chatbot", imageAddr: "text-to-image"} {
