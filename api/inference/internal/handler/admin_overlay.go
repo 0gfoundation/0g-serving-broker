@@ -31,8 +31,8 @@ import (
 // event service notice the new file and restart on it (config.WatchOverlay).
 //
 // It replaces the controller's PUT /v1/config/core, and is built against the ways that
-// one failed (security-relaunch-plan-20261106): it is served on the broker's own port, so
-// there is no extra port to publish; it never returns the main config, so it cannot leak
+// one failed (security-relaunch-plan-20261106): it needs no extra published port;
+// it never returns the main config, so it cannot leak
 // the private key in it; the admin addresses are a compose literal, so whoever can edit the
 // encrypted config cannot add themselves; and every token is short-lived, single-use and
 // bound to the exact request it authorizes.
@@ -42,6 +42,9 @@ const (
 	// separated. Set it in the compose file, not in the encrypted config: the compose
 	// file is what the quote's compose hash covers. Unset, the endpoint does not exist.
 	AdminAddressesEnvVar = "ZG_ADMIN_ADDRESSES"
+
+	// AdminOverlaySocketEnvVar moves the overlay routes to a private Unix socket.
+	AdminOverlaySocketEnvVar = "ZG_ADMIN_OVERLAY_SOCKET"
 
 	adminTokenHeader     = "X-ZG-Admin-Token"
 	adminSignatureHeader = "X-ZG-Admin-Signature"
@@ -148,9 +151,9 @@ func (a *adminAuth) verify(method, path string, body []byte, tokenB64, sigHex st
 	return addr, nil
 }
 
-// registerAdminOverlay adds the endpoint when both an overlay file and admin addresses are
+// RegisterAdminOverlay adds the endpoint when both an overlay file and admin addresses are
 // configured; otherwise it does not exist.
-func (h *Handler) registerAdminOverlay(group *gin.RouterGroup) {
+func (h *Handler) RegisterAdminOverlay(group *gin.RouterGroup) {
 	list := os.Getenv(AdminAddressesEnvVar)
 	if list == "" || os.Getenv(config.OverlayFileEnvVar) == "" {
 		return

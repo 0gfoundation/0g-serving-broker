@@ -19,10 +19,13 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/gin-gonic/gin"
+	"golang.org/x/time/rate"
 
 	commonconfig "github.com/0glabs/0g-serving-broker/common/config"
 	"github.com/0glabs/0g-serving-broker/common/log"
+	"github.com/0glabs/0g-serving-broker/common/middleware"
 	"github.com/0glabs/0g-serving-broker/inference/config"
+	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
 )
 
 const adminTestBase = `
@@ -63,7 +66,7 @@ func newAdminFixture(t *testing.T) *adminFixture {
 	}
 	h := &Handler{logger: logger}
 	f.router = gin.New()
-	h.registerAdminOverlay(f.router.Group("/v1"))
+	h.RegisterAdminOverlay(f.router.Group("/v1"))
 	return f
 }
 
@@ -97,6 +100,49 @@ func (f *adminFixture) do(t *testing.T, method, body, tokB64, sig string) *httpt
 	w := httptest.NewRecorder()
 	f.router.ServeHTTP(w, req)
 	return w
+}
+
+func TestAdminOverlaySocketModeKeepsAdminOffPublicRouter(t *testing.T) {
+	f := newAdminFixture(t)
+	logger, err := log.GetLogger(&commonconfig.LoggerConfig{Format: "text", Level: "error"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &Handler{
+		ctrl:        &ctrl.Ctrl{},
+		rateLimiter: middleware.NewRateLimiter(rate.Limit(10), 20),
+		logger:      logger,
+	}
+	public := gin.New()
+	t.Setenv(AdminOverlaySocketEnvVar, "/run/broker-admin/overlay.sock")
+	h.Register(public)
+	body := "service:\n  inputPrice: \"1500\"\n"
+	for _, method := range []string{http.MethodGet, http.MethodPut} {
+		payload := ""
+		if method == http.MethodPut {
+			payload = body
+		}
+		tok, sig := signAdmin(t, f.key, f.token(method, payload))
+		req := httptest.NewRequest(method, "/v1/admin/overlay", strings.NewReader(payload))
+		req.Header.Set(adminTokenHeader, tok)
+		req.Header.Set(adminSignatureHeader, sig)
+		w := httptest.NewRecorder()
+		public.ServeHTTP(w, req)
+		if w.Code != http.StatusNotFound {
+			t.Errorf("public %s = %d, want 404", method, w.Code)
+		}
+	}
+	if w := f.do(t, http.MethodGet, "", "", ""); w.Code != http.StatusUnauthorized {
+		t.Fatalf("unsigned private GET = %d, want 401", w.Code)
+	}
+	tok, sig := signAdmin(t, f.key, f.token(http.MethodPut, body))
+	if w := f.do(t, http.MethodPut, body, tok, sig); w.Code != http.StatusAccepted {
+		t.Fatalf("signed private PUT = %d, want 202", w.Code)
+	}
+	tok, sig = signAdmin(t, f.key, f.token(http.MethodGet, ""))
+	if w := f.do(t, http.MethodGet, "", tok, sig); w.Code != http.StatusOK || w.Body.String() != body {
+		t.Fatalf("signed private GET = %d %q, want 200 and the overlay", w.Code, w.Body)
+	}
 }
 
 func TestAdminOverlay_PutThenGet(t *testing.T) {
@@ -202,7 +248,7 @@ func TestAdminOverlay_OffByDefault(t *testing.T) {
 			t.Setenv(unset, "")
 			logger, _ := log.GetLogger(&commonconfig.LoggerConfig{Format: "text", Level: "error"})
 			r := gin.New()
-			(&Handler{logger: logger}).registerAdminOverlay(r.Group("/v1"))
+			(&Handler{logger: logger}).RegisterAdminOverlay(r.Group("/v1"))
 			w := httptest.NewRecorder()
 			r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/v1/admin/overlay", strings.NewReader("")))
 			if w.Code != http.StatusNotFound {
